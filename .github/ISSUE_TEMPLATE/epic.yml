@@ -1,0 +1,38 @@
+name: Epic
+description: A capability outcome grouping small delivery stories
+title: "[Epic] "
+labels:
+  - type:epic
+  - status:needs-triage
+body:
+  - type: input
+    id: outcome
+    attributes:
+      label: Capability outcome
+    validations:
+      required: true
+  - type: textarea
+    id: measures
+    attributes:
+      label: Success and safety measures
+      description: Include net economic and risk guardrails where applicable.
+    validations:
+      required: true
+  - type: textarea
+    id: non_goals
+    attributes:
+      label: Non-goals
+    validations:
+      required: true
+  - type: textarea
+    id: gate
+    attributes:
+      label: Exit gate
+    validations:
+      required: true
+  - type: textarea
+    id: children
+    attributes:
+      label: Child issues
+      placeholder: |
+        - [ ] #...

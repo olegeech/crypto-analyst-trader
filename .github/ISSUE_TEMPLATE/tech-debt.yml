@@ -1,0 +1,33 @@
+name: Technical debt
+description: Maintainability, dependency or operational cleanup
+title: "[Debt] "
+labels:
+  - type:tech-debt
+  - status:needs-triage
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem and recurring cost
+    validations:
+      required: true
+  - type: textarea
+    id: direction
+    attributes:
+      label: Recommended direction
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      placeholder: |
+        - [ ] ...
+    validations:
+      required: true
+  - type: textarea
+    id: verification
+    attributes:
+      label: Verification and affected areas
+    validations:
+      required: true

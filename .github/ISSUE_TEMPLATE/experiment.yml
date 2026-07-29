@@ -1,0 +1,48 @@
+name: Trading experiment
+description: Test a measurable strategy or decision hypothesis
+title: "[Experiment] "
+labels:
+  - type:experiment
+  - status:needs-triage
+body:
+  - type: textarea
+    id: hypothesis
+    attributes:
+      label: Hypothesis and baseline
+    validations:
+      required: true
+  - type: textarea
+    id: data
+    attributes:
+      label: Data period, holdout and source quality
+    validations:
+      required: true
+  - type: textarea
+    id: costs
+    attributes:
+      label: Fees, funding and slippage assumptions
+    validations:
+      required: true
+  - type: textarea
+    id: success
+    attributes:
+      label: Primary metric and success threshold
+    validations:
+      required: true
+  - type: textarea
+    id: guardrails
+    attributes:
+      label: Drawdown, exposure and data guardrails
+    validations:
+      required: true
+  - type: dropdown
+    id: result
+    attributes:
+      label: Decision
+      options:
+        - Not run
+        - Adopt
+        - Reject
+        - Retest
+    validations:
+      required: true

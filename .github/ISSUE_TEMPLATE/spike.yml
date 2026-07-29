@@ -1,0 +1,40 @@
+name: Time-boxed spike
+description: Resolve a concrete technical or product uncertainty
+title: "[Spike] "
+labels:
+  - type:spike
+  - status:needs-triage
+body:
+  - type: input
+    id: question
+    attributes:
+      label: Decision question
+    validations:
+      required: true
+  - type: input
+    id: timebox
+    attributes:
+      label: Time box
+      placeholder: "2 engineering days"
+    validations:
+      required: true
+  - type: textarea
+    id: method
+    attributes:
+      label: Method and evidence
+    validations:
+      required: true
+  - type: textarea
+    id: safety
+    attributes:
+      label: Safety boundary
+      description: Testnet, sanitized evidence and forbidden production effects.
+    validations:
+      required: true
+  - type: textarea
+    id: exit
+    attributes:
+      label: Exit criteria
+      description: Decision, ADR or follow-up stories produced by the spike.
+    validations:
+      required: true

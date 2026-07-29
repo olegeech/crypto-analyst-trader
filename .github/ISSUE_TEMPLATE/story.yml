@@ -1,0 +1,72 @@
+name: Product story
+description: A small, verifiable product or engineering outcome
+title: ""
+labels:
+  - type:story
+  - status:needs-triage
+body:
+  - type: input
+    id: outcome
+    attributes:
+      label: Outcome
+      description: One sentence describing the verifiable result.
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: Why now
+      description: Current problem, expected impact and evidence.
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope
+      placeholder: |
+        - ...
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      placeholder: |
+        - [ ] ...
+        - [ ] ...
+    validations:
+      required: true
+  - type: textarea
+    id: safety
+    attributes:
+      label: Safety and failure behavior
+      description: State what fails closed, whether exchange writes are possible, and how the change is halted or rolled back.
+    validations:
+      required: true
+  - type: textarea
+    id: non_goals
+    attributes:
+      label: Out of scope
+      placeholder: |
+        - ...
+    validations:
+      required: true
+  - type: textarea
+    id: relationships
+    attributes:
+      label: Relationships
+      description: "Use `Parent: #...` and `Blocked by: none | #12, #18`."
+    validations:
+      required: true
+  - type: textarea
+    id: verification
+    attributes:
+      label: Verification
+      description: Tests, fixtures, commands and operator evidence.
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Context links
+      description: At most five direct links to ADRs, contracts or source files.
