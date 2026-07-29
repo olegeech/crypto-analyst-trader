@@ -27,9 +27,14 @@ to unblock it.
 
 Priority:
 
-- P0: capital safety, security, accounting integrity or release gate;
-- P1: important current-milestone value;
-- P2: useful future work.
+- P0: blocks the active release gate, or is an urgent capital-safety,
+  security or accounting-integrity incident;
+- P1: belongs to the next release gate;
+- P2: belongs to a later gate or is optional future work.
+
+Safety severity and delivery priority are separate. A future safety-critical
+story keeps its safety labels but is promoted to P0 only when its release gate
+becomes active. Re-triage priorities when a milestone opens or closes.
 
 Keep no more than eight items Ready and no more than one In Progress per
 developer. If almost every issue is P1, triage has failed.
