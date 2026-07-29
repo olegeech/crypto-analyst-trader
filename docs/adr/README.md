@@ -2,7 +2,8 @@
 
 Use an ADR only for a decision that is expensive to reverse or affects several
 modules. Accepted ADRs are not silently rewritten; supersede them with a new
-record.
+record. The current normative safety set lives in
+[System Invariants](../architecture/invariants.md).
 
 Current decisions:
 
