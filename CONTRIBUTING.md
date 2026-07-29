@@ -1,10 +1,12 @@
 # Contributing
 
+The canonical process, classification, readiness and completion rules live in
+[Development Workflow](docs/workflow.md).
+
 ## Work from an issue
 
-Every non-trivial change starts from a GitHub Issue with one type, priority,
-status, primary area and milestone. The issue owns outcome, scope, acceptance
-criteria, dependencies and verification.
+Every non-trivial change starts from an issue that satisfies the
+[Definition of Ready](docs/workflow.md#definition-of-ready).
 
 Branch names should include the issue number, for example:
 
@@ -24,19 +26,8 @@ Run:
 npm run test:release
 ```
 
-Execution, accounting, data-quality and risk changes also require tests for
-negative paths, partial failures, duplicate input and restart behavior.
-
-## Live-trading changes
-
-A live-write pull request must include:
-
-- Testnet or deterministic contract-test evidence;
-- failure and timeout behavior;
-- rollback or halt procedure;
-- proof that manual and protective orders remain untouched;
-- post-write reconciliation behavior;
-- residual risk.
-
-Production credentials and unsanitized account artifacts must never be attached
-to issues, commits, CI logs or pull requests.
+For execution, accounting, data-quality, risk or security changes, follow the
+[Definition of Done](docs/workflow.md#definition-of-done),
+[system invariants](docs/architecture/invariants.md) and
+[security policy](SECURITY.md). Complete the relevant safety section in the pull
+request template instead of copying its checklist into documentation.

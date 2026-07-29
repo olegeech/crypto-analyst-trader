@@ -1,7 +1,8 @@
 # System Invariants
 
-These rules apply across modules and should stay short enough to read for every
-trading-related change.
+These rules are the current normative safety set across modules and should stay
+short enough to read for every trading-related change. ADRs preserve the
+rationale and decision history.
 
 1. Stale, incomplete, mixed-run or contradictory state never authorizes new
    exposure.
@@ -21,3 +22,5 @@ trading-related change.
 12. HALT blocks new entries until explicitly cleared after reconciliation.
 13. CI and default local tests cannot reach an exchange write endpoint.
 14. Mainnet always requires explicit configuration and cannot be the default.
+15. Preparation and execution remain separate; preparation or scheduling cannot
+    implicitly trigger a mainnet write.

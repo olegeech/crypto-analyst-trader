@@ -3,23 +3,33 @@
 ## Canonical sources
 
 - active scope and acceptance criteria: GitHub Issue;
-- release grouping: milestone;
+- release outcome and grouping: GitHub milestone;
+- active milestone queue: roadmap Issue;
+- current product boundary: `README.md`;
+- product priorities and trade-offs: `docs/product-principles.md`;
+- current technical structure: `docs/architecture/system-design.md`;
+- current mandatory safety rules: `docs/architecture/invariants.md`;
 - implementation evidence: pull request and tests;
-- architectural rationale: accepted ADR;
+- architectural rationale and decision history: accepted ADR;
 - actual behavior: code and tests;
-- operator procedure: operations documentation.
+- credential and incident containment: `SECURITY.md`.
 
 Closed issues and merged pull requests are the work archive. Do not create a
-second full backlog or done archive in Markdown.
+second backlog, roadmap or done archive in Markdown.
 
 ## Classification
 
-Every open work item has exactly one label from each required group:
+Every delivery issue leaving `status:needs-triage` has a milestone and exactly
+one label from each required group:
 
-- type: epic, story, bug, tech debt, spike or experiment;
-- priority: P0, P1 or P2;
-- status: needs triage, ready, in progress or blocked;
-- one primary area.
+- `type:epic`, `type:story`, `type:bug`, `type:tech-debt`, `type:spike` or
+  `type:experiment`;
+- `priority:P0`, `priority:P1` or `priority:P2`;
+- `status:ready`, `status:in-progress` or `status:blocked`;
+- one `area:*`.
+
+The unassigned cross-milestone roadmap tracker is the only milestone exception
+and does not count toward developer WIP.
 
 Closing an issue means Done; there is no done label. Status labels are removed
 automatically on close. A blocked item states the blocker and the action needed

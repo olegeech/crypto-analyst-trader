@@ -1,11 +1,9 @@
 # Crypto Analyst Trader
 
 Private TypeScript system for risk-gated daily trading with direct exchange
-execution. The first adapter targets Bybit USDT linear perpetuals.
-
-The product objective is to improve net risk-adjusted return after fees, funding
-and slippage while enforcing explicit exposure and drawdown limits. It does not
-promise profit.
+execution. The first adapter targets Bybit USDT linear perpetuals. Product
+decisions follow the [product principles](docs/product-principles.md); profit is
+an objective, not a guarantee.
 
 ## Product boundary
 
@@ -46,37 +44,24 @@ Explicitly out of scope for the MVP:
 
 ## Architecture
 
-The repository is a modular monolith with pure domain modules and adapter
-boundaries:
-
-```text
-CLI / scheduler
-      |
-application use cases
-prepare -> approve -> execute -> reconcile -> report
-      |
-domain
-analytics | planning | risk | execution | accounting
-      |
-ports
-market data | account state | trade execution | ledger | clock | alerts
-      |
-adapters
-Bybit V5 REST | SQLite | files / console
-```
+The repository is a modular monolith with pure domain modules, narrow ports and
+Bybit V5 REST and SQLite adapters. The current component model, lifecycle and
+execution sequence live in the system design rather than being repeated here.
 
 Start with:
 
 - [System design](docs/architecture/system-design.md)
 - [Safety invariants](docs/architecture/invariants.md)
 - [Product principles](docs/product-principles.md)
-- [Release gates](docs/roadmap.md)
 - [Development workflow](docs/workflow.md)
 - [Architecture decisions](docs/adr/README.md)
+- [Release milestones](https://github.com/olegeech/crypto-analyst-trader/milestones)
+- [Active milestone queue](https://github.com/olegeech/crypto-analyst-trader/issues/33)
 
-GitHub Issues are the canonical active backlog. Closed issues and merged pull
-requests are the history; this repository intentionally has no duplicated
-markdown backlog archive.
+[GitHub Issues](https://github.com/olegeech/crypto-analyst-trader/issues) are the
+canonical active backlog. Closed issues and merged pull requests are the
+history; this repository intentionally has no duplicated Markdown backlog or
+roadmap.
 
 ## Development
 
@@ -90,11 +75,12 @@ npm ci
 npm run test:release
 ```
 
-No CI job or unit test may use exchange credentials or submit exchange writes.
-Testnet smoke tests must be explicit, opt-in commands with separate credentials.
+See [Contributing](CONTRIBUTING.md) and the
+[system invariants](docs/architecture/invariants.md) for verification and
+credential boundaries.
 
 ## Safety
 
-Read [SECURITY.md](SECURITY.md) before configuring an exchange account. API keys
-must not have withdrawal permission. Mainnet execution remains unavailable
-until the production-canary release gate is deliberately completed.
+Credential and incident rules live in [SECURITY.md](SECURITY.md). Mainnet is
+disabled by default; [issue #31](https://github.com/olegeech/crypto-analyst-trader/issues/31)
+owns its manually approved, small-capital canary enablement.
