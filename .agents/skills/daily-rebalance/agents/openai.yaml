@@ -1,0 +1,4 @@
+interface:
+  display_name: "Daily Rebalance"
+  short_description: "Prepare and execute a risk-gated daily plan"
+  default_prompt: "Use $daily-rebalance to prepare a fresh daily plan and execute only within the requested environment and approved plan gate."

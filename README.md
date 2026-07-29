@@ -53,6 +53,7 @@ Start with:
 - [System design](docs/architecture/system-design.md)
 - [Safety invariants](docs/architecture/invariants.md)
 - [Product principles](docs/product-principles.md)
+- [Daily operator runbook](docs/operator-runbook.md)
 - [Development workflow](docs/workflow.md)
 - [Architecture decisions](docs/adr/README.md)
 - [Release milestones](https://github.com/olegeech/crypto-analyst-trader/milestones)
@@ -78,6 +79,14 @@ npm run test:release
 See [Contributing](CONTRIBUTING.md) and the
 [system invariants](docs/architecture/invariants.md) for verification and
 credential boundaries.
+
+Repository-native skills:
+
+- `$daily-rebalance`: run the released daily operator path;
+- `$test-current-feature-pr`: validate an exact pull request without mainnet
+  writes;
+- `$develop-next-roadmap-story`: select and deliver the next ready roadmap
+  item.
 
 ## Safety
 

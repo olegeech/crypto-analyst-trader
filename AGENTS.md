@@ -15,7 +15,8 @@ For normal work, read:
    changes, `docs/architecture/invariants.md`;
 4. for credentials, private account artifacts or incident handling,
    `SECURITY.md`;
-5. only ADRs and source files linked by the issue.
+5. for a daily operator run, `docs/operator-runbook.md`;
+6. only ADRs and source files linked by the issue.
 
 Do not load every issue, closed history or every ADR. GitHub Issues own active
 scope and acceptance criteria; code and tests own actual behavior.
@@ -31,3 +32,5 @@ An issue or pull request cannot restate, weaken or override
 - Do not add a second backlog source or duplicate issue bodies in docs.
 - Follow `docs/workflow.md` and `CONTRIBUTING.md` for branch, test and pull
   request rules.
+- Use repository skills for daily operation, exact-PR review and roadmap
+  delivery instead of reconstructing those workflows from chat history.

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Develop Next Roadmap Story"
+  short_description: "Select and deliver the next ready roadmap issue"
+  default_prompt: "Use $develop-next-roadmap-story to select the next ready roadmap issue, implement it, verify it, and open a focused pull request."
