@@ -36,22 +36,25 @@ pass. No mode may override a `BLOCK` or `HALT`.
 
 ## Market window
 
-The normal full rebalance window is once per United States cash-market session:
+Routine rebalance timing is defined by the active versioned strategy or
+operating policy. This runbook does not invent a fixed cash-market session,
+clock time, weekend rule or holiday calendar.
 
-- target time: `09:45 America/New_York`, after the first 15 minutes of the cash
-  session;
-- use IANA time zones, not a fixed UTC offset; this is normally `15:45` in
-  `Europe/Berlin`, with temporary differences around daylight-saving changes;
-- if a scheduled high-impact release occurs at or after the target time, defer
-  until at least 15 minutes after the latest relevant release and refresh all
-  time-sensitive evidence;
-- on weekends or United States cash-market holidays, skip the routine
-  exposure-increasing run unless a versioned policy explicitly permits a
-  prepare-only assessment;
-- an emergency reconciliation or `HALT` action may run at any time.
+- record the active timing-policy identity and version with the run;
+- use IANA time zones rather than fixed UTC offsets when a policy defines a
+  local-time window;
+- when a policy references an external market session, holiday calendar or
+  scheduled macro event, use an authoritative source for that dependency;
+- after a policy-defined event delay, refresh every time-sensitive evidence
+  input before preparing or executing a plan;
+- outside the policy-permitted exposure window, do not increase exposure;
+  follow the released policy for `PREPARE_ONLY`, `NO_TRADE` or `NOT_READY`;
+- emergency reconciliation or `HALT` containment may run at any time.
 
-Use an authoritative cash-market calendar. Never infer holidays from weekday
-alone.
+A proposed timing rule from research, historical analysis or operator judgment
+is evidence, not production policy. Adopt or change a routine market window only
+through a versioned policy or an explicit architecture/product decision with
+measured evidence.
 
 ## Required inputs
 
@@ -59,11 +62,13 @@ The run may prepare exposure only when all required inputs are present and
 coherent for one run:
 
 - exact environment, account and position mode;
-- versioned strategy, risk and cost policies;
+- versioned strategy, risk, cost and timing policies;
 - explicit capital allocation or a versioned policy allocation;
 - instrument status and constraints, including listing state, expiry or
   delivery risk, price and quantity steps, price bands and minimum order value;
 - fresh market, liquidity, volatility, funding and derivatives evidence;
+- validated evidence references with schema/producer identity, `asOf`, source
+  or input snapshot identity, freshness semantics and canonical content hash;
 - fresh Unified Trading Account balances, collateral state, liabilities,
   positions, orders and fills;
 - durable ownership mapping for every order eligible for cancellation;
@@ -101,18 +106,24 @@ required failed refresh with stale data.
    window and provenance.
 3. Capture a sanitized private account snapshot and reconcile balances,
    liabilities, positions, open orders and recent fills.
-4. Verify that required evidence falls inside policy freshness and
-   cross-source skew limits.
-5. If bounded candidate discovery is released, rank only its eligible universe
+4. Runtime-validate external, persisted and cross-process payloads before they
+   become domain evidence. Record each decision-relevant `EvidenceRef`, including
+   schema and producer version, source/input snapshot identity, freshness or
+   expiry semantics and canonical content hash.
+5. Verify that required evidence falls inside policy freshness and
+   cross-source skew limits, and that declared input identities are compatible
+   with this run.
+6. If bounded candidate discovery is released, rank only its eligible universe
    and retain the top 3-5 explainable candidates. Otherwise use only the
    configured strategy universe.
 
-A discovered candidate is evidence, not permission to trade. It still passes
-planning, economic, risk and approval gates.
+A discovered or research-generated candidate is evidence, not permission to
+trade. It still passes planning, economic, risk and approval gates.
 
 ### 3. Prepare the immutable plan
 
-The planner must be deterministic for the same snapshots and policies.
+The planner must be deterministic for the same validated evidence, snapshots and
+policies.
 
 1. Classify the market regime and record reason codes and uncertainty.
 2. Select fewer high-quality candidates when evidence or capital is limited.
@@ -120,8 +131,9 @@ The planner must be deterministic for the same snapshots and policies.
 3. Build a static daily entry grid. Every entry has one exchange-attached
    take-profit and one catastrophic stop; the collection of entries forms the
    plan-level exit ladder.
-4. Normalize price and quantity only through instrument constraints. Reject an
-   economically infeasible order rather than silently changing strategy risk.
+4. Normalize price and quantity only through instrument constraints and the
+   authoritative exact-decimal rounding policy. Reject an economically
+   infeasible order rather than silently changing strategy risk.
 5. Derive usable allocation as the lower of policy limits and conservative
    fresh account capacity after liabilities, collateral haircuts, locked
    funds, existing margin and reserve.
@@ -136,8 +148,10 @@ Do not average a losing position merely to reduce its displayed entry price.
 Additional exposure requires the same current strategy evidence and
 post-plan-risk proof as a new entry.
 
-Persist snapshots, policy versions, desired/current diff, decisions and the
-canonical plan hash before review.
+Persist snapshots, validated evidence references and hashes, policy versions,
+desired/current diff, decisions and the canonical plan hash before review.
+Research/model artifacts remain outside execution authority; only validated,
+runtime-neutral decision evidence may influence planning.
 
 ### 4. Review before approval
 
@@ -145,7 +159,7 @@ Present compact Markdown tables, not raw JSON. At minimum review:
 
 | Review surface | Required evidence                                                        |
 | -------------- | ------------------------------------------------------------------------ |
-| Inputs         | `asOf`, freshness, provenance and quality status                         |
+| Inputs         | `asOf`, freshness, provenance, evidence hashes and quality status        |
 | Candidates     | selected and excluded symbols with reason codes                          |
 | Account        | equity, usable capacity, liabilities, reserve and existing exposure      |
 | Plan           | create/cancel/keep counts and every changed field as `old -> new`        |
@@ -163,15 +177,16 @@ approval expiry and worst credible consequence from this review alone.
 Store the actor, timestamp, note, expiry, environment and exact plan hash.
 `REVIEW` items require an explicit note. `BLOCK` items cannot be approved.
 
-Any change to snapshots, policies, constraints, desired/current diff or
-normalized orders creates a new hash and invalidates the approval.
+Any relevant change to snapshots, validated evidence references or hashes,
+policies, constraints, desired/current diff or normalized orders creates a new
+canonical plan hash and invalidates the approval.
 
 ### 6. Execute the approved diff
 
 Execution is allowed only in the approved environment.
 
 1. Reacquire the account lock and revalidate approval, evidence and account
-   freshness.
+   freshness, including evidence provenance, input identity and integrity.
 2. Persist each intended write before submitting it.
 3. Cancel only stale owned entry orders.
 4. Reconcile every cancellation before relying on released capacity.
@@ -211,7 +226,7 @@ Use one execution verdict:
 Report:
 
 1. mode, environment, commit, run ID, plan hash and approval status;
-2. input freshness and quality;
+2. input freshness, quality, evidence identities and canonical hashes;
 3. candidate, selected, excluded and order counts;
 4. allocation and current -> projected exposure;
 5. the complete changed-field and owned-order diff tables;
@@ -240,6 +255,7 @@ profitability or the general quality of a newly developed feature.
 Immediately stop new exposure and persist `HALT` when any of these occurs:
 
 - unknown or stale account state;
+- stale, incompatible, malformed or integrity-invalid decision evidence;
 - an order without provable ownership;
 - a managed position without provable protection;
 - ambiguous create/cancel outcome;
