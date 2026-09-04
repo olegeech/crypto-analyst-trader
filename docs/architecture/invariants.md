@@ -16,11 +16,23 @@ rationale and decision history.
 7. An asynchronous acknowledgement is pending, not success.
 8. An ambiguous timeout is reconciled before retry.
 9. Every intended write is durably recorded before submission.
-10. Price, quantity, money and fees use exact decimal representations.
-11. Net performance includes fees, funding and slippage; transfers are not
+10. Price, quantity, money and fees use exact decimal representations and
+    explicit exchange-rule rounding for authoritative calculations.
+11. Immutable plan and evidence identity uses versioned canonical serialization
+    before hashing; equivalent logical inputs cannot depend on runtime-specific
+    JSON behavior.
+12. Net performance includes fees, funding and slippage; transfers are not
     profit.
-12. HALT blocks new entries until explicitly cleared after reconciliation.
-13. CI and default local tests cannot reach an exchange write endpoint.
-14. Mainnet always requires explicit configuration and cannot be the default.
-15. Preparation and execution remain separate; preparation or scheduling cannot
+13. HALT blocks new entries until explicitly cleared after reconciliation.
+14. CI and default local tests cannot reach an exchange write endpoint.
+15. Mainnet always requires explicit configuration and cannot be the default.
+16. Preparation and execution remain separate; preparation or scheduling cannot
     implicitly trigger a mainnet write.
+17. External exchange, file and process payloads are untrusted until runtime
+    validation succeeds; unchecked casts do not establish domain validity.
+18. Evidence that can affect a live-ready plan is versioned, attributable,
+    freshness-aware and canonically hashed; incompatible or stale evidence
+    cannot silently authorize exposure.
+19. Research and ML produce decision evidence only. Exchange-valid order intents
+    remain the responsibility of the TypeScript planner and cannot bypass risk
+    or immutable approval.
