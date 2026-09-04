@@ -55,7 +55,7 @@ body:
     id: relationships
     attributes:
       label: Relationships
-      description: "Use `Parent: #...` and `Blocked by: none | #12, #18`."
+      description: "Use `Parent: #...` and `Depends on: none | #12, #18`. Use blocked status only for an unexpected active impediment."
     validations:
       required: true
   - type: textarea

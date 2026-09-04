@@ -25,15 +25,25 @@ one label from each required group:
 - `type:epic`, `type:story`, `type:bug`, `type:tech-debt`, `type:spike` or
   `type:experiment`;
 - `priority:P0`, `priority:P1` or `priority:P2`;
-- `status:ready`, `status:in-progress` or `status:blocked`;
+- `status:queued`, `status:ready`, `status:in-progress` or `status:blocked`;
 - one `area:*`.
 
 The unassigned cross-milestone roadmap tracker is the only milestone exception
 and does not count toward developer WIP.
 
 Closing an issue means Done; there is no done label. Status labels are removed
-automatically on close. A blocked item states the blocker and the action needed
-to unblock it.
+automatically on close.
+
+Status:
+
+- `queued`: valid scoped work waiting in roadmap order; planned dependencies
+  may still be open and the item is outside Ready WIP;
+- `ready`: satisfies the Definition of Ready and may be claimed now;
+- `in-progress`: actively owned implementation;
+- `blocked`: work expected to proceed is stopped by a concrete unexpected
+  dependency or decision. State the blocker, owner and action needed.
+
+Do not use `blocked` merely because a later milestone has not started.
 
 Priority:
 
@@ -46,8 +56,23 @@ Safety severity and delivery priority are separate. A future safety-critical
 story keeps its safety labels but is promoted to P0 only when its release gate
 becomes active. Re-triage priorities when a milestone opens or closes.
 
-Keep no more than eight items Ready and no more than one In Progress per
-developer. If almost every issue is P1, triage has failed.
+Keep no more than eight delivery items Ready and no more than one In Progress
+per developer. Epics and the roadmap tracker do not count toward WIP. If almost
+every issue is P1, triage has failed.
+
+## Triage decision lens
+
+When implementation order is not already forced by a release gate, prefer the
+smallest slice that best improves:
+
+1. capital safety or accounting and data integrity;
+2. usable daily decision or execution capability;
+3. evidence about net return, drawdown or capital efficiency;
+4. operator effort and failure recovery;
+5. implementation, recurring API, storage and agent-context cost.
+
+Avoid labels for these dimensions unless they drive automation. Record the
+trade-off in the issue's "Why now" section instead.
 
 ## Definition of Ready
 
@@ -81,6 +106,8 @@ developer. If almost every issue is P1, triage has failed.
 - Agent work loads the issue, direct blockers and linked ADRs, not the whole
   backlog.
 - Comments record decisions or evidence, not daily status narration.
+- Daily reports link durable artifacts and summarize changed decisions instead
+  of pasting repeated raw snapshots.
 
 ## Experiments
 
