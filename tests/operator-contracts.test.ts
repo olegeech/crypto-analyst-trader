@@ -56,6 +56,31 @@ test("keeps execution modes and exact approval fail closed", async () => {
   assert.match(runbook, /Set `HALT`/);
 });
 
+test("keeps timing policy versioned instead of hard-coding a market session", async () => {
+  const [runbook, skill] = await Promise.all([
+    read("docs/operator-runbook.md"),
+    read(skillSpecs[0].path),
+  ]);
+
+  assert.match(runbook, /timing is defined by the active versioned strategy or\s+operating policy/i);
+  assert.match(skill, /active versioned timing policy/i);
+  assert.doesNotMatch(runbook, /09:45\s+America\/New_York/i);
+  assert.doesNotMatch(runbook, /United States cash-market holidays/i);
+});
+
+test("makes validated evidence identity part of immutable planning", async () => {
+  const [runbook, skill, invariants] = await Promise.all([
+    read("docs/operator-runbook.md"),
+    read(skillSpecs[0].path),
+    read("docs/architecture/invariants.md"),
+  ]);
+
+  assert.match(runbook, /validated evidence references and hashes/i);
+  assert.match(runbook, /evidence references or hashes[\s\S]{0,160}invalidates the approval/i);
+  assert.match(skill, /evidence refs\/hashes/i);
+  assert.match(invariants, /Evidence that can affect a live-ready plan/i);
+});
+
 test("declares complete repository skill metadata without placeholders", async () => {
   const skills = await Promise.all(
     skillSpecs.map(async ({ name, path }) => ({
