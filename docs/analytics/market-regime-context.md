@@ -32,16 +32,16 @@ trade signal by itself.
 
 The most complete explicit seven-block weighting preserved in the project is:
 
-| Group | Weight | Role |
-| --- | ---: | --- |
-| Macro | 20% | Cross-asset risk appetite and discount-rate pressure |
-| Liquidity | 20% | Fiat/global and crypto-native liquidity availability |
-| Derivatives | 15% | Leverage, crowding, squeeze and liquidation risk |
-| Market Structure | 15% | Trend, levels, breakout quality and volatility structure |
-| Sentiment | 10% | Fear/greed and behavioral extremes |
-| ETF Flows | 15% | Institutional spot demand/supply, separated to avoid hiding it in macro |
-| Breadth | 5% | Whether strength is broad, BTC-led or concentrated in a few alts |
-| **Total** | **100%** | |
+| Group            |   Weight | Role                                                                    |
+| ---------------- | -------: | ----------------------------------------------------------------------- |
+| Macro            |      20% | Cross-asset risk appetite and discount-rate pressure                    |
+| Liquidity        |      20% | Fiat/global and crypto-native liquidity availability                    |
+| Derivatives      |      15% | Leverage, crowding, squeeze and liquidation risk                        |
+| Market Structure |      15% | Trend, levels, breakout quality and volatility structure                |
+| Sentiment        |      10% | Fear/greed and behavioral extremes                                      |
+| ETF Flows        |      15% | Institutional spot demand/supply, separated to avoid hiding it in macro |
+| Breadth          |       5% | Whether strength is broad, BTC-led or concentrated in a few alts        |
+| **Total**        | **100%** |                                                                         |
 
 Historical context also contains earlier variants, including
 `25/20/15/15/10/10/5` and a six-block `25/25/20/15/10/5` formula before ETF
@@ -216,14 +216,14 @@ confidence, false-breakout risk and a strategy mapping to
 The following are synthesized heuristics from repeated project analyses; they
 are not yet calibrated production rules:
 
-| Phase | Typical evidence | Typical posture |
-| --- | --- | --- |
-| Accumulation | Post-selloff base, funding neutral/negative, leverage reset, supportive liquidity, fear elevated, breadth still narrow | DCA and selective swing; low leverage |
-| Early Expansion | Reclaim/breakout attempt, shorts squeezed, funding not yet crowded, spot/ETF demand improving, breadth begins to widen | Swing long / buy pullbacks; avoid chasing spikes |
-| Expansion | Higher-timeframe uptrend, broader participation, controlled leverage, improving flows | Trend following, buy dips, partial profit-taking as crowding rises |
-| Recovery | Bounce after flush while macro/ETF/breadth remain mixed | Smaller longs/grid, wait for confirmation, retain hedge flexibility |
-| Distribution | Price near highs/range, funding/OI crowded, breadth divergence, spot/ETF confirmation weakens | Reduce risk, take profit, hedge; short only on confirmed failure |
-| Markdown / Capitulation | Broad structure down, long-liquidation cascade, OI reset, fear/risk-off | Cash/hedge; avoid chasing shorts after the flush; watch for accumulation transition |
+| Phase                   | Typical evidence                                                                                                       | Typical posture                                                                     |
+| ----------------------- | ---------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------- |
+| Accumulation            | Post-selloff base, funding neutral/negative, leverage reset, supportive liquidity, fear elevated, breadth still narrow | DCA and selective swing; low leverage                                               |
+| Early Expansion         | Reclaim/breakout attempt, shorts squeezed, funding not yet crowded, spot/ETF demand improving, breadth begins to widen | Swing long / buy pullbacks; avoid chasing spikes                                    |
+| Expansion               | Higher-timeframe uptrend, broader participation, controlled leverage, improving flows                                  | Trend following, buy dips, partial profit-taking as crowding rises                  |
+| Recovery                | Bounce after flush while macro/ETF/breadth remain mixed                                                                | Smaller longs/grid, wait for confirmation, retain hedge flexibility                 |
+| Distribution            | Price near highs/range, funding/OI crowded, breadth divergence, spot/ETF confirmation weakens                          | Reduce risk, take profit, hedge; short only on confirmed failure                    |
+| Markdown / Capitulation | Broad structure down, long-liquidation cascade, OI reset, fear/risk-off                                                | Cash/hedge; avoid chasing shorts after the flush; watch for accumulation transition |
 
 A recurring phase sequence was
 `late accumulation -> early expansion -> expansion -> local flush/reset`, with
@@ -234,14 +234,14 @@ Recovery used when price bounced before macro and breadth fully repaired.
 `CEWS` changed meaning several times. This is the most important ambiguity to
 preserve before implementation.
 
-| Period | Scale / direction | Recovered interpretation |
-| --- | --- | --- |
-| 2026-03-07 | ~0–30, **higher = more warning/risk** | 0–8 bullish/pump, 9–15 range, 16–22 risk-off, 23–30 crash. Initial model used 12 indicators with 0/1/2 states and block multipliers (for example volatility/liquidity/crypto-flow 1.5, rates 1.2, credit 1.3). |
-| 2026-03-11/12 | 0–30, **higher = more warning/risk** | Variants used roughly 0–8/10 bullish, 9/10–15/18 neutral, 16/18–22/24 risk-off, 23/25+ panic/crash. On 12 Mar one explicit point set was VIX +2, DXY +1, US10Y +2, MOVE +2, RRP +1, WTI +2, SPX/NDX 0, Gold +1, Fear & Greed -1, liquidations +1 = 11/30. |
-| 2026-03-16 | 0–30 but direction effectively **flipped** | Negative funding and short liquidations were assigned positive bullish points while DXY/yields were negative; CEWS 17/30 was called `volatile bullish`. This is incompatible with the earlier warning-score direction. |
-| 2026-03-30 to Apr | 0–10, **higher = healthier/bullish** | 6.4 `bullish but fragile`, 7.2 `bullish improving`, 5.9 `neutral-to-bearish`; on 9 Apr CEWS was revised 6.3 -> 5.7 after correcting ETF outflows; on 13 Apr 7.1 -> 7.8 -> 8.4 accompanied strengthening expansion. |
-| 2026-05-23 | 0–100, **higher = healthier/bullish** | `<40` panic/capitulation, `40–55` bearish pressure, `55–70` neutral/volatile, `70+` strong bullish expansion; a 58 reading described a late-risk-off shakeout/reset. |
-| 2026-06-07 | 0–100, **higher was again described as risk** | 68 -> 73 was described as rising risk. This conflicts with the May 0–100 direction and should not be copied into code without an explicit version decision. |
+| Period            | Scale / direction                             | Recovered interpretation                                                                                                                                                                                                                                  |
+| ----------------- | --------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 2026-03-07        | ~0–30, **higher = more warning/risk**         | 0–8 bullish/pump, 9–15 range, 16–22 risk-off, 23–30 crash. Initial model used 12 indicators with 0/1/2 states and block multipliers (for example volatility/liquidity/crypto-flow 1.5, rates 1.2, credit 1.3).                                            |
+| 2026-03-11/12     | 0–30, **higher = more warning/risk**          | Variants used roughly 0–8/10 bullish, 9/10–15/18 neutral, 16/18–22/24 risk-off, 23/25+ panic/crash. On 12 Mar one explicit point set was VIX +2, DXY +1, US10Y +2, MOVE +2, RRP +1, WTI +2, SPX/NDX 0, Gold +1, Fear & Greed -1, liquidations +1 = 11/30. |
+| 2026-03-16        | 0–30 but direction effectively **flipped**    | Negative funding and short liquidations were assigned positive bullish points while DXY/yields were negative; CEWS 17/30 was called `volatile bullish`. This is incompatible with the earlier warning-score direction.                                    |
+| 2026-03-30 to Apr | 0–10, **higher = healthier/bullish**          | 6.4 `bullish but fragile`, 7.2 `bullish improving`, 5.9 `neutral-to-bearish`; on 9 Apr CEWS was revised 6.3 -> 5.7 after correcting ETF outflows; on 13 Apr 7.1 -> 7.8 -> 8.4 accompanied strengthening expansion.                                        |
+| 2026-05-23        | 0–100, **higher = healthier/bullish**         | `<40` panic/capitulation, `40–55` bearish pressure, `55–70` neutral/volatile, `70+` strong bullish expansion; a 58 reading described a late-risk-off shakeout/reset.                                                                                      |
+| 2026-06-07        | 0–100, **higher was again described as risk** | 68 -> 73 was described as rising risk. This conflicts with the May 0–100 direction and should not be copied into code without an explicit version decision.                                                                                               |
 
 ### Recommended normalization before coding
 
@@ -277,12 +277,12 @@ Historical forms:
 The 0–100 March-v2 bands are the most consistent basis for a future normalized
 LSI:
 
-| LSI | Regime |
-| ---: | --- |
-| 0–40 | Liquidity expansion / low stress |
-| 40–60 | Neutral |
-| 60–75 | Stress |
-| 75–100 | Crisis / severe stress |
+|    LSI | Regime                           |
+| -----: | -------------------------------- |
+|   0–40 | Liquidity expansion / low stress |
+|  40–60 | Neutral                          |
+|  60–75 | Stress                           |
+| 75–100 | Crisis / severe stress           |
 
 No stable per-input LSI weight set was recovered. Inputs repeatedly included
 RRP, Treasury cash/liabilities, WALCL, M2, DXY/yields, VIX/MOVE, credit stress
@@ -331,13 +331,13 @@ formula.
 
 The requested v2 risk interpretation is:
 
-| Trap Score | Risk |
-| ---: | --- |
-| 0–20 | Low |
-| 20–40 | Moderate |
-| 40–60 | Elevated |
-| 60–80 | High |
-| 80–100 | Extreme |
+| Trap Score | Risk     |
+| ---------: | -------- |
+|       0–20 | Low      |
+|      20–40 | Moderate |
+|      40–60 | Elevated |
+|      60–80 | High     |
+|     80–100 | Extreme  |
 
 The model should also emit probabilities for:
 
