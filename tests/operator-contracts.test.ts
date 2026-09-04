@@ -62,7 +62,10 @@ test("keeps timing policy versioned instead of hard-coding a market session", as
     read(skillSpecs[0].path),
   ]);
 
-  assert.match(runbook, /timing is defined by the active versioned strategy or\s+operating policy/i);
+  assert.match(
+    runbook,
+    /timing is defined by the active versioned strategy or\s+operating policy/i,
+  );
   assert.match(skill, /active versioned timing policy/i);
   assert.doesNotMatch(runbook, /09:45\s+America\/New_York/i);
   assert.doesNotMatch(runbook, /United States cash-market holidays/i);
@@ -76,7 +79,10 @@ test("makes validated evidence identity part of immutable planning", async () =>
   ]);
 
   assert.match(runbook, /validated evidence references and hashes/i);
-  assert.match(runbook, /evidence references or hashes[\s\S]{0,160}invalidates the approval/i);
+  assert.match(
+    runbook,
+    /evidence references or hashes[\s\S]{0,160}invalidates the approval/i,
+  );
   assert.match(skill, /evidence refs\/hashes/i);
   assert.match(invariants, /Evidence that can affect a live-ready plan/i);
 });
