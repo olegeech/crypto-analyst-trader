@@ -31,8 +31,8 @@ account equity as free allocation.
   trading run.
 - Invoke only scripts present in `package.json`; report an unavailable phase as
   `CAPABILITY_NOT_RELEASED`.
-- Never bypass freshness, economic, risk, ownership, approval, protection,
-  `HALT`, or reconciliation gates.
+- Never bypass timing-policy, freshness, evidence-integrity, economic, risk,
+  ownership, approval, protection, `HALT`, or reconciliation gates.
 - Never print credentials, signed requests, private raw payloads, or secret
   paths.
 - Use the repository secret boundary; do not ask the user to paste long-lived
@@ -40,26 +40,30 @@ account equity as free allocation.
 
 ## Run the workflow
 
-1. Record the commit, mode, environment, account scope, market window and
-   requested allocation.
+1. Record the commit, mode, environment, account scope, active timing-policy
+   identity and requested allocation.
 2. Confirm release evidence for the exact commit. Run `npm run test:release`
    when no durable passing attestation exists.
 3. Refresh instrument, market, derivatives and sanitized account evidence.
-   Attempt independent reads separately, but never substitute stale evidence
-   for a failed required source.
-4. Enforce one coherent run window, instrument availability and delist/expiry
-   exclusions.
+   Runtime-validate external payloads and record decision-relevant evidence
+   refs/hashes; never substitute stale evidence for a failed required source.
+4. Enforce the active versioned timing policy, one coherent run window,
+   evidence/input identity compatibility, instrument availability and
+   delist/expiry exclusions. Do not invent a fixed market session or holiday
+   rule in the skill.
 5. Use bounded candidate discovery only when implemented. Otherwise remain
    inside the configured universe; never improvise an unsupported symbol.
 6. Run the released prepare use case and require a deterministic immutable plan
-   or explicit `NO_TRADE`.
-7. Review every selected and excluded candidate, normalized order, attached
-   exit, expected cost, current -> projected exposure and owned-order diff.
+   derived from validated evidence or explicit `NO_TRADE`.
+7. Review every selected and excluded candidate, evidence identity/hash,
+   normalized order, attached exit, expected cost, current -> projected exposure
+   and owned-order diff.
 8. Stop at `PREPARED` in `PREPARE_ONLY`.
 9. For an execution mode, present the final hash, expiry, environment, diff,
    economics, risk and residual risk. Continue only after explicit approval of
    that exact hash.
-10. Execute only the approved owned-order diff. Reconcile cancellations before
+10. Execute only the approved owned-order diff. Revalidate evidence provenance,
+    input identity, integrity and freshness; reconcile cancellations before
     creates, stop after partial or ambiguous results, and never blind-retry.
 11. Verify protective coverage, reconcile account state and persist accounting
     checkpoints before declaring success.
@@ -74,7 +78,8 @@ weaken a gate or compose an ad hoc exchange request to finish the run.
 Respond in the user's language. Use compact Markdown tables and include:
 
 - mode, environment, commit, run ID, plan hash and approval state;
-- input freshness and source quality;
+- timing-policy identity and permitted window result;
+- input freshness, source quality, evidence identities and canonical hashes;
 - candidate, selected, excluded, create/cancel/keep and filled counts;
 - allocation plus current -> projected exposure and costs;
 - every changed field as `old -> new`;
