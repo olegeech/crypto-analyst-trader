@@ -52,6 +52,7 @@ Start with:
 
 - [System design](docs/architecture/system-design.md)
 - [Safety invariants](docs/architecture/invariants.md)
+- [Market regime research context](docs/analytics/market-regime-context.md)
 - [Product principles](docs/product-principles.md)
 - [Development workflow](docs/workflow.md)
 - [Architecture decisions](docs/adr/README.md)
