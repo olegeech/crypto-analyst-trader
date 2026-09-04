@@ -83,7 +83,7 @@ test("makes validated evidence identity part of immutable planning", async () =>
     runbook,
     /evidence references or hashes[\s\S]{0,160}invalidates the approval/i,
   );
-  assert.match(skill, /evidence refs\/hashes/i);
+  assert.match(skill, /evidence\s+refs\/hashes/i);
   assert.match(invariants, /Evidence that can affect a live-ready plan/i);
 });
 
