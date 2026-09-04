@@ -52,6 +52,7 @@ developer. If almost every issue is P1, triage has failed.
 ## Definition of Ready
 
 - one measurable outcome;
+- human product owner interview;
 - three to seven acceptance criteria;
 - explicit non-goals;
 - all dependencies closed or a time-boxed spike identified;
