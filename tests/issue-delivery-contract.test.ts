@@ -33,10 +33,14 @@ test("issue-delivery enforces the pre-development gates", async () => {
     /Product-owner interview.*Product-owner decisions/is,
     /Definition of Ready/i,
     /status:ready/i,
+    /exactly one status label.*status:ready/is,
     /independent issue review/i,
     /maximum three attempts/i,
     /ISSUE_REVIEW_CAP_REACHED/,
     /\$compound-engineering:lfg #<issue>/,
+    /scope manifest/i,
+    /pre-publication implementation plan or diff-scope receipt/i,
+    /existing unambiguous open PR.*bypass development/is,
     /one focused PR/i,
     /scope expansion/i,
   ]) {
@@ -50,6 +54,8 @@ test("issue-delivery binds PR review and merge to exact evidence", async () => {
   for (const requirement of [
     /After initial checks are green/i,
     /exact full head SHA/i,
+    /REVIEWED_HEAD_SHA/,
+    /First verify the PR head equals this full SHA/i,
     /PR_REVIEW_CAP_REACHED/,
     /current head SHA equals/i,
     /release-checks/,
@@ -59,6 +65,7 @@ test("issue-delivery binds PR review and merge to exact evidence", async () => {
     /--match-head-commit/,
     /Never replace the wrapper with an AI-only or implicit merge/i,
     /Non-blocking findings.*do not force stylistic churn/is,
+    /REVIEWER_UNAVAILABLE/,
   ]) {
     assert.match(skill, requirement);
   }
@@ -74,6 +81,7 @@ test("issue-delivery includes every required structured dry-run case", async () 
     "issue-review-cap",
     "scope-split",
     "development-helper-unavailable",
+    "reviewer-unavailable",
     "ci-identified-failure",
     "ci-ambiguous-failure",
     "pr-review-pass",

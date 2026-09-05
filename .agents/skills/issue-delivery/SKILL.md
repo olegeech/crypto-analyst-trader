@@ -49,9 +49,13 @@ Reject missing, malformed, cross-repository, closed, duplicate, or ambiguous
 issue identity before changing GitHub or repository state. The issue must be a
 delivery issue producing code, configuration, or canonical documentation. Do
 not use this skill for epics, roadmap trackers, or no-PR housekeeping. If more
-than one candidate PR exists, stop and ask for human selection. If one
-unambiguous open PR already belongs to the issue, continue from that PR;
-otherwise the development stage must create exactly one focused PR.
+than one candidate PR exists, stop and ask for human selection. Resolve this
+PR decision before the Ready gate: one unambiguous open PR already belonging
+to the issue is an existing implementation handoff and must bypass development;
+it proceeds directly to CI and exact-head PR review. Do not require it to
+return to `status:ready` or invoke LFG again. A closed/merged PR without a new
+eligible handoff is a human decision, not a reason to create a duplicate PR.
+Otherwise the development stage must create exactly one focused PR.
 
 The issue is the only active scope source. Do not create a second backlog,
 roadmap, or done archive in Markdown. Scope expansion, a second issue, or a
@@ -66,6 +70,7 @@ work, but the final PR evidence must preserve the material fields:
 {
   "issue": 52,
   "issue_url": "https://github.com/owner/repo/issues/52",
+  "scope_digest": "<sha256-of-fetched-issue-body-and-scope-fields>",
   "issue_review": { "attempts": 1, "outcome": "PASS", "blockers": [] },
   "development": { "pr": 0, "head_sha": "" },
   "ci": { "release_checks": "GREEN", "evidence": "" },
@@ -133,6 +138,12 @@ human-maintained update to this skill:
 claude -p "please review issue #<issue>" --model claude-opus-5 --effort high
 ```
 
+If the reviewer command is unavailable, unauthenticated, or returns no
+review-shaped result, stop as `REVIEWER_UNAVAILABLE`. Do not call the same
+failed command repeatedly and do not present the orchestrator's own reading
+as an independent review. A human may install/authenticate or explicitly
+maintain an equivalent reviewer command, after which the attempt starts fresh.
+
 Classify each finding as `BLOCKING`, `MATERIAL`, `NON_BLOCKING`, or
 `INFORMATIONAL`. A passing review has no unresolved `BLOCKING` or `MATERIAL`
 finding. Resolve valid blocking/material findings in the issue or the planned
@@ -147,10 +158,14 @@ the exact conflict and stop instead of silently changing the decision.
 
 ### 4. Ready gate and development handoff
 
-Require all of the following before development:
+For an existing unambiguous open PR, skip development and require the issue
+scope, PR linkage, current head, and PR review gates in sections 5 and 6. Do
+not mutate the issue status merely to satisfy the pre-development gate.
+
+For a new implementation, require all of the following before development:
 
 1. the issue is still the same eligible issue;
-2. its status label is exactly `status:ready`;
+2. it has exactly one status label and that label is `status:ready`;
 3. the independent issue review passed;
 4. no unresolved dependency, blocker, or scope-split request exists.
 
@@ -158,16 +173,29 @@ When work is claimed, update the issue status to `status:in-progress` using
 the repository's normal GitHub workflow and record the transition. If the
 status is missing or changed unexpectedly, stop and report it.
 
-Invoke the required implementation capability exactly as requested:
+Before invoking the required implementation capability, create a scope
+manifest from the freshly fetched issue. It must contain the issue URL and
+number, title, acceptance criteria, explicit non-goals, dependencies,
+safety/failure behavior, verification requirements, and `scope_digest`. Pass
+that manifest to the helper and require it to acknowledge the same issue and
+digest before it writes or publishes anything.
+
+Invoke the required implementation capability with the bound scope:
 
 ```text
-$compound-engineering:lfg #<issue>
+$compound-engineering:lfg #<issue> <issue-url> <scope-digest>
 ```
 
-Validate that it returns implementation evidence and an unambiguous PR or
-working-tree handoff. If the capability is unavailable, its invocation syntax
-or semantics changed, or it attempts work outside this issue, stop as
-`DEVELOPMENT_HELPER_UNAVAILABLE` or `SCOPE_EXPANSION` as appropriate.
+The helper must return a pre-publication implementation plan or diff-scope
+receipt before its normal shipping steps. Validate that receipt against the
+scope manifest, then allow the helper to return implementation evidence and an
+unambiguous PR or working-tree handoff. If the helper cannot accept the bound
+scope, cannot provide pre-publication scope evidence, its invocation syntax or
+semantics changed, or it attempts work outside this issue, stop as
+`DEVELOPMENT_HELPER_UNAVAILABLE` or `SCOPE_EXPANSION` before accepting remote
+state. After handoff, audit the complete changed-file list and stop on any
+scope mismatch; this is a second defense, not a substitute for the
+pre-publication check.
 
 ### 5. One focused PR and CI
 
@@ -197,8 +225,14 @@ After initial checks are green, fetch fresh PR metadata and record the exact
 full head SHA. Run an independent PR review against that SHA:
 
 ```sh
-claude -p "please review PR #<pr>" --model claude-opus-5 --effort high
+claude -p "please review PR #<pr> at exact head <reviewed-head-sha>. First verify the PR head equals this full SHA; inspect only that revision and include REVIEWED_HEAD_SHA: <reviewed-head-sha> in the report." --model claude-opus-5 --effort high
 ```
+
+If the reviewer cannot prove the reported `REVIEWED_HEAD_SHA` equals the
+freshly captured full SHA, treat the review as invalid and stop. If the
+reviewer command is unavailable, unauthenticated, or returns no review-shaped
+result, stop as `REVIEWER_UNAVAILABLE`; do not silently downgrade to a
+same-agent review.
 
 The review must examine the exact diff, issue acceptance evidence, tests,
 release checks, security/invariant impact, and scope. A review for any other
@@ -259,6 +293,7 @@ Use one of these stable stop labels in the receipt and final report:
 - `ISSUE_REVIEW_BLOCKED`
 - `ISSUE_REVIEW_CAP_REACHED`
 - `DEVELOPMENT_HELPER_UNAVAILABLE`
+- `REVIEWER_UNAVAILABLE`
 - `SCOPE_EXPANSION`
 - `CI_REPAIR_AMBIGUOUS`
 - `MANDATORY_CHECK_FAILED`
@@ -284,6 +319,7 @@ receipt demonstrating these deterministic cases and expected outcomes:
 | `issue-review-cap`               | `ISSUE_REVIEW_CAP_REACHED`, human action    |
 | `scope-split`                    | `SCOPE_EXPANSION`, split before development |
 | `development-helper-unavailable` | stop without substitute workflow            |
+| `reviewer-unavailable`           | stop without same-agent review              |
 | `ci-identified-failure`          | targeted repair then re-run evidence        |
 | `ci-ambiguous-failure`           | `CI_REPAIR_AMBIGUOUS`, human action         |
 | `pr-review-pass`                 | proceed to final gate                       |
