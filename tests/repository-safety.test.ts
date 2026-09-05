@@ -1,5 +1,12 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  mkdtemp,
+  mkdir,
+  readFile,
+  rm,
+  unlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFile } from "node:child_process";
@@ -71,6 +78,24 @@ test("tracked credential directory files fail without revealing values", async (
   }
 });
 
+test("ordinary source paths and nested environment examples pass", async () => {
+  const example = [
+    ["BYBIT_API_KEY", ""].join("="),
+    ["BYBIT_API_SECRET", ""].join("="),
+  ].join("\n");
+  const root = await fixture({
+    "src/adapters/credential-store.ts": "export {}\n",
+    "src/secrets.ts": "export {}\n",
+    "docs/credentials.md": "# Credential storage\n",
+    "config/.env.example": example,
+  });
+  try {
+    assert.deepEqual(await runGuard(root), { failed: false, output: "" });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("tracked Bybit credential fields fail in otherwise ordinary files", async () => {
   const key = "synthetic-bybit-key";
   const root = await fixture({
@@ -81,6 +106,31 @@ test("tracked Bybit credential fields fail in otherwise ordinary files", async (
     assert.equal(result.failed, true);
     assert.match(result.output, /non-placeholder Bybit credential field/);
     assert.doesNotMatch(result.output, new RegExp(key));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Bybit credential defaults fail in otherwise ordinary files", async () => {
+  const key = "synthetic-default-key";
+  const root = await fixture({
+    "config.ts": `const key = process.env.BYBIT_API_KEY ?? "${key}";\n`,
+  });
+  try {
+    const result = await runGuard(root);
+    assert.equal(result.failed, true);
+    assert.match(result.output, /non-placeholder Bybit credential field/);
+    assert.doesNotMatch(result.output, new RegExp(key));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("missing tracked files are not reported as credential violations", async () => {
+  const root = await fixture({ "a.txt": "safe\n" });
+  try {
+    await unlink(join(root, "a.txt"));
+    assert.deepEqual(await runGuard(root), { failed: false, output: "" });
   } finally {
     await rm(root, { recursive: true, force: true });
   }

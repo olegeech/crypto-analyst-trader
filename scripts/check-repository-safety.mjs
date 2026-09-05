@@ -12,10 +12,10 @@ const PLACEHOLDER_VALUES = new Set([
   "test",
 ]);
 const SENSITIVE_PATH =
-  /(?:^|\/)(?:\.env(?:\.[^/]+)?|credentials?(?:[._-][^/]*)?|secrets?(?:[._-][^/]*)?)(?:\/|$)|(?:^|\/)data\/private(?:\/|$)/i;
+  /(?:^|\/)(?:credentials?|secrets?)(?:\/|$)|(?:^|\/)data\/private(?:\/|$)/i;
 const SENSITIVE_EXTENSION = /\.(?:key|pem)$/i;
 const BYBIT_CREDENTIAL =
-  /["']?\bBYBIT_API_(?:KEY|SECRET)\b["']?[ \t]*(?:=|:)[ \t]*["']?([^"'\s,#},]*)/gi;
+  /["']?\bBYBIT_API_(?:KEY|SECRET)\b["']?[ \t]*(?:=|:|\?\?|\|\|)[ \t]*["']?([^"'\s,#},]*)/gi;
 
 function isPlaceholder(value) {
   const normalized = value.trim().toLowerCase();
@@ -39,21 +39,32 @@ function trackedPaths(repositoryRoot) {
   return output.split("\0").filter(Boolean);
 }
 
+function isSensitivePath(path) {
+  const fileName = path.slice(path.lastIndexOf("/") + 1);
+  const isEnvironmentFile = fileName === ".env" || fileName.startsWith(".env.");
+
+  return (
+    (isEnvironmentFile && fileName !== ".env.example") ||
+    SENSITIVE_PATH.test(path) ||
+    SENSITIVE_EXTENSION.test(path)
+  );
+}
+
 function inspectRepository(repositoryRoot = process.cwd()) {
   const violations = [];
 
   for (const path of trackedPaths(repositoryRoot)) {
-    if (
-      path !== ".env.example" &&
-      (SENSITIVE_PATH.test(path) || SENSITIVE_EXTENSION.test(path))
-    ) {
+    if (isSensitivePath(path)) {
       violations.push(`tracked credential path: ${path}`);
     }
 
     let content;
     try {
       content = readFileSync(`${repositoryRoot}/${path}`);
-    } catch {
+    } catch (error) {
+      if (error?.code === "ENOENT") {
+        continue;
+      }
       violations.push(`unreadable tracked path: ${path}`);
       continue;
     }

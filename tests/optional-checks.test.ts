@@ -58,8 +58,8 @@ test("audit workflow is manual or scheduled and remains separate from blocking C
     "utf8",
   );
   assert.match(workflow, /workflow_dispatch/);
-  assert.match(workflow, /schedule:/);
-  assert.match(workflow, /continue-on-error: true/);
+  assert.match(workflow, /cron: "17 3 \* \* 1"/);
+  assert.doesNotMatch(workflow, /continue-on-error/);
   assert.doesNotMatch(
     workflow,
     /BYBIT_API_|secrets\.|placeOrder|create-order/i,

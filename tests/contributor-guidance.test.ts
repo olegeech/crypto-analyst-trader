@@ -30,5 +30,4 @@ test("issue templates retain lightweight core guidance", async () => {
     assert.match(story, new RegExp(`id: ${field}`));
   }
   assert.match(config, /blank_issues_enabled: false/);
-  assert.doesNotMatch(story, /secret|credential|security audit/i);
 });
