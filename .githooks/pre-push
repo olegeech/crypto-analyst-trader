@@ -1,0 +1,16 @@
+#!/bin/sh
+
+if [ "${CAT_ALLOW_MAIN_PUSH:-0}" = "1" ]; then
+    exit 0
+fi
+
+while read -r local_ref local_oid remote_ref remote_oid; do
+    if [ "$remote_ref" = "refs/heads/main" ]; then
+        echo "Direct pushes to main are blocked for this clone." >&2
+        echo "Push a feature branch and open a pull request instead." >&2
+        echo "For an intentional emergency push, set CAT_ALLOW_MAIN_PUSH=1." >&2
+        exit 1
+    fi
+done
+
+exit 0
