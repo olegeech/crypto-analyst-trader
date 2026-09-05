@@ -1,0 +1,39 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+
+import {
+  credentialServiceName,
+  type CredentialEnvironment,
+  type ExchangeCredentials,
+} from "../src/ports/credential-provider.js";
+
+test("credential environments have deterministic, distinct Keychain services", () => {
+  assert.notEqual(
+    credentialServiceName("testnet"),
+    credentialServiceName("mainnet"),
+  );
+  assert.equal(
+    credentialServiceName("testnet"),
+    "com.olegeech.crypto-analyst-trader.bybit.testnet",
+  );
+  assert.equal(
+    credentialServiceName("mainnet"),
+    "com.olegeech.crypto-analyst-trader.bybit.mainnet",
+  );
+});
+
+test("credential contract is explicit about all values needed by authenticated Bybit calls", () => {
+  const environment: CredentialEnvironment = "testnet";
+  const credentials: ExchangeCredentials = {
+    apiKey: "test-key",
+    apiSecret: "test-secret",
+    accountId: "test-account",
+  };
+
+  assert.equal(environment, "testnet");
+  assert.deepEqual(Object.keys(credentials).sort(), [
+    "accountId",
+    "apiKey",
+    "apiSecret",
+  ]);
+});

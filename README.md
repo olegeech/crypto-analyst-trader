@@ -82,7 +82,9 @@ This is the single pre-PR and release verification command. The optional
 
 See [Contributing](CONTRIBUTING.md) and the
 [system invariants](docs/architecture/invariants.md) for verification and
-credential boundaries.
+credential boundaries. For local authenticated Bybit work, use the
+[macOS Keychain credential setup](docs/credentials.md); credentials are never
+read from a repository `.env` file by the authenticated path.
 
 Repository-native skills:
 
