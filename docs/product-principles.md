@@ -132,9 +132,10 @@ learning outcome when the evidence, risk and execution contracts behaved as
 designed. Execution corruption, invalid data authorization, ownership mistakes
 or bypassed risk/approval gates are not acceptable strategy errors.
 
-The primary weekly product metric is positive net PnL after fees, funding and
-slippage. Operator time, end-to-end automation rate, drawdown, capital
-efficiency and safety incidents remain required supporting metrics.
+The primary weekly product metric is net PnL after fees, funding and slippage,
+with a target of remaining positive over the operating period. Operator time,
+end-to-end automation rate, drawdown, capital efficiency and safety incidents
+remain required supporting metrics.
 
 Prioritization provenance: these trade-offs were confirmed in the product-owner
 prioritization interview following the discovery recorded in issue #35.
