@@ -22,9 +22,11 @@ Required decision evidence includes, at minimum:
 
 - versioned market-regime, early-warning-risk, liquidity-stress and trap evidence
   described by the [market-regime research context](analytics/market-regime-context.md)
-  and production-owned through issue #12;
+  and tracked by issue #12;
 - OHLCV market history;
-- derivatives evidence including funding, open interest and liquidation data;
+- derivatives evidence including funding, open interest and liquidation data,
+  with liquidation ownership tracked by
+  [issue #45](https://github.com/olegeech/crypto-analyst-trader/issues/45);
 - current account, position and order state;
 - listing and instrument metadata, including delist or expiry restrictions; and
 - completeness, freshness, integrity and provenance checks for required inputs.
