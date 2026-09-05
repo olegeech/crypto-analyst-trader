@@ -88,17 +88,21 @@ function safeCommandError(
       `Bybit ${environment} credentials cannot be accessed. Unlock the macOS Keychain and run ${setupCommand(environment)}.`,
     );
   }
+  if (operation === "write") {
+    return new CredentialProviderError(
+      "write-failed",
+      `Bybit ${environment} credentials could not be stored. Run ${setupCommand(environment)} again.`,
+    );
+  }
+  if (operation === "remove") {
+    return new CredentialProviderError(
+      "remove-failed",
+      `Bybit ${environment} credentials could not be removed.`,
+    );
+  }
   return new CredentialProviderError(
-    operation === "write"
-      ? "write-failed"
-      : operation === "remove"
-        ? "remove-failed"
-        : "command-failed",
-    operation === "load"
-      ? `Bybit ${environment} credentials could not be loaded. Run ${setupCommand(environment)}.`
-      : operation === "write"
-        ? `Bybit ${environment} credentials could not be stored. Run ${setupCommand(environment)} again.`
-        : `Bybit ${environment} credentials could not be removed.`,
+    "command-failed",
+    `Bybit ${environment} credentials could not be loaded. Run ${setupCommand(environment)}.`,
   );
 }
 

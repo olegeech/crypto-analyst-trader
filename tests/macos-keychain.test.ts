@@ -97,6 +97,39 @@ test("mainnet load never falls back to Testnet", async () => {
   );
 });
 
+test("locked Keychain access returns a safe actionable error", async () => {
+  const { runner } = runnerFor(() => ({
+    stdout: "",
+    stderr: "User interaction is not allowed.",
+    exitCode: 36,
+  }));
+  const provider = createMacOSKeychainProvider({ runner, platform: "darwin" });
+
+  await assert.rejects(provider.load("testnet"), (error: unknown) => {
+    assert.ok(error instanceof CredentialProviderError);
+    const typedError = error as CredentialProviderError;
+    assert.equal(typedError.code, "inaccessible");
+    assert.match(typedError.message, /unlock.*Keychain/i);
+    assert.doesNotMatch(typedError.message, /interaction|not allowed/i);
+    return true;
+  });
+});
+
+test("setup rejects empty or multiline values before invoking security", async () => {
+  let invoked = false;
+  const runner: SecurityRunner = async () => {
+    invoked = true;
+    return { stdout: "", stderr: "", exitCode: 0 };
+  };
+  const provider = createMacOSKeychainProvider({ runner, platform: "darwin" });
+
+  await assert.rejects(
+    provider.save("testnet", { ...credentials, apiSecret: "line\nbreak" }),
+    /single-line/,
+  );
+  assert.equal(invoked, false);
+});
+
 test("remove targets only the selected environment and treats missing entries as success", async () => {
   const { calls, runner } = runnerFor(() => ({
     stdout: "",
