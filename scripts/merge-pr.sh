@@ -45,7 +45,7 @@ JQ_FILTER='[
   (.isDraft | tostring),
   .baseRefName,
   .mergeable,
-  (.reviewDecision // "NONE"),
+  (if (.reviewDecision // "") == "" then "NONE" else .reviewDecision end),
   ([(.statusCheckRollup // [])[] | select((
     (.__typename == "CheckRun" and
       .status == "COMPLETED" and
