@@ -1,0 +1,4 @@
+interface:
+  display_name: "Issue Delivery"
+  short_description: "Deliver one named issue to an exact-head merge verdict"
+  default_prompt: "Use $issue-delivery with one named GitHub issue; stop at READY_FOR_MERGE unless the caller explicitly passes merge."

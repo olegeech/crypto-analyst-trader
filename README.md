@@ -93,6 +93,10 @@ Repository-native skills:
   writes;
 - `$develop-next-roadmap-story`: select and deliver the next ready roadmap
   item.
+- `$issue-delivery #<issue>`: deliver one named eligible issue through review,
+  development, CI and exact-head PR review to `READY_FOR_MERGE`; append
+  `merge` only for an explicitly authorized merge. Roadmap-selection skills
+  choose queued work; `$issue-delivery` does not select a roadmap item.
 
 ## Safety
 

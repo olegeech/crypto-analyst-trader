@@ -85,6 +85,25 @@ trade-off in the issue's "Why now" section instead.
 - size small enough for one focused pull request;
 - required live, capital, data-integrity or security labels applied.
 
+## Named issue delivery
+
+Use the repository-native `$issue-delivery #<issue>` skill for one named
+eligible delivery issue that produces code, configuration, or canonical
+documentation. It performs the PO/Ready gate, independent issue review,
+development handoff, release checks, and exact-head independent PR review. It
+does not select the next roadmap item; roadmap-selection skills own that
+decision.
+
+The default invocation stops at the skill-only verdict `READY_FOR_MERGE` and
+never merges. An explicit `$issue-delivery #<issue> merge` is required before
+the skill may call `./scripts/merge-pr.sh <PR-number> <reviewed-head-SHA>`.
+The wrapper's exact-reviewed-head guard remains the final merge authority.
+
+Issue and PR reviews are each capped at three total attempts. Unresolved
+blockers, missing Ready evidence, scope growth, ambiguous CI repair, unavailable
+implementation tooling, or a moved reviewed head stop the flow for human
+resolution. Non-blocking review findings do not require stylistic churn.
+
 ## Definition of Done
 
 - acceptance criteria have test or artifact evidence;
