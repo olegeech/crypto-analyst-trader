@@ -39,8 +39,8 @@ test("issue-delivery enforces the pre-development gates", async () => {
     /ISSUE_REVIEW_CAP_REACHED/,
     /\$compound-engineering:lfg #<issue>/,
     /scope manifest/i,
-    /pre-publication implementation plan or diff-scope receipt/i,
-    /existing unambiguous open PR.*bypass development/is,
+    /pre-publication implementation plan or diff-scope\s+receipt/i,
+    /For an existing unambiguous open PR, skip development/is,
     /one focused PR/i,
     /scope expansion/i,
   ]) {
