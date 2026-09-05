@@ -23,8 +23,11 @@ Use a short-lived branch and a focused pull request. Link the issue with
 Run:
 
 ```bash
-npm run test:release
+npm ci && npm run test:release
 ```
+
+This is the single pre-PR verification command. Testnet smoke and dependency
+audit are separate opt-in checks and are not part of the blocking release path.
 
 For execution, accounting, data-quality, risk or security changes, follow the
 [Definition of Done](docs/workflow.md#definition-of-done),

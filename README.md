@@ -73,9 +73,12 @@ Requirements:
 - npm 10+
 
 ```bash
-npm ci
-npm run test:release
+npm ci && npm run test:release
 ```
+
+This is the single pre-PR and release verification command. The optional
+`npm run test:testnet` command performs a read-only Bybit Testnet smoke check;
+`npm run audit:dependencies` runs the advisory dependency audit separately.
 
 See [Contributing](CONTRIBUTING.md) and the
 [system invariants](docs/architecture/invariants.md) for verification and
