@@ -9,10 +9,14 @@ const values = ["test-key", "test-secret", "test-account"];
 test("setup CLI prompts for the three values and never writes them to output", async () => {
   const output: string[] = [];
   let index = 0;
+  const hiddenFlags: boolean[] = [];
   let saved: unknown;
   const code = await runCredentialsCli(["setup", "testnet"], {
     output: { write: (message) => output.push(message) },
-    prompt: async () => values[index++] ?? "",
+    prompt: async (_label, hidden) => {
+      hiddenFlags.push(hidden);
+      return values[index++] ?? "";
+    },
     provider: {
       load: async () => {
         throw new Error("unused");
@@ -33,6 +37,7 @@ test("setup CLI prompts for the three values and never writes them to output", a
       accountId: values[2],
     },
   });
+  assert.deepEqual(hiddenFlags, [true, true, true]);
   assert.doesNotMatch(output.join(""), /test-key|test-secret|test-account/);
 });
 

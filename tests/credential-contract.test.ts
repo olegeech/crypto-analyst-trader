@@ -14,11 +14,11 @@ test("credential environments have deterministic, distinct Keychain services", (
   );
   assert.equal(
     credentialServiceName("testnet"),
-    "com.olegeech.crypto-analyst-trader.bybit.testnet",
+    "com.crypto-analyst-trader.bybit.testnet",
   );
   assert.equal(
     credentialServiceName("mainnet"),
-    "com.olegeech.crypto-analyst-trader.bybit.mainnet",
+    "com.crypto-analyst-trader.bybit.mainnet",
   );
 });
 
