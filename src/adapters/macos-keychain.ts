@@ -14,6 +14,8 @@ import {
 export { CredentialProviderError } from "../ports/credential-provider.js";
 
 const SECURITY_COMMAND = "/usr/bin/security";
+const SECURITY_ITEM_NOT_FOUND_EXIT_CODE = 44;
+const SECURITY_INTERACTION_REQUIRED_EXIT_CODE = 36;
 
 export interface SecurityCommandResult {
   stdout: string;
@@ -62,32 +64,17 @@ function runSecurity(
 }
 
 function isMissing(result: SecurityCommandResult): boolean {
-  return /could not be found|no matching items/i.test(result.stderr);
+  return result.exitCode === SECURITY_ITEM_NOT_FOUND_EXIT_CODE;
 }
 
 function isInaccessible(result: SecurityCommandResult): boolean {
-  return /locked|user interaction is not allowed|authorization/i.test(
-    result.stderr,
-  );
+  return result.exitCode === SECURITY_INTERACTION_REQUIRED_EXIT_CODE;
 }
 
 function safeCommandError(
   environment: CredentialEnvironment,
-  result: SecurityCommandResult,
   operation: "load" | "write" | "remove",
 ): CredentialProviderError {
-  if (isMissing(result) && operation === "load") {
-    return new CredentialProviderError(
-      "missing",
-      `Bybit ${environment} credentials are unavailable. Run ${setupCommand(environment)}.`,
-    );
-  }
-  if (isInaccessible(result)) {
-    return new CredentialProviderError(
-      "inaccessible",
-      `Bybit ${environment} credentials cannot be accessed. Unlock the macOS Keychain and run ${setupCommand(environment)}.`,
-    );
-  }
   if (operation === "write") {
     return new CredentialProviderError(
       "write-failed",
@@ -167,7 +154,19 @@ export function createMacOSKeychainProvider({
       undefined,
     );
     if (result.exitCode !== 0) {
-      throw safeCommandError(environment, result, "load");
+      if (isMissing(result)) {
+        throw new CredentialProviderError(
+          "missing",
+          `Bybit ${environment} credentials are unavailable. Run ${setupCommand(environment)}.`,
+        );
+      }
+      if (isInaccessible(result)) {
+        throw new CredentialProviderError(
+          "inaccessible",
+          `Bybit ${environment} credentials cannot be accessed. Unlock the macOS Keychain and run ${setupCommand(environment)}.`,
+        );
+      }
+      throw safeCommandError(environment, "load");
     }
     const value = result.stdout.endsWith("\n")
       ? result.stdout.slice(0, -1).replace(/\r$/, "")
@@ -183,58 +182,142 @@ export function createMacOSKeychainProvider({
     return value;
   }
 
-  return {
-    async load(environment) {
-      assertSupported();
-      const [apiKey, apiSecret, accountId] = await Promise.all([
-        readValue(environment, credentialAccounts.apiKey),
-        readValue(environment, credentialAccounts.apiSecret),
-        readValue(environment, credentialAccounts.accountId),
-      ]);
-      return { apiKey, apiSecret, accountId };
-    },
+  async function storeValue(
+    environment: CredentialEnvironment,
+    account: string,
+    value: string,
+  ): Promise<SecurityCommandResult> {
+    return command(
+      runner,
+      [
+        "add-generic-password",
+        ...accountArgs(account, credentialServiceName(environment)),
+        "-w",
+        "-U",
+      ],
+      `${value}\n`,
+    );
+  }
 
-    async save(environment, credentials) {
-      assertSupported();
-      validateCredentials(credentials);
-      const service = credentialServiceName(environment);
-      const records = [
-        [credentialAccounts.apiKey, credentials.apiKey],
-        [credentialAccounts.apiSecret, credentials.apiSecret],
-        [credentialAccounts.accountId, credentials.accountId],
-      ] as const;
-
-      for (const [account, value] of records) {
-        const result = await command(
-          runner,
-          [
-            "add-generic-password",
-            ...accountArgs(account, service),
-            "-w",
-            "-U",
-          ],
-          `${value}\n`,
-        );
-        if (result.exitCode !== 0) {
-          await this.remove(environment);
-          throw safeCommandError(environment, result, "write");
+  async function readExisting(
+    environment: CredentialEnvironment,
+  ): Promise<ExchangeCredentials | null> {
+    const values: string[] = [];
+    for (const account of Object.values(credentialAccounts)) {
+      try {
+        values.push(await readValue(environment, account));
+      } catch (error) {
+        if (
+          error instanceof CredentialProviderError &&
+          error.code === "missing"
+        ) {
+          return null;
         }
+        throw error;
       }
-    },
+    }
+    const [apiKey, apiSecret, accountId] = values;
+    if (
+      apiKey === undefined ||
+      apiSecret === undefined ||
+      accountId === undefined
+    ) {
+      return null;
+    }
+    return { apiKey, apiSecret, accountId };
+  }
 
-    async remove(environment) {
-      assertSupported();
-      const service = credentialServiceName(environment);
-      for (const account of Object.values(credentialAccounts)) {
-        const result = await command(
-          runner,
-          ["delete-generic-password", ...accountArgs(account, service)],
-          undefined,
-        );
-        if (result.exitCode !== 0 && !isMissing(result)) {
-          throw safeCommandError(environment, result, "remove");
-        }
+  async function restore(
+    environment: CredentialEnvironment,
+    credentials: ExchangeCredentials,
+  ): Promise<boolean> {
+    let complete = true;
+    const records = [
+      [credentialAccounts.apiKey, credentials.apiKey],
+      [credentialAccounts.apiSecret, credentials.apiSecret],
+      [credentialAccounts.accountId, credentials.accountId],
+    ] as const;
+    for (const [account, value] of records) {
+      const result = await storeValue(environment, account, value);
+      if (result.exitCode !== 0) {
+        complete = false;
       }
-    },
-  };
+    }
+    return complete;
+  }
+
+  async function removeRecords(
+    environment: CredentialEnvironment,
+  ): Promise<CredentialProviderError | null> {
+    let firstError: CredentialProviderError | null = null;
+    const service = credentialServiceName(environment);
+    for (const account of Object.values(credentialAccounts)) {
+      const result = await command(
+        runner,
+        ["delete-generic-password", ...accountArgs(account, service)],
+        undefined,
+      );
+      if (result.exitCode !== 0 && !isMissing(result) && firstError === null) {
+        firstError = safeCommandError(environment, "remove");
+      }
+    }
+    return firstError;
+  }
+
+  async function load(
+    environment: CredentialEnvironment,
+  ): Promise<ExchangeCredentials> {
+    assertSupported();
+    const apiKey = await readValue(environment, credentialAccounts.apiKey);
+    const apiSecret = await readValue(
+      environment,
+      credentialAccounts.apiSecret,
+    );
+    const accountId = await readValue(
+      environment,
+      credentialAccounts.accountId,
+    );
+    return { apiKey, apiSecret, accountId };
+  }
+
+  async function save(
+    environment: CredentialEnvironment,
+    credentials: ExchangeCredentials,
+  ): Promise<void> {
+    assertSupported();
+    validateCredentials(credentials);
+    const previous = await readExisting(environment);
+    const records = [
+      [credentialAccounts.apiKey, credentials.apiKey],
+      [credentialAccounts.apiSecret, credentials.apiSecret],
+      [credentialAccounts.accountId, credentials.accountId],
+    ] as const;
+
+    for (const [account, value] of records) {
+      const result = await storeValue(environment, account, value);
+      if (result.exitCode !== 0) {
+        const writeFailure = safeCommandError(environment, "write");
+        const rollbackComplete = previous
+          ? await restore(environment, previous)
+          : (await removeRecords(environment)) === null;
+        if (!rollbackComplete) {
+          throw new CredentialProviderError(
+            "write-failed",
+            `${writeFailure.message} Rollback incomplete; run ${setupCommand(environment)} again.`,
+          );
+        }
+        throw writeFailure;
+      }
+    }
+  }
+
+  async function remove(environment: CredentialEnvironment): Promise<void> {
+    assertSupported();
+    const error = await removeRecords(environment);
+    if (error) {
+      throw error;
+    }
+  }
+
+  return { load, save, remove };
 }

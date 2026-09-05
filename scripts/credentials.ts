@@ -104,7 +104,7 @@ export async function runCredentialsCli(
     if (operation === "setup") {
       const apiKey = await prompt("Bybit API key", true);
       const apiSecret = await prompt("Bybit API secret", true);
-      const accountId = await prompt("Bybit account/subaccount ID", false);
+      const accountId = await prompt("Bybit account/subaccount ID", true);
       await provider.save(environment, { apiKey, apiSecret, accountId });
       output.write(
         `Stored Bybit ${environment} credentials in macOS Keychain.\n`,

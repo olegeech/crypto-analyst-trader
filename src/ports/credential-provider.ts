@@ -24,7 +24,7 @@ export const credentialAccounts = {
 export function credentialServiceName(
   environment: CredentialEnvironment,
 ): string {
-  return `com.olegeech.crypto-analyst-trader.bybit.${environment}`;
+  return `com.crypto-analyst-trader.bybit.${environment}`;
 }
 
 export function setupCommand(environment: CredentialEnvironment): string {
