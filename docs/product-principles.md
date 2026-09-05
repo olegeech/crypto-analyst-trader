@@ -156,7 +156,8 @@ prioritization interview following the discovery recorded in issue #35.
    turnover, exposure and drawdown; gross PnL alone is insufficient.
 8. **Evidence-based promotion.** Strategies move from research to shadow,
    Testnet, canary and live only after explicit gates.
-9. **Small reversible steps.** Initial live scope uses a dedicated subaccount,
-   one symbol/side and a strict capital cap.
+9. **Small reversible steps.** Initial live scope is tightly bounded to a small
+   approved instrument set and strict capital cap, preferably isolated in a
+   dedicated subaccount when production canary execution begins.
 10. **Earn complexity.** Realtime state, grid replenishment, extra exchanges and
     unattended execution require measured need and a new architecture decision.
