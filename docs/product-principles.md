@@ -80,9 +80,10 @@ Product-value priority, in descending order, is:
 4. increase reliability and predictability of the daily decision loop; and
 5. improve trading performance beyond the current approach.
 
-This ordering does not weaken release, integrity or capital-safety gates.
-Reliability and deterministic verification remain prerequisites for exposing
-capital even when they are not the primary source of user value.
+This is a user-value ordering, not permission to defer foundational quality.
+Reliability, deterministic verification, data integrity and capital-safety gates
+remain prerequisites for exposing capital even when they are not the primary
+source of user value.
 
 ### Delivery trade-offs
 
