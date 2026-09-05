@@ -8,7 +8,7 @@
 
 ## Evidence
 
-- [ ] `npm run test:release`
+- [ ] `npm ci && npm run test:release`
 - Targeted tests or artifacts:
 
 ## Safety impact

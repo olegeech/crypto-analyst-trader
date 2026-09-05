@@ -11,8 +11,11 @@
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
     "format:check": "prettier --check .",
+    "check:repository-safety": "node scripts/check-repository-safety.mjs",
+    "test:testnet": "node --import tsx scripts/testnet-smoke.ts",
+    "audit:dependencies": "npm audit --audit-level=high",
     "test": "node --import tsx --test tests/**/*.test.ts",
-    "test:release": "npm run typecheck && npm run lint && npm run format:check && npm test"
+    "test:release": "npm run typecheck && npm run lint && npm run format:check && npm run check:repository-safety && npm test"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

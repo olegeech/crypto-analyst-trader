@@ -1,9 +1,14 @@
 node_modules/
+.idea/
 dist/
 coverage/
 .env
 .env.*
 !.env.example
+credentials/
+secrets/
+*.key
+*.pem
 *.db
 *.db-shm
 *.db-wal
