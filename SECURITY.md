@@ -6,7 +6,9 @@
 - Grant trading and read permissions only; withdrawal permission is forbidden.
 - Use an IP allowlist where the account and deployment support it.
 - Keep Testnet and mainnet keys separate.
-- Load secrets at runtime from environment or an approved secret manager.
+- Load secrets at runtime from environment or an approved secret manager such
+  as the local macOS Keychain provider; authenticated local commands must not
+  require plaintext values in shell history or repository files.
 - Never persist API secrets, signatures, signed headers or raw authentication
   responses.
 
