@@ -53,7 +53,10 @@ test("Testnet smoke rejects an unsafe base URL before requesting it", async () =
 });
 
 test("audit workflow is manual or scheduled and remains separate from blocking CI", async () => {
-  const workflow = await readFile(".github/workflows/security-audit.yml", "utf8");
+  const workflow = await readFile(
+    ".github/workflows/security-audit.yml",
+    "utf8",
+  );
   assert.match(workflow, /workflow_dispatch/);
   assert.match(workflow, /schedule:/);
   assert.match(workflow, /continue-on-error: true/);
