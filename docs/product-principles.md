@@ -6,71 +6,49 @@ Improve measured net risk-adjusted return after trading fees, funding and
 slippage without exceeding explicit capital, exposure and drawdown limits.
 Profit is an objective, not a guarantee.
 
-## Current product intent
+## Product intent — reviewed 2026-09-05
 
-The primary operator is the product owner, assisted by AI reviewers/advisers
-such as Codex or Claude CLI. The product should minimize manual work while
-improving decision quality and measured trading performance without weakening
-the minimum safety gates required for live capital.
+The primary operator is the product owner, assisted by AI coding and review
+assistants. The product should reduce manual exchange work while improving
+decision quality and measured trading performance without weakening the minimum
+safety gates required for live capital.
 
-The target daily loop is:
+The canonical daily product boundary is defined in [README.md](../README.md).
+Preparation and execution remain separate as required by
+[invariant 16](architecture/invariants.md), and every exchange write remains
+bound to an approved exact plan hash by invariant 2.
 
-```text
-daily-rebalance
-  -> refresh market, derivatives, listing and account evidence
-  -> evaluate regime, warnings, traps and instrument strength
-  -> produce an explainable proposed portfolio/order-plan diff
-  -> review risks and rationale
-  -> approve one exact immutable plan
-  -> execute only the approved live changes
-  -> reconcile and report results
-```
+Required decision evidence includes, at minimum:
 
-AI may recommend opening a new position, increasing or averaging an existing
-position, reducing or closing a position, rebuilding grid/TP parameters, or
-choosing `NO_TRADE`. In the current product stage, no live-state change occurs
-without explicit human approval of the exact immutable plan.
+- versioned market-regime, early-warning-risk, liquidity-stress and trap evidence
+  described by the [market-regime research context](analytics/market-regime-context.md)
+  and production-owned through issue #12;
+- OHLCV market history;
+- derivatives evidence including funding, open interest and liquidation data;
+- current account, position and order state;
+- listing and instrument metadata, including delist or expiry restrictions; and
+- completeness, freshness, integrity and provenance checks for required inputs.
+
+Missing, stale or incompatible required evidence blocks exposure according to
+invariants 1 and 18. Ordinary uncertainty that does not violate a required gate
+should remain visible through confidence and review warnings rather than being
+silently converted into fabricated certainty or an unnecessary blocked run.
 
 Averaging is never justified only because price moved against the position. It
 is eligible only when current regime and instrument evidence still supports the
 original or a newly stated trading thesis, the instrument remains sufficiently
-strong relative to the available alternatives, and the projected post-average
-exposure passes the configured risk gate.
+strong relative to available alternatives, and projected post-average exposure
+passes the configured risk gate.
 
-Required decision evidence includes, at minimum:
-
-- versioned `MarketRegimeScore`, `CEWS / EarlyWarningRisk`, `LSI` and trap
-  evidence;
-- OHLCV market history;
-- derivatives evidence including funding, open interest and liquidation data;
-- current account, position and order state;
-- listing and instrument metadata, including delist/expiry restrictions;
-- completeness, freshness, integrity and provenance checks for required inputs.
-
-Missing or stale required evidence produces `NOT_READY`/BLOCK rather than a
-best-effort live recommendation.
-
-For the first 1-2 months of usable operation, success means both:
-
-- positive net trading PnL after fees, funding and slippage, with drawdown,
-  capital efficiency and decision quality tracked explicitly; and
-- materially less operator time spent on manual data gathering, reconciliation
-  and order-plan construction.
-
-Trading performance is compared with buy-and-hold of the traded instruments,
-while the strategy's own net-profit history is tracked as the primary operating
-record. A profitable result alone is insufficient if it depends on excessive
-risk or opaque/unexplained actions.
-
-Unattended mainnet execution is a future capability. It may be considered only
-after enough operating history demonstrates stable decision quality, reliable
-reconciliation and acceptable risk behavior; it requires a separate promotion
-and architecture decision.
+AI contributions follow invariant 19: research or model output may contribute
+decision evidence, while the TypeScript planner remains authoritative for
+exchange-valid order intents.
 
 Discovery provenance: the initial product-owner interview was recorded in
 [issue #35](https://github.com/olegeech/crypto-analyst-trader/issues/35).
+Review this section when the production-canary scope or autonomy level changes.
 
-## Current product priorities
+## Product-value priorities
 
 Product-value priority, in descending order, is:
 
@@ -80,7 +58,12 @@ Product-value priority, in descending order, is:
 4. increase reliability and predictability of the daily decision loop; and
 5. improve trading performance beyond the current approach.
 
-This is a user-value ordering, not permission to defer foundational quality.
+This is a user-value ordering, not an implementation queue. It never overrides
+release dependencies, GitHub milestone scope, or the ordered active milestone
+queue in [issue #33](https://github.com/olegeech/crypto-analyst-trader/issues/33).
+Use it as a trade-off lens only where the canonical release gate and queue do not
+already force implementation order.
+
 Reliability, deterministic verification, data integrity and capital-safety gates
 remain prerequisites for exposing capital even when they are not the primary
 source of user value.
@@ -91,27 +74,26 @@ Prefer the shortest safe path to a useful end-to-end product:
 
 - deliver working Bybit execution with a simple deterministic planner before
   delaying execution for a substantially smarter planner;
-- start with a narrow 1-3 instrument scope that works end to end before scaling
-  the candidate universe or simultaneous exposure;
+- prove a narrow end-to-end instrument scope before scaling the candidate
+  universe or simultaneous exposure;
 - initially prioritize opening new positions; management of existing positions
-  remains part of the target loop but must not delay the first useful new-entry
-  path unless safety or ownership semantics require it;
-- use a hybrid decision model: AI may propose thesis, candidates, confidence and
-  parameters, while deterministic TypeScript domain, risk and exchange-rule
-  logic validates and constructs authoritative order intents;
+  remains part of the target product but should not delay the first useful
+  new-entry path unless safety or ownership semantics require it;
 - during early operation, balance automation with extra review visibility for
-  debugging; converge toward one-command operation as evidence and confidence
-  accumulate;
+  debugging, then reduce routine operator steps as evidence accumulates; and
 - distinguish missing required evidence from ordinary uncertainty: required
-  evidence that is stale, incomplete or incompatible still blocks exposure,
-  while non-critical uncertainty should prefer explicit confidence/review
-  warnings over unnecessary `NO_TRADE`/`NOT_READY` results.
+  evidence failures still block exposure, while non-critical uncertainty should
+  remain explicit through confidence and review warnings.
 
-### First live scope
+### First mainnet canary
 
-The first live product slice should focus on opening new positions for at most
-1-3 instruments in one approved run. Before approval, the operator must see at
-least:
+[Issue #31](https://github.com/olegeech/crypto-analyst-trader/issues/31) owns the
+canonical production-canary scope and acceptance criteria. The first canary uses
+a dedicated subaccount, one symbol and side, and a strict capital cap. Expanding
+to multiple symbols is a later product step and requires the separate issue and
+approval required by #31.
+
+Before approval, the operator should see at least:
 
 - instrument;
 - proposed entry price and quantity;
@@ -121,21 +103,22 @@ least:
 - rationale for the recommendation; and
 - when modifying existing state, a clear comparison with the current state.
 
-Testnet validates exchange mechanics and failure behavior, but the product
-should move to a tightly bounded, manually approved mainnet canary as soon as
-its explicit release and capital-safety gates are satisfied. Mainnet canary
-scope must remain small and reversible; it does not require proof that the
-strategy already outperforms every benchmark.
-
 A strategy recommendation that later proves unprofitable is an acceptable
-learning outcome when the evidence, risk and execution contracts behaved as
+learning outcome when evidence, risk and execution contracts behaved as
 designed. Execution corruption, invalid data authorization, ownership mistakes
-or bypassed risk/approval gates are not acceptable strategy errors.
+or bypassed risk or approval gates are not acceptable strategy errors.
 
-The primary weekly product metric is net PnL after fees, funding and slippage,
-with a target of remaining positive over the operating period. Operator time,
-end-to-end automation rate, drawdown, capital efficiency and safety incidents
-remain required supporting metrics.
+## Success measurement
+
+For the first 1–2 months of usable operation, the primary product outcome metric
+is cumulative net PnL after fees, funding and slippage. The target is positive
+net PnL over that evaluation window, without treating profit as guaranteed.
+
+Required supporting measures are operator minutes per completed daily run,
+drawdown, capital efficiency, end-to-end automation rate and safety incidents.
+Any experiment baseline, including buy-and-hold where useful, must define its
+period and cost assumptions under the [workflow experiment rules](workflow.md)
+rather than creating a second permanent baseline definition here.
 
 Prioritization provenance: these trade-offs were confirmed in the product-owner
 prioritization interview following the discovery recorded in issue #35.
@@ -158,8 +141,7 @@ prioritization interview following the discovery recorded in issue #35.
    turnover, exposure and drawdown; gross PnL alone is insufficient.
 8. **Evidence-based promotion.** Strategies move from research to shadow,
    Testnet, canary and live only after explicit gates.
-9. **Small reversible steps.** Initial live scope is tightly bounded to a small
-   approved instrument set and strict capital cap, preferably isolated in a
-   dedicated subaccount when production canary execution begins.
+9. **Small reversible steps.** Initial live scope uses a dedicated subaccount,
+   one symbol/side and a strict capital cap.
 10. **Earn complexity.** Realtime state, grid replenishment, extra exchanges and
     unattended execution require measured need and a new architecture decision.
