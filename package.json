@@ -12,6 +12,7 @@
     "lint": "eslint .",
     "format:check": "prettier --check .",
     "check:repository-safety": "node scripts/check-repository-safety.mjs",
+    "review:target": "node --import tsx scripts/review-target.ts",
     "credentials:setup:testnet": "node --import tsx scripts/credentials.ts setup testnet",
     "credentials:setup:mainnet": "node --import tsx scripts/credentials.ts setup mainnet",
     "credentials:remove:testnet": "node --import tsx scripts/credentials.ts remove testnet",

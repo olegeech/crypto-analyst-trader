@@ -40,6 +40,14 @@ test("scripts are included in the TypeScript project", () => {
   assert.ok(tsconfig.include.includes("scripts"));
 });
 
+test("review:target is explicit and excluded from default release execution", () => {
+  assert.match(
+    packageJson.scripts["review:target"] ?? "",
+    /node --import tsx scripts\/review-target\.ts/,
+  );
+  assert.doesNotMatch(releaseScript, /review:target/);
+});
+
 test("release composition propagates each blocking stage failure", async () => {
   for (const failingStage of ["typecheck", "lint", "format:check", "test"]) {
     const root = await mkdtemp(join(tmpdir(), "release-contract-"));
@@ -81,4 +89,5 @@ test("default CI delegates to the same release command without secrets or option
     ciWorkflow,
     /secrets\.|BYBIT_API_|credentials:(?:setup|remove)|test:testnet|audit:dependencies|api-testnet\.bybit\.com|placeOrder|create-order/i,
   );
+  assert.doesNotMatch(ciWorkflow, /review:target|scripts\/review-target\.ts/);
 });
