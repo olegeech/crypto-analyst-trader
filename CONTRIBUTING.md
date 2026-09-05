@@ -29,6 +29,25 @@ npm ci && npm run test:release
 This is the single pre-PR verification command. Testnet smoke and dependency
 audit are separate opt-in checks and are not part of the blocking release path.
 
+## Merge a reviewed pull request
+
+After the PR has been reviewed and its checks are green, run the repository
+wrapper from a clean checkout of the PR branch:
+
+```bash
+./scripts/merge-pr.sh <PR-number> <reviewed-head-SHA>
+```
+
+The full SHA is the review evidence supplied by the maintainer; it must still
+match the PR head when the command runs. The wrapper also requires an open,
+non-draft PR targeting `main`, a mergeable state, no requested changes, and a
+successful `release-checks` result before asking GitHub to squash-merge it. It
+then switches to local `main` and updates it with `git pull --ff-only`.
+
+Tracked working-tree changes must be committed or stashed first. Untracked
+scratch files are ignored by the preflight because they cannot enter the
+server-side squash merge.
+
 For execution, accounting, data-quality, risk or security changes, follow the
 [Definition of Done](docs/workflow.md#definition-of-done),
 [system invariants](docs/architecture/invariants.md) and

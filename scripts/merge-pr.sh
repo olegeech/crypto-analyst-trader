@@ -34,8 +34,8 @@ fi
 
 REVIEWED_SHA="$(printf '%s' "$REVIEWED_SHA" | tr '[:upper:]' '[:lower:]')"
 
-if [[ -n "$(git status --porcelain)" ]]; then
-  echo "ERROR: working tree must be clean before merge." >&2
+if [[ -n "$(git status --porcelain --untracked-files=no)" ]]; then
+  echo "ERROR: tracked working-tree changes must be clean before merge." >&2
   exit 1
 fi
 
