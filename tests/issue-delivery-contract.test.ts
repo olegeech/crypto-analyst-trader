@@ -42,7 +42,7 @@ test("issue-delivery enforces the pre-development gates", async () => {
     /REVIEW_INPUT_UNAVAILABLE/,
     /REVIEW_INPUT_STALE/,
     /malformed-output.*stale-input.*do not consume/is,
-    /Claude JSON envelope/i,
+    /Claude's JSON result envelope.*plain-text/is,
     /BLOCKING.*MATERIAL.*NON_BLOCKING.*INFORMATIONAL/is,
     /ISSUE_REVIEW_CAP_REACHED/,
     /\$compound-engineering:lfg #<issue>/,
