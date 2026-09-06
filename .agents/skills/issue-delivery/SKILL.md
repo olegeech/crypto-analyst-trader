@@ -146,9 +146,12 @@ details. The reviewer may use bounded read-only repository, GitHub, and
 public-web retrieval. It cannot edit or write, mutate GitHub, push or merge,
 read secrets, or bypass permissions broadly.
 
-The adapter returns the Claude JSON envelope with an inner `VERDICT: PASS` or
-`VERDICT: BLOCKED` and findings classified as `BLOCKING`, `MATERIAL`,
-`NON_BLOCKING`, or `INFORMATIONAL`. A passing review has no unresolved
+The live runner consumes Claude's JSON result envelope and validates its inner
+plain-text `VERDICT: PASS` or `VERDICT: BLOCKED` plus findings classified as
+`BLOCKING`, `MATERIAL`, `NON_BLOCKING`, or `INFORMATIONAL`. The CLI prints the
+adapter's normalized result with `kind`, `verdict`, `findings`, the bound
+digest or reviewed head, and `attemptConsumed`; it does not print the raw
+Claude envelope. A passing review has no unresolved
 `BLOCKING` or `MATERIAL` finding. Resolve valid blocking/material findings and
 re-run the adapter. Count total quality-review attempts, including the first
 valid bound review, and stop after attempt three with

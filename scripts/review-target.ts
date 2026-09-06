@@ -37,7 +37,7 @@ const FINDING_SEVERITIES = [
   "INFORMATIONAL",
 ] as const;
 const MAX_REVIEWER_OUTPUT_BYTES = 1024 * 1024;
-const REVIEWER_TIMEOUT_MS = 120_000;
+const REVIEWER_TIMEOUT_MS = 900_000;
 const VERDICTS = ["PASS", "BLOCKED"] as const;
 
 export type FindingSeverity = (typeof FINDING_SEVERITIES)[number];
@@ -638,15 +638,13 @@ async function runLiveReviewer(
   ];
   const args = [
     "-p",
-    "Read the JSON review envelope from stdin. Return only the requested Claude JSON result envelope. In its result string, emit VERDICT: PASS or VERDICT: BLOCKED and one FINDING: SEVERITY: message line per finding.",
+    "Read the JSON review envelope from stdin. Review the bound target's scope and acceptance criteria, the exact diff when the target is a PR, tests, release-check evidence, and safety/invariant impact using read-only access. Reply with PLAIN TEXT ONLY - no JSON, no markdown, and no code fences. The first line must be exactly VERDICT: PASS or VERDICT: BLOCKED. Each finding must be on its own single line, exactly FINDING: <SEVERITY>: <message>, where <SEVERITY> is one of BLOCKING, MATERIAL, NON_BLOCKING, INFORMATIONAL. Output nothing else.",
     "--model",
     "claude-opus-5",
     "--effort",
     "high",
     "--output-format",
     "json",
-    "--permission-mode",
-    "plan",
     "--tools",
     invocation.policy.allowedTools.join(","),
     "--allowedTools",
