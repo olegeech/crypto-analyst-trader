@@ -71,7 +71,12 @@ work, but the final PR evidence must preserve the material fields:
   "issue": 52,
   "issue_url": "https://github.com/owner/repo/issues/52",
   "scope_digest": "<sha256-of-fetched-issue-body-and-scope-fields>",
-  "issue_review": { "attempts": 1, "outcome": "PASS", "blockers": [] },
+  "issue_review": {
+    "attempts": 1,
+    "outcome": "PASS",
+    "review_scope_digest": "<sha256-of-title-and-body>",
+    "blockers": []
+  },
   "development": { "pr": 0, "head_sha": "" },
   "ci": { "release_checks": "GREEN", "evidence": "" },
   "pr_review": {
@@ -126,32 +131,50 @@ title, a label alone, or a reviewer suggestion.
 
 ### 3. Independent issue review (maximum three attempts)
 
-Before implementation, run an independent issue review using the configured
-reviewer command below. The reviewer checks scope, acceptance criteria,
-dependencies, safety, failure behavior, testability, and contradictions with
-the canonical sources. It must not implement code or decide product policy.
-
-The reviewer command is the replaceable default and may be changed only by a
-human-maintained update to this skill:
+Before implementation, run one independent bound review through the repository
+adapter:
 
 ```sh
-claude -p "please review issue #<issue>" --model claude-opus-5 --effort high
+npm run review:target -- issue <issue>
 ```
 
-If the reviewer command is unavailable, unauthenticated, or returns no
-review-shaped result, stop as `REVIEWER_UNAVAILABLE`. Do not call the same
-failed command repeatedly and do not present the orchestrator's own reading
-as an independent review. A human may install/authenticate or explicitly
-maintain an equivalent reviewer command, after which the attempt starts fresh.
+The adapter fetches a fresh issue and passes number, URL, title, body, labels,
+milestone, state, and `review_scope_digest` through stdin. Comments are not
+included by default. The production default is one `claude-opus-5` reviewer at
+high effort; the model and CLI syntax remain replaceable implementation
+details. The reviewer checks scope, acceptance criteria, dependencies, safety,
+failure behavior, testability, and contradictions with canonical sources. It
+may use the configured read-only repository, GitHub, and public-web retrieval
+tools. The adapter supplies only a tracked revision archive, does not include
+untracked files or repository secrets, and does not expose edit/write, push, or
+merge tools. User, project, and local Claude settings and MCP configuration
+remain active because this workflow runs in a trusted local environment; the
+adapter does not use Claude's `--restricted` or `--strict-mcp-config` flags.
 
-Classify each finding as `BLOCKING`, `MATERIAL`, `NON_BLOCKING`, or
-`INFORMATIONAL`. A passing review has no unresolved `BLOCKING` or `MATERIAL`
-finding. Resolve valid blocking/material findings in the issue or the planned
-implementation, then re-run the review. Count total issue-review attempts,
-including the first run, and stop after attempt three with
-`ISSUE_REVIEW_CAP_REACHED` if a blocker remains. A cap requires human
-resolution; it is never an automatic pass. Non-blocking findings do not force
-stylistic churn or automatic follow-up issues.
+The live runner consumes Claude's JSON result envelope and validates its inner
+plain-text `VERDICT: PASS` or `VERDICT: BLOCKED` plus findings classified as
+`BLOCKING`, `MATERIAL`, `NON_BLOCKING`, or `INFORMATIONAL`. The reviewer
+reserves `BLOCKING` and `MATERIAL` for concrete defects that make the change
+wrong or unsafe, and omits uncertain findings or classifies them as
+`NON_BLOCKING` or `INFORMATIONAL`. The CLI prints the
+adapter's normalized result with `kind`, `verdict`, `findings`, the bound
+digest or reviewed head, and `attemptConsumed`; it does not print the raw
+Claude envelope. A passing review has no unresolved
+`BLOCKING` or `MATERIAL` finding. Resolve valid blocking/material findings and
+re-run the adapter. Count total quality-review attempts, including the first
+valid bound review, and stop after attempt three with
+`ISSUE_REVIEW_CAP_REACHED` if a blocker remains. Infrastructure, retrieval,
+authentication, malformed-output, and stale-input failures do not consume an
+attempt. Do not present the delivery agent's own reading as an independent
+review.
+
+If the target cannot be fetched or normalized, stop as
+`REVIEW_INPUT_UNAVAILABLE`. If the reviewer cannot execute or returns no valid
+review-shaped result, stop as `REVIEWER_UNAVAILABLE`. If the issue's title or
+body changes after review, stop as `REVIEW_INPUT_STALE`. Labels, milestone, and
+state are contextual metadata and their drift does not make issue evidence
+stale. Record `review_scope_digest`, the failure state, recovery action, and
+whether the quality attempt was consumed in the receipt.
 
 If the review conflicts with a settled PO decision or canonical source, report
 the exact conflict and stop instead of silently changing the decision.
@@ -222,24 +245,27 @@ commit SHA, command, result, and relevant output summary without secrets.
 ### 6. Independent exact-head PR review (maximum three attempts)
 
 After initial checks are green, fetch fresh PR metadata and record the exact
-full head SHA. Run an independent PR review against that SHA:
+full head SHA. Run an independent bound PR review against that SHA:
 
 ```sh
-claude -p "please review PR #<pr> at exact head <reviewed-head-sha>. First verify the PR head equals this full SHA; inspect only that revision and include REVIEWED_HEAD_SHA: <reviewed-head-sha> in the report." --model claude-opus-5 --effort high
+npm run review:target -- pr <pr> <reviewed-head-sha>
 ```
 
-If the reviewer cannot prove the reported `REVIEWED_HEAD_SHA` equals the
-freshly captured full SHA, treat the review as invalid and stop. If the
-reviewer command is unavailable, unauthenticated, or returns no review-shaped
-result, stop as `REVIEWER_UNAVAILABLE`; do not silently downgrade to a
-same-agent review.
+The adapter binds the exact full head SHA, diff/patch, linked issue scope, and
+relevant check evidence in the stdin envelope. It verifies the SHA before and
+after the review. A mismatch before review is `REVIEW_INPUT_UNAVAILABLE`; a
+moved head after review is `REVIEW_INPUT_STALE`. Any unavailable or malformed
+reviewer result is `REVIEWER_UNAVAILABLE`. None of these infrastructure or
+stale-input failures consumes a quality-review attempt. Do not silently
+downgrade to a same-agent review.
 
 The review must examine the exact diff, issue acceptance evidence, tests,
 release checks, security/invariant impact, and scope. A review for any other
 SHA is invalid. Classify findings using the same severity terms as issue
 review. Resolve blocking/material findings and re-run CI before the next PR
-review attempt. Count total PR-review attempts, including the first, and stop
-after attempt three with `PR_REVIEW_CAP_REACHED` if a blocker remains.
+review attempt. Count total PR-review attempts, including the first valid bound
+review, and stop after attempt three with `PR_REVIEW_CAP_REACHED` if a blocker
+remains.
 
 Non-blocking findings are recorded as residual risk or optional follow-up and
 do not force stylistic churn. A moved head, new failing check, requested
@@ -290,10 +316,12 @@ Use one of these stable stop labels in the receipt and final report:
 - `INELIGIBLE_ISSUE`
 - `NEEDS_PO_INTERVIEW`
 - `NOT_READY`
+- `REVIEW_INPUT_UNAVAILABLE`
 - `ISSUE_REVIEW_BLOCKED`
 - `ISSUE_REVIEW_CAP_REACHED`
 - `DEVELOPMENT_HELPER_UNAVAILABLE`
 - `REVIEWER_UNAVAILABLE`
+- `REVIEW_INPUT_STALE`
 - `SCOPE_EXPANSION`
 - `CI_REPAIR_AMBIGUOUS`
 - `MANDATORY_CHECK_FAILED`
