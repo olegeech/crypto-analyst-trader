@@ -12,6 +12,7 @@ test("the future authenticated probe has a typed vault seam and no dotenv fallba
     "utf8",
   );
   const packageSource = await readFile("package.json", "utf8");
+  const ciWorkflow = await readFile(".github/workflows/ci.yml", "utf8");
 
   assert.match(providerSource, /export interface CredentialProvider/);
   assert.match(providerSource, /load\(environment: CredentialEnvironment/);
@@ -21,4 +22,7 @@ test("the future authenticated probe has a typed vault seam and no dotenv fallba
     packageSource,
     /credentials:.*dotenv|dotenv.*credentials/i,
   );
+  assert.match(packageSource, /credentials:connect:testnet/);
+  assert.match(packageSource, /credentials:connect:mainnet/);
+  assert.doesNotMatch(ciWorkflow, /credentials:connect/);
 });

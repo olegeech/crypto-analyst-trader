@@ -17,6 +17,8 @@
     "credentials:setup:mainnet": "node --import tsx scripts/credentials.ts setup mainnet",
     "credentials:remove:testnet": "node --import tsx scripts/credentials.ts remove testnet",
     "credentials:remove:mainnet": "node --import tsx scripts/credentials.ts remove mainnet",
+    "credentials:connect:testnet": "node --import tsx scripts/credentials-connect.ts testnet",
+    "credentials:connect:mainnet": "node --import tsx scripts/credentials-connect.ts mainnet",
     "test:testnet": "node --import tsx scripts/testnet-smoke.ts",
     "audit:dependencies": "npm audit --audit-level=high",
     "test": "node --import tsx --test tests/**/*.test.ts",

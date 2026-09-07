@@ -1,13 +1,16 @@
+import { randomBytes } from "node:crypto";
 import { spawn } from "node:child_process";
 import process from "node:process";
 
 import {
   credentialAccounts,
+  credentialPreflightAccount,
+  credentialPreflightServiceName,
   credentialServiceName,
   CredentialProviderError,
   setupCommand,
   type CredentialEnvironment,
-  type CredentialProvider,
+  type CredentialProviderWithPreflight,
   type ExchangeCredentials,
 } from "../ports/credential-provider.js";
 
@@ -93,6 +96,15 @@ function safeCommandError(
   );
 }
 
+function safePreflightError(
+  environment: CredentialEnvironment,
+): CredentialProviderError {
+  return new CredentialProviderError(
+    "preflight-failed",
+    `Bybit ${environment} Keychain preflight failed; OAuth was not started.`,
+  );
+}
+
 function validateCredentialValue(name: string, value: string): void {
   if (!value || /[\u0000-\u001f\u007f\r\n]/.test(value)) {
     throw new CredentialProviderError(
@@ -130,7 +142,7 @@ export function createMacOSKeychainProvider({
 }: {
   platform?: NodeJS.Platform;
   runner?: SecurityRunner;
-} = {}): CredentialProvider {
+} = {}): CredentialProviderWithPreflight {
   function assertSupported(): void {
     if (platform !== "darwin") {
       throw new CredentialProviderError(
@@ -264,6 +276,70 @@ export function createMacOSKeychainProvider({
     return firstError;
   }
 
+  async function preflight(environment: CredentialEnvironment): Promise<void> {
+    assertSupported();
+    const service = credentialPreflightServiceName(environment);
+    const sentinel = `connect-preflight-${randomBytes(16).toString("hex")}`;
+    const writeResult = await command(
+      runner,
+      [
+        "add-generic-password",
+        "-a",
+        credentialPreflightAccount,
+        "-s",
+        service,
+        "-w",
+        "-U",
+      ],
+      `${sentinel}\n`,
+    );
+    if (writeResult.exitCode !== 0) {
+      throw safePreflightError(environment);
+    }
+
+    let failure: CredentialProviderError | null = null;
+    const readResult = await command(
+      runner,
+      [
+        "find-generic-password",
+        "-a",
+        credentialPreflightAccount,
+        "-s",
+        service,
+        "-w",
+      ],
+      undefined,
+    );
+    const readValue = readResult.stdout.endsWith("\n")
+      ? readResult.stdout.slice(0, -1).replace(/\r$/, "")
+      : readResult.stdout;
+    if (readResult.exitCode !== 0 || readValue !== sentinel) {
+      failure = safePreflightError(environment);
+    }
+
+    const removeResult = await command(
+      runner,
+      [
+        "delete-generic-password",
+        "-a",
+        credentialPreflightAccount,
+        "-s",
+        service,
+      ],
+      undefined,
+    );
+    if (
+      removeResult.exitCode !== 0 &&
+      !isMissing(removeResult) &&
+      failure === null
+    ) {
+      failure = safePreflightError(environment);
+    }
+    if (failure) {
+      throw failure;
+    }
+  }
+
   async function load(
     environment: CredentialEnvironment,
   ): Promise<ExchangeCredentials> {
@@ -319,5 +395,5 @@ export function createMacOSKeychainProvider({
     }
   }
 
-  return { load, save, remove };
+  return { load, save, remove, preflight };
 }

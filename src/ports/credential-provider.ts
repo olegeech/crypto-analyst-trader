@@ -15,16 +15,31 @@ export interface CredentialProvider {
   remove(environment: CredentialEnvironment): Promise<void>;
 }
 
+export interface CredentialPreflight {
+  preflight(environment: CredentialEnvironment): Promise<void>;
+}
+
+export type CredentialProviderWithPreflight = CredentialProvider &
+  CredentialPreflight;
+
 export const credentialAccounts = {
   apiKey: "api-key",
   apiSecret: "api-secret",
   accountId: "account-id",
 } as const;
 
+export const credentialPreflightAccount = "connect-preflight";
+
 export function credentialServiceName(
   environment: CredentialEnvironment,
 ): string {
   return `com.crypto-analyst-trader.bybit.${environment}`;
+}
+
+export function credentialPreflightServiceName(
+  environment: CredentialEnvironment,
+): string {
+  return `${credentialServiceName(environment)}.preflight`;
 }
 
 export function setupCommand(environment: CredentialEnvironment): string {
@@ -39,7 +54,8 @@ export class CredentialProviderError extends Error {
     | "invalid"
     | "command-failed"
     | "write-failed"
-    | "remove-failed";
+    | "remove-failed"
+    | "preflight-failed";
 
   constructor(code: CredentialProviderError["code"], message: string) {
     super(message);
