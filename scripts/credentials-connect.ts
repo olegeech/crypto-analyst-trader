@@ -65,7 +65,10 @@ async function chooseSelection(
 
   const answer = (await prompt("Choose an option")).trim();
   if (!/^\d+$/.test(answer)) {
-    throw new Error("Choose one of the listed AI Subaccount options.");
+    throw new AgentConnectError(
+      "invalid-response",
+      "Choose one of the listed AI Subaccount options.",
+    );
   }
   const value = Number.parseInt(answer, 10);
   if (Number.isInteger(value) && value >= 1 && value <= accounts.length) {
@@ -77,7 +80,10 @@ async function chooseSelection(
   if (canCreate && value === accounts.length + 1) {
     return { kind: "create" };
   }
-  throw new Error("Choose one of the listed AI Subaccount options.");
+  throw new AgentConnectError(
+    "invalid-response",
+    "Choose one of the listed AI Subaccount options.",
+  );
 }
 
 function safeErrorMessage(error: unknown): string {
@@ -162,7 +168,7 @@ export async function runCredentialsConnectCli(
       } catch {
         failure = new CredentialProviderError(
           "write-failed",
-          `Bybit ${environment} credentials could not be verified after storage; cleanup was incomplete. Run ${setupCommand(environment)} again.`,
+          `${safeErrorMessage(error)} Cleanup was incomplete. Run ${setupCommand(environment)} again.`,
         );
       }
     }

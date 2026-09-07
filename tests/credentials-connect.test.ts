@@ -35,10 +35,12 @@ function providerFor(
   {
     preflightError,
     loadedCredentials = importedCredentials,
+    loadError,
     removeError,
   }: {
     preflightError?: CredentialProviderError;
     loadedCredentials?: ExchangeCredentials;
+    loadError?: CredentialProviderError;
     removeError?: Error;
   } = {},
 ): CredentialProviderWithPreflight {
@@ -49,6 +51,7 @@ function providerFor(
     },
     load: async (environment) => {
       events.push(`load:${environment}`);
+      if (loadError) throw loadError;
       return loadedCredentials;
     },
     save: async (environment, credentials) => {
@@ -183,7 +186,7 @@ test("create is sent only after the operator explicitly selects it", async () =>
 test("selection rejects non-exact numeric choices", async () => {
   for (const choice of ["1junk", "1.5"]) {
     const events: string[] = [];
-    const { output } = outputBuffer();
+    const { output, text } = outputBuffer();
     const code = await runCredentialsConnectCli(["testnet"], {
       provider: providerFor(events),
       client: clientFor(events, [
@@ -194,6 +197,7 @@ test("selection rejects non-exact numeric choices", async () => {
     });
 
     assert.equal(code, 1);
+    assert.match(text(), /Choose one of the listed AI Subaccount options/);
     assert.deepEqual(events, [
       "preflight:testnet",
       "session:testnet",
@@ -253,9 +257,33 @@ test("cleanup failure after storage verification stays safe and actionable", asy
   });
 
   assert.equal(code, 1);
-  assert.match(text(), /cleanup was incomplete/);
+  assert.match(text(), /Cleanup was incomplete/);
   assert.doesNotMatch(text(), /private cleanup detail|different-api-key/);
   assert.deepEqual(events.slice(-2), ["remove:testnet", "close"]);
+});
+
+test("cleanup failure preserves the original safe failure reason", async () => {
+  const events: string[] = [];
+  const { output, text } = outputBuffer();
+  const code = await runCredentialsConnectCli(["testnet"], {
+    provider: providerFor(events, {
+      loadError: new CredentialProviderError(
+        "command-failed",
+        "Bybit testnet credentials could not be loaded. Run credentials:setup:testnet.",
+      ),
+      removeError: new Error("private cleanup detail"),
+    }),
+    client: clientFor(events, [
+      { accountId: importedCredentials.accountId, displayName: "Trading" },
+    ]),
+    prompt: async () => "1",
+    output,
+  });
+
+  assert.equal(code, 1);
+  assert.match(text(), /credentials could not be loaded/);
+  assert.match(text(), /Cleanup was incomplete/);
+  assert.doesNotMatch(text(), /private cleanup detail|imported-api-secret/);
 });
 
 test("Keychain preflight failure stops before starting OAuth and redacts details", async () => {
