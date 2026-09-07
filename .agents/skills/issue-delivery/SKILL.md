@@ -142,13 +142,21 @@ The adapter fetches a fresh issue and passes number, URL, title, body, labels,
 milestone, state, and `review_scope_digest` through stdin. Comments are not
 included by default. The production default is one `claude-opus-5` reviewer at
 high effort; the model and CLI syntax remain replaceable implementation
-details. The reviewer may use bounded read-only repository, GitHub, and
-public-web retrieval. It cannot edit or write, mutate GitHub, push or merge,
-read secrets, or bypass permissions broadly.
+details. The reviewer checks scope, acceptance criteria, dependencies, safety,
+failure behavior, testability, and contradictions with canonical sources. It
+may use the configured read-only repository, GitHub, and public-web retrieval
+tools. The adapter supplies only a tracked revision archive, does not include
+untracked files or repository secrets, and does not expose edit/write, push, or
+merge tools. User, project, and local Claude settings and MCP configuration
+remain active because this workflow runs in a trusted local environment; the
+adapter does not use Claude's `--restricted` or `--strict-mcp-config` flags.
 
 The live runner consumes Claude's JSON result envelope and validates its inner
 plain-text `VERDICT: PASS` or `VERDICT: BLOCKED` plus findings classified as
-`BLOCKING`, `MATERIAL`, `NON_BLOCKING`, or `INFORMATIONAL`. The CLI prints the
+`BLOCKING`, `MATERIAL`, `NON_BLOCKING`, or `INFORMATIONAL`. The reviewer
+reserves `BLOCKING` and `MATERIAL` for concrete defects that make the change
+wrong or unsafe, and omits uncertain findings or classifies them as
+`NON_BLOCKING` or `INFORMATIONAL`. The CLI prints the
 adapter's normalized result with `kind`, `verdict`, `findings`, the bound
 digest or reviewed head, and `attemptConsumed`; it does not print the raw
 Claude envelope. A passing review has no unresolved

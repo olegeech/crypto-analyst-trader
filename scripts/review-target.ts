@@ -637,7 +637,7 @@ async function runLiveReviewer(
   ];
   const args = [
     "-p",
-    "Read the JSON review envelope from stdin. Review the bound target's scope and acceptance criteria, the exact diff when the target is a PR, tests, release-check evidence, and safety/invariant impact using read-only access. Reply with PLAIN TEXT ONLY - no JSON, no markdown, and no code fences. The first line must be exactly VERDICT: PASS or VERDICT: BLOCKED. Each finding must be on its own single line, exactly FINDING: <SEVERITY>: <message>, where <SEVERITY> is one of BLOCKING, MATERIAL, NON_BLOCKING, INFORMATIONAL. Output nothing else.",
+    "Read the JSON review envelope from stdin. Review the bound target's scope and acceptance criteria, dependencies, testability, contradictions with canonical sources, the exact diff when the target is a PR, tests, release-check evidence, and safety/invariant impact using read-only access. Reserve BLOCKING and MATERIAL for concrete defects that make the change wrong or unsafe; when uncertain, omit the finding or classify it as NON_BLOCKING or INFORMATIONAL. Reply with PLAIN TEXT ONLY - no JSON, no markdown, and no code fences. The first line must be exactly VERDICT: PASS or VERDICT: BLOCKED. Each finding must be on its own single line, exactly FINDING: <SEVERITY>: <message>, where <SEVERITY> is one of BLOCKING, MATERIAL, NON_BLOCKING, INFORMATIONAL. Output nothing else.",
     "--model",
     "claude-opus-5",
     "--effort",
@@ -657,7 +657,7 @@ async function runLiveReviewer(
     return await new Promise((resolve, reject) => {
       const child = spawn("claude", args, {
         cwd: safeWorkspace,
-        shell: true,
+        shell: false,
         stdio: ["pipe", "pipe", "pipe"],
       });
       let stdout = "";
