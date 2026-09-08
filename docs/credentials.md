@@ -4,6 +4,48 @@ Authenticated local commands load Bybit credentials from the macOS Keychain.
 The repository does not provide a plaintext-file fallback, and the default CI
 path remains credential-free.
 
+## Bybit Agent Connect (preferred)
+
+Use Agent Connect when Bybit should authorize an isolated AI Subaccount without
+manual API-key creation:
+
+```bash
+npm run credentials:connect:testnet
+npm run credentials:connect:mainnet
+```
+
+Choose the environment in the command before starting. The command first
+performs a reversible non-secret Keychain preflight, then prints a Bybit OAuth
+link with a loopback callback. Open the link and authorize the requested
+`ai-account` scope. The callback is accepted once and expires after a bounded
+wait.
+
+If Bybit requires two-factor authentication, the command stops with a fixed
+instruction to bind 2FA before proceeding; bind it and run the connect command
+again.
+
+After authorization, the command lists AI Subaccounts and waits for an
+explicit selection. It never selects or creates an account automatically. If
+you choose create, Bybit performs the account provisioning inside its
+authorized Agent Connect flow. The prompt follows Bybit's documented maximum
+of five AI Subaccounts; at that limit it offers selection only. The endpoint
+and parameter contract follows Bybit's [Agent Connect OAuth module](https://raw.githubusercontent.com/bybit-exchange/skills/main/modules/oauth.md).
+
+The command keeps OAuth codes and tokens in memory only. It imports only the
+API key, API secret and `sub_member_id` into the selected environment's
+existing Keychain records. The `sub_member_id` is the existing `account-id`
+value; no fourth credential record or second credential store is created. If
+credentials expire, run the connect command again instead of persisting a
+refresh token.
+
+Agent Connect does not grant project write authority. Withdrawals and managed
+transfers are not requested by this onboarding path. Configure an IP allowlist
+on Bybit when supported before the separate #31 mainnet canary decision.
+
+The connect commands are intentionally excluded from default CI and release
+execution. Release tests use injected OAuth, callback and Keychain fixtures;
+they never contact Bybit or modify a real Keychain.
+
 ## Recommended setup
 
 Run the environment-specific command in an interactive macOS Terminal:

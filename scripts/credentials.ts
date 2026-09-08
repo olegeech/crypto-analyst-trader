@@ -1,8 +1,8 @@
-import { createInterface } from "node:readline";
 import { pathToFileURL } from "node:url";
 import process from "node:process";
 
 import { createMacOSKeychainProvider } from "../src/adapters/macos-keychain.js";
+import { promptVisible as promptVisibleCommon } from "../src/cli/interactive-prompt.js";
 import {
   CredentialProviderError,
   type CredentialEnvironment,
@@ -12,6 +12,13 @@ import {
 type Output = { write(message: string): void };
 type Prompt = (label: string, hidden: boolean) => Promise<string>;
 
+function promptVisible(label: string): Promise<string> {
+  return promptVisibleCommon(
+    label,
+    "Interactive credential setup requires a terminal.",
+  );
+}
+
 function isEnvironment(
   value: string | undefined,
 ): value is CredentialEnvironment {
@@ -20,21 +27,6 @@ function isEnvironment(
 
 function usage(): string {
   return "Usage: npm run credentials:setup:<testnet|mainnet> or npm run credentials:remove:<testnet|mainnet>";
-}
-
-function promptVisible(label: string): Promise<string> {
-  const input = process.stdin;
-  const output = process.stdout;
-  if (!input.isTTY) {
-    throw new Error("Interactive credential setup requires a terminal.");
-  }
-  const readline = createInterface({ input, output });
-  return new Promise((resolve) => {
-    readline.question(`${label}: `, (answer) => {
-      readline.close();
-      resolve(answer);
-    });
-  });
 }
 
 function promptHidden(label: string): Promise<string> {

@@ -12,6 +12,22 @@
 - Never persist API secrets, signatures, signed headers or raw authentication
   responses.
 
+## Agent Connect onboarding
+
+- Agent Connect uses an explicit environment, PKCE S256, an unpredictable
+  state value, and a loopback callback bound only to `127.0.0.1`.
+- The local flow requires a reversible non-secret Keychain preflight before
+  OAuth and an explicit AI Subaccount selection or create choice.
+- OAuth codes and tokens remain in memory for the onboarding operation only.
+  The existing Keychain stores only the API key, API secret and account ID.
+- The onboarding path requests no withdrawal or managed-transfer capability
+  and never calls a trading, funding or transfer endpoint.
+- Storing a mainnet credential before #31 is allowed for onboarding, but it
+  does not enable project writes. The first mainnet write remains gated by #31
+  and the canonical plan, risk, approval and reconciliation controls.
+- If OAuth credentials expire, reconnect through Agent Connect. Do not persist
+  refresh tokens in the repository or in a second local credential store.
+
 ## Reporting a vulnerability
 
 Do not open a public issue containing credentials, account identifiers, private

@@ -7,6 +7,10 @@ import {
   type SecurityCommandResult,
   type SecurityRunner,
 } from "../src/adapters/macos-keychain.js";
+import {
+  credentialPreflightAccount,
+  credentialPreflightServiceName,
+} from "../src/ports/credential-provider.js";
 
 const credentials = {
   apiKey: "test-api-key",
@@ -50,6 +54,65 @@ test("setup stores each value through security without putting secrets in argv",
     ["api-key", "api-secret", "account-id"],
   );
   assert.ok(writes[0]?.input?.includes(credentials.apiKey));
+});
+
+test("preflight round-trips an isolated non-secret sentinel and removes it", async () => {
+  let sentinel = "";
+  const { calls, runner } = runnerFor((args, input) => {
+    if (args[0] === "add-generic-password") {
+      sentinel = (input ?? "").trim();
+      return { stdout: "", stderr: "", exitCode: 0 };
+    }
+    if (args[0] === "find-generic-password") {
+      return { stdout: `${sentinel}\n`, stderr: "", exitCode: 0 };
+    }
+    return { stdout: "", stderr: "", exitCode: 0 };
+  });
+  const provider = createMacOSKeychainProvider({ runner, platform: "darwin" });
+
+  await provider.preflight("testnet");
+
+  assert.equal(calls.length, 3);
+  assert.deepEqual(
+    calls.map(({ args }) => args[0]),
+    [
+      "add-generic-password",
+      "find-generic-password",
+      "delete-generic-password",
+    ],
+  );
+  for (const { args } of calls) {
+    assert.equal(args[args.indexOf("-a") + 1], credentialPreflightAccount);
+    assert.equal(
+      args[args.indexOf("-s") + 1],
+      credentialPreflightServiceName("testnet"),
+    );
+    assert.equal(args.includes(sentinel), false);
+  }
+  assert.match(calls[0]?.input ?? "", /^connect-preflight-[a-f0-9]{32}\n$/);
+});
+
+test("preflight failure is redacted and still removes the sentinel", async () => {
+  const { calls, runner } = runnerFor((args) => {
+    if (args[0] === "find-generic-password") {
+      return {
+        stdout: "wrong-sentinel\n",
+        stderr: "private detail",
+        exitCode: 0,
+      };
+    }
+    return { stdout: "", stderr: "private detail", exitCode: 0 };
+  });
+  const provider = createMacOSKeychainProvider({ runner, platform: "darwin" });
+
+  await assert.rejects(provider.preflight("mainnet"), (error: unknown) => {
+    assert.ok(error instanceof CredentialProviderError);
+    assert.equal((error as CredentialProviderError).code, "preflight-failed");
+    assert.match((error as Error).message, /OAuth was not started/);
+    assert.doesNotMatch((error as Error).message, /private detail|sentinel/);
+    return true;
+  });
+  assert.equal(calls.at(-1)?.args[0], "delete-generic-password");
 });
 
 test("load reads a complete environment from its own service", async () => {
@@ -305,6 +368,28 @@ test("partial update restores a complete prior credential set", async () => {
     `api-secret:${oldCredentials.apiSecret}\n`,
     `account-id:${oldCredentials.accountId}\n`,
   ]);
+});
+
+test("setup overwrites a corrupt prior credential record", async () => {
+  let writes = 0;
+  const { calls, runner } = runnerFor((args) => {
+    if (args[0] === "find-generic-password") {
+      return { stdout: "corrupt\nvalue", stderr: "", exitCode: 0 };
+    }
+    if (args[0] === "add-generic-password") {
+      writes += 1;
+    }
+    return { stdout: "", stderr: "", exitCode: 0 };
+  });
+  const provider = createMacOSKeychainProvider({ runner, platform: "darwin" });
+
+  await provider.save("testnet", credentials);
+
+  assert.equal(writes, 3);
+  assert.equal(
+    calls.filter(({ args }) => args[0] === "delete-generic-password").length,
+    0,
+  );
 });
 
 test("non-macOS setup is blocked before invoking a command", async () => {

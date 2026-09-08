@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  credentialPreflightServiceName,
   credentialServiceName,
   type CredentialEnvironment,
   type ExchangeCredentials,
@@ -20,6 +21,14 @@ test("credential environments have deterministic, distinct Keychain services", (
     credentialServiceName("mainnet"),
     "com.crypto-analyst-trader.bybit.mainnet",
   );
+});
+
+test("preflight uses an isolated service instead of a fourth credential field", () => {
+  assert.notEqual(
+    credentialPreflightServiceName("testnet"),
+    credentialServiceName("testnet"),
+  );
+  assert.match(credentialPreflightServiceName("mainnet"), /\.preflight$/);
 });
 
 test("credential contract is explicit about all values needed by authenticated Bybit calls", () => {

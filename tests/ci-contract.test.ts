@@ -87,7 +87,7 @@ test("default CI delegates to the same release command without secrets or option
   assert.match(ciWorkflow, /run: npm run test:release/);
   assert.doesNotMatch(
     ciWorkflow,
-    /secrets\.|BYBIT_API_|credentials:(?:setup|remove)|test:testnet|audit:dependencies|api-testnet\.bybit\.com|placeOrder|create-order/i,
+    /secrets\.|BYBIT_API_|credentials:(?:setup|remove|connect)|test:testnet|audit:dependencies|api-testnet\.bybit\.com|placeOrder|create-order/i,
   );
   assert.doesNotMatch(ciWorkflow, /review:target|scripts\/review-target\.ts/);
 });
