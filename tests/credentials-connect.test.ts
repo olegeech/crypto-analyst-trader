@@ -35,15 +35,21 @@ function providerFor(
   {
     preflightError,
     loadedCredentials = importedCredentials,
+    loadResults,
     loadError,
     removeError,
+    saveResults,
   }: {
     preflightError?: CredentialProviderError;
     loadedCredentials?: ExchangeCredentials;
+    loadResults?: Array<ExchangeCredentials | CredentialProviderError>;
     loadError?: CredentialProviderError;
     removeError?: Error;
+    saveResults?: Array<Error | undefined>;
   } = {},
 ): CredentialProviderWithPreflight {
+  let loadIndex = 0;
+  let saveIndex = 0;
   return {
     preflight: async (environment) => {
       events.push(`preflight:${environment}`);
@@ -51,11 +57,16 @@ function providerFor(
     },
     load: async (environment) => {
       events.push(`load:${environment}`);
+      const result = loadResults?.[loadIndex++];
+      if (result instanceof CredentialProviderError) throw result;
+      if (result) return result;
       if (loadError) throw loadError;
       return loadedCredentials;
     },
     save: async (environment, credentials) => {
       events.push(`save:${environment}:${credentials.accountId}`);
+      const error = saveResults?.[saveIndex++];
+      if (error) throw error;
     },
     remove: async (environment) => {
       events.push(`remove:${environment}`);
@@ -134,6 +145,7 @@ test("successful connect preflights first, requires explicit selection, and veri
     "exchange:one-time-code",
     "list:access-token",
     "fetch:access-token:123456",
+    "load:testnet",
     "save:testnet:123456",
     "load:testnet",
     "close",
@@ -183,6 +195,34 @@ test("create is sent only after the operator explicitly selects it", async () =>
   assert.ok(events.includes("fetch:access-token:create"));
 });
 
+test("account cap hides create when five AI Subaccounts are listed", async () => {
+  const events: string[] = [];
+  const { output, text } = outputBuffer();
+  const code = await runCredentialsConnectCli(["mainnet"], {
+    provider: providerFor(events),
+    client: clientFor(
+      events,
+      Array.from({ length: 5 }, (_, index) => ({
+        accountId: `account-${index + 1}`,
+        displayName: `Trading ${index + 1}`,
+      })),
+    ),
+    prompt: async () => "6",
+    output,
+  });
+
+  assert.equal(code, 1);
+  assert.doesNotMatch(text(), /Create a new AI Subaccount/);
+  assert.deepEqual(events, [
+    "preflight:mainnet",
+    "session:mainnet",
+    "callback",
+    "exchange:one-time-code",
+    "list:access-token",
+    "close",
+  ]);
+});
+
 test("selection rejects non-exact numeric choices", async () => {
   for (const choice of ["1junk", "1.5"]) {
     const events: string[] = [];
@@ -230,23 +270,27 @@ test("connect fails when the load seam returns different credentials", async () 
   assert.equal(code, 1);
   assert.match(text(), /could not be verified after storage/);
   assert.doesNotMatch(text(), /different-api-key|imported-api-secret/);
-  assert.deepEqual(events.slice(-3), [
+  assert.deepEqual(events.slice(-4), [
     "load:testnet",
     "remove:testnet",
+    "save:testnet:123456",
     "close",
   ]);
 });
 
-test("cleanup failure after storage verification stays safe and actionable", async () => {
+test("cleanup failure after storage verification restores prior credentials", async () => {
   const events: string[] = [];
   const { output, text } = outputBuffer();
   const code = await runCredentialsConnectCli(["testnet"], {
     provider: providerFor(events, {
-      loadedCredentials: {
-        apiKey: "different-api-key",
-        apiSecret: importedCredentials.apiSecret,
-        accountId: importedCredentials.accountId,
-      },
+      loadResults: [
+        importedCredentials,
+        {
+          apiKey: "different-api-key",
+          apiSecret: importedCredentials.apiSecret,
+          accountId: importedCredentials.accountId,
+        },
+      ],
       removeError: new Error("private cleanup detail"),
     }),
     client: clientFor(events, [
@@ -257,9 +301,14 @@ test("cleanup failure after storage verification stays safe and actionable", asy
   });
 
   assert.equal(code, 1);
-  assert.match(text(), /Cleanup was incomplete/);
+  assert.match(text(), /could not be verified after storage/);
+  assert.doesNotMatch(text(), /Cleanup was incomplete/);
   assert.doesNotMatch(text(), /private cleanup detail|different-api-key/);
-  assert.deepEqual(events.slice(-2), ["remove:testnet", "close"]);
+  assert.deepEqual(events.slice(-3), [
+    "remove:testnet",
+    "save:testnet:123456",
+    "close",
+  ]);
 });
 
 test("cleanup failure preserves the original safe failure reason", async () => {
@@ -267,11 +316,15 @@ test("cleanup failure preserves the original safe failure reason", async () => {
   const { output, text } = outputBuffer();
   const code = await runCredentialsConnectCli(["testnet"], {
     provider: providerFor(events, {
-      loadError: new CredentialProviderError(
-        "command-failed",
-        "Bybit testnet credentials could not be loaded. Run credentials:setup:testnet.",
-      ),
+      loadResults: [
+        importedCredentials,
+        new CredentialProviderError(
+          "command-failed",
+          "Bybit testnet credentials could not be loaded. Run credentials:setup:testnet.",
+        ),
+      ],
       removeError: new Error("private cleanup detail"),
+      saveResults: [undefined, new Error("private restore detail")],
     }),
     client: clientFor(events, [
       { accountId: importedCredentials.accountId, displayName: "Trading" },

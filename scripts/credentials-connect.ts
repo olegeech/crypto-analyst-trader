@@ -15,11 +15,13 @@ import {
   CredentialProviderError,
   type CredentialEnvironment,
   type CredentialProviderWithPreflight,
+  type ExchangeCredentials,
   setupCommand,
 } from "../src/ports/credential-provider.js";
 
 type Output = { write(message: string): void };
 type Prompt = (label: string) => Promise<string>;
+const MAX_AI_SUBACCOUNTS = 5;
 
 function promptVisible(label: string): Promise<string> {
   return promptVisibleCommon(
@@ -58,7 +60,7 @@ async function chooseSelection(
       `${index + 1}. ${safeAccountName(account.displayName)} (${maskedAccountId(account.accountId)})\n`,
     );
   });
-  const canCreate = accounts.length < 5;
+  const canCreate = accounts.length < MAX_AI_SUBACCOUNTS;
   if (canCreate) {
     output.write(`${accounts.length + 1}. Create a new AI Subaccount\n`);
   }
@@ -78,7 +80,10 @@ async function chooseSelection(
     }
   }
   if (canCreate && value === accounts.length + 1) {
-    return { kind: "create" };
+    return {
+      kind: "create",
+      existingAccountIds: accounts.map((account) => account.accountId),
+    };
   }
   throw new AgentConnectError(
     "invalid-response",
@@ -94,6 +99,20 @@ function safeErrorMessage(error: unknown): string {
     return error.message;
   }
   return "Bybit Agent Connect onboarding failed.";
+}
+
+async function readPreviousCredentials(
+  provider: CredentialProviderWithPreflight,
+  environment: CredentialEnvironment,
+): Promise<ExchangeCredentials | undefined> {
+  try {
+    return await provider.load(environment);
+  } catch (error) {
+    if (error instanceof CredentialProviderError && error.code === "missing") {
+      return undefined;
+    }
+    throw error;
+  }
 }
 
 export async function runCredentialsConnectCli(
@@ -119,6 +138,7 @@ export async function runCredentialsConnectCli(
   const environment = environmentValue;
   let session: AgentConnectSession | undefined;
   let storageCommitted = false;
+  let previousCredentials: ExchangeCredentials | undefined;
   try {
     await provider.preflight(environment);
     session = await client.createSession(environment);
@@ -136,6 +156,7 @@ export async function runCredentialsConnectCli(
       accessToken,
       selection,
     );
+    previousCredentials = await readPreviousCredentials(provider, environment);
     await provider.save(environment, credentials);
     storageCommitted = true;
     const loadedCredentials = await provider.load(environment);
@@ -163,9 +184,21 @@ export async function runCredentialsConnectCli(
   } catch (error) {
     let failure = error;
     if (storageCommitted) {
+      let cleanupFailed = false;
       try {
         await provider.remove(environment);
       } catch {
+        cleanupFailed = true;
+      }
+      if (previousCredentials) {
+        try {
+          await provider.save(environment, previousCredentials);
+          cleanupFailed = false;
+        } catch {
+          cleanupFailed = true;
+        }
+      }
+      if (cleanupFailed) {
         failure = new CredentialProviderError(
           "write-failed",
           `${safeErrorMessage(error)} Cleanup was incomplete. Run ${setupCommand(environment)} again.`,

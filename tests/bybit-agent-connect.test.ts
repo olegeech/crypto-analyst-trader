@@ -10,6 +10,7 @@ import {
   agentConnectEndpoints,
   buildAuthorizationUrl,
   createBybitAgentConnectClient,
+  defaultAgentConnectTransport,
   startAgentConnectSession,
 } from "../src/adapters/bybit-agent-connect.js";
 import {
@@ -225,11 +226,67 @@ test("selected and create account requests are explicit and normalize credential
   assert.deepEqual(
     await client.fetchAccountCredentials("mainnet", "token", {
       kind: "create",
+      existingAccountIds: ["123"],
     }),
     { apiKey: "api-key", apiSecret: "api-secret", accountId: "456" },
   );
   assert.equal(new URL(urls[0] ?? "").searchParams.get("sub_member_id"), "456");
   assert.equal(new URL(urls[1] ?? "").searchParams.get("is_create"), "true");
+});
+
+test("create account credentials must not resolve to a listed account", async () => {
+  const client = createBybitAgentConnectClient({
+    transport: {
+      async postForm() {
+        return {};
+      },
+      async get() {
+        return {
+          retCode: 0,
+          result: {
+            api_key: "api-key",
+            api_secret: "api-secret",
+            sub_member_id: "existing-account",
+          },
+        };
+      },
+    },
+  });
+
+  await assert.rejects(
+    client.fetchAccountCredentials("testnet", "token", {
+      kind: "create",
+      existingAccountIds: ["existing-account"],
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof AgentConnectError);
+      assert.equal((error as AgentConnectError).code, "invalid-response");
+      assert.match((error as Error).message, /existing AI Subaccount/);
+      return true;
+    },
+  );
+});
+
+test("HTTP errors are classified before parsing an invalid body", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () =>
+    new Response("not-json", { status: 502 })) as typeof fetch;
+  try {
+    await assert.rejects(
+      defaultAgentConnectTransport.get(
+        "https://api2-testnet.bybit.com/oauth/v1/resource/restrict/ai_accounts",
+        "token",
+      ),
+      (error: unknown) => {
+        assert.ok(error instanceof AgentConnectError);
+        assert.equal((error as AgentConnectError).code, "api-failed");
+        assert.match((error as Error).message, /HTTP 502/);
+        return true;
+      },
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test("OAuth API and response failures are safe and typed", async () => {

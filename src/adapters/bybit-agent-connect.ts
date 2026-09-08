@@ -107,6 +107,12 @@ async function fetchJson(url: string, init: RequestInit): Promise<unknown> {
   const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
   try {
     const response = await fetch(url, { ...init, signal: controller.signal });
+    if (!response.ok) {
+      throw new AgentConnectError(
+        "api-failed",
+        `Bybit OAuth request failed (HTTP ${response.status}).`,
+      );
+    }
     let payload: unknown;
     try {
       payload = await response.json();
@@ -114,12 +120,6 @@ async function fetchJson(url: string, init: RequestInit): Promise<unknown> {
       throw new AgentConnectError(
         "invalid-response",
         "Bybit OAuth returned an invalid response.",
-      );
-    }
-    if (!response.ok) {
-      throw new AgentConnectError(
-        "api-failed",
-        `Bybit OAuth request failed (HTTP ${response.status}).`,
       );
     }
     return payload;
@@ -501,6 +501,15 @@ export function createBybitAgentConnectClient({
         throw new AgentConnectError(
           "invalid-response",
           "Bybit OAuth returned credentials for a different AI Subaccount.",
+        );
+      }
+      if (
+        selection.kind === "create" &&
+        selection.existingAccountIds.includes(accountId)
+      ) {
+        throw new AgentConnectError(
+          "invalid-response",
+          "Bybit OAuth returned an existing AI Subaccount for a create request.",
         );
       }
       return {

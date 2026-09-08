@@ -23,7 +23,9 @@ wait.
 After authorization, the command lists AI Subaccounts and waits for an
 explicit selection. It never selects or creates an account automatically. If
 you choose create, Bybit performs the account provisioning inside its
-authorized Agent Connect flow.
+authorized Agent Connect flow. The prompt follows Bybit's documented maximum
+of five AI Subaccounts; at that limit it offers selection only. The endpoint
+and parameter contract follows Bybit's [Agent Connect OAuth module](https://raw.githubusercontent.com/bybit-exchange/skills/main/modules/oauth.md).
 
 The command keeps OAuth codes and tokens in memory only. It imports only the
 API key, API secret and `sub_member_id` into the selected environment's

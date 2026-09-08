@@ -4,7 +4,8 @@ import type {
 } from "./credential-provider.js";
 
 export type AgentConnectSelection =
-  { kind: "existing"; accountId: string } | { kind: "create" };
+  | { kind: "existing"; accountId: string }
+  | { kind: "create"; existingAccountIds: readonly string[] };
 
 export interface AgentConnectAccount {
   accountId: string;
