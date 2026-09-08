@@ -1,0 +1,3 @@
+# Compound Engineering repo config.
+# Keep CE-generated artifacts in the local, gitignored workspace tree.
+docs_root: local/ce
