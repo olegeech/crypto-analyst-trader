@@ -20,6 +20,10 @@ link with a loopback callback. Open the link and authorize the requested
 `ai-account` scope. The callback is accepted once and expires after a bounded
 wait.
 
+If Bybit requires two-factor authentication, the command stops with a fixed
+instruction to bind 2FA before proceeding; bind it and run the connect command
+again.
+
 After authorization, the command lists AI Subaccounts and waits for an
 explicit selection. It never selects or creates an account automatically. If
 you choose create, Bybit performs the account provisioning inside its

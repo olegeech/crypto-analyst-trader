@@ -108,7 +108,10 @@ async function readPreviousCredentials(
   try {
     return await provider.load(environment);
   } catch (error) {
-    if (error instanceof CredentialProviderError && error.code === "missing") {
+    if (
+      error instanceof CredentialProviderError &&
+      (error.code === "missing" || error.code === "invalid")
+    ) {
       return undefined;
     }
     throw error;
@@ -141,6 +144,7 @@ export async function runCredentialsConnectCli(
   let previousCredentials: ExchangeCredentials | undefined;
   try {
     await provider.preflight(environment);
+    previousCredentials = await readPreviousCredentials(provider, environment);
     session = await client.createSession(environment);
     output.write(
       `Bybit ${environment} Agent Connect authorization URL:\n${session.authorizationUrl}\n`,
@@ -156,7 +160,6 @@ export async function runCredentialsConnectCli(
       accessToken,
       selection,
     );
-    previousCredentials = await readPreviousCredentials(provider, environment);
     await provider.save(environment, credentials);
     storageCommitted = true;
     const loadedCredentials = await provider.load(environment);

@@ -311,13 +311,26 @@ test("OAuth API and response failures are safe and typed", async () => {
     (error: unknown) => {
       assert.ok(error instanceof AgentConnectError);
       assert.equal((error as AgentConnectError).code, "api-failed");
+      assert.equal(
+        (error as Error).message,
+        "Bybit authorization failed. Run the Agent Connect flow again.",
+      );
       assert.doesNotMatch((error as Error).message, /raw token|server detail/);
       return true;
     },
   );
   await assert.rejects(
     client.listAccounts("mainnet", "token"),
-    /AI Subaccount lookup failed/,
+    (error: unknown) => {
+      assert.ok(error instanceof AgentConnectError);
+      assert.equal((error as AgentConnectError).code, "api-failed");
+      assert.equal(
+        (error as Error).message,
+        "Please bind 2FA before proceeding.",
+      );
+      assert.doesNotMatch((error as Error).message, /private response detail/);
+      return true;
+    },
   );
 });
 

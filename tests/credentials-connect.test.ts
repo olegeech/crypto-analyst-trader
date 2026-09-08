@@ -140,12 +140,12 @@ test("successful connect preflights first, requires explicit selection, and veri
   assert.equal(code, 0);
   assert.deepEqual(events, [
     "preflight:testnet",
+    "load:testnet",
     "session:testnet",
     "callback",
     "exchange:one-time-code",
     "list:access-token",
     "fetch:access-token:123456",
-    "load:testnet",
     "save:testnet:123456",
     "load:testnet",
     "close",
@@ -173,6 +173,7 @@ test("empty account list waits for an explicit choice and does not auto-create",
   assert.equal(code, 1);
   assert.deepEqual(events, [
     "preflight:mainnet",
+    "load:mainnet",
     "session:mainnet",
     "callback",
     "exchange:one-time-code",
@@ -215,6 +216,7 @@ test("account cap hides create when five AI Subaccounts are listed", async () =>
   assert.doesNotMatch(text(), /Create a new AI Subaccount/);
   assert.deepEqual(events, [
     "preflight:mainnet",
+    "load:mainnet",
     "session:mainnet",
     "callback",
     "exchange:one-time-code",
@@ -240,6 +242,7 @@ test("selection rejects non-exact numeric choices", async () => {
     assert.match(text(), /Choose one of the listed AI Subaccount options/);
     assert.deepEqual(events, [
       "preflight:testnet",
+      "load:testnet",
       "session:testnet",
       "callback",
       "exchange:one-time-code",
@@ -274,6 +277,42 @@ test("connect fails when the load seam returns different credentials", async () 
     "load:testnet",
     "remove:testnet",
     "save:testnet:123456",
+    "close",
+  ]);
+});
+
+test("corrupt prior credentials do not block connect", async () => {
+  const events: string[] = [];
+  const { output, text } = outputBuffer();
+  const code = await runCredentialsConnectCli(["testnet"], {
+    provider: providerFor(events, {
+      loadResults: [
+        new CredentialProviderError(
+          "invalid",
+          "Bybit testnet credentials contain a corrupt value.",
+        ),
+        importedCredentials,
+      ],
+    }),
+    client: clientFor(events, [
+      { accountId: importedCredentials.accountId, displayName: "Trading" },
+    ]),
+    prompt: async () => "1",
+    output,
+  });
+
+  assert.equal(code, 0);
+  assert.match(text(), /stored in macOS Keychain/);
+  assert.deepEqual(events, [
+    "preflight:testnet",
+    "load:testnet",
+    "session:testnet",
+    "callback",
+    "exchange:one-time-code",
+    "list:access-token",
+    "fetch:access-token:123456",
+    "save:testnet:123456",
+    "load:testnet",
     "close",
   ]);
 });

@@ -370,6 +370,28 @@ test("partial update restores a complete prior credential set", async () => {
   ]);
 });
 
+test("setup overwrites a corrupt prior credential record", async () => {
+  let writes = 0;
+  const { calls, runner } = runnerFor((args) => {
+    if (args[0] === "find-generic-password") {
+      return { stdout: "corrupt\nvalue", stderr: "", exitCode: 0 };
+    }
+    if (args[0] === "add-generic-password") {
+      writes += 1;
+    }
+    return { stdout: "", stderr: "", exitCode: 0 };
+  });
+  const provider = createMacOSKeychainProvider({ runner, platform: "darwin" });
+
+  await provider.save("testnet", credentials);
+
+  assert.equal(writes, 3);
+  assert.equal(
+    calls.filter(({ args }) => args[0] === "delete-generic-password").length,
+    0,
+  );
+});
+
 test("non-macOS setup is blocked before invoking a command", async () => {
   const runner: SecurityRunner = async () => ({
     stdout: "",

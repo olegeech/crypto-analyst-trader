@@ -221,7 +221,7 @@ export function createMacOSKeychainProvider({
       } catch (error) {
         if (
           error instanceof CredentialProviderError &&
-          error.code === "missing"
+          (error.code === "missing" || error.code === "invalid")
         ) {
           return null;
         }

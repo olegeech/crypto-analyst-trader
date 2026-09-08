@@ -29,6 +29,7 @@ const DEFAULT_PORT_RANGE = 10;
 const DEFAULT_CALLBACK_TIMEOUT_MS = 300_000;
 const MAX_CALLBACK_TIMEOUT_MS = 300_000;
 const REQUEST_TIMEOUT_MS = 30_000;
+const TWO_FACTOR_REQUIRED_CODE = 20039;
 
 export const agentConnectEndpoints = {
   mainnet: {
@@ -85,6 +86,20 @@ function isSuccessCode(code: unknown): boolean {
   return code === undefined || code === 0 || code === "0";
 }
 
+function isCode(code: unknown, expected: number): boolean {
+  return code === expected || code === String(expected);
+}
+
+function apiFailureMessage(code: unknown, operation: string): string {
+  if (isCode(code, TWO_FACTOR_REQUIRED_CODE)) {
+    return "Please bind 2FA before proceeding.";
+  }
+  if (isCode(code, 401) || isCode(code, 10001)) {
+    return "Bybit authorization failed. Run the Agent Connect flow again.";
+  }
+  return `Bybit ${operation} failed.`;
+}
+
 function assertApiSuccess(response: unknown, operation: string): void {
   const code = responseCode(response);
   if (
@@ -98,7 +113,10 @@ function assertApiSuccess(response: unknown, operation: string): void {
     );
   }
   if (!isSuccessCode(code)) {
-    throw new AgentConnectError("api-failed", `Bybit ${operation} failed.`);
+    throw new AgentConnectError(
+      "api-failed",
+      apiFailureMessage(code, operation),
+    );
   }
 }
 
