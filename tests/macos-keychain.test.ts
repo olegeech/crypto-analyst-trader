@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
+import type { spawn } from "node:child_process";
 import test from "node:test";
 
 import {
   CredentialProviderError,
   createMacOSKeychainProvider,
+  runSecurity,
   type SecurityCommandResult,
   type SecurityRunner,
 } from "../src/adapters/macos-keychain.js";
@@ -188,6 +190,33 @@ function statefulSecurityRunner({
     },
   };
 }
+
+test("hung security commands are killed after a bounded timeout", async () => {
+  let killedWith: NodeJS.Signals | undefined;
+  const child = {
+    stdout: {
+      setEncoding: () => undefined,
+      on: () => undefined,
+    },
+    stderr: {
+      setEncoding: () => undefined,
+      on: () => undefined,
+    },
+    stdin: { end: () => undefined },
+    once: () => child,
+    kill: (signal?: NodeJS.Signals) => {
+      killedWith = signal;
+      return true;
+    },
+  } as unknown as ReturnType<typeof spawn>;
+  const spawnProcess = (() => child) as unknown as typeof spawn;
+
+  await assert.rejects(
+    runSecurity([], undefined, { timeoutMs: 10, spawnProcess }),
+    /timed out/,
+  );
+  assert.equal(killedWith, "SIGKILL");
+});
 
 const testnetService = "com.crypto-analyst-trader.bybit.testnet";
 const mainnetService = "com.crypto-analyst-trader.bybit.mainnet";
@@ -930,7 +959,11 @@ test("fresh partial saves clear and verify absence after nonzero and mismatched 
 
       await assert.rejects(
         provider.save("testnet", credentials),
-        /could not be stored/,
+        (error: unknown) => {
+          assert.ok(error instanceof CredentialProviderError);
+          assert.match(error.message, /testnet credential set was cleared/i);
+          return true;
+        },
       );
 
       for (const account of ["api-key", "api-secret", "account-id"]) {
@@ -1138,6 +1171,9 @@ test("a final restore mismatch clears the selected environment and verifies abse
     (error: unknown) => {
       assert.ok(error instanceof CredentialProviderError);
       assert.equal(error.code, "write-failed");
+      assert.match(error.message, /previous.*could not be restored/i);
+      assert.match(error.message, /environment was cleared/i);
+      assert.match(error.message, /credentials:setup:testnet/);
       assert.doesNotMatch(
         error.message,
         /rollback incomplete|private restore mismatch/i,
