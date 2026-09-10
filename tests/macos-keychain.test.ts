@@ -218,6 +218,65 @@ test("hung security commands are killed after a bounded timeout", async () => {
   assert.equal(killedWith, "SIGKILL");
 });
 
+test("timed out Keychain reads return actionable unlock guidance", async () => {
+  const { runner } = runnerFor(() => ({
+    stdout: "",
+    stderr: "",
+    exitCode: 1,
+    failure: "timeout",
+  }));
+  const provider = createMacOSKeychainProvider({ runner, platform: "darwin" });
+
+  await assert.rejects(provider.load("testnet"), (error: unknown) => {
+    assert.ok(error instanceof CredentialProviderError);
+    assert.equal(error.code, "inaccessible");
+    assert.match(error.message, /Keychain access timed out/);
+    assert.match(error.message, /unlock.*Keychain|approve.*access prompt/i);
+    return true;
+  });
+});
+
+test("timed out writes retain actionable unlock guidance", async () => {
+  const { runner } = runnerFor((args) => {
+    if (args[0] === "add-generic-password") {
+      return { stdout: "", stderr: "", exitCode: 1, failure: "timeout" };
+    }
+    return { stdout: "", stderr: "", exitCode: 44 };
+  });
+  const provider = createMacOSKeychainProvider({ runner, platform: "darwin" });
+
+  await assert.rejects(
+    provider.save("testnet", credentials),
+    (error: unknown) => {
+      assert.ok(error instanceof CredentialProviderError);
+      assert.equal(error.code, "write-failed");
+      assert.match(error.message, /Keychain access timed out/);
+      assert.match(error.message, /unlock.*Keychain|approve.*access prompt/i);
+      assert.match(error.message, /credential set was cleared/i);
+      return true;
+    },
+  );
+});
+
+test("timed out preflight returns actionable unlock guidance", async () => {
+  const { runner } = runnerFor((args) => {
+    if (args[0] === "add-generic-password") {
+      return { stdout: "", stderr: "", exitCode: 1, failure: "timeout" };
+    }
+    return { stdout: "", stderr: "", exitCode: 44 };
+  });
+  const provider = createMacOSKeychainProvider({ runner, platform: "darwin" });
+
+  await assert.rejects(provider.preflight("testnet"), (error: unknown) => {
+    assert.ok(error instanceof CredentialProviderError);
+    assert.equal(error.code, "preflight-failed");
+    assert.match(error.message, /preflight timed out/);
+    assert.match(error.message, /unlock.*Keychain|approve.*access prompt/i);
+    assert.match(error.message, /OAuth was not started/);
+    return true;
+  });
+});
+
 const testnetService = "com.crypto-analyst-trader.bybit.testnet";
 const mainnetService = "com.crypto-analyst-trader.bybit.mainnet";
 

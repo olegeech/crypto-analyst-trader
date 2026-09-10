@@ -20,11 +20,13 @@ const SECURITY_COMMAND = "/usr/bin/security";
 const SECURITY_COMMAND_TIMEOUT_MS = 30_000;
 const SECURITY_ITEM_NOT_FOUND_EXIT_CODE = 44;
 const SECURITY_INTERACTION_REQUIRED_EXIT_CODE = 36;
+type SecurityCommandFailure = "timeout";
 
 export interface SecurityCommandResult {
   stdout: string;
   stderr: string;
   exitCode: number;
+  failure?: SecurityCommandFailure;
 }
 
 export type SecurityRunner = (
@@ -35,6 +37,13 @@ export type SecurityRunner = (
 interface SecurityRunOptions {
   timeoutMs?: number;
   spawnProcess?: typeof spawn;
+}
+
+class SecurityCommandTimeoutError extends Error {
+  constructor() {
+    super("security command timed out");
+    this.name = "SecurityCommandTimeoutError";
+  }
 }
 
 export function runSecurity(
@@ -66,7 +75,7 @@ export function runSecurity(
       } catch {
         // The process may have exited between the timeout and kill attempt.
       }
-      reject(new Error("security command timed out"));
+      reject(new SecurityCommandTimeoutError());
     }, effectiveTimeoutMs);
 
     const finish = (callback: () => void): void => {
@@ -107,10 +116,47 @@ function isInaccessible(result: SecurityCommandResult): boolean {
   return result.exitCode === SECURITY_INTERACTION_REQUIRED_EXIT_CODE;
 }
 
+function isTimedOut(result: SecurityCommandResult): boolean {
+  return result.failure === "timeout";
+}
+
+function keychainAccessError(
+  environment: CredentialEnvironment,
+  timedOut = false,
+): CredentialProviderError {
+  if (timedOut) {
+    return new CredentialProviderError(
+      "inaccessible",
+      `Bybit ${environment} Keychain access timed out. Unlock the macOS Keychain or approve the access prompt, then run ${setupCommand(environment)} again.`,
+    );
+  }
+  return new CredentialProviderError(
+    "inaccessible",
+    `Bybit ${environment} credentials cannot be accessed. Unlock the macOS Keychain and run ${setupCommand(environment)}.`,
+  );
+}
+
 function safeCommandError(
   environment: CredentialEnvironment,
   operation: "load" | "write" | "remove",
+  timedOut = false,
 ): CredentialProviderError {
+  if (timedOut) {
+    const code =
+      operation === "write"
+        ? "write-failed"
+        : operation === "remove"
+          ? "remove-failed"
+          : "command-failed";
+    const retry =
+      operation === "remove"
+        ? "retry the removal"
+        : `run ${setupCommand(environment)} again`;
+    return new CredentialProviderError(
+      code,
+      `Bybit ${environment} Keychain access timed out. Unlock the macOS Keychain or approve the access prompt, then ${retry}.`,
+    );
+  }
   if (operation === "write") {
     return new CredentialProviderError(
       "write-failed",
@@ -131,7 +177,14 @@ function safeCommandError(
 
 function safePreflightError(
   environment: CredentialEnvironment,
+  timedOut = false,
 ): CredentialProviderError {
+  if (timedOut) {
+    return new CredentialProviderError(
+      "preflight-failed",
+      `Bybit ${environment} Keychain preflight timed out; unlock the macOS Keychain or approve the access prompt, then run ${setupCommand(environment)} again. OAuth was not started.`,
+    );
+  }
   return new CredentialProviderError(
     "preflight-failed",
     `Bybit ${environment} Keychain preflight failed; OAuth was not started.`,
@@ -200,7 +253,15 @@ async function command(
 ): Promise<SecurityCommandResult> {
   try {
     return await runner(args, input);
-  } catch {
+  } catch (error) {
+    if (error instanceof SecurityCommandTimeoutError) {
+      return {
+        stdout: "",
+        stderr: "",
+        exitCode: 1,
+        failure: "timeout",
+      };
+    }
     return { stdout: "", stderr: "", exitCode: 1 };
   }
 }
@@ -247,11 +308,8 @@ export function createMacOSKeychainProvider({
           `Bybit ${environment} credentials are unavailable. Run ${setupCommand(environment)}.`,
         );
       }
-      if (isInaccessible(result)) {
-        throw new CredentialProviderError(
-          "inaccessible",
-          `Bybit ${environment} credentials cannot be accessed. Unlock the macOS Keychain and run ${setupCommand(environment)}.`,
-        );
+      if (isInaccessible(result) || isTimedOut(result)) {
+        throw keychainAccessError(environment, isTimedOut(result));
       }
       throw safeCommandError(environment, "load");
     }
@@ -271,7 +329,11 @@ export function createMacOSKeychainProvider({
     account: string,
     service: string,
     value: string,
-  ): Promise<{ addSucceeded: boolean; exactMatch: boolean }> {
+  ): Promise<{
+    addSucceeded: boolean;
+    exactMatch: boolean;
+    timedOut: boolean;
+  }> {
     const addResult = await command(
       runner,
       ["add-generic-password", ...accountArgs(account, service), "-U", "-w"],
@@ -279,13 +341,18 @@ export function createMacOSKeychainProvider({
     );
     const readResult = await readRawValue(account, service);
     if (readResult.exitCode !== 0) {
-      return { addSucceeded: addResult.exitCode === 0, exactMatch: false };
+      return {
+        addSucceeded: addResult.exitCode === 0,
+        exactMatch: false,
+        timedOut: isTimedOut(addResult) || isTimedOut(readResult),
+      };
     }
     const observedValue = valueFromReadResult(readResult);
     return {
       addSucceeded: addResult.exitCode === 0,
       exactMatch:
         isValidCredentialValue(observedValue) && observedValue === value,
+      timedOut: isTimedOut(addResult) || isTimedOut(readResult),
     };
   }
 
@@ -300,7 +367,7 @@ export function createMacOSKeychainProvider({
         states.push(Object.freeze({ kind: "missing" }));
         continue;
       }
-      if (isInaccessible(result)) {
+      if (isInaccessible(result) || isTimedOut(result)) {
         states.push(Object.freeze({ kind: "inaccessible" }));
         continue;
       }
@@ -326,10 +393,7 @@ export function createMacOSKeychainProvider({
       ({ kind }) => kind === "inaccessible" || kind === "unknown",
     );
     if (fatalState?.kind === "inaccessible") {
-      throw new CredentialProviderError(
-        "inaccessible",
-        `Bybit ${environment} credentials cannot be accessed. Unlock the macOS Keychain and run ${setupCommand(environment)}.`,
-      );
+      throw keychainAccessError(environment);
     }
     if (fatalState?.kind === "unknown") {
       throw safeCommandError(environment, "load");
@@ -393,7 +457,11 @@ export function createMacOSKeychainProvider({
         undefined,
       );
       if (result.exitCode !== 0 && !isMissing(result) && firstError === null) {
-        firstError = safeCommandError(environment, "remove");
+        firstError = safeCommandError(
+          environment,
+          "remove",
+          isTimedOut(result),
+        );
       }
     }
     return firstError;
@@ -415,6 +483,7 @@ export function createMacOSKeychainProvider({
     const sentinel = `connect-preflight-${randomBytes(16).toString("hex")}`;
     let writeVerified = false;
     let cleanupSucceeded = false;
+    let timedOut = false;
     try {
       const writeResult = await writeAndVerifyValue(
         credentialPreflightAccount,
@@ -422,6 +491,7 @@ export function createMacOSKeychainProvider({
         sentinel,
       );
       writeVerified = writeResult.addSucceeded && writeResult.exactMatch;
+      timedOut = writeResult.timedOut;
     } catch {
       writeVerified = false;
     } finally {
@@ -434,9 +504,10 @@ export function createMacOSKeychainProvider({
         undefined,
       );
       cleanupSucceeded = removeResult.exitCode === 0 || isMissing(removeResult);
+      timedOut ||= isTimedOut(removeResult);
     }
     if (!writeVerified || !cleanupSucceeded) {
-      throw safePreflightError(environment);
+      throw safePreflightError(environment, timedOut);
     }
   }
 
@@ -471,7 +542,11 @@ export function createMacOSKeychainProvider({
         value,
       );
       if (!result.addSucceeded || !result.exactMatch) {
-        const writeFailure = safeCommandError(environment, "write");
+        const writeFailure = safeCommandError(
+          environment,
+          "write",
+          result.timedOut,
+        );
         let restored = false;
         if (previous.kind === "complete") {
           restored = await restoreCompleteSnapshot(
