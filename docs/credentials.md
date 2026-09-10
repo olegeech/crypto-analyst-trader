@@ -6,8 +6,8 @@ path remains credential-free.
 
 ## Bybit Agent Connect (preferred)
 
-Use Agent Connect when Bybit should authorize an isolated AI Subaccount without
-manual API-key creation:
+Use Agent Connect as the preferred quick start when Bybit should authorize an
+isolated AI Subaccount without manual API-key creation:
 
 ```bash
 npm run credentials:connect:testnet
@@ -46,9 +46,10 @@ The connect commands are intentionally excluded from default CI and release
 execution. Release tests use injected OAuth, callback and Keychain fixtures;
 they never contact Bybit or modify a real Keychain.
 
-## Recommended setup
+## Manual API credential fallback
 
-Run the environment-specific command in an interactive macOS Terminal:
+If Agent Connect is unavailable or you need to enter existing API credentials,
+use this manual fallback in an interactive macOS Terminal:
 
 ```bash
 npm run credentials:setup:testnet
