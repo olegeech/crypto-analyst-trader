@@ -65,6 +65,10 @@ Testnet and mainnet use separate Keychain services and never fall back to one
 another. Storing mainnet credentials does not enable mainnet execution; the
 execution and approval gates remain separate.
 
+Each underlying Keychain command has a bounded timeout. If a permission dialog
+or locked Keychain blocks the command, setup fails closed instead of waiting
+indefinitely; unlock or approve access and run the setup command again.
+
 ## Removal
 
 Remove only the selected environment's records:
