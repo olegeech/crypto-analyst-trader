@@ -3,6 +3,11 @@ import test from "node:test";
 
 import { runCredentialsConnectCli } from "../scripts/credentials-connect.js";
 import {
+  createMacOSKeychainProvider,
+  type SecurityCommandResult,
+  type SecurityRunner,
+} from "../src/adapters/macos-keychain.js";
+import {
   AgentConnectError,
   type AgentConnectClient,
   type AgentConnectSession,
@@ -397,6 +402,97 @@ test("Keychain preflight failure stops before starting OAuth and redacts details
   assert.deepEqual(events, ["preflight:testnet"]);
   assert.match(text(), /OAuth was not started/);
   assert.doesNotMatch(text(), /sentinel|private/);
+});
+
+test("every Keychain preflight failure branch cleans up before OAuth can start", async (t) => {
+  for (const scenario of [
+    {
+      name: "duplicate exit",
+      add: { stdout: "", stderr: "private duplicate", exitCode: 45 },
+    },
+    {
+      name: "other nonzero exit",
+      add: { stdout: "", stderr: "private add", exitCode: 1 },
+    },
+    { name: "add exception", addThrows: true },
+    {
+      name: "read failure",
+      add: { stdout: "", stderr: "", exitCode: 0 },
+      read: { stdout: "", stderr: "private read", exitCode: 1 },
+    },
+    {
+      name: "empty read-back",
+      add: { stdout: "", stderr: "", exitCode: 0 },
+      read: { stdout: "", stderr: "", exitCode: 0 },
+    },
+    {
+      name: "mismatched read-back",
+      add: { stdout: "", stderr: "", exitCode: 0 },
+      read: { stdout: "different\n", stderr: "", exitCode: 0 },
+    },
+    {
+      name: "cleanup failure",
+      add: { stdout: "", stderr: "", exitCode: 0 },
+      readMatchesWrite: true,
+      delete: { stdout: "", stderr: "private cleanup", exitCode: 1 },
+    },
+  ] satisfies Array<{
+    name: string;
+    add?: SecurityCommandResult;
+    addThrows?: boolean;
+    read?: SecurityCommandResult;
+    readMatchesWrite?: boolean;
+    delete?: SecurityCommandResult;
+  }>) {
+    await t.test(scenario.name, async () => {
+      const keychainEvents: string[] = [];
+      let writtenValue = "";
+      const runner: SecurityRunner = async (args, input) => {
+        const operation = args[0] ?? "unknown";
+        keychainEvents.push(operation);
+        if (operation === "add-generic-password") {
+          if (scenario.addThrows) throw new Error("private add exception");
+          writtenValue = input?.split("\n")[0] ?? "";
+          return scenario.add ?? { stdout: "", stderr: "", exitCode: 1 };
+        }
+        if (operation === "find-generic-password") {
+          if (scenario.readMatchesWrite) {
+            return { stdout: `${writtenValue}\n`, stderr: "", exitCode: 0 };
+          }
+          return (
+            scenario.read ?? { stdout: "", stderr: "missing", exitCode: 44 }
+          );
+        }
+        if (operation === "delete-generic-password") {
+          return scenario.delete ?? { stdout: "", stderr: "", exitCode: 0 };
+        }
+        return { stdout: "", stderr: "", exitCode: 0 };
+      };
+      const events: string[] = [];
+      const { output, text } = outputBuffer();
+      const provider = createMacOSKeychainProvider({
+        runner,
+        platform: "darwin",
+      });
+
+      const code = await runCredentialsConnectCli(["testnet"], {
+        provider,
+        client: clientFor(events, []),
+        prompt: async () => "1",
+        output,
+      });
+
+      assert.equal(code, 1);
+      assert.deepEqual(keychainEvents, [
+        "add-generic-password",
+        "find-generic-password",
+        "delete-generic-password",
+      ]);
+      assert.deepEqual(events, []);
+      assert.match(text(), /OAuth was not started/);
+      assert.doesNotMatch(text(), /private|different|connect-preflight-/);
+    });
+  }
 });
 
 test("unexpected implementation errors use a generic safe CLI message", async () => {
