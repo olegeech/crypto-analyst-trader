@@ -41,6 +41,35 @@ test("setup CLI prompts for the three values and never writes them to output", a
   assert.doesNotMatch(output.join(""), /test-key|test-secret|test-account/);
 });
 
+test("setup CLI reports success only after save resolves", async () => {
+  const output: string[] = [];
+  let valueIndex = 0;
+  let resolveSave: (() => void) | undefined;
+  const savePending = new Promise<void>((resolve) => {
+    resolveSave = resolve;
+  });
+  const run = runCredentialsCli(["setup", "testnet"], {
+    output: { write: (message) => output.push(message) },
+    prompt: async (_label, hidden) => {
+      assert.equal(hidden, true);
+      return values[valueIndex++] ?? "test-value";
+    },
+    provider: {
+      load: async () => {
+        throw new Error("unused");
+      },
+      save: async () => savePending,
+      remove: async () => undefined,
+    },
+  });
+
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(output.length, 0);
+  resolveSave?.();
+  assert.equal(await run, 0);
+  assert.match(output.join(""), /Stored Bybit testnet credentials/);
+});
+
 test("remove CLI passes only the selected environment", async () => {
   let removed: string | undefined;
   const code = await runCredentialsCli(["remove", "mainnet"], {
