@@ -120,6 +120,42 @@ function validateCredentials(credentials: ExchangeCredentials): void {
   validateCredentialValue("Account ID", credentials.accountId);
 }
 
+function isValidCredentialValue(value: string): boolean {
+  try {
+    validateCredentialValue("credential", value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function valueFromReadResult(result: SecurityCommandResult): string {
+  return result.stdout.endsWith("\n")
+    ? result.stdout.slice(0, -1).replace(/\r$/, "")
+    : result.stdout;
+}
+
+type CredentialRecordState =
+  | Readonly<{ kind: "present"; value: string }>
+  | Readonly<{
+      kind: "missing" | "invalid" | "inaccessible" | "unknown";
+    }>;
+
+type CredentialSnapshot =
+  | Readonly<{
+      kind: "complete";
+      credentials: Readonly<ExchangeCredentials>;
+    }>
+  | Readonly<{ kind: "non-restorable" }>;
+
+function credentialRecords(credentials: ExchangeCredentials) {
+  return [
+    [credentialAccounts.apiKey, credentials.apiKey],
+    [credentialAccounts.apiSecret, credentials.apiSecret],
+    [credentialAccounts.accountId, credentials.accountId],
+  ] as const;
+}
+
 function accountArgs(account: string, service: string): string[] {
   return ["-a", account, "-s", service];
 }
@@ -152,18 +188,24 @@ export function createMacOSKeychainProvider({
     }
   }
 
+  async function readRawValue(
+    account: string,
+    service: string,
+  ): Promise<SecurityCommandResult> {
+    return command(
+      runner,
+      ["find-generic-password", ...accountArgs(account, service), "-w"],
+      undefined,
+    );
+  }
+
   async function readValue(
     environment: CredentialEnvironment,
     account: string,
   ): Promise<string> {
-    const result = await command(
-      runner,
-      [
-        "find-generic-password",
-        ...accountArgs(account, credentialServiceName(environment)),
-        "-w",
-      ],
-      undefined,
+    const result = await readRawValue(
+      account,
+      credentialServiceName(environment),
     );
     if (result.exitCode !== 0) {
       if (isMissing(result)) {
@@ -180,9 +222,7 @@ export function createMacOSKeychainProvider({
       }
       throw safeCommandError(environment, "load");
     }
-    const value = result.stdout.endsWith("\n")
-      ? result.stdout.slice(0, -1).replace(/\r$/, "")
-      : result.stdout;
+    const value = valueFromReadResult(result);
     try {
       validateCredentialValue(account, value);
     } catch {
@@ -194,68 +234,118 @@ export function createMacOSKeychainProvider({
     return value;
   }
 
-  async function storeValue(
-    environment: CredentialEnvironment,
+  async function writeAndVerifyValue(
     account: string,
+    service: string,
     value: string,
-  ): Promise<SecurityCommandResult> {
-    return command(
+  ): Promise<{ addSucceeded: boolean; exactMatch: boolean }> {
+    const addResult = await command(
       runner,
-      [
-        "add-generic-password",
-        ...accountArgs(account, credentialServiceName(environment)),
-        "-w",
-        "-U",
-      ],
-      `${value}\n`,
+      ["add-generic-password", ...accountArgs(account, service), "-U", "-w"],
+      `${value}\n${value}\n`,
     );
+    const readResult = await readRawValue(account, service);
+    if (readResult.exitCode !== 0) {
+      return { addSucceeded: addResult.exitCode === 0, exactMatch: false };
+    }
+    const observedValue = valueFromReadResult(readResult);
+    return {
+      addSucceeded: addResult.exitCode === 0,
+      exactMatch:
+        isValidCredentialValue(observedValue) && observedValue === value,
+    };
   }
 
-  async function readExisting(
+  async function readCredentialStates(
     environment: CredentialEnvironment,
-  ): Promise<ExchangeCredentials | null> {
-    const values: string[] = [];
+  ): Promise<readonly CredentialRecordState[]> {
+    const service = credentialServiceName(environment);
+    const states: CredentialRecordState[] = [];
     for (const account of Object.values(credentialAccounts)) {
-      try {
-        values.push(await readValue(environment, account));
-      } catch (error) {
-        if (
-          error instanceof CredentialProviderError &&
-          (error.code === "missing" || error.code === "invalid")
-        ) {
-          return null;
-        }
-        throw error;
+      const result = await readRawValue(account, service);
+      if (isMissing(result)) {
+        states.push(Object.freeze({ kind: "missing" }));
+        continue;
       }
+      if (isInaccessible(result)) {
+        states.push(Object.freeze({ kind: "inaccessible" }));
+        continue;
+      }
+      if (result.exitCode !== 0) {
+        states.push(Object.freeze({ kind: "unknown" }));
+        continue;
+      }
+      const value = valueFromReadResult(result);
+      if (!isValidCredentialValue(value)) {
+        states.push(Object.freeze({ kind: "invalid" }));
+        continue;
+      }
+      states.push(Object.freeze({ kind: "present", value }));
     }
-    const [apiKey, apiSecret, accountId] = values;
-    if (
-      apiKey === undefined ||
-      apiSecret === undefined ||
-      accountId === undefined
-    ) {
-      return null;
-    }
-    return { apiKey, apiSecret, accountId };
+    return Object.freeze(states);
   }
 
-  async function restore(
+  async function snapshotBeforeMutation(
+    environment: CredentialEnvironment,
+  ): Promise<CredentialSnapshot> {
+    const states = await readCredentialStates(environment);
+    const fatalState = states.find(
+      ({ kind }) => kind === "inaccessible" || kind === "unknown",
+    );
+    if (fatalState?.kind === "inaccessible") {
+      throw new CredentialProviderError(
+        "inaccessible",
+        `Bybit ${environment} credentials cannot be accessed. Unlock the macOS Keychain and run ${setupCommand(environment)}.`,
+      );
+    }
+    if (fatalState?.kind === "unknown") {
+      throw safeCommandError(environment, "load");
+    }
+    if (states.some(({ kind }) => kind !== "present")) {
+      return Object.freeze({ kind: "non-restorable" });
+    }
+    const [apiKeyState, apiSecretState, accountIdState] = states;
+    if (
+      apiKeyState?.kind !== "present" ||
+      apiSecretState?.kind !== "present" ||
+      accountIdState?.kind !== "present"
+    ) {
+      return Object.freeze({ kind: "non-restorable" });
+    }
+    return Object.freeze({
+      kind: "complete",
+      credentials: Object.freeze({
+        apiKey: apiKeyState.value,
+        apiSecret: apiSecretState.value,
+        accountId: accountIdState.value,
+      }),
+    });
+  }
+
+  async function matchesCompleteSnapshot(
     environment: CredentialEnvironment,
     credentials: ExchangeCredentials,
   ): Promise<boolean> {
-    let complete = true;
-    const records = [
-      [credentialAccounts.apiKey, credentials.apiKey],
-      [credentialAccounts.apiSecret, credentials.apiSecret],
-      [credentialAccounts.accountId, credentials.accountId],
-    ] as const;
-    for (const [account, value] of records) {
-      const result = await storeValue(environment, account, value);
-      if (result.exitCode !== 0) {
-        complete = false;
-      }
+    const states = await readCredentialStates(environment);
+    const records = credentialRecords(credentials);
+    return states.every(
+      (state, index) =>
+        state.kind === "present" && state.value === records[index]?.[1],
+    );
+  }
+
+  async function restoreCompleteSnapshot(
+    environment: CredentialEnvironment,
+    credentials: ExchangeCredentials,
+  ): Promise<boolean> {
+    for (const [account, value] of credentialRecords(credentials)) {
+      await writeAndVerifyValue(
+        account,
+        credentialServiceName(environment),
+        value,
+      );
     }
-    return complete;
+    return matchesCompleteSnapshot(environment, credentials);
   }
 
   async function removeRecords(
@@ -276,67 +366,44 @@ export function createMacOSKeychainProvider({
     return firstError;
   }
 
+  async function clearAndVerifyAbsent(
+    environment: CredentialEnvironment,
+  ): Promise<boolean> {
+    const removeError = await removeRecords(environment);
+    const states = await readCredentialStates(environment);
+    return (
+      removeError === null && states.every(({ kind }) => kind === "missing")
+    );
+  }
+
   async function preflight(environment: CredentialEnvironment): Promise<void> {
     assertSupported();
     const service = credentialPreflightServiceName(environment);
     const sentinel = `connect-preflight-${randomBytes(16).toString("hex")}`;
-    const writeResult = await command(
-      runner,
-      [
-        "add-generic-password",
-        "-a",
+    let writeVerified = false;
+    let cleanupSucceeded = false;
+    try {
+      const writeResult = await writeAndVerifyValue(
         credentialPreflightAccount,
-        "-s",
         service,
-        "-w",
-        "-U",
-      ],
-      `${sentinel}\n`,
-    );
-    if (writeResult.exitCode !== 0) {
+        sentinel,
+      );
+      writeVerified = writeResult.addSucceeded && writeResult.exactMatch;
+    } catch {
+      writeVerified = false;
+    } finally {
+      const removeResult = await command(
+        runner,
+        [
+          "delete-generic-password",
+          ...accountArgs(credentialPreflightAccount, service),
+        ],
+        undefined,
+      );
+      cleanupSucceeded = removeResult.exitCode === 0 || isMissing(removeResult);
+    }
+    if (!writeVerified || !cleanupSucceeded) {
       throw safePreflightError(environment);
-    }
-
-    let failure: CredentialProviderError | null = null;
-    const readResult = await command(
-      runner,
-      [
-        "find-generic-password",
-        "-a",
-        credentialPreflightAccount,
-        "-s",
-        service,
-        "-w",
-      ],
-      undefined,
-    );
-    const readValue = readResult.stdout.endsWith("\n")
-      ? readResult.stdout.slice(0, -1).replace(/\r$/, "")
-      : readResult.stdout;
-    if (readResult.exitCode !== 0 || readValue !== sentinel) {
-      failure = safePreflightError(environment);
-    }
-
-    const removeResult = await command(
-      runner,
-      [
-        "delete-generic-password",
-        "-a",
-        credentialPreflightAccount,
-        "-s",
-        service,
-      ],
-      undefined,
-    );
-    if (
-      removeResult.exitCode !== 0 &&
-      !isMissing(removeResult) &&
-      failure === null
-    ) {
-      failure = safePreflightError(environment);
-    }
-    if (failure) {
-      throw failure;
     }
   }
 
@@ -362,20 +429,26 @@ export function createMacOSKeychainProvider({
   ): Promise<void> {
     assertSupported();
     validateCredentials(credentials);
-    const previous = await readExisting(environment);
-    const records = [
-      [credentialAccounts.apiKey, credentials.apiKey],
-      [credentialAccounts.apiSecret, credentials.apiSecret],
-      [credentialAccounts.accountId, credentials.accountId],
-    ] as const;
+    const previous = await snapshotBeforeMutation(environment);
 
-    for (const [account, value] of records) {
-      const result = await storeValue(environment, account, value);
-      if (result.exitCode !== 0) {
+    for (const [account, value] of credentialRecords(credentials)) {
+      const result = await writeAndVerifyValue(
+        account,
+        credentialServiceName(environment),
+        value,
+      );
+      if (!result.addSucceeded || !result.exactMatch) {
         const writeFailure = safeCommandError(environment, "write");
-        const rollbackComplete = previous
-          ? await restore(environment, previous)
-          : (await removeRecords(environment)) === null;
+        let rollbackComplete = false;
+        if (previous.kind === "complete") {
+          rollbackComplete = await restoreCompleteSnapshot(
+            environment,
+            previous.credentials,
+          );
+        }
+        if (!rollbackComplete) {
+          rollbackComplete = await clearAndVerifyAbsent(environment);
+        }
         if (!rollbackComplete) {
           throw new CredentialProviderError(
             "write-failed",
