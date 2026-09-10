@@ -17,6 +17,7 @@ import {
 export { CredentialProviderError } from "../ports/credential-provider.js";
 
 const SECURITY_COMMAND = "/usr/bin/security";
+const SECURITY_COMMAND_TIMEOUT_MS = 30_000;
 const SECURITY_ITEM_NOT_FOUND_EXIT_CODE = 44;
 const SECURITY_INTERACTION_REQUIRED_EXIT_CODE = 36;
 
@@ -31,17 +32,49 @@ export type SecurityRunner = (
   input?: string,
 ) => Promise<SecurityCommandResult>;
 
-function runSecurity(
+interface SecurityRunOptions {
+  timeoutMs?: number;
+  spawnProcess?: typeof spawn;
+}
+
+export function runSecurity(
   args: string[],
   input?: string,
+  {
+    timeoutMs = SECURITY_COMMAND_TIMEOUT_MS,
+    spawnProcess = spawn,
+  }: SecurityRunOptions = {},
 ): Promise<SecurityCommandResult> {
   return new Promise((resolve, reject) => {
-    const child = spawn(SECURITY_COMMAND, args, {
+    const child = spawnProcess(SECURITY_COMMAND, args, {
       stdio: ["pipe", "pipe", "pipe"],
       shell: false,
     });
     let stdout = "";
     let stderr = "";
+    let settled = false;
+    const effectiveTimeoutMs =
+      Number.isFinite(timeoutMs) && timeoutMs > 0
+        ? timeoutMs
+        : SECURITY_COMMAND_TIMEOUT_MS;
+    const timeout = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      try {
+        child.kill("SIGKILL");
+      } catch {
+        // The process may have exited between the timeout and kill attempt.
+      }
+      reject(new Error("security command timed out"));
+    }, effectiveTimeoutMs);
+
+    const finish = (callback: () => void): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      callback();
+    };
 
     child.stdout.setEncoding("utf8");
     child.stderr.setEncoding("utf8");
@@ -51,11 +84,11 @@ function runSecurity(
     child.stderr.on("data", (chunk: string) => {
       stderr += chunk;
     });
-    child.once("error", () => {
-      reject(new Error("security command could not be started"));
-    });
+    child.once("error", () =>
+      finish(() => reject(new Error("security command could not be started"))),
+    );
     child.once("close", (exitCode) => {
-      resolve({ stdout, stderr, exitCode: exitCode ?? 1 });
+      finish(() => resolve({ stdout, stderr, exitCode: exitCode ?? 1 }));
     });
 
     if (input !== undefined) {
@@ -439,23 +472,31 @@ export function createMacOSKeychainProvider({
       );
       if (!result.addSucceeded || !result.exactMatch) {
         const writeFailure = safeCommandError(environment, "write");
-        let rollbackComplete = false;
+        let restored = false;
         if (previous.kind === "complete") {
-          rollbackComplete = await restoreCompleteSnapshot(
+          restored = await restoreCompleteSnapshot(
             environment,
             previous.credentials,
           );
         }
-        if (!rollbackComplete) {
-          rollbackComplete = await clearAndVerifyAbsent(environment);
+        if (restored) {
+          throw writeFailure;
         }
-        if (!rollbackComplete) {
+        const cleared = await clearAndVerifyAbsent(environment);
+        if (!cleared) {
           throw new CredentialProviderError(
             "write-failed",
             `${writeFailure.message} Rollback incomplete; run ${setupCommand(environment)} again.`,
           );
         }
-        throw writeFailure;
+        const recoveryMessage =
+          previous.kind === "complete"
+            ? `The previous ${environment} credential set could not be restored; the environment was cleared.`
+            : `The ${environment} credential set was cleared.`;
+        throw new CredentialProviderError(
+          "write-failed",
+          `${writeFailure.message} ${recoveryMessage} Run ${setupCommand(environment)} again.`,
+        );
       }
     }
   }
