@@ -31,9 +31,11 @@ which selection channel it will use:
 
 - In an interactive terminal, enter the option number at the terminal prompt.
 - Without interactive terminal input, for example from an agent shell with
-  piped stdin, the authorization tab redirects to a local page on the same
-  `127.0.0.1` callback port. It lists the options with masked account IDs;
-  choose one there or cancel. The page accepts only same-origin submissions
+  piped stdin, the command prints a link to a local page on the same
+  `127.0.0.1` callback port once the options are loaded; open it in the
+  browser used for authorization. When the callback arrives as a visible
+  navigation, the authorization tab is also redirected there. The page lists
+  the options with masked account IDs; choose one there or cancel. The page accepts only same-origin submissions
   carrying a one-time session secret, is never cached, and exists only while
   the command runs.
 
@@ -41,6 +43,15 @@ Selection waits at most five minutes. A timeout, a cancellation (**Cancel** on
 the page, or Ctrl-C/Ctrl-D at the terminal prompt) or unavailable input ends the
 command before any account credentials are requested, reports that no account
 was selected or created, and leaves existing Keychain records unchanged.
+
+While waiting, the command prints one `Loopback request:` line for every
+request that reaches the callback server: method, path without query, the
+browser's `Sec-Fetch-*` values, the request origin, whether it is a
+private-network preflight, and whether the callback state matched and a code
+was present. It never prints the code, the state or other query values. If
+authorization times out, the message says whether any request reached the
+callback server at all. Include these lines when reporting a callback that did
+not arrive.
 
 If you choose create, Bybit performs the account provisioning inside its
 authorized Agent Connect flow. The prompt follows Bybit's documented maximum

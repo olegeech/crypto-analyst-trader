@@ -11,6 +11,7 @@ import {
   type AgentConnectAccount,
   type AgentConnectChoice,
   type AgentConnectClient,
+  type AgentConnectRequestEvent,
   type AgentConnectSelection,
   type AgentConnectSession,
 } from "../src/ports/agent-connect.js";
@@ -49,6 +50,22 @@ function selectionModeNotice(mode: SelectionMode): string {
   return mode === "terminal"
     ? "AI Subaccount selection: terminal prompt after authorization.\n"
     : "AI Subaccount selection: browser page after authorization (no interactive terminal input detected).\n";
+}
+
+function requestEvidence(event: AgentConnectRequestEvent): string {
+  const details = [
+    `fetch site=${event.fetchSite ?? "-"}, mode=${event.fetchMode ?? "-"}, dest=${event.fetchDest ?? "-"}`,
+    `origin=${event.origin ?? "-"}`,
+  ];
+  if (event.privateNetworkPreflight) {
+    details.push("private-network preflight");
+  }
+  if (event.callback) {
+    details.push(
+      `state ${event.callback.stateMatches ? "matches" : "mismatch"}, code ${event.callback.codePresent ? "present" : "absent"}${event.callback.errorPresent ? ", error present" : ""}`,
+    );
+  }
+  return `Loopback request: ${event.method} ${event.path} -> ${event.outcome} (${details.join("; ")})\n`;
 }
 
 function isEnvironment(
@@ -209,6 +226,7 @@ export async function runCredentialsConnectCli(
     previousCredentials = await readPreviousCredentials(provider, environment);
     session = await client.createSession(environment, {
       browserSelection: selectionMode === "browser",
+      onRequest: (event) => output.write(requestEvidence(event)),
     });
     const activeSession = session;
     output.write(
@@ -223,8 +241,12 @@ export async function runCredentialsConnectCli(
       selectionMode === "terminal"
         ? () => prompt("Choose an option")
         : (choices) => {
+            // The callback may not arrive as a visible navigation, so the
+            // redirect alone cannot be relied on to show the page.
             output.write(
-              "Choose an option on the Agent Connect page in the browser used for authorization.\n",
+              activeSession.selectionUrl
+                ? `Open this local page in the browser used for authorization and choose an option:\n${activeSession.selectionUrl}\n`
+                : "Choose an option on the Agent Connect page in the browser used for authorization.\n",
             );
             return activeSession.chooseInBrowser(choices);
           };

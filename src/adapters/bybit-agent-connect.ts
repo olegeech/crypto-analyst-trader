@@ -12,6 +12,7 @@ import {
   type AgentConnectCallback,
   type AgentConnectChoice,
   type AgentConnectClient,
+  type AgentConnectRequestEvent,
   type AgentConnectSession,
   type AgentConnectSessionOptions,
   type AgentConnectTransport,
@@ -346,6 +347,49 @@ function sameSecret(expected: string, actual: string | null): boolean {
   );
 }
 
+function diagnosticText(value: string, limit = 64): string {
+  return value.replace(/[^\x20-\x7e]/g, "?").slice(0, limit);
+}
+
+function headerValue(request: IncomingMessage, name: string): string | null {
+  const value = request.headers[name];
+  const first = Array.isArray(value) ? value[0] : value;
+  return first === undefined ? null : diagnosticText(first, 256);
+}
+
+function originOf(value: string | null): string | null {
+  if (value === null || value === "null") return value;
+  try {
+    return diagnosticText(new URL(value).origin);
+  } catch {
+    return "invalid";
+  }
+}
+
+function requestEvent(
+  request: IncomingMessage,
+  path: string,
+  outcome: AgentConnectRequestEvent["outcome"],
+  callback: AgentConnectRequestEvent["callback"],
+): AgentConnectRequestEvent {
+  const sanitized = (name: string): string | null => {
+    const value = headerValue(request, name);
+    return value === null ? null : diagnosticText(value);
+  };
+  return {
+    method: diagnosticText(request.method ?? "UNKNOWN", 16),
+    path: diagnosticText(path),
+    fetchSite: sanitized("sec-fetch-site"),
+    fetchMode: sanitized("sec-fetch-mode"),
+    fetchDest: sanitized("sec-fetch-dest"),
+    origin: originOf(headerValue(request, "origin")),
+    privateNetworkPreflight:
+      headerValue(request, "access-control-request-private-network") === "true",
+    callback,
+    outcome,
+  };
+}
+
 export async function startAgentConnectSession(
   environment: CredentialEnvironment,
   options: AgentConnectSessionOptions = {},
@@ -552,6 +596,19 @@ export async function startAgentConnectSession(
     );
   };
 
+  // Every request outside the selection page is reported as sanitized
+  // metadata, so a missing or unusual callback delivery leaves evidence.
+  let loopbackRequests = 0;
+  const report = (
+    request: IncomingMessage,
+    path: string,
+    outcome: AgentConnectRequestEvent["outcome"],
+    callbackCheck: AgentConnectRequestEvent["callback"] = null,
+  ): void => {
+    loopbackRequests += 1;
+    options.onRequest?.(requestEvent(request, path, outcome, callbackCheck));
+  };
+
   const handleRequest = (
     request: IncomingMessage,
     response: ServerResponse,
@@ -561,9 +618,11 @@ export async function startAgentConnectSession(
       url = new URL(request.url ?? "", "http://127.0.0.1");
     } catch {
       if (settled) {
+        report(request, "(malformed)", "already-processed");
         callbackResponse(response, 409, "Authorization already processed.");
         return;
       }
+      report(request, "(malformed)", "rejected");
       callbackResponse(response, 400, "Authorization failed.");
       fail(
         new AgentConnectError(
@@ -578,17 +637,29 @@ export async function startAgentConnectSession(
       return;
     }
     if (settled) {
+      report(request, url.pathname, "already-processed");
       callbackResponse(response, 409, "Authorization already processed.");
       return;
     }
     if (url.pathname !== "/callback") {
+      report(request, url.pathname, "not-found");
       callbackResponse(response, 404, "Not found.");
       return;
     }
     const returnedState = url.searchParams.get("state");
     const returnedError = url.searchParams.get("error");
     const returnedCode = url.searchParams.get("code");
-    if (returnedState !== state || returnedError !== null || !returnedCode) {
+    const callbackCheck = Object.freeze({
+      stateMatches: returnedState === state,
+      codePresent: Boolean(returnedCode),
+      errorPresent: returnedError !== null,
+    });
+    if (
+      !callbackCheck.stateMatches ||
+      callbackCheck.errorPresent ||
+      !returnedCode
+    ) {
+      report(request, url.pathname, "rejected", callbackCheck);
       callbackResponse(response, 400, "Authorization failed.");
       fail(
         new AgentConnectError(
@@ -600,8 +671,10 @@ export async function startAgentConnectSession(
     }
     try {
       const code = safeSingleLineString(returnedCode, "authorization code");
+      report(request, url.pathname, "accepted", callbackCheck);
       succeed(code, response);
     } catch (error) {
+      report(request, url.pathname, "rejected", callbackCheck);
       callbackResponse(response, 400, "Authorization failed.");
       fail(
         error instanceof AgentConnectError
@@ -659,7 +732,12 @@ export async function startAgentConnectSession(
 
   const timeout = setTimeout(() => {
     fail(
-      new AgentConnectError("timeout", "Bybit OAuth authorization timed out."),
+      new AgentConnectError(
+        "timeout",
+        loopbackRequests === 0
+          ? `Bybit OAuth authorization timed out; no request reached the callback server on 127.0.0.1:${selectedPort}.`
+          : `Bybit OAuth authorization timed out; ${loopbackRequests} request(s) reached 127.0.0.1:${selectedPort}, but none was a valid OAuth callback.`,
+      ),
     );
   }, timeoutMs);
 
@@ -671,6 +749,11 @@ export async function startAgentConnectSession(
       verifier,
     ),
     port: selectedPort,
+    ...(browserSelection
+      ? {
+          selectionUrl: `http://127.0.0.1:${selectedPort}${SELECTION_PATH}?s=${selectionSecret}`,
+        }
+      : {}),
     waitForCallback: () => callback,
     chooseInBrowser: (choices) => {
       if (selection.kind !== "loading") {

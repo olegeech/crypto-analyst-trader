@@ -15,6 +15,7 @@ import {
   AgentConnectError,
   type AgentConnectChoice,
   type AgentConnectClient,
+  type AgentConnectRequestEvent,
   type AgentConnectSession,
 } from "../src/ports/agent-connect.js";
 import {
@@ -100,15 +101,22 @@ function clientFor(
   accounts: Array<{ accountId: string; displayName: string }>,
   {
     browserChoice,
+    selectionUrl,
+    requestEvents = [],
   }: {
     browserChoice?: (choices: readonly AgentConnectChoice[]) => Promise<string>;
+    selectionUrl?: string;
+    requestEvents?: AgentConnectRequestEvent[];
   } = {},
 ): AgentConnectClient {
+  let onRequest: ((event: AgentConnectRequestEvent) => void) | undefined;
   const session: AgentConnectSession = {
     authorizationUrl: "https://testnet.bybit.com/oauth?state=masked",
     port: 9876,
+    ...(selectionUrl === undefined ? {} : { selectionUrl }),
     waitForCallback: async () => {
       events.push("callback");
+      for (const event of requestEvents) onRequest?.(event);
       return { code: "one-time-code", codeVerifier: "verifier" };
     },
     chooseInBrowser: async (choices) => {
@@ -122,6 +130,7 @@ function clientFor(
   };
   return {
     createSession: async (environment, options) => {
+      onRequest = options?.onRequest;
       events.push(
         `session:${environment}${options?.browserSelection ? ":browser" : ""}`,
       );
@@ -614,6 +623,52 @@ test("without terminal input the operator chooses in the browser within the same
     text(),
     /imported-api-key|imported-api-secret|access-token|one-time-code|123456/,
   );
+});
+
+test("browser selection prints a direct page link and sanitized loopback request evidence", async () => {
+  const events: string[] = [];
+  const { output, text } = outputBuffer();
+  const code = await runConnect(["testnet"], {
+    provider: providerFor(events),
+    client: clientFor(
+      events,
+      [{ accountId: "123456", displayName: "Trading" }],
+      {
+        browserChoice: async () => "1",
+        selectionUrl: "http://127.0.0.1:9876/select?s=local-session-secret",
+        requestEvents: [
+          {
+            method: "GET",
+            path: "/callback",
+            fetchSite: "cross-site",
+            fetchMode: "no-cors",
+            fetchDest: "empty",
+            origin: "https://testnet.bybit.com",
+            privateNetworkPreflight: false,
+            callback: {
+              stateMatches: true,
+              codePresent: true,
+              errorPresent: false,
+            },
+            outcome: "accepted",
+          },
+        ],
+      },
+    ),
+    output,
+    selectionMode: "browser",
+  });
+
+  assert.equal(code, 0);
+  assert.match(
+    text(),
+    /Open this local page[^\n]*\nhttp:\/\/127\.0\.0\.1:9876\/select\?s=local-session-secret\n/,
+  );
+  assert.match(
+    text(),
+    /Loopback request: GET \/callback -> accepted \(fetch site=cross-site, mode=no-cors, dest=empty; origin=https:\/\/testnet\.bybit\.com; state matches, code present\)/,
+  );
+  assert.doesNotMatch(text(), /one-time-code|access-token/);
 });
 
 test("browser selection never auto-selects and stops cleanly when the wait ends", async () => {

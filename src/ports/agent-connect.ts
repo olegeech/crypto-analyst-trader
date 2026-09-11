@@ -22,9 +22,31 @@ export interface AgentConnectChoice {
   label: string;
 }
 
+/**
+ * Sanitized metadata about one request that reached the loopback callback
+ * server. It never carries query values such as the code or state.
+ */
+export interface AgentConnectRequestEvent {
+  method: string;
+  path: string;
+  fetchSite: string | null;
+  fetchMode: string | null;
+  fetchDest: string | null;
+  origin: string | null;
+  privateNetworkPreflight: boolean;
+  callback: Readonly<{
+    stateMatches: boolean;
+    codePresent: boolean;
+    errorPresent: boolean;
+  }> | null;
+  outcome: "accepted" | "rejected" | "already-processed" | "not-found";
+}
+
 export interface AgentConnectSession {
   authorizationUrl: string;
   port: number;
+  /** Local selection page, present when browser selection is enabled. */
+  selectionUrl?: string;
   waitForCallback(): Promise<AgentConnectCallback>;
   /**
    * Shows the choices on the loopback page the authorization tab was
@@ -40,6 +62,7 @@ export interface AgentConnectSessionOptions {
   timeoutMs?: number;
   browserSelection?: boolean;
   selectionTimeoutMs?: number;
+  onRequest?: (event: AgentConnectRequestEvent) => void;
 }
 
 export interface AgentConnectTransport {

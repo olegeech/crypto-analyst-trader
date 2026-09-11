@@ -16,6 +16,7 @@ import {
 } from "../src/adapters/bybit-agent-connect.js";
 import {
   AgentConnectError,
+  type AgentConnectRequestEvent,
   type AgentConnectTransport,
 } from "../src/ports/agent-connect.js";
 
@@ -200,13 +201,17 @@ function rawRequest(
   });
 }
 
-async function authorizedBrowserSession(selectionTimeoutMs?: number) {
+async function authorizedBrowserSession(
+  selectionTimeoutMs?: number,
+  onRequest?: (event: AgentConnectRequestEvent) => void,
+) {
   const session = await startAgentConnectSession("testnet", {
     startPort: 0,
     maxPort: 0,
     timeoutMs: 1_000,
     browserSelection: true,
     ...(selectionTimeoutMs === undefined ? {} : { selectionTimeoutMs }),
+    ...(onRequest === undefined ? {} : { onRequest }),
   });
   const state =
     new URL(session.authorizationUrl).searchParams.get("state") ?? "";
@@ -237,11 +242,126 @@ function postSelection(
   });
 }
 
+test("callback server reports each request as sanitized metadata without query values", async () => {
+  const reported: AgentConnectRequestEvent[] = [];
+  const session = await startAgentConnectSession("testnet", {
+    startPort: 0,
+    maxPort: 0,
+    timeoutMs: 1_000,
+    onRequest: (event) => reported.push(event),
+  });
+  try {
+    const state =
+      new URL(session.authorizationUrl).searchParams.get("state") ?? "";
+    const callbackPromise = session.waitForCallback();
+    await rawRequest(session.port, {
+      method: "OPTIONS",
+      path: "/probe?private=value",
+      headers: { "access-control-request-private-network": "true" },
+    });
+    await rawRequest(session.port, {
+      path: `/callback?${new URLSearchParams({ code: "private-auth-code", state })}`,
+      headers: {
+        "sec-fetch-site": "cross-site",
+        "sec-fetch-mode": "navigate",
+        "sec-fetch-dest": "document",
+        origin: "https://testnet.bybit.com/oauth?private=value",
+      },
+    });
+    await callbackPromise;
+
+    assert.deepEqual(reported, [
+      {
+        method: "OPTIONS",
+        path: "/probe",
+        fetchSite: null,
+        fetchMode: null,
+        fetchDest: null,
+        origin: null,
+        privateNetworkPreflight: true,
+        callback: null,
+        outcome: "not-found",
+      },
+      {
+        method: "GET",
+        path: "/callback",
+        fetchSite: "cross-site",
+        fetchMode: "navigate",
+        fetchDest: "document",
+        origin: "https://testnet.bybit.com",
+        privateNetworkPreflight: false,
+        callback: {
+          stateMatches: true,
+          codePresent: true,
+          errorPresent: false,
+        },
+        outcome: "accepted",
+      },
+    ]);
+    assert.doesNotMatch(
+      JSON.stringify(reported),
+      new RegExp(`private-auth-code|private=value|${state}`),
+    );
+  } finally {
+    session.close();
+  }
+});
+
+test("callback timeout states whether any request reached the loopback server", async () => {
+  const silent = await startAgentConnectSession("testnet", {
+    startPort: 0,
+    maxPort: 0,
+    timeoutMs: 50,
+  });
+  try {
+    await assert.rejects(silent.waitForCallback(), (error: unknown) => {
+      assert.ok(error instanceof AgentConnectError);
+      assert.equal(error.code, "timeout");
+      assert.match(
+        error.message,
+        new RegExp(
+          `no request reached the callback server on 127\\.0\\.0\\.1:${silent.port}`,
+        ),
+      );
+      return true;
+    });
+  } finally {
+    silent.close();
+  }
+
+  const probed = await startAgentConnectSession("testnet", {
+    startPort: 0,
+    maxPort: 0,
+    timeoutMs: 300,
+  });
+  const probedCallback = assert.rejects(
+    probed.waitForCallback(),
+    (error: unknown) => {
+      assert.ok(error instanceof AgentConnectError);
+      assert.equal(error.code, "timeout");
+      assert.match(error.message, /1 request\(s\) reached/);
+      assert.match(error.message, /none was a valid OAuth callback/);
+      return true;
+    },
+  );
+  try {
+    await rawRequest(probed.port, { path: "/favicon.ico" });
+    await probedCallback;
+  } finally {
+    probed.close();
+  }
+});
+
 test("browser selection continues the authorized session only after an explicit choice", async () => {
+  const reported: AgentConnectRequestEvent[] = [];
   const { session, callback, location, secret } =
-    await authorizedBrowserSession();
+    await authorizedBrowserSession(undefined, (event) => reported.push(event));
   try {
     assert.equal(callback.status, 303);
+    assert.equal(
+      session.selectionUrl,
+      `http://127.0.0.1:${session.port}${location}`,
+    );
     assert.match(location, /^\/select\?s=[A-Za-z0-9_-]{43}$/);
 
     const loading = await rawRequest(session.port, { path: location });
@@ -271,6 +391,10 @@ test("browser selection continues the authorized session only after an explicit 
     assert.equal(submitted.status, 200);
     assert.match(submitted.body, /Selection received/);
     assert.equal(await choice, "2");
+    assert.deepEqual(
+      reported.map(({ path }) => path),
+      ["/callback"],
+    );
   } finally {
     session.close();
   }
@@ -389,6 +513,7 @@ test("browser selection is unavailable unless enabled and never precedes authori
   });
   const callback = session.waitForCallback().catch(() => undefined);
   try {
+    assert.equal(session.selectionUrl, undefined);
     assert.equal(
       (await rawRequest(session.port, { path: "/select?s=anything" })).status,
       404,
