@@ -4,6 +4,7 @@ import {
   createServer as createNetServer,
   type Server as NetServer,
 } from "node:net";
+import { request as httpRequest, type IncomingHttpHeaders } from "node:http";
 import test from "node:test";
 
 import {
@@ -99,6 +100,7 @@ test("callback session uses the actual fallback port and accepts one valid callb
     );
     const response = await fetch(callbackUrl);
     assert.equal(response.status, 200);
+    assert.match(await response.text(), /Return to the terminal/);
     const callback = await callbackPromise;
     assert.equal(callback.code, "auth-code");
     assert.match(callback.codeVerifier, /^[A-Za-z0-9_-]{43}$/);
@@ -152,6 +154,256 @@ test("callback timeout is bounded and typed", async () => {
     });
   } finally {
     session.close();
+  }
+});
+
+interface RawResponse {
+  status: number;
+  headers: IncomingHttpHeaders;
+  body: string;
+}
+
+function rawRequest(
+  port: number,
+  {
+    method = "GET",
+    path,
+    headers = {},
+    body,
+  }: {
+    method?: string;
+    path: string;
+    headers?: Record<string, string>;
+    body?: string;
+  },
+): Promise<RawResponse> {
+  return new Promise((resolve, reject) => {
+    const request = httpRequest(
+      { host: "127.0.0.1", port, method, path, headers },
+      (response) => {
+        let text = "";
+        response.setEncoding("utf8");
+        response.on("data", (chunk: string) => {
+          text += chunk;
+        });
+        response.on("end", () =>
+          resolve({
+            status: response.statusCode ?? 0,
+            headers: response.headers,
+            body: text,
+          }),
+        );
+      },
+    );
+    request.on("error", reject);
+    request.end(body);
+  });
+}
+
+async function authorizedBrowserSession(selectionTimeoutMs?: number) {
+  const session = await startAgentConnectSession("testnet", {
+    startPort: 0,
+    maxPort: 0,
+    timeoutMs: 1_000,
+    browserSelection: true,
+    ...(selectionTimeoutMs === undefined ? {} : { selectionTimeoutMs }),
+  });
+  const state =
+    new URL(session.authorizationUrl).searchParams.get("state") ?? "";
+  const callbackPromise = session.waitForCallback();
+  const callback = await rawRequest(session.port, {
+    path: `/callback?${new URLSearchParams({ code: "auth-code", state })}`,
+  });
+  await callbackPromise;
+  const location = callback.headers.location ?? "";
+  const secret =
+    new URL(location, "http://127.0.0.1").searchParams.get("s") ?? "";
+  return { session, callback, location, secret };
+}
+
+function postSelection(
+  port: number,
+  fields: Record<string, string>,
+  headers: Record<string, string> = { origin: `http://127.0.0.1:${port}` },
+): Promise<RawResponse> {
+  return rawRequest(port, {
+    method: "POST",
+    path: "/select",
+    headers: {
+      "content-type": "application/x-www-form-urlencoded",
+      ...headers,
+    },
+    body: new URLSearchParams(fields).toString(),
+  });
+}
+
+test("browser selection continues the authorized session only after an explicit choice", async () => {
+  const { session, callback, location, secret } =
+    await authorizedBrowserSession();
+  try {
+    assert.equal(callback.status, 303);
+    assert.match(location, /^\/select\?s=[A-Za-z0-9_-]{43}$/);
+
+    const loading = await rawRequest(session.port, { path: location });
+    assert.equal(loading.status, 200);
+    assert.match(loading.body, /http-equiv="refresh"/);
+
+    const choice = session.chooseInBrowser([
+      { id: "1", label: "<b>Trading</b> (•••3456)" },
+      { id: "2", label: "Create a new AI Subaccount" },
+    ]);
+    const form = await rawRequest(session.port, { path: location });
+    assert.equal(form.status, 200);
+    assert.match(form.body, /&#60;b&#62;Trading&#60;\/b&#62;/);
+    assert.doesNotMatch(form.body, /<b>|checked/);
+    assert.equal(
+      form.headers["content-security-policy"],
+      "default-src 'none'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
+    );
+    assert.equal(form.headers["cache-control"], "no-store");
+    assert.equal(form.headers["x-frame-options"], "DENY");
+
+    const submitted = await postSelection(session.port, {
+      s: secret,
+      action: "choose",
+      choice: "2",
+    });
+    assert.equal(submitted.status, 200);
+    assert.match(submitted.body, /Selection received/);
+    assert.equal(await choice, "2");
+  } finally {
+    session.close();
+  }
+});
+
+test("browser selection rejects cross-origin, unauthenticated, rebinding, and unlisted submissions", async () => {
+  const { session, location, secret } = await authorizedBrowserSession();
+  try {
+    const choice = session.chooseInBrowser([{ id: "1", label: "Trading" }]);
+    let choiceSettled = false;
+    void choice.then(
+      () => {
+        choiceSettled = true;
+      },
+      () => {
+        choiceSettled = true;
+      },
+    );
+    const origin = `http://127.0.0.1:${session.port}`;
+    const valid = { s: secret, action: "choose", choice: "1" };
+
+    assert.equal(
+      (
+        await postSelection(session.port, valid, {
+          origin: "http://evil.example",
+        })
+      ).status,
+      403,
+    );
+    assert.equal((await postSelection(session.port, valid, {})).status, 403);
+    assert.equal(
+      (await postSelection(session.port, { ...valid, s: "wrong" })).status,
+      403,
+    );
+    assert.equal(
+      (
+        await postSelection(session.port, valid, {
+          origin,
+          host: "rebind.example",
+        })
+      ).status,
+      404,
+    );
+    assert.equal(
+      (await rawRequest(session.port, { path: "/select?s=wrong" })).status,
+      404,
+    );
+    assert.equal(
+      (
+        await rawRequest(session.port, {
+          path: location,
+          headers: { host: "rebind.example" },
+        })
+      ).status,
+      404,
+    );
+    const unlisted = await postSelection(session.port, {
+      ...valid,
+      choice: "2",
+    });
+    assert.equal(unlisted.status, 400);
+    assert.match(unlisted.body, /Choose one of the listed options/);
+    assert.equal(choiceSettled, false);
+
+    const cancelled = await postSelection(session.port, {
+      s: secret,
+      action: "cancel",
+    });
+    assert.match(cancelled.body, /Selection cancelled/);
+    await assert.rejects(choice, (error: unknown) => {
+      assert.ok(error instanceof AgentConnectError);
+      assert.equal(error.code, "selection-cancelled");
+      assert.match(error.message, /no account was selected or created/);
+      assert.match(error.message, /credentials:connect:testnet/);
+      return true;
+    });
+  } finally {
+    session.close();
+  }
+});
+
+test("browser selection wait is bounded and typed", async () => {
+  const { session } = await authorizedBrowserSession(10);
+  try {
+    await assert.rejects(
+      session.chooseInBrowser([{ id: "1", label: "Trading" }]),
+      (error: unknown) => {
+        assert.ok(error instanceof AgentConnectError);
+        assert.equal(error.code, "selection-timeout");
+        assert.match(error.message, /timed out/);
+        return true;
+      },
+    );
+  } finally {
+    session.close();
+  }
+});
+
+test("closing the session cancels a pending browser selection", async () => {
+  const { session } = await authorizedBrowserSession();
+  const choice = session.chooseInBrowser([{ id: "1", label: "Trading" }]);
+  session.close();
+
+  await assert.rejects(choice, (error: unknown) => {
+    assert.ok(error instanceof AgentConnectError);
+    assert.equal(error.code, "selection-cancelled");
+    return true;
+  });
+});
+
+test("browser selection is unavailable unless enabled and never precedes authorization", async () => {
+  const session = await startAgentConnectSession("testnet", {
+    startPort: 0,
+    maxPort: 0,
+    timeoutMs: 1_000,
+  });
+  const callback = session.waitForCallback().catch(() => undefined);
+  try {
+    assert.equal(
+      (await rawRequest(session.port, { path: "/select?s=anything" })).status,
+      404,
+    );
+    await assert.rejects(
+      session.chooseInBrowser([{ id: "1", label: "Trading" }]),
+      (error: unknown) => {
+        assert.ok(error instanceof AgentConnectError);
+        assert.equal(error.code, "selection-unavailable");
+        return true;
+      },
+    );
+  } finally {
+    session.close();
+    await callback;
   }
 });
 

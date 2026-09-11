@@ -25,8 +25,24 @@ instruction to bind 2FA before proceeding; bind it and run the connect command
 again.
 
 After authorization, the command lists AI Subaccounts and waits for an
-explicit selection. It never selects or creates an account automatically. If
-you choose create, Bybit performs the account provisioning inside its
+explicit selection. It never selects or creates an account automatically, even
+when only one option exists. Before the Keychain preflight, the command states
+which selection channel it will use:
+
+- In an interactive terminal, enter the option number at the terminal prompt.
+- Without interactive terminal input, for example from an agent shell with
+  piped stdin, the authorization tab redirects to a local page on the same
+  `127.0.0.1` callback port. It lists the options with masked account IDs;
+  choose one there or cancel. The page accepts only same-origin submissions
+  carrying a one-time session secret, is never cached, and exists only while
+  the command runs.
+
+Selection waits at most five minutes. A timeout, a cancellation (**Cancel** on
+the page, or Ctrl-C/Ctrl-D at the terminal prompt) or unavailable input ends the
+command before any account credentials are requested, reports that no account
+was selected or created, and leaves existing Keychain records unchanged.
+
+If you choose create, Bybit performs the account provisioning inside its
 authorized Agent Connect flow. The prompt follows Bybit's documented maximum
 of five AI Subaccounts; at that limit it offers selection only. The endpoint
 and parameter contract follows Bybit's [Agent Connect OAuth module](https://raw.githubusercontent.com/bybit-exchange/skills/main/modules/oauth.md).

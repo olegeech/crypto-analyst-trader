@@ -2,16 +2,21 @@ import { pathToFileURL } from "node:url";
 import process from "node:process";
 
 import { createBybitAgentConnectClient } from "../src/adapters/bybit-agent-connect.js";
-import { promptVisible as promptVisibleCommon } from "../src/cli/interactive-prompt.js";
+import {
+  PromptInterruptedError,
+  promptVisible as promptVisibleCommon,
+} from "../src/cli/interactive-prompt.js";
 import {
   AgentConnectError,
   type AgentConnectAccount,
+  type AgentConnectChoice,
   type AgentConnectClient,
   type AgentConnectSelection,
   type AgentConnectSession,
 } from "../src/ports/agent-connect.js";
 import { createMacOSKeychainProvider } from "../src/adapters/macos-keychain.js";
 import {
+  connectCommand,
   CredentialProviderError,
   type CredentialEnvironment,
   type CredentialProviderWithPreflight,
@@ -21,13 +26,29 @@ import {
 
 type Output = { write(message: string): void };
 type Prompt = (label: string) => Promise<string>;
+type ChooseOption = (choices: readonly AgentConnectChoice[]) => Promise<string>;
+export type SelectionMode = "terminal" | "browser";
 const MAX_AI_SUBACCOUNTS = 5;
+const SELECTION_TIMEOUT_MS = 300_000;
 
 function promptVisible(label: string): Promise<string> {
   return promptVisibleCommon(
     label,
     "Interactive Agent Connect requires a terminal.",
+    { timeoutMs: SELECTION_TIMEOUT_MS },
   );
+}
+
+export function detectSelectionMode(
+  input: { isTTY?: boolean } = process.stdin,
+): SelectionMode {
+  return input.isTTY === true ? "terminal" : "browser";
+}
+
+function selectionModeNotice(mode: SelectionMode): string {
+  return mode === "terminal"
+    ? "AI Subaccount selection: terminal prompt after authorization.\n"
+    : "AI Subaccount selection: browser page after authorization (no interactive terminal input detected).\n";
 }
 
 function isEnvironment(
@@ -49,23 +70,59 @@ function safeAccountName(name: string): string {
   return (normalized || "AI Subaccount").slice(0, 80);
 }
 
+function selectionInputError(
+  error: unknown,
+  environment: CredentialEnvironment,
+): AgentConnectError {
+  if (error instanceof AgentConnectError) {
+    return error;
+  }
+  const retry = `Run ${connectCommand(environment)} again.`;
+  if (error instanceof PromptInterruptedError) {
+    return error.reason === "timeout"
+      ? new AgentConnectError(
+          "selection-timeout",
+          `AI Subaccount selection timed out; no account was selected or created. ${retry}`,
+        )
+      : new AgentConnectError(
+          "selection-cancelled",
+          `AI Subaccount selection was cancelled; no account was selected or created. ${retry}`,
+        );
+  }
+  return new AgentConnectError(
+    "selection-unavailable",
+    `AI Subaccount selection input is unavailable; no account was selected or created. ${retry} Use an interactive terminal, or an agent shell to choose in the browser.`,
+  );
+}
+
 async function chooseSelection(
   accounts: AgentConnectAccount[],
-  prompt: Prompt,
+  choose: ChooseOption,
   output: Output,
+  environment: CredentialEnvironment,
 ): Promise<AgentConnectSelection> {
-  output.write("Available Bybit AI Subaccounts:\n");
-  accounts.forEach((account, index) => {
-    output.write(
-      `${index + 1}. ${safeAccountName(account.displayName)} (${maskedAccountId(account.accountId)})\n`,
-    );
-  });
+  const choices: AgentConnectChoice[] = accounts.map((account, index) => ({
+    id: String(index + 1),
+    label: `${safeAccountName(account.displayName)} (${maskedAccountId(account.accountId)})`,
+  }));
   const canCreate = accounts.length < MAX_AI_SUBACCOUNTS;
   if (canCreate) {
-    output.write(`${accounts.length + 1}. Create a new AI Subaccount\n`);
+    choices.push({
+      id: String(accounts.length + 1),
+      label: "Create a new AI Subaccount",
+    });
+  }
+  output.write("Available Bybit AI Subaccounts:\n");
+  for (const choice of choices) {
+    output.write(`${choice.id}. ${choice.label}\n`);
   }
 
-  const answer = (await prompt("Choose an option")).trim();
+  let answer: string;
+  try {
+    answer = (await choose(choices)).trim();
+  } catch (error) {
+    throw selectionInputError(error, environment);
+  }
   if (!/^\d+$/.test(answer)) {
     throw new AgentConnectError(
       "invalid-response",
@@ -125,11 +182,13 @@ export async function runCredentialsConnectCli(
     client = createBybitAgentConnectClient(),
     prompt = promptVisible,
     output = process.stdout,
+    selectionMode = detectSelectionMode(),
   }: {
     provider?: CredentialProviderWithPreflight;
     client?: AgentConnectClient;
     prompt?: Prompt;
     output?: Output;
+    selectionMode?: SelectionMode;
   } = {},
 ): Promise<number> {
   const [environmentValue, extra] = argv;
@@ -139,13 +198,19 @@ export async function runCredentialsConnectCli(
   }
 
   const environment = environmentValue;
+  // Announce how the account will be chosen before any side effect, so an
+  // unsuitable invocation can be stopped before browser authorization.
+  output.write(selectionModeNotice(selectionMode));
   let session: AgentConnectSession | undefined;
   let storageCommitted = false;
   let previousCredentials: ExchangeCredentials | undefined;
   try {
     await provider.preflight(environment);
     previousCredentials = await readPreviousCredentials(provider, environment);
-    session = await client.createSession(environment);
+    session = await client.createSession(environment, {
+      browserSelection: selectionMode === "browser",
+    });
+    const activeSession = session;
     output.write(
       `Bybit ${environment} Agent Connect authorization URL:\n${session.authorizationUrl}\n`,
     );
@@ -154,7 +219,21 @@ export async function runCredentialsConnectCli(
     const callback = await session.waitForCallback();
     const accessToken = await client.exchangeCode(environment, callback);
     const accounts = await client.listAccounts(environment, accessToken);
-    const selection = await chooseSelection(accounts, prompt, output);
+    const choose: ChooseOption =
+      selectionMode === "terminal"
+        ? () => prompt("Choose an option")
+        : (choices) => {
+            output.write(
+              "Choose an option on the Agent Connect page in the browser used for authorization.\n",
+            );
+            return activeSession.chooseInBrowser(choices);
+          };
+    const selection = await chooseSelection(
+      accounts,
+      choose,
+      output,
+      environment,
+    );
     const credentials = await client.fetchAccountCredentials(
       environment,
       accessToken,

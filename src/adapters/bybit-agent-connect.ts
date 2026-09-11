@@ -1,4 +1,4 @@
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import {
   createServer,
   type IncomingMessage,
@@ -10,14 +10,16 @@ import {
   AgentConnectError,
   type AgentConnectAccount,
   type AgentConnectCallback,
+  type AgentConnectChoice,
   type AgentConnectClient,
   type AgentConnectSession,
   type AgentConnectSessionOptions,
   type AgentConnectTransport,
 } from "../ports/agent-connect.js";
-import type {
-  CredentialEnvironment,
-  ExchangeCredentials,
+import {
+  connectCommand,
+  type CredentialEnvironment,
+  type ExchangeCredentials,
 } from "../ports/credential-provider.js";
 
 const OAUTH_CLIENT_ID = "ai-agent";
@@ -30,6 +32,21 @@ const DEFAULT_CALLBACK_TIMEOUT_MS = 300_000;
 const MAX_CALLBACK_TIMEOUT_MS = 300_000;
 const REQUEST_TIMEOUT_MS = 30_000;
 const TWO_FACTOR_REQUIRED_CODE = 20039;
+const DEFAULT_SELECTION_TIMEOUT_MS = 300_000;
+const MAX_SELECTION_TIMEOUT_MS = 300_000;
+const MAX_SELECTION_FORM_BYTES = 4_096;
+const SELECTION_REFRESH_SECONDS = 2;
+const SELECTION_PATH = "/select";
+const SELECTION_TITLE = "Choose a Bybit AI Subaccount";
+const HTML_HEADERS = {
+  "content-type": "text/html; charset=utf-8",
+  "cache-control": "no-store",
+  "content-security-policy":
+    "default-src 'none'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
+  "referrer-policy": "same-origin",
+  "x-content-type-options": "nosniff",
+  "x-frame-options": "DENY",
+} as const;
 
 export const agentConnectEndpoints = {
   mainnet: {
@@ -234,6 +251,101 @@ function callbackResponse(
   response.end(message);
 }
 
+type BrowserSelectionState =
+  | Readonly<{ kind: "unavailable" | "loading" }>
+  | Readonly<{
+      kind: "open";
+      choices: readonly AgentConnectChoice[];
+      resolve: (choiceId: string) => void;
+      reject: (error: AgentConnectError) => void;
+      timer: ReturnType<typeof setTimeout>;
+    }>
+  | Readonly<{ kind: "finished"; message: string }>;
+
+function escapeHtml(value: string): string {
+  return value.replace(
+    /[&<>"']/g,
+    (character) => `&#${character.charCodeAt(0)};`,
+  );
+}
+
+function htmlResponse(
+  response: ServerResponse,
+  status: number,
+  title: string,
+  body: string,
+  refresh = false,
+): void {
+  response.writeHead(status, HTML_HEADERS);
+  response.end(
+    `<!doctype html><html lang="en"><head><meta charset="utf-8">` +
+      (refresh
+        ? `<meta http-equiv="refresh" content="${SELECTION_REFRESH_SECONDS}">`
+        : "") +
+      `<title>${escapeHtml(title)}</title></head>` +
+      `<body><h1>${escapeHtml(title)}</h1>${body}</body></html>`,
+  );
+}
+
+function selectionForm(
+  choices: readonly AgentConnectChoice[],
+  secret: string,
+  error?: string,
+): string {
+  // No option is preselected: the operator must choose explicitly.
+  const options = choices
+    .map(
+      (choice) =>
+        `<p><label><input type="radio" name="choice" value="${escapeHtml(choice.id)}" required> ${escapeHtml(choice.label)}</label></p>`,
+    )
+    .join("");
+  return (
+    (error ? `<p role="alert">${escapeHtml(error)}</p>` : "") +
+    `<form method="post" action="${SELECTION_PATH}">` +
+    `<input type="hidden" name="s" value="${escapeHtml(secret)}">${options}` +
+    `<p><button type="submit" name="action" value="choose">Continue</button> ` +
+    `<button type="submit" name="action" value="cancel" formnovalidate>Cancel</button></p>` +
+    `</form>`
+  );
+}
+
+function readForm(request: IncomingMessage): Promise<URLSearchParams> {
+  return new Promise((resolve, reject) => {
+    const contentType = request.headers["content-type"] ?? "";
+    if (
+      !contentType.toLowerCase().startsWith("application/x-www-form-urlencoded")
+    ) {
+      request.resume();
+      reject(new Error("unsupported form encoding"));
+      return;
+    }
+    const chunks: Buffer[] = [];
+    let size = 0;
+    request.on("data", (chunk: Buffer) => {
+      size += chunk.length;
+      if (size <= MAX_SELECTION_FORM_BYTES) chunks.push(chunk);
+    });
+    request.once("end", () => {
+      if (size > MAX_SELECTION_FORM_BYTES) {
+        reject(new Error("form too large"));
+        return;
+      }
+      resolve(new URLSearchParams(Buffer.concat(chunks).toString("utf8")));
+    });
+    request.once("error", () => reject(new Error("form read failed")));
+  });
+}
+
+function sameSecret(expected: string, actual: string | null): boolean {
+  if (actual === null) return false;
+  const expectedBytes = Buffer.from(expected);
+  const actualBytes = Buffer.from(actual);
+  return (
+    expectedBytes.length === actualBytes.length &&
+    timingSafeEqual(expectedBytes, actualBytes)
+  );
+}
+
 export async function startAgentConnectSession(
   environment: CredentialEnvironment,
   options: AgentConnectSessionOptions = {},
@@ -256,8 +368,16 @@ export async function startAgentConnectSession(
     );
   }
 
+  const selectionTimeoutMs = Math.min(
+    Math.max(options.selectionTimeoutMs ?? DEFAULT_SELECTION_TIMEOUT_MS, 1),
+    MAX_SELECTION_TIMEOUT_MS,
+  );
+  const browserSelection = options.browserSelection === true;
+
   const state = createState();
   const verifier = createVerifier();
+  const selectionSecret = randomBytes(32).toString("base64url");
+  let selection: BrowserSelectionState = { kind: "unavailable" };
   let activeServer: Server | undefined;
   let settled = false;
   let resolveCallback: (callback: AgentConnectCallback) => void = () =>
@@ -282,26 +402,168 @@ export async function startAgentConnectSession(
     }
     settled = true;
     if (timeout) clearTimeout(timeout);
-    callbackResponse(
+    if (browserSelection) {
+      // Keep the loopback server open for the selection page.
+      selection = { kind: "loading" };
+      response.writeHead(303, {
+        location: `${SELECTION_PATH}?s=${selectionSecret}`,
+        "cache-control": "no-store",
+        "referrer-policy": "no-referrer",
+      });
+      response.end();
+    } else {
+      callbackResponse(
+        response,
+        200,
+        "Authorization successful. Return to the terminal to choose an AI Subaccount.",
+      );
+      setImmediate(() => closeServer(activeServer));
+    }
+    resolveCallback({ code, codeVerifier: verifier });
+  };
+
+  const settleSelection = (
+    message: string,
+    outcome:
+      Readonly<{ choiceId: string }> | Readonly<{ error: AgentConnectError }>,
+  ): void => {
+    if (selection.kind !== "open") return;
+    const open = selection;
+    clearTimeout(open.timer);
+    selection = { kind: "finished", message };
+    if ("choiceId" in outcome) {
+      open.resolve(outcome.choiceId);
+    } else {
+      open.reject(outcome.error);
+    }
+  };
+  const renderSelection = (response: ServerResponse): void => {
+    if (selection.kind === "open") {
+      htmlResponse(
+        response,
+        200,
+        SELECTION_TITLE,
+        selectionForm(selection.choices, selectionSecret),
+      );
+      return;
+    }
+    if (selection.kind === "finished") {
+      htmlResponse(
+        response,
+        200,
+        "Bybit Agent Connect",
+        `<p>${escapeHtml(selection.message)}</p>`,
+      );
+      return;
+    }
+    htmlResponse(
       response,
       200,
-      "Authorization successful. You can close this page.",
+      "Loading Bybit AI Subaccounts",
+      "<p>Authorization received. Loading AI Subaccount options…</p>",
+      true,
     );
-    resolveCallback({ code, codeVerifier: verifier });
-    setImmediate(() => closeServer(activeServer));
   };
+  const submitSelection = (
+    form: URLSearchParams,
+    response: ServerResponse,
+  ): void => {
+    if (selection.kind !== "open") {
+      renderSelection(response);
+      return;
+    }
+    const open = selection;
+    const action = form.get("action");
+    if (action === "cancel") {
+      settleSelection(
+        "Selection cancelled. No AI Subaccount was selected or created; you can close this page.",
+        {
+          error: new AgentConnectError(
+            "selection-cancelled",
+            `AI Subaccount selection was cancelled; no account was selected or created. Run ${connectCommand(environment)} again.`,
+          ),
+        },
+      );
+      renderSelection(response);
+      return;
+    }
+    const choiceId = form.get("choice");
+    if (
+      action !== "choose" ||
+      choiceId === null ||
+      !open.choices.some(({ id }) => id === choiceId)
+    ) {
+      htmlResponse(
+        response,
+        400,
+        SELECTION_TITLE,
+        selectionForm(
+          open.choices,
+          selectionSecret,
+          "Choose one of the listed options.",
+        ),
+      );
+      return;
+    }
+    settleSelection(
+      "Selection received. Return to the terminal or agent to finish connecting; you can close this page.",
+      { choiceId },
+    );
+    renderSelection(response);
+  };
+  const handleSelectionRequest = (
+    request: IncomingMessage,
+    response: ServerResponse,
+    url: URL,
+  ): void => {
+    // The page exists only after authorization and only for this loopback
+    // origin; any other Host header indicates DNS rebinding.
+    if (
+      selection.kind === "unavailable" ||
+      request.headers.host !== `127.0.0.1:${selectedPort}`
+    ) {
+      callbackResponse(response, 404, "Not found.");
+      return;
+    }
+    if (request.method === "GET") {
+      if (!sameSecret(selectionSecret, url.searchParams.get("s"))) {
+        callbackResponse(response, 404, "Not found.");
+        return;
+      }
+      renderSelection(response);
+      return;
+    }
+    if (request.method !== "POST") {
+      callbackResponse(response, 405, "Method not allowed.");
+      return;
+    }
+    readForm(request).then(
+      (form) => {
+        if (
+          request.headers.origin !== `http://127.0.0.1:${selectedPort}` ||
+          !sameSecret(selectionSecret, form.get("s"))
+        ) {
+          callbackResponse(response, 403, "Selection rejected.");
+          return;
+        }
+        submitSelection(form, response);
+      },
+      () => callbackResponse(response, 400, "Selection rejected."),
+    );
+  };
+
   const handleRequest = (
     request: IncomingMessage,
     response: ServerResponse,
   ): void => {
-    if (settled) {
-      callbackResponse(response, 409, "Authorization already processed.");
-      return;
-    }
     let url: URL;
     try {
       url = new URL(request.url ?? "", "http://127.0.0.1");
     } catch {
+      if (settled) {
+        callbackResponse(response, 409, "Authorization already processed.");
+        return;
+      }
       callbackResponse(response, 400, "Authorization failed.");
       fail(
         new AgentConnectError(
@@ -309,6 +571,14 @@ export async function startAgentConnectSession(
           "OAuth callback was malformed.",
         ),
       );
+      return;
+    }
+    if (url.pathname === SELECTION_PATH) {
+      handleSelectionRequest(request, response, url);
+      return;
+    }
+    if (settled) {
+      callbackResponse(response, 409, "Authorization already processed.");
       return;
     }
     if (url.pathname !== "/callback") {
@@ -402,7 +672,48 @@ export async function startAgentConnectSession(
     ),
     port: selectedPort,
     waitForCallback: () => callback,
+    chooseInBrowser: (choices) => {
+      if (selection.kind !== "loading") {
+        return Promise.reject(
+          new AgentConnectError(
+            "selection-unavailable",
+            browserSelection
+              ? "Browser AI Subaccount selection is not available for this session."
+              : "Browser AI Subaccount selection was not enabled for this session.",
+          ),
+        );
+      }
+      return new Promise<string>((resolve, reject) => {
+        const timer = setTimeout(() => {
+          settleSelection(
+            "Selection timed out. No AI Subaccount was selected or created.",
+            {
+              error: new AgentConnectError(
+                "selection-timeout",
+                `AI Subaccount selection timed out; no account was selected or created. Run ${connectCommand(environment)} again.`,
+              ),
+            },
+          );
+        }, selectionTimeoutMs);
+        selection = {
+          kind: "open",
+          choices: Object.freeze([...choices]),
+          resolve,
+          reject,
+          timer,
+        };
+      });
+    },
     close: () => {
+      settleSelection(
+        "This Agent Connect session has ended. Return to the terminal or agent.",
+        {
+          error: new AgentConnectError(
+            "selection-cancelled",
+            `Agent Connect session closed before an AI Subaccount was selected; no account was selected or created. Run ${connectCommand(environment)} again.`,
+          ),
+        },
+      );
       if (!settled) {
         fail(
           new AgentConnectError(

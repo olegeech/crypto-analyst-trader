@@ -17,10 +17,20 @@ export interface AgentConnectCallback {
   codeVerifier: string;
 }
 
+export interface AgentConnectChoice {
+  id: string;
+  label: string;
+}
+
 export interface AgentConnectSession {
   authorizationUrl: string;
   port: number;
   waitForCallback(): Promise<AgentConnectCallback>;
+  /**
+   * Shows the choices on the loopback page the authorization tab was
+   * redirected to and waits for one explicit operator choice.
+   */
+  chooseInBrowser(choices: readonly AgentConnectChoice[]): Promise<string>;
   close(): void;
 }
 
@@ -28,6 +38,8 @@ export interface AgentConnectSessionOptions {
   startPort?: number;
   maxPort?: number;
   timeoutMs?: number;
+  browserSelection?: boolean;
+  selectionTimeoutMs?: number;
 }
 
 export interface AgentConnectTransport {
@@ -61,7 +73,10 @@ export type AgentConnectErrorCode =
   | "callback-invalid"
   | "transport-failed"
   | "api-failed"
-  | "invalid-response";
+  | "invalid-response"
+  | "selection-unavailable"
+  | "selection-cancelled"
+  | "selection-timeout";
 
 export class AgentConnectError extends Error {
   readonly code: AgentConnectErrorCode;
