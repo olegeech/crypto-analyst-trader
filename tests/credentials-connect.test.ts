@@ -1,10 +1,22 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { runCredentialsConnectCli } from "../scripts/credentials-connect.js";
+import {
+  detectSelectionMode,
+  runCredentialsConnectCli,
+} from "../scripts/credentials-connect.js";
+import { PromptInterruptedError } from "../src/cli/interactive-prompt.js";
+import {
+  createMacOSKeychainProvider,
+  type SecurityCommandResult,
+  type SecurityRunner,
+} from "../src/adapters/macos-keychain.js";
 import {
   AgentConnectError,
+  type AgentConnectCallback,
+  type AgentConnectChoice,
   type AgentConnectClient,
+  type AgentConnectRequestEvent,
   type AgentConnectSession,
 } from "../src/ports/agent-connect.js";
 import {
@@ -28,6 +40,30 @@ function outputBuffer(): {
     output: { write: (message) => messages.push(message) },
     text: () => messages.join(""),
   };
+}
+
+function pendingCodePrompt(
+  _label: string,
+  signal: AbortSignal,
+): Promise<string> {
+  return new Promise((_resolve, reject) => {
+    signal.addEventListener(
+      "abort",
+      () => reject(new PromptInterruptedError("cancelled")),
+      { once: true },
+    );
+  });
+}
+
+function runConnect(
+  argv: string[],
+  dependencies: NonNullable<Parameters<typeof runCredentialsConnectCli>[1]>,
+): Promise<number> {
+  return runCredentialsConnectCli(argv, {
+    selectionMode: "terminal",
+    promptCode: pendingCodePrompt,
+    ...dependencies,
+  });
 }
 
 function providerFor(
@@ -78,19 +114,57 @@ function providerFor(
 function clientFor(
   events: string[],
   accounts: Array<{ accountId: string; displayName: string }>,
+  {
+    browserChoice,
+    selectionUrl,
+    requestEvents = [],
+    pastedOnly = false,
+  }: {
+    browserChoice?: (choices: readonly AgentConnectChoice[]) => Promise<string>;
+    selectionUrl?: string;
+    requestEvents?: AgentConnectRequestEvent[];
+    pastedOnly?: boolean;
+  } = {},
 ): AgentConnectClient {
+  let onRequest: ((event: AgentConnectRequestEvent) => void) | undefined;
+  let resolvePasted: (callback: AgentConnectCallback) => void = () => undefined;
+  const pasted = new Promise<AgentConnectCallback>((resolve) => {
+    resolvePasted = resolve;
+  });
+  let codeSubmitted = false;
   const session: AgentConnectSession = {
     authorizationUrl: "https://testnet.bybit.com/oauth?state=masked",
     port: 9876,
+    ...(selectionUrl === undefined ? {} : { selectionUrl }),
     waitForCallback: async () => {
       events.push("callback");
+      for (const event of requestEvents) onRequest?.(event);
+      if (pastedOnly) return pasted;
       return { code: "one-time-code", codeVerifier: "verifier" };
+    },
+    submitAuthorizationCode: (code) => {
+      if (codeSubmitted) return "closed";
+      if (/\s/.test(code)) return "invalid";
+      codeSubmitted = true;
+      events.push(`pasted:${code}`);
+      resolvePasted({ code, codeVerifier: "verifier", source: "pasted" });
+      return "accepted";
+    },
+    chooseInBrowser: async (choices) => {
+      events.push(
+        `browser-choice:${choices.map(({ label }) => label).join("|")}`,
+      );
+      if (!browserChoice) throw new Error("unexpected browser selection");
+      return browserChoice(choices);
     },
     close: () => events.push("close"),
   };
   return {
-    createSession: async (environment) => {
-      events.push(`session:${environment}`);
+    createSession: async (environment, options) => {
+      onRequest = options?.onRequest;
+      events.push(
+        `session:${environment}${options?.browserSelection ? ":browser" : ""}`,
+      );
       return session;
     },
     exchangeCode: async (_environment, callback) => {
@@ -113,7 +187,7 @@ function clientFor(
 test("invalid connect command does not touch Keychain or OAuth", async () => {
   const events: string[] = [];
   const { output, text } = outputBuffer();
-  const code = await runCredentialsConnectCli(["production"], {
+  const code = await runConnect(["production"], {
     provider: providerFor(events),
     client: clientFor(events, []),
     prompt: async () => "1",
@@ -128,7 +202,7 @@ test("invalid connect command does not touch Keychain or OAuth", async () => {
 test("successful connect preflights first, requires explicit selection, and verifies the load seam", async () => {
   const events: string[] = [];
   const { output, text } = outputBuffer();
-  const code = await runCredentialsConnectCli(["testnet"], {
+  const code = await runConnect(["testnet"], {
     provider: providerFor(events),
     client: clientFor(events, [
       { accountId: "123456", displayName: "Trading" },
@@ -163,7 +237,7 @@ test("successful connect preflights first, requires explicit selection, and veri
 test("empty account list waits for an explicit choice and does not auto-create", async () => {
   const events: string[] = [];
   const { output } = outputBuffer();
-  const code = await runCredentialsConnectCli(["mainnet"], {
+  const code = await runConnect(["mainnet"], {
     provider: providerFor(events),
     client: clientFor(events, []),
     prompt: async () => "invalid",
@@ -185,7 +259,7 @@ test("empty account list waits for an explicit choice and does not auto-create",
 test("create is sent only after the operator explicitly selects it", async () => {
   const events: string[] = [];
   const { output } = outputBuffer();
-  const code = await runCredentialsConnectCli(["mainnet"], {
+  const code = await runConnect(["mainnet"], {
     provider: providerFor(events),
     client: clientFor(events, []),
     prompt: async () => "1",
@@ -199,7 +273,7 @@ test("create is sent only after the operator explicitly selects it", async () =>
 test("account cap hides create when five AI Subaccounts are listed", async () => {
   const events: string[] = [];
   const { output, text } = outputBuffer();
-  const code = await runCredentialsConnectCli(["mainnet"], {
+  const code = await runConnect(["mainnet"], {
     provider: providerFor(events),
     client: clientFor(
       events,
@@ -229,7 +303,7 @@ test("selection rejects non-exact numeric choices", async () => {
   for (const choice of ["1junk", "1.5"]) {
     const events: string[] = [];
     const { output, text } = outputBuffer();
-    const code = await runCredentialsConnectCli(["testnet"], {
+    const code = await runConnect(["testnet"], {
       provider: providerFor(events),
       client: clientFor(events, [
         { accountId: "123456", displayName: "Trading" },
@@ -255,7 +329,7 @@ test("selection rejects non-exact numeric choices", async () => {
 test("connect fails when the load seam returns different credentials", async () => {
   const events: string[] = [];
   const { output, text } = outputBuffer();
-  const code = await runCredentialsConnectCli(["testnet"], {
+  const code = await runConnect(["testnet"], {
     provider: providerFor(events, {
       loadedCredentials: {
         apiKey: "different-api-key",
@@ -284,7 +358,7 @@ test("connect fails when the load seam returns different credentials", async () 
 test("corrupt prior credentials do not block connect", async () => {
   const events: string[] = [];
   const { output, text } = outputBuffer();
-  const code = await runCredentialsConnectCli(["testnet"], {
+  const code = await runConnect(["testnet"], {
     provider: providerFor(events, {
       loadResults: [
         new CredentialProviderError(
@@ -320,7 +394,7 @@ test("corrupt prior credentials do not block connect", async () => {
 test("cleanup failure after storage verification restores prior credentials", async () => {
   const events: string[] = [];
   const { output, text } = outputBuffer();
-  const code = await runCredentialsConnectCli(["testnet"], {
+  const code = await runConnect(["testnet"], {
     provider: providerFor(events, {
       loadResults: [
         importedCredentials,
@@ -353,7 +427,7 @@ test("cleanup failure after storage verification restores prior credentials", as
 test("cleanup failure preserves the original safe failure reason", async () => {
   const events: string[] = [];
   const { output, text } = outputBuffer();
-  const code = await runCredentialsConnectCli(["testnet"], {
+  const code = await runConnect(["testnet"], {
     provider: providerFor(events, {
       loadResults: [
         importedCredentials,
@@ -381,7 +455,7 @@ test("cleanup failure preserves the original safe failure reason", async () => {
 test("Keychain preflight failure stops before starting OAuth and redacts details", async () => {
   const events: string[] = [];
   const { output, text } = outputBuffer();
-  const code = await runCredentialsConnectCli(["testnet"], {
+  const code = await runConnect(["testnet"], {
     provider: providerFor(events, {
       preflightError: new CredentialProviderError(
         "preflight-failed",
@@ -399,6 +473,97 @@ test("Keychain preflight failure stops before starting OAuth and redacts details
   assert.doesNotMatch(text(), /sentinel|private/);
 });
 
+test("every Keychain preflight failure branch cleans up before OAuth can start", async (t) => {
+  for (const scenario of [
+    {
+      name: "duplicate exit",
+      add: { stdout: "", stderr: "private duplicate", exitCode: 45 },
+    },
+    {
+      name: "other nonzero exit",
+      add: { stdout: "", stderr: "private add", exitCode: 1 },
+    },
+    { name: "add exception", addThrows: true },
+    {
+      name: "read failure",
+      add: { stdout: "", stderr: "", exitCode: 0 },
+      read: { stdout: "", stderr: "private read", exitCode: 1 },
+    },
+    {
+      name: "empty read-back",
+      add: { stdout: "", stderr: "", exitCode: 0 },
+      read: { stdout: "", stderr: "", exitCode: 0 },
+    },
+    {
+      name: "mismatched read-back",
+      add: { stdout: "", stderr: "", exitCode: 0 },
+      read: { stdout: "different\n", stderr: "", exitCode: 0 },
+    },
+    {
+      name: "cleanup failure",
+      add: { stdout: "", stderr: "", exitCode: 0 },
+      readMatchesWrite: true,
+      delete: { stdout: "", stderr: "private cleanup", exitCode: 1 },
+    },
+  ] satisfies Array<{
+    name: string;
+    add?: SecurityCommandResult;
+    addThrows?: boolean;
+    read?: SecurityCommandResult;
+    readMatchesWrite?: boolean;
+    delete?: SecurityCommandResult;
+  }>) {
+    await t.test(scenario.name, async () => {
+      const keychainEvents: string[] = [];
+      let writtenValue = "";
+      const runner: SecurityRunner = async (args, input) => {
+        const operation = args[0] ?? "unknown";
+        keychainEvents.push(operation);
+        if (operation === "add-generic-password") {
+          if (scenario.addThrows) throw new Error("private add exception");
+          writtenValue = input?.split("\n")[0] ?? "";
+          return scenario.add ?? { stdout: "", stderr: "", exitCode: 1 };
+        }
+        if (operation === "find-generic-password") {
+          if (scenario.readMatchesWrite) {
+            return { stdout: `${writtenValue}\n`, stderr: "", exitCode: 0 };
+          }
+          return (
+            scenario.read ?? { stdout: "", stderr: "missing", exitCode: 44 }
+          );
+        }
+        if (operation === "delete-generic-password") {
+          return scenario.delete ?? { stdout: "", stderr: "", exitCode: 0 };
+        }
+        return { stdout: "", stderr: "", exitCode: 0 };
+      };
+      const events: string[] = [];
+      const { output, text } = outputBuffer();
+      const provider = createMacOSKeychainProvider({
+        runner,
+        platform: "darwin",
+      });
+
+      const code = await runConnect(["testnet"], {
+        provider,
+        client: clientFor(events, []),
+        prompt: async () => "1",
+        output,
+      });
+
+      assert.equal(code, 1);
+      assert.deepEqual(keychainEvents, [
+        "add-generic-password",
+        "find-generic-password",
+        "delete-generic-password",
+      ]);
+      assert.deepEqual(events, []);
+      assert.match(text(), /OAuth was not started/);
+      assert.doesNotMatch(text(), /private|different|connect-preflight-/);
+    });
+  }
+});
+
 test("unexpected implementation errors use a generic safe CLI message", async () => {
   const events: string[] = [];
   const { output, text } = outputBuffer();
@@ -406,7 +571,7 @@ test("unexpected implementation errors use a generic safe CLI message", async ()
   failingClient.createSession = async () => {
     throw new AgentConnectError("transport-failed", "transport failed safely");
   };
-  const code = await runCredentialsConnectCli(["testnet"], {
+  const code = await runConnect(["testnet"], {
     provider: providerFor(events),
     client: failingClient,
     prompt: async () => "1",
@@ -416,4 +581,260 @@ test("unexpected implementation errors use a generic safe CLI message", async ()
   assert.equal(code, 1);
   assert.match(text(), /transport failed safely/);
   assert.doesNotMatch(text(), /api-key|secret|token/);
+});
+
+test("a pasted authorization code completes authorization when the callback never arrives", async () => {
+  const events: string[] = [];
+  const { output, text } = outputBuffer();
+  const answers = ["two words", "pasted-code"];
+  const code = await runConnect(["testnet"], {
+    provider: providerFor(events),
+    client: clientFor(
+      events,
+      [{ accountId: "123456", displayName: "Trading" }],
+      { pastedOnly: true },
+    ),
+    prompt: async () => "1",
+    promptCode: async (label, signal) =>
+      answers.shift() ?? pendingCodePrompt(label, signal),
+    output,
+  });
+
+  assert.equal(code, 0);
+  assert.deepEqual(events.slice(0, 6), [
+    "preflight:testnet",
+    "load:testnet",
+    "session:testnet",
+    "callback",
+    "pasted:pasted-code",
+    "exchange:pasted-code",
+  ]);
+  assert.match(text(), /paste it at the prompt below/);
+  assert.match(text(), /That is not an authorization code/);
+  assert.match(text(), /Pasted authorization code accepted/);
+  assert.match(text(), /stored in macOS Keychain/);
+  assert.doesNotMatch(text(), /pasted-code/);
+});
+
+test("cancelling the code prompt stops before any account request", async () => {
+  const events: string[] = [];
+  const { output, text } = outputBuffer();
+  const code = await runConnect(["testnet"], {
+    provider: providerFor(events),
+    client: clientFor(events, [], { pastedOnly: true }),
+    prompt: async () => "1",
+    promptCode: async () => {
+      throw new PromptInterruptedError("cancelled");
+    },
+    output,
+  });
+
+  assert.equal(code, 1);
+  assert.match(
+    text(),
+    /authorization was cancelled; no account was selected or created/,
+  );
+  assert.match(text(), /credentials:connect:testnet/);
+  assert.deepEqual(events, [
+    "preflight:testnet",
+    "load:testnet",
+    "session:testnet",
+    "callback",
+    "close",
+  ]);
+});
+
+test("selection mode follows interactive terminal input", () => {
+  assert.equal(detectSelectionMode({ isTTY: true }), "terminal");
+  assert.equal(detectSelectionMode({ isTTY: false }), "browser");
+  assert.equal(detectSelectionMode({}), "browser");
+});
+
+test("the selection channel is announced before Keychain preflight", async () => {
+  for (const [selectionMode, expected] of [
+    ["terminal", /selection: terminal prompt/],
+    ["browser", /selection: browser page/],
+  ] as const) {
+    const events: string[] = [];
+    const { output, text } = outputBuffer();
+    const code = await runConnect(["testnet"], {
+      provider: providerFor(events, {
+        preflightError: new CredentialProviderError(
+          "preflight-failed",
+          "Bybit testnet Keychain preflight failed; OAuth was not started.",
+        ),
+      }),
+      client: clientFor(events, []),
+      output,
+      selectionMode,
+    });
+
+    assert.equal(code, 1);
+    assert.deepEqual(events, ["preflight:testnet"]);
+    assert.match(text(), expected);
+  }
+});
+
+test("without terminal input the operator chooses in the browser within the same authorization", async () => {
+  const events: string[] = [];
+  const { output, text } = outputBuffer();
+  let prompted = false;
+  const code = await runConnect(["testnet"], {
+    provider: providerFor(events),
+    client: clientFor(
+      events,
+      [{ accountId: "123456", displayName: "Trading" }],
+      { browserChoice: async () => "1" },
+    ),
+    prompt: async () => {
+      prompted = true;
+      return "2";
+    },
+    output,
+    selectionMode: "browser",
+  });
+
+  assert.equal(code, 0);
+  assert.equal(prompted, false);
+  assert.deepEqual(events, [
+    "preflight:testnet",
+    "load:testnet",
+    "session:testnet:browser",
+    "callback",
+    "exchange:one-time-code",
+    "list:access-token",
+    "browser-choice:Trading (•••3456)|Create a new AI Subaccount",
+    "fetch:access-token:123456",
+    "save:testnet:123456",
+    "load:testnet",
+    "close",
+  ]);
+  assert.match(text(), /Agent Connect page in the browser/);
+  assert.match(text(), /stored in macOS Keychain/);
+  assert.doesNotMatch(
+    text(),
+    /imported-api-key|imported-api-secret|access-token|one-time-code|123456/,
+  );
+});
+
+test("browser selection prints a direct page link and sanitized loopback request evidence", async () => {
+  const events: string[] = [];
+  const { output, text } = outputBuffer();
+  const code = await runConnect(["testnet"], {
+    provider: providerFor(events),
+    client: clientFor(
+      events,
+      [{ accountId: "123456", displayName: "Trading" }],
+      {
+        browserChoice: async () => "1",
+        selectionUrl: "http://127.0.0.1:9876/select?s=local-session-secret",
+        requestEvents: [
+          {
+            method: "GET",
+            path: "/callback",
+            fetchSite: "cross-site",
+            fetchMode: "no-cors",
+            fetchDest: "empty",
+            origin: "https://testnet.bybit.com",
+            privateNetworkPreflight: false,
+            callback: {
+              stateMatches: true,
+              codePresent: true,
+              errorPresent: false,
+            },
+            outcome: "accepted",
+          },
+        ],
+      },
+    ),
+    output,
+    selectionMode: "browser",
+  });
+
+  assert.equal(code, 0);
+  assert.match(
+    text(),
+    /Open this local page[^\n]*\nhttp:\/\/127\.0\.0\.1:9876\/select\?s=local-session-secret\n/,
+  );
+  assert.match(
+    text(),
+    /paste it there:\nhttp:\/\/127\.0\.0\.1:9876\/select\?s=local-session-secret\n[\s\S]*Available Bybit AI Subaccounts/,
+  );
+  assert.match(
+    text(),
+    /Loopback request: GET \/callback -> accepted \(fetch site=cross-site, mode=no-cors, dest=empty; origin=https:\/\/testnet\.bybit\.com; state matches, code present\)/,
+  );
+  assert.doesNotMatch(text(), /one-time-code|access-token/);
+});
+
+test("browser selection never auto-selects and stops cleanly when the wait ends", async () => {
+  const events: string[] = [];
+  const { output, text } = outputBuffer();
+  const code = await runConnect(["testnet"], {
+    provider: providerFor(events),
+    client: clientFor(
+      events,
+      [{ accountId: "123456", displayName: "Trading" }],
+      {
+        browserChoice: async () => {
+          throw new AgentConnectError(
+            "selection-timeout",
+            "AI Subaccount selection timed out; no account was selected or created. Run npm run credentials:connect:testnet again.",
+          );
+        },
+      },
+    ),
+    output,
+    selectionMode: "browser",
+  });
+
+  assert.equal(code, 1);
+  assert.match(text(), /selection timed out/);
+  assert.deepEqual(events.slice(-3), [
+    "list:access-token",
+    "browser-choice:Trading (•••3456)|Create a new AI Subaccount",
+    "close",
+  ]);
+});
+
+test("selection input failures are reported distinctly before account credentials are requested", async (t) => {
+  for (const { name, error, expected } of [
+    {
+      name: "unavailable input",
+      error: new Error("private prompt detail"),
+      expected: /selection input is unavailable/,
+    },
+    {
+      name: "timeout",
+      error: new PromptInterruptedError("timeout"),
+      expected: /selection timed out/,
+    },
+    {
+      name: "cancellation",
+      error: new PromptInterruptedError("cancelled"),
+      expected: /selection was cancelled/,
+    },
+  ]) {
+    await t.test(name, async () => {
+      const events: string[] = [];
+      const { output, text } = outputBuffer();
+      const code = await runConnect(["testnet"], {
+        provider: providerFor(events),
+        client: clientFor(events, [
+          { accountId: "123456", displayName: "Trading" },
+        ]),
+        prompt: async () => {
+          throw error;
+        },
+        output,
+      });
+
+      assert.equal(code, 1);
+      assert.match(text(), expected);
+      assert.match(text(), /no account was selected or created/);
+      assert.match(text(), /credentials:connect:testnet/);
+      assert.doesNotMatch(text(), /onboarding failed|private prompt detail/);
+      assert.deepEqual(events.slice(-2), ["list:access-token", "close"]);
+    });
+  }
 });

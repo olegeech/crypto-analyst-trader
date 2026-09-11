@@ -6,8 +6,8 @@ path remains credential-free.
 
 ## Bybit Agent Connect (preferred)
 
-Use Agent Connect when Bybit should authorize an isolated AI Subaccount without
-manual API-key creation:
+Use Agent Connect as the preferred quick start when Bybit should authorize an
+isolated AI Subaccount without manual API-key creation:
 
 ```bash
 npm run credentials:connect:testnet
@@ -25,8 +25,43 @@ instruction to bind 2FA before proceeding; bind it and run the connect command
 again.
 
 After authorization, the command lists AI Subaccounts and waits for an
-explicit selection. It never selects or creates an account automatically. If
-you choose create, Bybit performs the account provisioning inside its
+explicit selection. It never selects or creates an account automatically, even
+when only one option exists. Before the Keychain preflight, the command states
+which selection channel it will use:
+
+- In an interactive terminal, enter the option number at the terminal prompt.
+- Without interactive terminal input, for example from an agent shell with
+  piped stdin, the command prints a link to a local page on the same
+  `127.0.0.1` callback port once the options are loaded; open it in the
+  browser used for authorization. When the callback arrives as a visible
+  navigation, the authorization tab is also redirected there. The page lists
+  the options with masked account IDs; choose one there or cancel. The page accepts only same-origin submissions
+  carrying a one-time session secret, is never cached, and exists only while
+  the command runs.
+
+Selection waits at most five minutes. A timeout, a cancellation (**Cancel** on
+the page, or Ctrl-C/Ctrl-D at the terminal prompt) or unavailable input ends the
+command before any account credentials are requested, reports that no account
+was selected or created, and leaves existing Keychain records unchanged.
+
+If the Bybit page shows an authorization code instead of finishing, the command
+accepts that code while it is still waiting for the callback, within the same
+deadline. Paste it at the terminal prompt or, without terminal input, into the
+local page whose link the command prints right after the authorization URL.
+Bybit exchanges the code only together with this session's PKCE verifier, so a
+code from any other authorization request is rejected. Ctrl-C or Ctrl-D at the
+code prompt cancels the authorization.
+
+While waiting, the command prints one `Loopback request:` line for every
+request that reaches the callback server: method, path without query, the
+browser's `Sec-Fetch-*` values, the request origin, whether it is a
+private-network preflight, and whether the callback state matched and a code
+was present. It never prints the code, the state or other query values. If
+authorization times out, the message says whether any request reached the
+callback server at all. Include these lines when reporting a callback that did
+not arrive.
+
+If you choose create, Bybit performs the account provisioning inside its
 authorized Agent Connect flow. The prompt follows Bybit's documented maximum
 of five AI Subaccounts; at that limit it offers selection only. The endpoint
 and parameter contract follows Bybit's [Agent Connect OAuth module](https://raw.githubusercontent.com/bybit-exchange/skills/main/modules/oauth.md).
@@ -46,9 +81,10 @@ The connect commands are intentionally excluded from default CI and release
 execution. Release tests use injected OAuth, callback and Keychain fixtures;
 they never contact Bybit or modify a real Keychain.
 
-## Recommended setup
+## Manual API credential fallback
 
-Run the environment-specific command in an interactive macOS Terminal:
+If Agent Connect is unavailable or you need to enter existing API credentials,
+use this manual fallback in an interactive macOS Terminal:
 
 ```bash
 npm run credentials:setup:testnet
@@ -63,6 +99,17 @@ records.
 Testnet and mainnet use separate Keychain services and never fall back to one
 another. Storing mainnet credentials does not enable mainnet execution; the
 execution and approval gates remain separate.
+
+Each underlying Keychain command has a bounded timeout. If a permission dialog
+or locked Keychain blocks the command, setup fails closed instead of waiting
+indefinitely; unlock or approve access and run the same setup or connect
+command again.
+
+Keychain commands run without the controlling terminal, so values always travel
+over a private pipe and the terminal stays available for this CLI's own
+prompts. A terminal prompt such as `password data for new item:` therefore
+never belongs to a normal run; report it as a defect instead of typing a value.
+Terminal interrupts end any in-flight Keychain command together with the CLI.
 
 ## Removal
 

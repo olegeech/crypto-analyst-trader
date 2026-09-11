@@ -26,3 +26,25 @@ test("the future authenticated probe has a typed vault seam and no dotenv fallba
   assert.match(packageSource, /credentials:connect:mainnet/);
   assert.doesNotMatch(ciWorkflow, /credentials:connect/);
 });
+
+test("the credential guide presents Agent Connect as the only preferred onboarding path", async () => {
+  const guide = await readFile("docs/credentials.md", "utf8");
+  const agentConnectHeading = "## Bybit Agent Connect (preferred)";
+  const manualSetupHeading = "## Manual API credential fallback";
+  const keychainFallbackHeading = "## Manual Keychain Access fallback";
+
+  assert.match(guide, /^## Bybit Agent Connect \(preferred\)$/m);
+  assert.match(guide, /npm run credentials:connect:testnet/);
+  assert.match(guide, /npm run credentials:connect:mainnet/);
+  assert.match(guide, /^## Manual API credential fallback$/m);
+  assert.match(guide, /npm run credentials:setup:testnet/);
+  assert.match(guide, /npm run credentials:setup:mainnet/);
+  assert.match(guide, /^## Manual Keychain Access fallback$/m);
+  assert.doesNotMatch(guide, /^## .*recommended.*$/gim);
+  assert.ok(
+    guide.indexOf(agentConnectHeading) < guide.indexOf(manualSetupHeading),
+  );
+  assert.ok(
+    guide.indexOf(manualSetupHeading) < guide.indexOf(keychainFallbackHeading),
+  );
+});

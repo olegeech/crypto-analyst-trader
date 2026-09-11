@@ -4,6 +4,7 @@ import {
   createServer as createNetServer,
   type Server as NetServer,
 } from "node:net";
+import { request as httpRequest, type IncomingHttpHeaders } from "node:http";
 import test from "node:test";
 
 import {
@@ -15,6 +16,7 @@ import {
 } from "../src/adapters/bybit-agent-connect.js";
 import {
   AgentConnectError,
+  type AgentConnectRequestEvent,
   type AgentConnectTransport,
 } from "../src/ports/agent-connect.js";
 
@@ -99,6 +101,7 @@ test("callback session uses the actual fallback port and accepts one valid callb
     );
     const response = await fetch(callbackUrl);
     assert.equal(response.status, 200);
+    assert.match(await response.text(), /Return to the terminal/);
     const callback = await callbackPromise;
     assert.equal(callback.code, "auth-code");
     assert.match(callback.codeVerifier, /^[A-Za-z0-9_-]{43}$/);
@@ -150,6 +153,523 @@ test("callback timeout is bounded and typed", async () => {
       assert.match((error as Error).message, /timed out/);
       return true;
     });
+  } finally {
+    session.close();
+  }
+});
+
+interface RawResponse {
+  status: number;
+  headers: IncomingHttpHeaders;
+  body: string;
+}
+
+function rawRequest(
+  port: number,
+  {
+    method = "GET",
+    path,
+    headers = {},
+    body,
+  }: {
+    method?: string;
+    path: string;
+    headers?: Record<string, string>;
+    body?: string;
+  },
+): Promise<RawResponse> {
+  return new Promise((resolve, reject) => {
+    const request = httpRequest(
+      { host: "127.0.0.1", port, method, path, headers },
+      (response) => {
+        let text = "";
+        response.setEncoding("utf8");
+        response.on("data", (chunk: string) => {
+          text += chunk;
+        });
+        response.on("end", () =>
+          resolve({
+            status: response.statusCode ?? 0,
+            headers: response.headers,
+            body: text,
+          }),
+        );
+      },
+    );
+    request.on("error", reject);
+    request.end(body);
+  });
+}
+
+async function authorizedBrowserSession(
+  selectionTimeoutMs?: number,
+  onRequest?: (event: AgentConnectRequestEvent) => void,
+) {
+  const session = await startAgentConnectSession("testnet", {
+    startPort: 0,
+    maxPort: 0,
+    timeoutMs: 1_000,
+    browserSelection: true,
+    ...(selectionTimeoutMs === undefined ? {} : { selectionTimeoutMs }),
+    ...(onRequest === undefined ? {} : { onRequest }),
+  });
+  const state =
+    new URL(session.authorizationUrl).searchParams.get("state") ?? "";
+  const callbackPromise = session.waitForCallback();
+  const callback = await rawRequest(session.port, {
+    path: `/callback?${new URLSearchParams({ code: "auth-code", state })}`,
+  });
+  await callbackPromise;
+  const location = callback.headers.location ?? "";
+  const secret =
+    new URL(location, "http://127.0.0.1").searchParams.get("s") ?? "";
+  return { session, callback, location, secret };
+}
+
+function postSelection(
+  port: number,
+  fields: Record<string, string>,
+  headers: Record<string, string> = { origin: `http://127.0.0.1:${port}` },
+): Promise<RawResponse> {
+  return rawRequest(port, {
+    method: "POST",
+    path: "/select",
+    headers: {
+      "content-type": "application/x-www-form-urlencoded",
+      ...headers,
+    },
+    body: new URLSearchParams(fields).toString(),
+  });
+}
+
+test("callback server reports each request as sanitized metadata without query values", async () => {
+  const reported: AgentConnectRequestEvent[] = [];
+  const session = await startAgentConnectSession("testnet", {
+    startPort: 0,
+    maxPort: 0,
+    timeoutMs: 1_000,
+    onRequest: (event) => reported.push(event),
+  });
+  try {
+    const state =
+      new URL(session.authorizationUrl).searchParams.get("state") ?? "";
+    const callbackPromise = session.waitForCallback();
+    await rawRequest(session.port, {
+      method: "OPTIONS",
+      path: "/probe?private=value",
+      headers: { "access-control-request-private-network": "true" },
+    });
+    await rawRequest(session.port, {
+      path: `/callback?${new URLSearchParams({ code: "private-auth-code", state })}`,
+      headers: {
+        "sec-fetch-site": "cross-site",
+        "sec-fetch-mode": "navigate",
+        "sec-fetch-dest": "document",
+        origin: "https://testnet.bybit.com/oauth?private=value",
+      },
+    });
+    await callbackPromise;
+
+    assert.deepEqual(reported, [
+      {
+        method: "OPTIONS",
+        path: "/probe",
+        fetchSite: null,
+        fetchMode: null,
+        fetchDest: null,
+        origin: null,
+        privateNetworkPreflight: true,
+        callback: null,
+        outcome: "not-found",
+      },
+      {
+        method: "GET",
+        path: "/callback",
+        fetchSite: "cross-site",
+        fetchMode: "navigate",
+        fetchDest: "document",
+        origin: "https://testnet.bybit.com",
+        privateNetworkPreflight: false,
+        callback: {
+          stateMatches: true,
+          codePresent: true,
+          errorPresent: false,
+        },
+        outcome: "accepted",
+      },
+    ]);
+    assert.doesNotMatch(
+      JSON.stringify(reported),
+      new RegExp(`private-auth-code|private=value|${state}`),
+    );
+  } finally {
+    session.close();
+  }
+});
+
+test("callback timeout states whether any request reached the loopback server", async () => {
+  const silent = await startAgentConnectSession("testnet", {
+    startPort: 0,
+    maxPort: 0,
+    timeoutMs: 50,
+  });
+  try {
+    await assert.rejects(silent.waitForCallback(), (error: unknown) => {
+      assert.ok(error instanceof AgentConnectError);
+      assert.equal(error.code, "timeout");
+      assert.match(
+        error.message,
+        new RegExp(
+          `no request reached the callback server on 127\\.0\\.0\\.1:${silent.port}`,
+        ),
+      );
+      return true;
+    });
+  } finally {
+    silent.close();
+  }
+
+  const probed = await startAgentConnectSession("testnet", {
+    startPort: 0,
+    maxPort: 0,
+    timeoutMs: 300,
+  });
+  const probedCallback = assert.rejects(
+    probed.waitForCallback(),
+    (error: unknown) => {
+      assert.ok(error instanceof AgentConnectError);
+      assert.equal(error.code, "timeout");
+      assert.match(error.message, /1 request\(s\) reached/);
+      assert.match(error.message, /none was a valid OAuth callback/);
+      return true;
+    },
+  );
+  try {
+    await rawRequest(probed.port, { path: "/favicon.ico" });
+    await probedCallback;
+  } finally {
+    probed.close();
+  }
+});
+
+test("browser selection continues the authorized session only after an explicit choice", async () => {
+  const reported: AgentConnectRequestEvent[] = [];
+  const { session, callback, location, secret } =
+    await authorizedBrowserSession(undefined, (event) => reported.push(event));
+  try {
+    assert.equal(callback.status, 303);
+    assert.equal(
+      session.selectionUrl,
+      `http://127.0.0.1:${session.port}${location}`,
+    );
+    assert.match(location, /^\/select\?s=[A-Za-z0-9_-]{43}$/);
+
+    const loading = await rawRequest(session.port, { path: location });
+    assert.equal(loading.status, 200);
+    assert.match(loading.body, /http-equiv="refresh"/);
+
+    const choice = session.chooseInBrowser([
+      { id: "1", label: "<b>Trading</b> (•••3456)" },
+      { id: "2", label: "Create a new AI Subaccount" },
+    ]);
+    const form = await rawRequest(session.port, { path: location });
+    assert.equal(form.status, 200);
+    assert.match(form.body, /&#60;b&#62;Trading&#60;\/b&#62;/);
+    assert.doesNotMatch(form.body, /<b>|checked/);
+    assert.equal(
+      form.headers["content-security-policy"],
+      "default-src 'none'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
+    );
+    assert.equal(form.headers["cache-control"], "no-store");
+    assert.equal(form.headers["x-frame-options"], "DENY");
+
+    const submitted = await postSelection(session.port, {
+      s: secret,
+      action: "choose",
+      choice: "2",
+    });
+    assert.equal(submitted.status, 200);
+    assert.match(submitted.body, /Selection received/);
+    assert.equal(await choice, "2");
+    assert.deepEqual(
+      reported.map(({ path }) => path),
+      ["/callback"],
+    );
+  } finally {
+    session.close();
+  }
+});
+
+test("browser selection rejects cross-origin, unauthenticated, rebinding, and unlisted submissions", async () => {
+  const { session, location, secret } = await authorizedBrowserSession();
+  try {
+    const choice = session.chooseInBrowser([{ id: "1", label: "Trading" }]);
+    let choiceSettled = false;
+    void choice.then(
+      () => {
+        choiceSettled = true;
+      },
+      () => {
+        choiceSettled = true;
+      },
+    );
+    const origin = `http://127.0.0.1:${session.port}`;
+    const valid = { s: secret, action: "choose", choice: "1" };
+
+    assert.equal(
+      (
+        await postSelection(session.port, valid, {
+          origin: "http://evil.example",
+        })
+      ).status,
+      403,
+    );
+    assert.equal((await postSelection(session.port, valid, {})).status, 403);
+    assert.equal(
+      (await postSelection(session.port, { ...valid, s: "wrong" })).status,
+      403,
+    );
+    assert.equal(
+      (
+        await postSelection(session.port, valid, {
+          origin,
+          host: "rebind.example",
+        })
+      ).status,
+      404,
+    );
+    assert.equal(
+      (await rawRequest(session.port, { path: "/select?s=wrong" })).status,
+      404,
+    );
+    assert.equal(
+      (
+        await rawRequest(session.port, {
+          path: location,
+          headers: { host: "rebind.example" },
+        })
+      ).status,
+      404,
+    );
+    const unlisted = await postSelection(session.port, {
+      ...valid,
+      choice: "2",
+    });
+    assert.equal(unlisted.status, 400);
+    assert.match(unlisted.body, /Choose one of the listed options/);
+    assert.equal(choiceSettled, false);
+
+    const cancelled = await postSelection(session.port, {
+      s: secret,
+      action: "cancel",
+    });
+    assert.match(cancelled.body, /Selection cancelled/);
+    await assert.rejects(choice, (error: unknown) => {
+      assert.ok(error instanceof AgentConnectError);
+      assert.equal(error.code, "selection-cancelled");
+      assert.match(error.message, /no account was selected or created/);
+      assert.match(error.message, /credentials:connect:testnet/);
+      return true;
+    });
+  } finally {
+    session.close();
+  }
+});
+
+test("browser selection wait is bounded and typed", async () => {
+  const { session } = await authorizedBrowserSession(10);
+  try {
+    await assert.rejects(
+      session.chooseInBrowser([{ id: "1", label: "Trading" }]),
+      (error: unknown) => {
+        assert.ok(error instanceof AgentConnectError);
+        assert.equal(error.code, "selection-timeout");
+        assert.match(error.message, /timed out/);
+        return true;
+      },
+    );
+  } finally {
+    session.close();
+  }
+});
+
+test("closing the session cancels a pending browser selection", async () => {
+  const { session } = await authorizedBrowserSession();
+  const choice = session.chooseInBrowser([{ id: "1", label: "Trading" }]);
+  session.close();
+
+  await assert.rejects(choice, (error: unknown) => {
+    assert.ok(error instanceof AgentConnectError);
+    assert.equal(error.code, "selection-cancelled");
+    return true;
+  });
+});
+
+test("browser selection is unavailable unless enabled and never precedes authorization", async () => {
+  const session = await startAgentConnectSession("testnet", {
+    startPort: 0,
+    maxPort: 0,
+    timeoutMs: 1_000,
+  });
+  const callback = session.waitForCallback().catch(() => undefined);
+  try {
+    assert.equal(session.selectionUrl, undefined);
+    assert.equal(
+      (await rawRequest(session.port, { path: "/select?s=anything" })).status,
+      404,
+    );
+    await assert.rejects(
+      session.chooseInBrowser([{ id: "1", label: "Trading" }]),
+      (error: unknown) => {
+        assert.ok(error instanceof AgentConnectError);
+        assert.equal(error.code, "selection-unavailable");
+        return true;
+      },
+    );
+  } finally {
+    session.close();
+    await callback;
+  }
+});
+
+test("a pasted authorization code completes the pending authorization from the local page", async () => {
+  const session = await startAgentConnectSession("testnet", {
+    startPort: 0,
+    maxPort: 0,
+    timeoutMs: 1_000,
+    browserSelection: true,
+  });
+  try {
+    const pageUrl = new URL(session.selectionUrl ?? "");
+    const location = `${pageUrl.pathname}${pageUrl.search}`;
+    const secret = pageUrl.searchParams.get("s") ?? "";
+
+    const waiting = await rawRequest(session.port, { path: location });
+    assert.equal(waiting.status, 200);
+    assert.match(waiting.body, /name="code"/);
+    assert.match(waiting.body, /autocomplete="off"/);
+    assert.doesNotMatch(waiting.body, /http-equiv="refresh"/);
+    assert.equal(waiting.headers["cache-control"], "no-store");
+
+    const callbackPromise = session.waitForCallback();
+    const submitted = await postSelection(session.port, {
+      s: secret,
+      action: "code",
+      code: "  pasted-code  ",
+    });
+    assert.equal(submitted.status, 200);
+    assert.match(submitted.body, /Loading Bybit AI Subaccounts/);
+    const callback = await callbackPromise;
+    assert.equal(callback.code, "pasted-code");
+    assert.equal(callback.source, "pasted");
+    assert.match(callback.codeVerifier, /^[A-Za-z0-9_-]{43}$/);
+
+    const state =
+      new URL(session.authorizationUrl).searchParams.get("state") ?? "";
+    const late = await rawRequest(session.port, {
+      path: `/callback?${new URLSearchParams({ code: "late-code", state })}`,
+    });
+    assert.equal(late.status, 409);
+
+    const choice = session.chooseInBrowser([{ id: "1", label: "Trading" }]);
+    const form = await rawRequest(session.port, { path: location });
+    assert.match(form.body, /Choose a Bybit AI Subaccount/);
+    await postSelection(session.port, {
+      s: secret,
+      action: "choose",
+      choice: "1",
+    });
+    assert.equal(await choice, "1");
+  } finally {
+    session.close();
+  }
+});
+
+test("pasted codes are refused when invalid, unauthenticated, or after the callback", async () => {
+  const session = await startAgentConnectSession("testnet", {
+    startPort: 0,
+    maxPort: 0,
+    timeoutMs: 1_000,
+    browserSelection: true,
+  });
+  const pending = session.waitForCallback();
+  let settledEarly = false;
+  void pending.then(
+    () => {
+      settledEarly = true;
+    },
+    () => {
+      settledEarly = true;
+    },
+  );
+  try {
+    const secret =
+      new URL(session.selectionUrl ?? "").searchParams.get("s") ?? "";
+    const invalid = await postSelection(session.port, {
+      s: secret,
+      action: "code",
+      code: "two words",
+    });
+    assert.equal(invalid.status, 400);
+    assert.match(invalid.body, /exactly as the Bybit page shows it/);
+    assert.equal(
+      (
+        await postSelection(session.port, {
+          s: "wrong",
+          action: "code",
+          code: "abc",
+        })
+      ).status,
+      403,
+    );
+    assert.equal(
+      (
+        await postSelection(
+          session.port,
+          { s: secret, action: "code", code: "abc" },
+          { origin: "http://evil.example" },
+        )
+      ).status,
+      403,
+    );
+    assert.equal(settledEarly, false);
+
+    const state =
+      new URL(session.authorizationUrl).searchParams.get("state") ?? "";
+    await rawRequest(session.port, {
+      path: `/callback?${new URLSearchParams({ code: "loopback-code", state })}`,
+    });
+    const afterCallback = await postSelection(session.port, {
+      s: secret,
+      action: "code",
+      code: "pasted-late",
+    });
+    assert.match(afterCallback.body, /Loading Bybit AI Subaccounts/);
+    const callback = await pending;
+    assert.equal(callback.code, "loopback-code");
+    assert.equal(callback.source, "loopback");
+  } finally {
+    session.close();
+  }
+});
+
+test("a session accepts one pasted code only while the callback is pending", async () => {
+  const session = await startAgentConnectSession("testnet", {
+    startPort: 0,
+    maxPort: 0,
+    timeoutMs: 1_000,
+  });
+  try {
+    const pending = session.waitForCallback();
+    assert.equal(session.submitAuthorizationCode("two words"), "invalid");
+    assert.equal(
+      session.submitAuthorizationCode(" terminal-code "),
+      "accepted",
+    );
+    assert.equal(session.submitAuthorizationCode("another-code"), "closed");
+    const callback = await pending;
+    assert.equal(callback.code, "terminal-code");
+    assert.equal(callback.source, "pasted");
   } finally {
     session.close();
   }
@@ -446,4 +966,85 @@ test("selected account credential response must match the requested account", as
       return true;
     },
   );
+});
+
+test("credential lookup unwraps accounts for existing and newly created accounts", async () => {
+  const record = {
+    sub_member_id: 456,
+    api_key: "fixture-key",
+    api_secret: "fixture-secret",
+  };
+  for (const response of [
+    { accounts: [record] },
+    { retCode: 0, result: { accounts: [record] } },
+  ]) {
+    const client = createBybitAgentConnectClient({
+      transport: {
+        async postForm() {
+          return {};
+        },
+        async get() {
+          return response;
+        },
+      },
+    });
+    for (const selection of [
+      { kind: "existing", accountId: "456" } as const,
+      { kind: "create", existingAccountIds: ["123"] } as const,
+    ]) {
+      assert.deepEqual(
+        await client.fetchAccountCredentials(
+          "testnet",
+          "fixture-token",
+          selection,
+        ),
+        {
+          accountId: "456",
+          apiKey: "fixture-key",
+          apiSecret: "fixture-secret",
+        },
+      );
+    }
+    await assert.rejects(
+      client.fetchAccountCredentials("testnet", "fixture-token", {
+        kind: "existing",
+        accountId: "789",
+      }),
+      /different AI Subaccount/,
+    );
+    await assert.rejects(
+      client.fetchAccountCredentials("testnet", "fixture-token", {
+        kind: "create",
+        existingAccountIds: ["456"],
+      }),
+      /existing AI Subaccount/,
+    );
+  }
+});
+
+test("credential lookup rejects empty malformed and ambiguous accounts envelopes", async () => {
+  const record = {
+    sub_member_id: 456,
+    api_key: "fixture-key",
+    api_secret: "fixture-secret",
+  };
+  for (const accounts of [[], [record, record], null, {}, [null]]) {
+    const client = createBybitAgentConnectClient({
+      transport: {
+        async postForm() {
+          return {};
+        },
+        async get() {
+          return { accounts };
+        },
+      },
+    });
+    await assert.rejects(
+      client.fetchAccountCredentials("testnet", "fixture-token", {
+        kind: "existing",
+        accountId: "456",
+      }),
+      /invalid AI Subaccount credential response/,
+    );
+  }
 });
