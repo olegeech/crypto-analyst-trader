@@ -46,6 +46,10 @@ export function setupCommand(environment: CredentialEnvironment): string {
   return `npm run credentials:setup:${environment}`;
 }
 
+export function connectCommand(environment: CredentialEnvironment): string {
+  return `npm run credentials:connect:${environment}`;
+}
+
 export class CredentialProviderError extends Error {
   readonly code:
     | "missing"

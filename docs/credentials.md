@@ -67,7 +67,14 @@ execution and approval gates remain separate.
 
 Each underlying Keychain command has a bounded timeout. If a permission dialog
 or locked Keychain blocks the command, setup fails closed instead of waiting
-indefinitely; unlock or approve access and run the setup command again.
+indefinitely; unlock or approve access and run the same setup or connect
+command again.
+
+Keychain commands run without the controlling terminal, so values always travel
+over a private pipe and the terminal stays available for this CLI's own
+prompts. A terminal prompt such as `password data for new item:` therefore
+never belongs to a normal run; report it as a defect instead of typing a value.
+Terminal interrupts end any in-flight Keychain command together with the CLI.
 
 ## Removal
 

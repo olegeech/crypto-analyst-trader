@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import type { spawn } from "node:child_process";
+import type { spawn, SpawnOptions } from "node:child_process";
+import { EventEmitter } from "node:events";
 import test from "node:test";
 
 import {
@@ -218,6 +219,125 @@ test("hung security commands are killed after a bounded timeout", async () => {
   assert.equal(killedWith, "SIGKILL");
 });
 
+function fakeSecurityChild() {
+  const child = new EventEmitter() as EventEmitter & {
+    stdout: EventEmitter & { setEncoding(): void };
+    stderr: EventEmitter & { setEncoding(): void };
+    stdin: { end(input?: string): void };
+    kill(signal?: NodeJS.Signals): boolean;
+  };
+  const stream = () =>
+    Object.assign(new EventEmitter(), { setEncoding: () => undefined });
+  const state: {
+    input?: string | undefined;
+    killedWith?: NodeJS.Signals | undefined;
+  } = {};
+  child.stdout = stream();
+  child.stderr = stream();
+  child.stdin = { end: (input?: string) => void (state.input = input) };
+  child.kill = (signal?: NodeJS.Signals) => {
+    state.killedWith = signal;
+    return true;
+  };
+  return { child, state };
+}
+
+function fakeParentProcess() {
+  const parent = Object.assign(new EventEmitter(), {
+    pid: 4242,
+    raised: [] as Array<[number, string | number | undefined]>,
+    kill(pid: number, signal?: string | number) {
+      parent.raised.push([pid, signal]);
+      return true;
+    },
+  });
+  return parent;
+}
+
+test("security runs without a controlling terminal so piped input is used", async () => {
+  const { child } = fakeSecurityChild();
+  let spawnOptions: SpawnOptions | undefined;
+  const spawnProcess = ((
+    _command: string,
+    _args: string[],
+    options: SpawnOptions,
+  ) => {
+    spawnOptions = options;
+    return child;
+  }) as unknown as typeof spawn;
+  const parentProcess = fakeParentProcess();
+
+  const result = runSecurity(["find-generic-password"], undefined, {
+    spawnProcess,
+    parentProcess: parentProcess as unknown as NodeJS.Process,
+  });
+  child.emit("close", 0);
+  await result;
+
+  assert.equal(spawnOptions?.detached, true);
+  assert.deepEqual(spawnOptions?.stdio, ["pipe", "pipe", "pipe"]);
+  assert.equal(spawnOptions?.shell, false);
+});
+
+test("a terminal signal kills the detached security child and is re-raised", async (t) => {
+  for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
+    await t.test(signal, async () => {
+      const { child, state } = fakeSecurityChild();
+      const spawnProcess = (() => child) as unknown as typeof spawn;
+      const parentProcess = fakeParentProcess();
+
+      const result = runSecurity(["add-generic-password"], "value\nvalue\n", {
+        spawnProcess,
+        parentProcess: parentProcess as unknown as NodeJS.Process,
+      });
+      parentProcess.emit(signal, signal);
+
+      await assert.rejects(result, /interrupted/);
+      assert.equal(state.killedWith, "SIGKILL");
+      assert.deepEqual(parentProcess.raised, [[4242, signal]]);
+      for (const event of ["exit", "SIGINT", "SIGTERM", "SIGHUP"]) {
+        assert.equal(parentProcess.listenerCount(event), 0);
+      }
+    });
+  }
+});
+
+test("parent exit kills an active security child", async () => {
+  const { child, state } = fakeSecurityChild();
+  const spawnProcess = (() => child) as unknown as typeof spawn;
+  const parentProcess = fakeParentProcess();
+
+  const result = runSecurity(["find-generic-password"], undefined, {
+    spawnProcess,
+    parentProcess: parentProcess as unknown as NodeJS.Process,
+  });
+  parentProcess.emit("exit", 1);
+  child.emit("close", null);
+  await result;
+
+  assert.equal(state.killedWith, "SIGKILL");
+});
+
+test("completed security commands release parent listeners", async () => {
+  const { child, state } = fakeSecurityChild();
+  const spawnProcess = (() => child) as unknown as typeof spawn;
+  const parentProcess = fakeParentProcess();
+
+  const result = runSecurity(["add-generic-password"], "value\nvalue\n", {
+    spawnProcess,
+    parentProcess: parentProcess as unknown as NodeJS.Process,
+  });
+  child.stdout.emit("data", "out");
+  child.emit("close", 0);
+
+  assert.deepEqual(await result, { stdout: "out", stderr: "", exitCode: 0 });
+  assert.equal(state.input, "value\nvalue\n");
+  assert.equal(state.killedWith, undefined);
+  for (const event of ["exit", "SIGINT", "SIGTERM", "SIGHUP"]) {
+    assert.equal(parentProcess.listenerCount(event), 0);
+  }
+});
+
 test("timed out Keychain reads return actionable unlock guidance", async () => {
   const { runner } = runnerFor(() => ({
     stdout: "",
@@ -272,6 +392,8 @@ test("timed out preflight returns actionable unlock guidance", async () => {
     assert.equal(error.code, "preflight-failed");
     assert.match(error.message, /preflight timed out/);
     assert.match(error.message, /unlock.*Keychain|approve.*access prompt/i);
+    assert.match(error.message, /credentials:connect:testnet/);
+    assert.doesNotMatch(error.message, /credentials:setup/);
     assert.match(error.message, /OAuth was not started/);
     return true;
   });

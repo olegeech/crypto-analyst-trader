@@ -3,6 +3,7 @@ import { spawn } from "node:child_process";
 import process from "node:process";
 
 import {
+  connectCommand,
   credentialAccounts,
   credentialPreflightAccount,
   credentialPreflightServiceName,
@@ -34,9 +35,14 @@ export type SecurityRunner = (
   input?: string,
 ) => Promise<SecurityCommandResult>;
 
+const PARENT_TERMINATION_SIGNALS = ["SIGINT", "SIGTERM", "SIGHUP"] as const;
+
+type ParentProcess = Pick<NodeJS.Process, "pid" | "kill" | "once" | "off">;
+
 interface SecurityRunOptions {
   timeoutMs?: number;
   spawnProcess?: typeof spawn;
+  parentProcess?: ParentProcess;
 }
 
 class SecurityCommandTimeoutError extends Error {
@@ -52,12 +58,17 @@ export function runSecurity(
   {
     timeoutMs = SECURITY_COMMAND_TIMEOUT_MS,
     spawnProcess = spawn,
+    parentProcess = process,
   }: SecurityRunOptions = {},
 ): Promise<SecurityCommandResult> {
   return new Promise((resolve, reject) => {
     const child = spawnProcess(SECURITY_COMMAND, args, {
       stdio: ["pipe", "pipe", "pipe"],
       shell: false,
+      // security reads prompted values through getpass(), which prefers the
+      // controlling terminal over piped stdin. A new session has no
+      // controlling terminal, so the piped value is always used.
+      detached: true,
     });
     let stdout = "";
     let stderr = "";
@@ -66,24 +77,39 @@ export function runSecurity(
       Number.isFinite(timeoutMs) && timeoutMs > 0
         ? timeoutMs
         : SECURITY_COMMAND_TIMEOUT_MS;
-    const timeout = setTimeout(() => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timeout);
+
+    const killChild = (): void => {
       try {
         child.kill("SIGKILL");
       } catch {
-        // The process may have exited between the timeout and kill attempt.
+        // The process may have exited before the kill attempt.
       }
-      reject(new SecurityCommandTimeoutError());
-    }, effectiveTimeoutMs);
-
+    };
+    // The detached child no longer receives terminal signals, so it must not
+    // outlive the parent and complete a Keychain mutation unobserved.
+    const onParentSignal = (signal: NodeJS.Signals): void => {
+      killChild();
+      finish(() => reject(new Error("security command was interrupted")));
+      parentProcess.kill(parentProcess.pid, signal);
+    };
     const finish = (callback: () => void): void => {
       if (settled) return;
       settled = true;
       clearTimeout(timeout);
+      parentProcess.off("exit", killChild);
+      for (const signal of PARENT_TERMINATION_SIGNALS) {
+        parentProcess.off(signal, onParentSignal);
+      }
       callback();
     };
+    const timeout = setTimeout(() => {
+      killChild();
+      finish(() => reject(new SecurityCommandTimeoutError()));
+    }, effectiveTimeoutMs);
+    parentProcess.once("exit", killChild);
+    for (const signal of PARENT_TERMINATION_SIGNALS) {
+      parentProcess.once(signal, onParentSignal);
+    }
 
     child.stdout.setEncoding("utf8");
     child.stderr.setEncoding("utf8");
@@ -182,7 +208,7 @@ function safePreflightError(
   if (timedOut) {
     return new CredentialProviderError(
       "preflight-failed",
-      `Bybit ${environment} Keychain preflight timed out; unlock the macOS Keychain or approve the access prompt, then run ${setupCommand(environment)} again. OAuth was not started.`,
+      `Bybit ${environment} Keychain preflight timed out; unlock the macOS Keychain or approve the access prompt, then run ${connectCommand(environment)} again. OAuth was not started.`,
     );
   }
   return new CredentialProviderError(
