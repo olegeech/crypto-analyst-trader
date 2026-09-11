@@ -967,3 +967,84 @@ test("selected account credential response must match the requested account", as
     },
   );
 });
+
+test("credential lookup unwraps accounts for existing and newly created accounts", async () => {
+  const record = {
+    sub_member_id: 456,
+    api_key: "fixture-key",
+    api_secret: "fixture-secret",
+  };
+  for (const response of [
+    { accounts: [record] },
+    { retCode: 0, result: { accounts: [record] } },
+  ]) {
+    const client = createBybitAgentConnectClient({
+      transport: {
+        async postForm() {
+          return {};
+        },
+        async get() {
+          return response;
+        },
+      },
+    });
+    for (const selection of [
+      { kind: "existing", accountId: "456" } as const,
+      { kind: "create", existingAccountIds: ["123"] } as const,
+    ]) {
+      assert.deepEqual(
+        await client.fetchAccountCredentials(
+          "testnet",
+          "fixture-token",
+          selection,
+        ),
+        {
+          accountId: "456",
+          apiKey: "fixture-key",
+          apiSecret: "fixture-secret",
+        },
+      );
+    }
+    await assert.rejects(
+      client.fetchAccountCredentials("testnet", "fixture-token", {
+        kind: "existing",
+        accountId: "789",
+      }),
+      /different AI Subaccount/,
+    );
+    await assert.rejects(
+      client.fetchAccountCredentials("testnet", "fixture-token", {
+        kind: "create",
+        existingAccountIds: ["456"],
+      }),
+      /existing AI Subaccount/,
+    );
+  }
+});
+
+test("credential lookup rejects empty malformed and ambiguous accounts envelopes", async () => {
+  const record = {
+    sub_member_id: 456,
+    api_key: "fixture-key",
+    api_secret: "fixture-secret",
+  };
+  for (const accounts of [[], [record, record], null, {}, [null]]) {
+    const client = createBybitAgentConnectClient({
+      transport: {
+        async postForm() {
+          return {};
+        },
+        async get() {
+          return { accounts };
+        },
+      },
+    });
+    await assert.rejects(
+      client.fetchAccountCredentials("testnet", "fixture-token", {
+        kind: "existing",
+        accountId: "456",
+      }),
+      /invalid AI Subaccount credential response/,
+    );
+  }
+});

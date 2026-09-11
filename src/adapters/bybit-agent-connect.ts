@@ -921,7 +921,18 @@ function normalizeAccount(value: unknown): AgentConnectAccount {
 
 function selectedAccount(response: unknown): JsonObject {
   const result = responseResult(response);
-  const value = Array.isArray(result) ? result[0] : result;
+  const envelope = asObject(result);
+  const records =
+    envelope && "accounts" in envelope ? envelope.accounts : result;
+  // A credential response must identify one account, never an arbitrary first
+  // entry from an ambiguous list. Identity is checked by the caller below.
+  const value = Array.isArray(records)
+    ? records.length === 1
+      ? records[0]
+      : null
+    : envelope && "accounts" in envelope
+      ? null
+      : records;
   const object = asObject(value);
   if (!object) {
     throw new AgentConnectError(
