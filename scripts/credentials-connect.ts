@@ -9,6 +9,7 @@ import {
 import {
   AgentConnectError,
   type AgentConnectAccount,
+  type AgentConnectCallback,
   type AgentConnectChoice,
   type AgentConnectClient,
   type AgentConnectRequestEvent,
@@ -27,6 +28,7 @@ import {
 
 type Output = { write(message: string): void };
 type Prompt = (label: string) => Promise<string>;
+type CodePrompt = (label: string, signal: AbortSignal) => Promise<string>;
 type ChooseOption = (choices: readonly AgentConnectChoice[]) => Promise<string>;
 export type SelectionMode = "terminal" | "browser";
 const MAX_AI_SUBACCOUNTS = 5;
@@ -38,6 +40,70 @@ function promptVisible(label: string): Promise<string> {
     "Interactive Agent Connect requires a terminal.",
     { timeoutMs: SELECTION_TIMEOUT_MS },
   );
+}
+
+function promptCodeVisible(
+  label: string,
+  signal: AbortSignal,
+): Promise<string> {
+  return promptVisibleCommon(
+    label,
+    "Interactive Agent Connect requires a terminal.",
+    { signal },
+  );
+}
+
+async function waitForAuthorization(
+  session: AgentConnectSession,
+  selectionMode: SelectionMode,
+  promptCode: CodePrompt,
+  output: Output,
+  environment: CredentialEnvironment,
+): Promise<AgentConnectCallback> {
+  const callback = session.waitForCallback();
+  if (selectionMode !== "terminal") {
+    return callback;
+  }
+  // Bybit's completion page may show the code instead of delivering the
+  // callback, so the operator can paste it while the callback is awaited.
+  const controller = new AbortController();
+  const pasteLoop = async (): Promise<AgentConnectCallback> => {
+    for (;;) {
+      let answer: string;
+      try {
+        answer = (
+          await promptCode(
+            "Authorization code (only if the Bybit page shows one)",
+            controller.signal,
+          )
+        ).trim();
+      } catch (error) {
+        if (error instanceof PromptInterruptedError) throw error;
+        // Without usable input, keep waiting for the automatic callback.
+        return callback;
+      }
+      if (!answer) continue;
+      if (session.submitAuthorizationCode(answer) !== "invalid") {
+        return callback;
+      }
+      output.write(
+        "That is not an authorization code; paste it exactly as the Bybit page shows it.\n",
+      );
+    }
+  };
+  try {
+    return await Promise.race([callback, pasteLoop()]);
+  } catch (error) {
+    if (error instanceof PromptInterruptedError) {
+      throw new AgentConnectError(
+        "authorization-cancelled",
+        `Bybit authorization was cancelled; no account was selected or created. Run ${connectCommand(environment)} again.`,
+      );
+    }
+    throw error;
+  } finally {
+    controller.abort();
+  }
 }
 
 export function detectSelectionMode(
@@ -198,12 +264,14 @@ export async function runCredentialsConnectCli(
     provider = createMacOSKeychainProvider(),
     client = createBybitAgentConnectClient(),
     prompt = promptVisible,
+    promptCode = promptCodeVisible,
     output = process.stdout,
     selectionMode = detectSelectionMode(),
   }: {
     provider?: CredentialProviderWithPreflight;
     client?: AgentConnectClient;
     prompt?: Prompt;
+    promptCode?: CodePrompt;
     output?: Output;
     selectionMode?: SelectionMode;
   } = {},
@@ -233,8 +301,28 @@ export async function runCredentialsConnectCli(
       `Bybit ${environment} Agent Connect authorization URL:\n${session.authorizationUrl}\n`,
     );
     output.write(`Waiting for one callback on 127.0.0.1:${session.port}.\n`);
+    if (selectionMode === "terminal") {
+      output.write(
+        "If the Bybit page shows an authorization code instead of finishing, paste it at the prompt below; the automatic callback is still accepted.\n",
+      );
+    } else if (session.selectionUrl) {
+      output.write(
+        `If the Bybit page shows an authorization code instead of finishing, open this local page and paste it there:\n${session.selectionUrl}\n`,
+      );
+    }
 
-    const callback = await session.waitForCallback();
+    const callback = await waitForAuthorization(
+      session,
+      selectionMode,
+      promptCode,
+      output,
+      environment,
+    );
+    output.write(
+      callback.source === "pasted"
+        ? "Pasted authorization code accepted.\n"
+        : `${selectionMode === "terminal" ? "\n" : ""}Authorization callback received.\n`,
+    );
     const accessToken = await client.exchangeCode(environment, callback);
     const accounts = await client.listAccounts(environment, accessToken);
     const choose: ChooseOption =

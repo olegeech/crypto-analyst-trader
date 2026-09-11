@@ -44,6 +44,14 @@ the page, or Ctrl-C/Ctrl-D at the terminal prompt) or unavailable input ends the
 command before any account credentials are requested, reports that no account
 was selected or created, and leaves existing Keychain records unchanged.
 
+If the Bybit page shows an authorization code instead of finishing, the command
+accepts that code while it is still waiting for the callback, within the same
+deadline. Paste it at the terminal prompt or, without terminal input, into the
+local page whose link the command prints right after the authorization URL.
+Bybit exchanges the code only together with this session's PKCE verifier, so a
+code from any other authorization request is rejected. Ctrl-C or Ctrl-D at the
+code prompt cancels the authorization.
+
 While waiting, the command prints one `Loopback request:` line for every
 request that reaches the callback server: method, path without query, the
 browser's `Sec-Fetch-*` values, the request origin, whether it is a

@@ -60,3 +60,19 @@ test("end of terminal input cancels the prompt instead of hanging", async () => 
     return true;
   });
 });
+
+test("aborting the signal cancels a pending prompt", async () => {
+  const streams = terminalStreams();
+  const controller = new AbortController();
+  const answer = promptVisible("Authorization code", undefined, {
+    ...streams,
+    signal: controller.signal,
+  });
+  controller.abort();
+
+  await assert.rejects(answer, (error: unknown) => {
+    assert.ok(error instanceof PromptInterruptedError);
+    assert.equal(error.reason, "cancelled");
+    return true;
+  });
+});

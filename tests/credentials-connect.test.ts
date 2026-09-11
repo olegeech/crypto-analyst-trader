@@ -13,6 +13,7 @@ import {
 } from "../src/adapters/macos-keychain.js";
 import {
   AgentConnectError,
+  type AgentConnectCallback,
   type AgentConnectChoice,
   type AgentConnectClient,
   type AgentConnectRequestEvent,
@@ -41,12 +42,26 @@ function outputBuffer(): {
   };
 }
 
+function pendingCodePrompt(
+  _label: string,
+  signal: AbortSignal,
+): Promise<string> {
+  return new Promise((_resolve, reject) => {
+    signal.addEventListener(
+      "abort",
+      () => reject(new PromptInterruptedError("cancelled")),
+      { once: true },
+    );
+  });
+}
+
 function runConnect(
   argv: string[],
   dependencies: NonNullable<Parameters<typeof runCredentialsConnectCli>[1]>,
 ): Promise<number> {
   return runCredentialsConnectCli(argv, {
     selectionMode: "terminal",
+    promptCode: pendingCodePrompt,
     ...dependencies,
   });
 }
@@ -103,13 +118,20 @@ function clientFor(
     browserChoice,
     selectionUrl,
     requestEvents = [],
+    pastedOnly = false,
   }: {
     browserChoice?: (choices: readonly AgentConnectChoice[]) => Promise<string>;
     selectionUrl?: string;
     requestEvents?: AgentConnectRequestEvent[];
+    pastedOnly?: boolean;
   } = {},
 ): AgentConnectClient {
   let onRequest: ((event: AgentConnectRequestEvent) => void) | undefined;
+  let resolvePasted: (callback: AgentConnectCallback) => void = () => undefined;
+  const pasted = new Promise<AgentConnectCallback>((resolve) => {
+    resolvePasted = resolve;
+  });
+  let codeSubmitted = false;
   const session: AgentConnectSession = {
     authorizationUrl: "https://testnet.bybit.com/oauth?state=masked",
     port: 9876,
@@ -117,7 +139,16 @@ function clientFor(
     waitForCallback: async () => {
       events.push("callback");
       for (const event of requestEvents) onRequest?.(event);
+      if (pastedOnly) return pasted;
       return { code: "one-time-code", codeVerifier: "verifier" };
+    },
+    submitAuthorizationCode: (code) => {
+      if (codeSubmitted) return "closed";
+      if (/\s/.test(code)) return "invalid";
+      codeSubmitted = true;
+      events.push(`pasted:${code}`);
+      resolvePasted({ code, codeVerifier: "verifier", source: "pasted" });
+      return "accepted";
     },
     chooseInBrowser: async (choices) => {
       events.push(
@@ -552,6 +583,67 @@ test("unexpected implementation errors use a generic safe CLI message", async ()
   assert.doesNotMatch(text(), /api-key|secret|token/);
 });
 
+test("a pasted authorization code completes authorization when the callback never arrives", async () => {
+  const events: string[] = [];
+  const { output, text } = outputBuffer();
+  const answers = ["two words", "pasted-code"];
+  const code = await runConnect(["testnet"], {
+    provider: providerFor(events),
+    client: clientFor(
+      events,
+      [{ accountId: "123456", displayName: "Trading" }],
+      { pastedOnly: true },
+    ),
+    prompt: async () => "1",
+    promptCode: async (label, signal) =>
+      answers.shift() ?? pendingCodePrompt(label, signal),
+    output,
+  });
+
+  assert.equal(code, 0);
+  assert.deepEqual(events.slice(0, 6), [
+    "preflight:testnet",
+    "load:testnet",
+    "session:testnet",
+    "callback",
+    "pasted:pasted-code",
+    "exchange:pasted-code",
+  ]);
+  assert.match(text(), /paste it at the prompt below/);
+  assert.match(text(), /That is not an authorization code/);
+  assert.match(text(), /Pasted authorization code accepted/);
+  assert.match(text(), /stored in macOS Keychain/);
+  assert.doesNotMatch(text(), /pasted-code/);
+});
+
+test("cancelling the code prompt stops before any account request", async () => {
+  const events: string[] = [];
+  const { output, text } = outputBuffer();
+  const code = await runConnect(["testnet"], {
+    provider: providerFor(events),
+    client: clientFor(events, [], { pastedOnly: true }),
+    prompt: async () => "1",
+    promptCode: async () => {
+      throw new PromptInterruptedError("cancelled");
+    },
+    output,
+  });
+
+  assert.equal(code, 1);
+  assert.match(
+    text(),
+    /authorization was cancelled; no account was selected or created/,
+  );
+  assert.match(text(), /credentials:connect:testnet/);
+  assert.deepEqual(events, [
+    "preflight:testnet",
+    "load:testnet",
+    "session:testnet",
+    "callback",
+    "close",
+  ]);
+});
+
 test("selection mode follows interactive terminal input", () => {
   assert.equal(detectSelectionMode({ isTTY: true }), "terminal");
   assert.equal(detectSelectionMode({ isTTY: false }), "browser");
@@ -663,6 +755,10 @@ test("browser selection prints a direct page link and sanitized loopback request
   assert.match(
     text(),
     /Open this local page[^\n]*\nhttp:\/\/127\.0\.0\.1:9876\/select\?s=local-session-secret\n/,
+  );
+  assert.match(
+    text(),
+    /paste it there:\nhttp:\/\/127\.0\.0\.1:9876\/select\?s=local-session-secret\n[\s\S]*Available Bybit AI Subaccounts/,
   );
   assert.match(
     text(),

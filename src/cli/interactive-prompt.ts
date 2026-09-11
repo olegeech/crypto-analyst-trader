@@ -20,10 +20,12 @@ export function promptVisible(
   nonInteractiveMessage = "Interactive prompt requires a terminal.",
   {
     timeoutMs,
+    signal,
     input = process.stdin,
     output = process.stdout,
   }: {
     timeoutMs?: number;
+    signal?: AbortSignal;
     input?: NodeJS.ReadableStream & { isTTY?: boolean };
     output?: NodeJS.WritableStream;
   } = {},
@@ -39,9 +41,12 @@ export function promptVisible(
       if (settled) return;
       settled = true;
       if (timeout) clearTimeout(timeout);
+      signal?.removeEventListener("abort", onAbort);
       callback();
       readline.close();
     };
+    const onAbort = (): void =>
+      finish(() => reject(new PromptInterruptedError("cancelled")));
     // Ctrl-C and end of input cancel the prompt instead of leaving it pending.
     readline.once("SIGINT", () =>
       finish(() => reject(new PromptInterruptedError("cancelled"))),
@@ -55,6 +60,11 @@ export function promptVisible(
         timeoutMs,
       );
     }
+    if (signal?.aborted) {
+      onAbort();
+      return;
+    }
+    signal?.addEventListener("abort", onAbort, { once: true });
     readline.question(`${label}: `, (answer) => finish(() => resolve(answer)));
   });
 }

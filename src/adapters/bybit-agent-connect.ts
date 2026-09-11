@@ -39,6 +39,8 @@ const MAX_SELECTION_FORM_BYTES = 4_096;
 const SELECTION_REFRESH_SECONDS = 2;
 const SELECTION_PATH = "/select";
 const SELECTION_TITLE = "Choose a Bybit AI Subaccount";
+const WAITING_TITLE = "Waiting for Bybit authorization";
+const MAX_PASTED_CODE_LENGTH = 512;
 const HTML_HEADERS = {
   "content-type": "text/html; charset=utf-8",
   "cache-control": "no-store",
@@ -310,6 +312,28 @@ function selectionForm(
   );
 }
 
+function codeForm(secret: string, error?: string): string {
+  return (
+    `<p>Finish authorization in the Bybit tab, then reload this page to see the AI Subaccount options.</p>` +
+    `<p>If the Bybit page shows an authorization code instead, paste it here.</p>` +
+    (error ? `<p role="alert">${escapeHtml(error)}</p>` : "") +
+    `<form method="post" action="${SELECTION_PATH}">` +
+    `<input type="hidden" name="s" value="${escapeHtml(secret)}">` +
+    `<p><label>Authorization code <input type="text" name="code" required maxlength="${MAX_PASTED_CODE_LENGTH}" autocomplete="off" spellcheck="false"></label></p>` +
+    `<p><button type="submit" name="action" value="code">Continue</button></p>` +
+    `</form>`
+  );
+}
+
+function pastedCode(value: string | null): string | null {
+  const code = value?.trim() ?? "";
+  return code.length > 0 &&
+    code.length <= MAX_PASTED_CODE_LENGTH &&
+    /^[\x21-\x7e]+$/.test(code)
+    ? code
+    : null;
+}
+
 function readForm(request: IncomingMessage): Promise<URLSearchParams> {
   return new Promise((resolve, reject) => {
     const contentType = request.headers["content-type"] ?? "";
@@ -439,16 +463,29 @@ export async function startAgentConnectSession(
     closeServer(activeServer);
     rejectCallback(error);
   };
-  const succeed = (code: string, response: ServerResponse): void => {
-    if (settled) {
-      callbackResponse(response, 409, "Authorization already processed.");
-      return;
-    }
+  // Completes the pending authorization with a code from the loopback
+  // callback or pasted by the operator; PKCE binds either to this session.
+  const settleCallback = (
+    code: string,
+    source: "loopback" | "pasted",
+  ): void => {
     settled = true;
     if (timeout) clearTimeout(timeout);
     if (browserSelection) {
       // Keep the loopback server open for the selection page.
       selection = { kind: "loading" };
+    } else {
+      setImmediate(() => closeServer(activeServer));
+    }
+    resolveCallback({ code, codeVerifier: verifier, source });
+  };
+  const succeed = (code: string, response: ServerResponse): void => {
+    if (settled) {
+      callbackResponse(response, 409, "Authorization already processed.");
+      return;
+    }
+    settleCallback(code, "loopback");
+    if (browserSelection) {
       response.writeHead(303, {
         location: `${SELECTION_PATH}?s=${selectionSecret}`,
         "cache-control": "no-store",
@@ -461,9 +498,7 @@ export async function startAgentConnectSession(
         200,
         "Authorization successful. Return to the terminal to choose an AI Subaccount.",
       );
-      setImmediate(() => closeServer(activeServer));
     }
-    resolveCallback({ code, codeVerifier: verifier });
   };
 
   const settleSelection = (
@@ -500,6 +535,10 @@ export async function startAgentConnectSession(
       );
       return;
     }
+    if (selection.kind === "unavailable") {
+      htmlResponse(response, 200, WAITING_TITLE, codeForm(selectionSecret));
+      return;
+    }
     htmlResponse(
       response,
       200,
@@ -508,10 +547,39 @@ export async function startAgentConnectSession(
       true,
     );
   };
+  const submitCode = (
+    form: URLSearchParams,
+    response: ServerResponse,
+  ): void => {
+    // A pasted code is accepted only while the authorization is pending.
+    if (settled) {
+      renderSelection(response);
+      return;
+    }
+    const code = pastedCode(form.get("code"));
+    if (code === null) {
+      htmlResponse(
+        response,
+        400,
+        WAITING_TITLE,
+        codeForm(
+          selectionSecret,
+          "Paste the authorization code exactly as the Bybit page shows it.",
+        ),
+      );
+      return;
+    }
+    settleCallback(code, "pasted");
+    renderSelection(response);
+  };
   const submitSelection = (
     form: URLSearchParams,
     response: ServerResponse,
   ): void => {
+    if (form.get("action") === "code") {
+      submitCode(form, response);
+      return;
+    }
     if (selection.kind !== "open") {
       renderSelection(response);
       return;
@@ -560,10 +628,10 @@ export async function startAgentConnectSession(
     response: ServerResponse,
     url: URL,
   ): void => {
-    // The page exists only after authorization and only for this loopback
+    // The page exists only with browser selection and only for this loopback
     // origin; any other Host header indicates DNS rebinding.
     if (
-      selection.kind === "unavailable" ||
+      !browserSelection ||
       request.headers.host !== `127.0.0.1:${selectedPort}`
     ) {
       callbackResponse(response, 404, "Not found.");
@@ -755,6 +823,13 @@ export async function startAgentConnectSession(
         }
       : {}),
     waitForCallback: () => callback,
+    submitAuthorizationCode: (value) => {
+      if (settled) return "closed";
+      const code = pastedCode(value);
+      if (code === null) return "invalid";
+      settleCallback(code, "pasted");
+      return "accepted";
+    },
     chooseInBrowser: (choices) => {
       if (selection.kind !== "loading") {
         return Promise.reject(

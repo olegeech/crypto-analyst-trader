@@ -15,6 +15,8 @@ export interface AgentConnectAccount {
 export interface AgentConnectCallback {
   code: string;
   codeVerifier: string;
+  /** How the code arrived: the loopback callback or an operator paste. */
+  source?: "loopback" | "pasted";
 }
 
 export interface AgentConnectChoice {
@@ -45,9 +47,18 @@ export interface AgentConnectRequestEvent {
 export interface AgentConnectSession {
   authorizationUrl: string;
   port: number;
-  /** Local selection page, present when browser selection is enabled. */
+  /**
+   * Local page, present when browser selection is enabled: it accepts a
+   * pasted authorization code before the callback and shows the AI
+   * Subaccount choices after it.
+   */
   selectionUrl?: string;
   waitForCallback(): Promise<AgentConnectCallback>;
+  /**
+   * Completes the pending authorization with a code the operator pasted from
+   * the Bybit page. Only this session's PKCE verifier can exchange it.
+   */
+  submitAuthorizationCode(code: string): "accepted" | "invalid" | "closed";
   /**
    * Shows the choices on the loopback page the authorization tab was
    * redirected to and waits for one explicit operator choice.
@@ -97,6 +108,7 @@ export type AgentConnectErrorCode =
   | "transport-failed"
   | "api-failed"
   | "invalid-response"
+  | "authorization-cancelled"
   | "selection-unavailable"
   | "selection-cancelled"
   | "selection-timeout";

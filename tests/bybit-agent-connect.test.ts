@@ -532,6 +532,149 @@ test("browser selection is unavailable unless enabled and never precedes authori
   }
 });
 
+test("a pasted authorization code completes the pending authorization from the local page", async () => {
+  const session = await startAgentConnectSession("testnet", {
+    startPort: 0,
+    maxPort: 0,
+    timeoutMs: 1_000,
+    browserSelection: true,
+  });
+  try {
+    const pageUrl = new URL(session.selectionUrl ?? "");
+    const location = `${pageUrl.pathname}${pageUrl.search}`;
+    const secret = pageUrl.searchParams.get("s") ?? "";
+
+    const waiting = await rawRequest(session.port, { path: location });
+    assert.equal(waiting.status, 200);
+    assert.match(waiting.body, /name="code"/);
+    assert.match(waiting.body, /autocomplete="off"/);
+    assert.doesNotMatch(waiting.body, /http-equiv="refresh"/);
+    assert.equal(waiting.headers["cache-control"], "no-store");
+
+    const callbackPromise = session.waitForCallback();
+    const submitted = await postSelection(session.port, {
+      s: secret,
+      action: "code",
+      code: "  pasted-code  ",
+    });
+    assert.equal(submitted.status, 200);
+    assert.match(submitted.body, /Loading Bybit AI Subaccounts/);
+    const callback = await callbackPromise;
+    assert.equal(callback.code, "pasted-code");
+    assert.equal(callback.source, "pasted");
+    assert.match(callback.codeVerifier, /^[A-Za-z0-9_-]{43}$/);
+
+    const state =
+      new URL(session.authorizationUrl).searchParams.get("state") ?? "";
+    const late = await rawRequest(session.port, {
+      path: `/callback?${new URLSearchParams({ code: "late-code", state })}`,
+    });
+    assert.equal(late.status, 409);
+
+    const choice = session.chooseInBrowser([{ id: "1", label: "Trading" }]);
+    const form = await rawRequest(session.port, { path: location });
+    assert.match(form.body, /Choose a Bybit AI Subaccount/);
+    await postSelection(session.port, {
+      s: secret,
+      action: "choose",
+      choice: "1",
+    });
+    assert.equal(await choice, "1");
+  } finally {
+    session.close();
+  }
+});
+
+test("pasted codes are refused when invalid, unauthenticated, or after the callback", async () => {
+  const session = await startAgentConnectSession("testnet", {
+    startPort: 0,
+    maxPort: 0,
+    timeoutMs: 1_000,
+    browserSelection: true,
+  });
+  const pending = session.waitForCallback();
+  let settledEarly = false;
+  void pending.then(
+    () => {
+      settledEarly = true;
+    },
+    () => {
+      settledEarly = true;
+    },
+  );
+  try {
+    const secret =
+      new URL(session.selectionUrl ?? "").searchParams.get("s") ?? "";
+    const invalid = await postSelection(session.port, {
+      s: secret,
+      action: "code",
+      code: "two words",
+    });
+    assert.equal(invalid.status, 400);
+    assert.match(invalid.body, /exactly as the Bybit page shows it/);
+    assert.equal(
+      (
+        await postSelection(session.port, {
+          s: "wrong",
+          action: "code",
+          code: "abc",
+        })
+      ).status,
+      403,
+    );
+    assert.equal(
+      (
+        await postSelection(
+          session.port,
+          { s: secret, action: "code", code: "abc" },
+          { origin: "http://evil.example" },
+        )
+      ).status,
+      403,
+    );
+    assert.equal(settledEarly, false);
+
+    const state =
+      new URL(session.authorizationUrl).searchParams.get("state") ?? "";
+    await rawRequest(session.port, {
+      path: `/callback?${new URLSearchParams({ code: "loopback-code", state })}`,
+    });
+    const afterCallback = await postSelection(session.port, {
+      s: secret,
+      action: "code",
+      code: "pasted-late",
+    });
+    assert.match(afterCallback.body, /Loading Bybit AI Subaccounts/);
+    const callback = await pending;
+    assert.equal(callback.code, "loopback-code");
+    assert.equal(callback.source, "loopback");
+  } finally {
+    session.close();
+  }
+});
+
+test("a session accepts one pasted code only while the callback is pending", async () => {
+  const session = await startAgentConnectSession("testnet", {
+    startPort: 0,
+    maxPort: 0,
+    timeoutMs: 1_000,
+  });
+  try {
+    const pending = session.waitForCallback();
+    assert.equal(session.submitAuthorizationCode("two words"), "invalid");
+    assert.equal(
+      session.submitAuthorizationCode(" terminal-code "),
+      "accepted",
+    );
+    assert.equal(session.submitAuthorizationCode("another-code"), "closed");
+    const callback = await pending;
+    assert.equal(callback.code, "terminal-code");
+    assert.equal(callback.source, "pasted");
+  } finally {
+    session.close();
+  }
+});
+
 test("OAuth client exchanges only the code verifier contract and never persists token data", async () => {
   const calls: Array<{
     kind: "post" | "get";
