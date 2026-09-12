@@ -433,15 +433,16 @@ export async function runReadOnlyPreflight(
       coin: "USDT",
     }),
   );
-  if (
-    compareDecimals(
-      availableBalance,
-      multiplyDecimals(plannedNotional, BALANCE_MULTIPLIER),
-    ) < 0
-  ) {
+  const requiredBalance = multiplyDecimals(plannedNotional, BALANCE_MULTIPLIER);
+  if (compareDecimals(availableBalance, requiredBalance) < 0) {
+    const availableBalanceText = toDecimalString(availableBalance);
+    const requiredBalanceText = toDecimalString(requiredBalance);
+    const shortfallText = toDecimalString(
+      subtractDecimals(requiredBalance, availableBalance),
+    );
     throw precondition(
-      "Available Testnet USDT is below five times the planned probe notional.",
-      "Use the Bybit Testnet faucet and rerun the read-only preflight.",
+      `Available Testnet USDT is ${availableBalanceText}; at least ${requiredBalanceText} USDT is required (five times the planned probe notional). Add at least ${shortfallText} USDT using the Bybit Testnet faucet, then rerun the probe.`,
+      `Add at least ${shortfallText} USDT using the Bybit Testnet faucet, then rerun the read-only preflight.`,
     );
   }
 

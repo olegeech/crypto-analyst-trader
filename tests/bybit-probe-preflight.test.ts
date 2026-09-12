@@ -169,6 +169,35 @@ test("PendingOpen, hedge mode, dirty baseline, and low balance are all hard stop
   }
 });
 
+test("low balance reports the exact requirement and actionable shortfall", async () => {
+  const { transport } = transportFor({
+    "/v5/account/wallet-balance": {
+      list: [{ totalAvailableBalance: "1.250" }],
+    },
+  });
+
+  await assert.rejects(
+    runReadOnlyPreflight({
+      transport,
+      symbol: "DOGEUSDT",
+      confirmExclusiveUse: async () => true,
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof PreflightError);
+      assert.equal(error.kind, "precondition-failed");
+      assert.equal(
+        error.message,
+        "Available Testnet USDT is 1.25; at least 25.449 USDT is required (five times the planned probe notional). Add at least 24.199 USDT using the Bybit Testnet faucet, then rerun the probe.",
+      );
+      assert.equal(
+        error.guidance,
+        "Add at least 24.199 USDT using the Bybit Testnet faucet, then rerun the read-only preflight.",
+      );
+      return true;
+    },
+  );
+});
+
 test("exclusive-use refusal makes no account configuration call", async () => {
   const { transport, requests } = transportFor();
   await assert.rejects(
