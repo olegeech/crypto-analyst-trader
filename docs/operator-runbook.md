@@ -38,6 +38,18 @@ observed. `CONFIRMED_CLEAN` is the only clean completion verdict; `REFUSED`,
 the handoff and the exchange-UI manual fallback in `SECURITY.md`; never
 cancel all orders or flatten unowned exposure.
 
+For a saved run whose UI and read-only checks show no matching order, open
+orders, executions or position, use the explicit manual closure flow:
+
+```text
+npm run probe:bybit:testnet:recover -- <saved-run-id>
+```
+
+It records `MANUAL_RECOVERY_CONFIRMED` with the operator, timestamp, recovery
+reference and sanitized read-only evidence while preserving the original
+`UNRESOLVED` result as unverified. Owned state is routed through the normal
+exact-plan recovery path.
+
 CLI names in this document describe application use cases. Invoke only commands
 implemented by the current `package.json` and released for the selected
 environment. A missing capability is `CAPABILITY_NOT_RELEASED`; do not replace

@@ -24,7 +24,7 @@ function response(result: Record<string, unknown>): BybitResponse {
 type ProbeFixtureOptions = {
   readonly pendingOpen?: boolean;
   readonly recoveryOrder?: boolean;
-  readonly rejectionCode?: 10014 | 110057;
+  readonly rejectionCode?: 10014 | 110057 | 12345;
   readonly invisibleOrders?: boolean;
   readonly lostAcknowledgement?: boolean;
   readonly acceptDuplicate?: boolean;
@@ -134,7 +134,7 @@ function fixtureTransport(options: ProbeFixtureOptions = {}) {
       const rejectionCode = options.rejectionCode ?? 10014;
       if (
         !options.invisibleOrders &&
-        (options.rejectionCode === 110057 ||
+        (options.rejectionCode !== undefined ||
           (options.rejectionCode === undefined &&
             !options.acceptDuplicate &&
             createCount > 1 &&
@@ -365,6 +365,24 @@ test("a post-write reconciliation failure becomes an unresolved handoff", async 
       saved.find((run) => run.runId === "probe-test")?.verdict,
       "UNRESOLVED",
     );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("unknown dispatch retCodes are persisted as sanitized diagnostics", async () => {
+  const { result, output, root } = await runFixture({ rejectionCode: 12345 });
+  try {
+    assert.equal(result.verdict, "UNRESOLVED");
+    assert.match(
+      output,
+      /dispatch error: exchange-rejection; transport kind: exchange-failure; retCode: 12345/,
+    );
+    const findings = JSON.parse(
+      await readFile(join(root, "probe-test", "findings.json"), "utf8"),
+    ) as { content: string };
+    assert.match(findings.content, /retCode: 12345/);
+    assert.doesNotMatch(findings.content, /deterministic Testnet rejection/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

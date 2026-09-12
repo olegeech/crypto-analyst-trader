@@ -17,6 +17,7 @@ import { hashProbePlan, type ProbePlan } from "./probe-plan.js";
 
 export const DEFAULT_PROBE_DATA_ROOT = "data/private/bybit-probe";
 export const UNRESOLVED_RUN_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1_000;
+export const MANUAL_RECOVERY_STATUS = "MANUAL_RECOVERY_CONFIRMED" as const;
 
 export const EXIT_CODES = {
   CONFIRMED_CLEAN: 0,
@@ -27,6 +28,7 @@ export const EXIT_CODES = {
 } as const;
 
 export type ProbeVerdict = keyof typeof EXIT_CODES;
+export type ManualRecoveryStatus = typeof MANUAL_RECOVERY_STATUS;
 
 export class ProbeStoreError extends Error {
   readonly code:
@@ -71,7 +73,38 @@ export interface StoredRun {
   readonly runId: string;
   readonly intents: readonly StoredIntent[];
   readonly verdict: ProbeVerdict | undefined;
+  readonly manualRecovery: StoredManualRecovery | undefined;
   readonly createdAt: number | undefined;
+  readonly path: string;
+}
+
+export interface ManualRecoveryCheck {
+  readonly category: string;
+  readonly symbol: string;
+  readonly orderLinkId: string;
+  readonly exchangeOrderId: string | undefined;
+  readonly realtimeOrderMatches: number;
+  readonly historyOrderMatches: number;
+  readonly executionMatches: number;
+  readonly openOrderMatches: number;
+  readonly openOrderCount: number;
+  readonly position: "flat" | "non-flat";
+}
+
+export interface ManualRecoveryInput {
+  readonly runId: string;
+  readonly actor: string;
+  readonly confirmedAt: number;
+  readonly accountIdHash: string;
+  readonly originalVerdict: "UNRESOLVED";
+  readonly recoveryReference: string;
+  readonly checks: readonly ManualRecoveryCheck[];
+}
+
+export interface StoredManualRecovery extends ManualRecoveryInput {
+  readonly recordVersion: 1;
+  readonly status: ManualRecoveryStatus;
+  readonly reference: "SECURITY.md";
   readonly path: string;
 }
 
@@ -188,6 +221,158 @@ function storedTimestamp(value: unknown, field: string): number {
     throw new ProbeStoreError("invalid-record", `${field} is invalid`);
   }
   return value as number;
+}
+
+function storedCount(value: unknown, field: string): number {
+  if (!Number.isInteger(value) || (value as number) < 0) {
+    throw new ProbeStoreError("invalid-record", `${field} is invalid`);
+  }
+  return value as number;
+}
+
+const MANUAL_RECOVERY_FIELDS = new Set([
+  "recordVersion",
+  "status",
+  "runId",
+  "actor",
+  "confirmedAt",
+  "accountIdHash",
+  "originalVerdict",
+  "recoveryReference",
+  "checks",
+  "reference",
+]);
+
+const MANUAL_RECOVERY_CHECK_FIELDS = new Set([
+  "category",
+  "symbol",
+  "orderLinkId",
+  "exchangeOrderId",
+  "realtimeOrderMatches",
+  "historyOrderMatches",
+  "executionMatches",
+  "openOrderMatches",
+  "openOrderCount",
+  "position",
+]);
+
+function validateManualRecovery(
+  value: unknown,
+  path: string,
+  expectedRunId: string,
+): StoredManualRecovery {
+  const record = recordObject(value, "manual recovery record");
+  if (
+    Object.keys(record).some((field) => !MANUAL_RECOVERY_FIELDS.has(field)) ||
+    record.recordVersion !== 1 ||
+    record.status !== MANUAL_RECOVERY_STATUS ||
+    record.originalVerdict !== "UNRESOLVED" ||
+    record.reference !== "SECURITY.md"
+  ) {
+    throw new ProbeStoreError(
+      "invalid-record",
+      "the manual recovery record is invalid",
+    );
+  }
+  const runId = safeId(
+    storedString(record, "runId", true) ?? "",
+    "manualRecovery.runId",
+  );
+  if (runId !== expectedRunId) {
+    throw new ProbeStoreError(
+      "invalid-record",
+      "the manual recovery identity does not match its path",
+    );
+  }
+  const actor = storedString(record, "actor", true);
+  const recoveryReference = storedString(record, "recoveryReference", true);
+  const accountIdHash = storedString(record, "accountIdHash", true);
+  if (
+    actor === undefined ||
+    recoveryReference === undefined ||
+    accountIdHash === undefined ||
+    !/^[a-f0-9]{12}$/.test(accountIdHash)
+  ) {
+    throw new ProbeStoreError(
+      "invalid-record",
+      "the manual recovery identity is invalid",
+    );
+  }
+  const confirmedAt = storedTimestamp(record.confirmedAt, "confirmedAt");
+  if (!Array.isArray(record.checks) || record.checks.length === 0) {
+    throw new ProbeStoreError(
+      "invalid-record",
+      "manual recovery checks are invalid",
+    );
+  }
+  const checks = record.checks.map((value, index) => {
+    const check = recordObject(value, `checks[${index}]`);
+    if (
+      Object.keys(check).some(
+        (field) => !MANUAL_RECOVERY_CHECK_FIELDS.has(field),
+      ) ||
+      check.position !== "flat"
+    ) {
+      throw new ProbeStoreError(
+        "invalid-record",
+        `manual recovery check ${index} is invalid`,
+      );
+    }
+    const category = storedString(check, "category", true);
+    const symbol = storedString(check, "symbol", true);
+    const orderLinkId = storedString(check, "orderLinkId", true);
+    const exchangeOrderId = storedString(check, "exchangeOrderId");
+    if (
+      category === undefined ||
+      symbol === undefined ||
+      orderLinkId === undefined
+    ) {
+      throw new ProbeStoreError(
+        "invalid-record",
+        `manual recovery check ${index} is invalid`,
+      );
+    }
+    return {
+      category,
+      symbol,
+      orderLinkId,
+      exchangeOrderId,
+      realtimeOrderMatches: storedCount(
+        check.realtimeOrderMatches,
+        `checks[${index}].realtimeOrderMatches`,
+      ),
+      historyOrderMatches: storedCount(
+        check.historyOrderMatches,
+        `checks[${index}].historyOrderMatches`,
+      ),
+      executionMatches: storedCount(
+        check.executionMatches,
+        `checks[${index}].executionMatches`,
+      ),
+      openOrderMatches: storedCount(
+        check.openOrderMatches,
+        `checks[${index}].openOrderMatches`,
+      ),
+      openOrderCount: storedCount(
+        check.openOrderCount,
+        `checks[${index}].openOrderCount`,
+      ),
+      position: "flat" as const,
+    };
+  });
+  return {
+    recordVersion: 1,
+    status: MANUAL_RECOVERY_STATUS,
+    runId,
+    actor,
+    confirmedAt,
+    accountIdHash,
+    originalVerdict: "UNRESOLVED",
+    recoveryReference,
+    checks,
+    reference: "SECURITY.md",
+    path,
+  };
 }
 
 function validateStoredPlan(value: unknown): StoredPlan {
@@ -709,10 +894,28 @@ export class ProbeStore {
           );
         }
       }
+      let manualRecovery: StoredManualRecovery | undefined;
+      const manualRecoveryPath = join(directory, "manual-recovery.json");
+      try {
+        manualRecovery = validateManualRecovery(
+          JSON.parse(await readFile(manualRecoveryPath, "utf8")),
+          manualRecoveryPath,
+          runId,
+        );
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+          if (error instanceof ProbeStoreError) throw error;
+          throw new ProbeStoreError(
+            "invalid-record",
+            `saved probe run ${runId} contains an invalid manual recovery record`,
+          );
+        }
+      }
       runs.push({
         runId,
         intents,
         verdict,
+        manualRecovery,
         createdAt: intents[0]?.createdAt,
         path: directory,
       });
@@ -731,6 +934,7 @@ export class ProbeStore {
         run.runId !== currentRunId &&
         run.verdict !== "CONFIRMED_CLEAN" &&
         run.verdict !== "REFUSED" &&
+        run.manualRecovery?.status !== MANUAL_RECOVERY_STATUS &&
         (run.verdict !== "PRECONDITION_FAILED" || run.intents.length > 0),
     );
     if (prior.length > 1) {
@@ -783,6 +987,147 @@ export class ProbeStore {
               reference: "SECURITY.md" as const,
             },
           }),
+    };
+    await atomicJsonWrite(path, record);
+    return { ...record, path };
+  }
+
+  async writeManualRecovery(
+    input: ManualRecoveryInput,
+  ): Promise<StoredManualRecovery> {
+    safeId(input.runId, "runId");
+    const actor = safeText(input.actor, "manualRecovery.actor");
+    const recoveryReference = safeText(
+      input.recoveryReference,
+      "manualRecovery.recoveryReference",
+    );
+    if (!/^[a-f0-9]{12}$/.test(input.accountIdHash)) {
+      throw new ProbeStoreError(
+        "invalid-record",
+        "manualRecovery.accountIdHash is invalid",
+      );
+    }
+    ensureFiniteTimestamp(input.confirmedAt, "manualRecovery.confirmedAt");
+    if (input.originalVerdict !== "UNRESOLVED") {
+      throw new ProbeStoreError(
+        "invalid-record",
+        "manual recovery can only close an UNRESOLVED run",
+      );
+    }
+    if (input.checks.length === 0) {
+      throw new ProbeStoreError(
+        "invalid-record",
+        "manual recovery requires read-only checks",
+      );
+    }
+    const checks = input.checks.map((check, index) => {
+      const category = safeText(check.category, `checks[${index}].category`);
+      const symbol = safeText(check.symbol, `checks[${index}].symbol`);
+      const orderLinkId = safeText(
+        check.orderLinkId,
+        `checks[${index}].orderLinkId`,
+      );
+      if (check.exchangeOrderId !== undefined) {
+        safeText(check.exchangeOrderId, `checks[${index}].exchangeOrderId`);
+      }
+      for (const [field, value] of [
+        ["realtimeOrderMatches", check.realtimeOrderMatches],
+        ["historyOrderMatches", check.historyOrderMatches],
+        ["executionMatches", check.executionMatches],
+        ["openOrderMatches", check.openOrderMatches],
+        ["openOrderCount", check.openOrderCount],
+      ] as const) {
+        storedCount(value, `checks[${index}].${field}`);
+      }
+      if (check.position !== "flat") {
+        throw new ProbeStoreError(
+          "invalid-record",
+          `checks[${index}].position is invalid`,
+        );
+      }
+      return {
+        category,
+        symbol,
+        orderLinkId,
+        exchangeOrderId: check.exchangeOrderId,
+        realtimeOrderMatches: check.realtimeOrderMatches,
+        historyOrderMatches: check.historyOrderMatches,
+        executionMatches: check.executionMatches,
+        openOrderMatches: check.openOrderMatches,
+        openOrderCount: check.openOrderCount,
+        position: check.position,
+      };
+    });
+    const saved = (await this.listSavedRuns()).find(
+      (run) => run.runId === input.runId,
+    );
+    if (saved?.verdict !== "UNRESOLVED") {
+      throw new ProbeStoreError(
+        "invalid-record",
+        "manual recovery requires an existing UNRESOLVED run",
+      );
+    }
+    if (
+      saved.intents.some(
+        (intent) => intent.plan.accountIdHash !== input.accountIdHash,
+      )
+    ) {
+      throw new ProbeStoreError(
+        "invalid-record",
+        "manual recovery account identity does not match the saved intent",
+      );
+    }
+    const expectedChecks = saved.intents.map((intent) => ({
+      category: intent.plan.params.category,
+      symbol: intent.plan.params.symbol,
+      orderLinkId: intent.orderLinkId ?? intent.plan.params.orderLinkId,
+      exchangeOrderId: intent.exchangeOrderId,
+    }));
+    const checkKey = (check: {
+      readonly category: unknown;
+      readonly symbol: unknown;
+      readonly orderLinkId: unknown;
+      readonly exchangeOrderId: unknown;
+    }): string =>
+      JSON.stringify([
+        check.category,
+        check.symbol,
+        check.orderLinkId,
+        check.exchangeOrderId,
+      ]);
+    if (
+      expectedChecks.length !== checks.length ||
+      expectedChecks.some(
+        (expected) =>
+          !checks.some((actual) => checkKey(actual) === checkKey(expected)),
+      )
+    ) {
+      throw new ProbeStoreError(
+        "invalid-record",
+        "manual recovery checks do not match the saved intents",
+      );
+    }
+    if (saved.manualRecovery !== undefined) {
+      throw new ProbeStoreError(
+        "invalid-record",
+        "manual recovery has already been recorded for this run",
+      );
+    }
+    const directory = this.runDir(input.runId);
+    await mkdir(directory, { recursive: true, mode: 0o700 });
+    await chmod(directory, 0o700);
+    const path = join(directory, "manual-recovery.json");
+    const record = {
+      recordVersion: 1 as const,
+      status: MANUAL_RECOVERY_STATUS,
+      runId: input.runId,
+      actor,
+      confirmedAt: input.confirmedAt,
+      accountIdHash: input.accountIdHash,
+      originalVerdict: "UNRESOLVED" as const,
+      recoveryReference,
+      checks,
+      reference: "SECURITY.md" as const,
     };
     await atomicJsonWrite(path, record);
     return { ...record, path };

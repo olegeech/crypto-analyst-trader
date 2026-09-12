@@ -7,7 +7,11 @@ import {
 } from "./probe-plan.js";
 import type { ProbeStore } from "./store.js";
 import { BybitProbeTransportError, responseList } from "./transport.js";
-import type { BybitResponse, QueryInput } from "./transport.js";
+import type {
+  BybitResponse,
+  QueryInput,
+  TransportFailureKind,
+} from "./transport.js";
 
 type JsonObject = Record<string, unknown>;
 export type ScenarioTransport = {
@@ -299,6 +303,12 @@ export interface EntryScenarioOptions {
   readonly historyAttempts?: number;
 }
 
+export interface DispatchErrorEvidence {
+  readonly classification: "exchange-rejection" | "ambiguous-transport";
+  readonly transportKind: TransportFailureKind | undefined;
+  readonly retCode: number | undefined;
+}
+
 export type EntryScenarioResult =
   | Readonly<{
       kind: "refused";
@@ -317,6 +327,7 @@ export type EntryScenarioResult =
       orderLinkId: string;
       exchangeOrderId: string | undefined;
       duplicateOutcome: "rejected" | "accepted" | undefined;
+      dispatchError: DispatchErrorEvidence | undefined;
     }>;
 
 export type DispatchedEntryScenarioResult = Exclude<
@@ -360,6 +371,28 @@ function rejectionReconciliation(message: string): ReconciliationResult {
     terminalState: undefined,
     source: undefined,
     message,
+  };
+}
+
+function sanitizedDispatchError(
+  error: unknown,
+): DispatchErrorEvidence | undefined {
+  if (error === undefined) return undefined;
+  if (error instanceof BybitProbeTransportError) {
+    const retCode = Number.isSafeInteger(error.retCode)
+      ? error.retCode
+      : undefined;
+    return {
+      classification:
+        retCode === undefined ? "ambiguous-transport" : "exchange-rejection",
+      transportKind: error.kind,
+      retCode,
+    };
+  }
+  return {
+    classification: "ambiguous-transport",
+    transportKind: undefined,
+    retCode: undefined,
   };
 }
 
@@ -462,6 +495,7 @@ export async function runEntryScenario(
       ? (duplicateOutcome ??
         (acknowledgement === undefined ? undefined : "accepted"))
       : undefined;
+  const dispatchErrorEvidence = sanitizedDispatchError(dispatchError);
   return {
     kind,
     acknowledgement: isDeterministicRejection ? "rejected" : "pending",
@@ -472,6 +506,7 @@ export async function runEntryScenario(
     orderLinkId,
     exchangeOrderId: order?.orderId ?? reconciliationOrderId,
     duplicateOutcome: duplicateScenarioOutcome,
+    dispatchError: dispatchErrorEvidence,
   };
 }
 

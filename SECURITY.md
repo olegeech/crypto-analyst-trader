@@ -44,3 +44,21 @@ A suspected execution or accounting incident requires:
 4. cancel only known owned entry orders when required;
 5. preserve protective exits;
 6. use the exchange UI as the documented manual fallback.
+
+## Bybit probe manual recovery
+
+When a Testnet capability probe records `UNRESOLVED`, do not delete its intent
+or change the original verdict. After checking the exact saved run in the
+Bybit Testnet UI, run:
+
+`npm run probe:bybit:testnet:recover -- <saved-run-id>`
+
+The command displays the saved run, account hash, symbol and client order ID,
+then revalidates realtime and history orders, executions, open orders and
+position through read-only endpoints. It requires an operator identity, a
+recovery reference and an explicit `YES` confirmation of the UI check. A
+clean result is stored as `MANUAL_RECOVERY_CONFIRMED` with sanitized evidence
+and the `SECURITY.md` reference; the original `UNRESOLVED` result remains
+unverified. Any owned order or exposure is routed through the normal exact
+plan approval, durable intent and recovery path instead of being confirmed
+manually.

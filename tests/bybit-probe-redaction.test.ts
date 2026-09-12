@@ -26,6 +26,11 @@ test("findings use an account hash prefix and never print a full exchange ID", (
         orderLinkId: "run-1-long",
         attachedExits: "accepted",
         protectionAfterFill: "unverified",
+        dispatchError: {
+          classification: "exchange-rejection",
+          transportKind: "exchange-failure",
+          retCode: 12345,
+        },
       },
     ],
   });
@@ -34,6 +39,10 @@ test("findings use an account hash prefix and never print a full exchange ID", (
   assert.doesNotMatch(output, /1234567890abcdef/);
   assert.match(output, new RegExp(truncateExchangeOrderId("1234567890abcdef")));
   assert.match(output, /protection after fill: unverified/);
+  assert.match(
+    output,
+    /dispatch error: exchange-rejection; transport kind: exchange-failure; retCode: 12345/,
+  );
 });
 
 test("sanitized-output enforcement rejects a credential-shaped value", () => {

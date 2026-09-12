@@ -28,6 +28,11 @@ import {
   type SanitizedScenarioFinding,
 } from "./bybit-probe/findings.js";
 import { runReadOnlyPreflight } from "./bybit-probe/preflight.js";
+import {
+  runManualRecovery as executeManualRecovery,
+  type ManualRecoveryResult,
+  type ManualRecoveryTarget,
+} from "./bybit-probe/manual-recovery.js";
 import { recoverInterruptedRun } from "./bybit-probe/recovery.js";
 import {
   buildAttachedEntryPlan,
@@ -38,6 +43,7 @@ import {
 } from "./bybit-probe/scenarios.js";
 import {
   EXIT_CODES,
+  MANUAL_RECOVERY_STATUS,
   ProbeStore,
   type ProbeVerdict,
 } from "./bybit-probe/store.js";
@@ -79,6 +85,15 @@ export interface CapabilityProbeOptions {
   readonly runId?: string;
   readonly realtimeAttempts?: number;
   readonly historyAttempts?: number;
+}
+
+export interface ManualRecoveryProbeOptions extends CapabilityProbeOptions {
+  readonly runId: string;
+  readonly actor: string;
+  readonly recoveryReference: string;
+  readonly confirmManualRecovery?: (
+    target: ManualRecoveryTarget,
+  ) => boolean | Promise<boolean>;
 }
 
 function newRunId(clock: () => number): string {
@@ -357,6 +372,9 @@ function findingFromResult(
     protectionAfterFill:
       result.protectionAfterFill === "not-tested" ? "unverified" : "observed",
     duplicateOutcome: result.duplicateOutcome ?? "unverified",
+    ...(result.dispatchError === undefined
+      ? {}
+      : { dispatchError: result.dispatchError }),
   };
 }
 
@@ -366,6 +384,106 @@ function defaultApproval(
   clock: () => number,
 ): (plan: Parameters<typeof approveProbePlan>[0]) => Promise<ProbeApproval> {
   return (plan) => approveProbePlan(plan, { input, output, clock });
+}
+
+async function confirmManualRecovery(
+  target: ManualRecoveryTarget,
+  input: PromptInput,
+  output: Output,
+): Promise<boolean> {
+  if (input.isTTY !== true) return false;
+  try {
+    const answer = await promptVisible(
+      `Confirm the Bybit UI check for saved run ${target.runId} (type YES)`,
+      "Manual recovery confirmation requires a terminal.",
+      {
+        input,
+        output: output as unknown as NodeJS.WritableStream,
+        timeoutMs: 120_000,
+      },
+    );
+    return answer.trim() === "YES";
+  } catch {
+    return false;
+  }
+}
+
+export async function runManualRecovery(
+  options: ManualRecoveryProbeOptions,
+): Promise<ManualRecoveryResult> {
+  const clock = options.clock ?? Date.now;
+  const output = options.output ?? process.stdout;
+  const input = options.input ?? process.stdin;
+  try {
+    const config = resolveProbeConfig(options.environment ?? process.env);
+    let credentials = options.credentials;
+    if (!credentials && !options.transport) {
+      const provider =
+        options.credentialProvider ?? createMacOSKeychainProvider();
+      credentials = await provider.load("testnet");
+    }
+    const accountId = options.accountId ?? credentials?.accountId;
+    if (!accountId)
+      throw new Error("the Testnet account identity is unavailable");
+    const transport =
+      options.transport ??
+      new BybitProbeTransport({
+        baseUrl: config.baseUrl,
+        ...(credentials === undefined ? {} : { credentials }),
+        ...(options.request === undefined ? {} : { request: options.request }),
+        clock,
+      });
+    const store = options.store ?? new ProbeStore();
+    return await executeManualRecovery({
+      runId: options.runId,
+      accountId,
+      actor: options.actor,
+      recoveryReference: options.recoveryReference,
+      store,
+      transport,
+      approve: options.approve ?? defaultApproval(input, output, clock),
+      confirmUi:
+        options.confirmManualRecovery ??
+        ((target) => confirmManualRecovery(target, input, output)),
+      readOwnedExposure: async (intent, ownedOrderIdentities) => {
+        const category = intent.plan.params.category;
+        const symbol = intent.plan.params.symbol;
+        if (typeof category !== "string" || typeof symbol !== "string") {
+          throw new Error("saved run lacks category or symbol");
+        }
+        if (intent.baselineSignedQty === undefined) {
+          throw new Error("saved run lacks a flat baseline");
+        }
+        const exposure = await readOwnedExposure(
+          transport,
+          category,
+          symbol,
+          ownedOrderIdentities,
+          intent.baselineSignedQty,
+        );
+        if (!exposure) throw new Error("owned exposure could not be read");
+        return exposure;
+      },
+      clock,
+      ...(options.sleep === undefined ? {} : { sleep: options.sleep }),
+      ...(options.realtimeAttempts === undefined
+        ? {}
+        : { realtimeAttempts: options.realtimeAttempts }),
+      ...(options.historyAttempts === undefined
+        ? {}
+        : { historyAttempts: options.historyAttempts }),
+      output,
+    });
+  } catch (error) {
+    return {
+      status: "PRECONDITION_FAILED",
+      runId: options.runId,
+      message:
+        error instanceof Error
+          ? error.message
+          : "manual recovery could not start",
+    };
+  }
 }
 
 async function recordVerdict(
@@ -457,6 +575,7 @@ export async function runCapabilityProbe(
         run.runId !== runId &&
         run.verdict !== "CONFIRMED_CLEAN" &&
         run.verdict !== "REFUSED" &&
+        run.manualRecovery?.status !== MANUAL_RECOVERY_STATUS &&
         (run.verdict !== "PRECONDITION_FAILED" || run.intents.length > 0),
     );
     await store.assertNoBlockingPriorRuns(runId, priorRuns);
@@ -688,7 +807,47 @@ export async function runCapabilityProbe(
 
 const invokedPath = process.argv[1];
 if (invokedPath && import.meta.url === pathToFileURL(invokedPath).href) {
-  const result = await runCapabilityProbe();
-  console.log(`${result.verdict}: ${result.message}`);
-  process.exitCode = EXIT_CODES[result.verdict];
+  const manualRecoveryIndex = process.argv.indexOf("--manual-recover");
+  if (manualRecoveryIndex >= 0) {
+    const runId = process.argv[manualRecoveryIndex + 1];
+    if (!runId || runId.startsWith("--")) {
+      console.error(
+        "Usage: npm run probe:bybit:testnet:recover -- <saved-run-id>",
+      );
+      process.exitCode = EXIT_CODES.PRECONDITION_FAILED;
+    } else {
+      let actor = "";
+      let recoveryReference = "";
+      try {
+        actor = await promptVisible(
+          "Recovery actor (operator name or ticket owner)",
+          "Manual recovery requires a terminal.",
+        );
+        recoveryReference = await promptVisible(
+          "Recovery reference (ticket, incident or UI evidence reference)",
+          "Manual recovery requires a terminal.",
+        );
+      } catch {
+        // The exported flow will fail closed when the required operator fields
+        // are absent or the terminal cannot complete the prompts.
+      }
+      const result = await runManualRecovery({
+        runId,
+        actor,
+        recoveryReference,
+      });
+      console.log(`${result.status}: ${result.message}`);
+      process.exitCode =
+        result.status === "MANUAL_RECOVERY_CONFIRMED" ||
+        result.status === "RECOVERED_CLEAN"
+          ? EXIT_CODES.CONFIRMED_CLEAN
+          : result.status === "PRECONDITION_FAILED"
+            ? EXIT_CODES.PRECONDITION_FAILED
+            : EXIT_CODES.UNRESOLVED;
+    }
+  } else {
+    const result = await runCapabilityProbe();
+    console.log(`${result.verdict}: ${result.message}`);
+    process.exitCode = EXIT_CODES[result.verdict];
+  }
 }

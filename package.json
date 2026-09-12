@@ -21,6 +21,7 @@
     "credentials:connect:mainnet": "node --import tsx scripts/credentials-connect.ts mainnet",
     "test:testnet": "node --import tsx scripts/testnet-smoke.ts",
     "probe:bybit:testnet": "TRADER_ENV=testnet node --import tsx scripts/bybit-capability-probe.ts",
+    "probe:bybit:testnet:recover": "TRADER_ENV=testnet node --import tsx scripts/bybit-capability-probe.ts --manual-recover",
     "audit:dependencies": "npm audit --audit-level=high",
     "test": "node --import tsx --test tests/**/*.test.ts",
     "test:release": "npm run typecheck && npm run lint && npm run format:check && npm run check:repository-safety && npm test"

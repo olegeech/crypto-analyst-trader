@@ -14,7 +14,10 @@ import {
   hashProbePlan,
 } from "../scripts/bybit-probe/probe-plan.js";
 import { ProbeStore } from "../scripts/bybit-probe/store.js";
-import type { BybitResponse } from "../scripts/bybit-probe/transport.js";
+import {
+  BybitProbeTransportError,
+  type BybitResponse,
+} from "../scripts/bybit-probe/transport.js";
 
 function response(result: Record<string, unknown>): BybitResponse {
   return { retCode: 0, retMsg: "OK", result };
@@ -340,6 +343,87 @@ test("accepted duplicate client-order IDs are surfaced in scenario results", asy
     });
     if (result.kind === "refused") throw new Error("scenario was refused");
     assert.equal(result.duplicateOutcome, "accepted");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+async function runDispatchFailure(error: unknown, processId: number) {
+  const root = await mkdtemp(join(tmpdir(), "bybit-probe-dispatch-error-"));
+  const store = new ProbeStore({
+    rootDir: root,
+    clock: () => 1_000,
+    processId,
+    isProcessAlive: () => false,
+  });
+  const transport: ScenarioTransport = {
+    async get() {
+      return response({ list: [] });
+    },
+    async post() {
+      throw error;
+    },
+  };
+  const plan = entryPlan();
+  const result = await runEntryScenario({
+    runId: `run-${processId}`,
+    attemptId: "attempt-dispatch-error",
+    plan,
+    transport,
+    store,
+    clock: () => 1_000,
+    sleep: async () => undefined,
+    approve: async () => ({
+      kind: "approved",
+      plan,
+      digest: hashProbePlan(plan),
+      approvedAt: 1_000,
+      expiresAt: plan.expiresAt,
+    }),
+    realtimeAttempts: 1,
+    historyAttempts: 1,
+  });
+  return { result, root };
+}
+
+test("unknown exchange rejection codes are retained without bypassing reconciliation", async () => {
+  const privateMessage = "private exchange response detail";
+  const { result, root } = await runDispatchFailure(
+    new BybitProbeTransportError("exchange-failure", privateMessage, {
+      retCode: 12345,
+    }),
+    104,
+  );
+  try {
+    if (result.kind === "refused") throw new Error("scenario was refused");
+    assert.equal(result.kind, "unresolved");
+    assert.equal(result.reconciliation.lookupCount, 2);
+    assert.deepEqual(result.dispatchError, {
+      classification: "exchange-rejection",
+      transportKind: "exchange-failure",
+      retCode: 12345,
+    });
+    assert.doesNotMatch(JSON.stringify(result), new RegExp(privateMessage));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("generic dispatch failures retain only an ambiguous transport classification", async () => {
+  const privateMessage = "private network detail";
+  const { result, root } = await runDispatchFailure(
+    new Error(privateMessage),
+    105,
+  );
+  try {
+    if (result.kind === "refused") throw new Error("scenario was refused");
+    assert.equal(result.kind, "unresolved");
+    assert.deepEqual(result.dispatchError, {
+      classification: "ambiguous-transport",
+      transportKind: undefined,
+      retCode: undefined,
+    });
+    assert.doesNotMatch(JSON.stringify(result), new RegExp(privateMessage));
   } finally {
     await rm(root, { recursive: true, force: true });
   }

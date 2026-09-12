@@ -1,4 +1,5 @@
 import { accountHash, type ProbeVerdict } from "./store.js";
+import type { DispatchErrorEvidence } from "./scenarios.js";
 
 export type AttachedExitFinding =
   "accepted" | "silent-drop" | "rejected-110057" | "unverified";
@@ -13,6 +14,7 @@ export interface SanitizedScenarioFinding {
   readonly attachedExits: AttachedExitFinding;
   readonly protectionAfterFill: "observed" | "unverified";
   readonly duplicateOutcome?: "accepted" | "rejected" | "unverified";
+  readonly dispatchError?: DispatchErrorEvidence;
 }
 
 export interface FindingsInput {
@@ -32,6 +34,14 @@ function display(value: string | undefined): string {
   return value && !/[\u0000-\u001f\u007f\r\n]/.test(value)
     ? value
     : "unverified";
+}
+
+function displayDispatchError(error: DispatchErrorEvidence): string {
+  const kind = display(error.transportKind);
+  const retCode = Number.isSafeInteger(error.retCode)
+    ? `; retCode: ${error.retCode}`
+    : "";
+  return `${error.classification}; transport kind: ${kind}${retCode}`;
 }
 
 export function renderSanitizedFindings(input: FindingsInput): string {
@@ -57,6 +67,11 @@ export function renderSanitizedFindings(input: FindingsInput): string {
     lines.push(
       `  duplicate client-order-ID outcome: ${scenario.duplicateOutcome ?? "unverified"}`,
     );
+    if (scenario.dispatchError !== undefined) {
+      lines.push(
+        `  dispatch error: ${displayDispatchError(scenario.dispatchError)}`,
+      );
+    }
   }
   return `${lines.join("\n")}\n`;
 }
