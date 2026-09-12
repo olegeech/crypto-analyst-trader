@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -7,6 +7,7 @@ import test from "node:test";
 import { runCapabilityProbe } from "../scripts/bybit-capability-probe.js";
 import type { ProbeApproval } from "../scripts/bybit-probe/approval.js";
 import {
+  buildProbePlan,
   hashProbePlan,
   type ProbePlan,
 } from "../scripts/bybit-probe/probe-plan.js";
@@ -25,6 +26,8 @@ type ProbeFixtureOptions = {
   readonly rejectionCode?: 10014 | 110057;
   readonly invisibleOrders?: boolean;
   readonly lostAcknowledgement?: boolean;
+  readonly acceptDuplicate?: boolean;
+  readonly throwAfterWrite?: boolean;
 };
 
 function fixtureTransport(options: ProbeFixtureOptions = {}) {
@@ -52,6 +55,14 @@ function fixtureTransport(options: ProbeFixtureOptions = {}) {
         path,
         ...(query === undefined ? {} : { query }),
       });
+      if (
+        options.throwAfterWrite &&
+        createCount > 0 &&
+        path === "/v5/order/realtime" &&
+        query?.orderLinkId !== undefined
+      ) {
+        throw new Error("post-write reconciliation read failed");
+      }
       if (path === "/v5/market/instruments-info") {
         return response({
           list: [
@@ -116,6 +127,7 @@ function fixtureTransport(options: ProbeFixtureOptions = {}) {
         !options.invisibleOrders &&
         (options.rejectionCode === 110057 ||
           (options.rejectionCode === undefined &&
+            !options.acceptDuplicate &&
             createCount > 1 &&
             body.orderLinkId === "probe-test-long"))
       ) {
@@ -259,6 +271,16 @@ test("orchestrator runs preflight, long, short, lost acknowledgement, duplicate,
   }
 });
 
+test("orchestrator records an accepted duplicate client-order-ID outcome", async () => {
+  const { output, result, root } = await runFixture({ acceptDuplicate: true });
+  try {
+    assert.equal(result.verdict, "CONFIRMED_CLEAN");
+    assert.match(output, /duplicate client-order-ID outcome: accepted/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("orchestrator stops before writes when preflight is refused or invalid", async () => {
   const refused = await runFixture({}, async () => ({
     kind: "refused" as const,
@@ -297,6 +319,14 @@ test("orchestrator preserves unresolved and contradiction verdicts without retry
       ).length,
       1,
     );
+    const findings = JSON.parse(
+      await readFile(
+        join(unresolved.root, "probe-test", "findings.json"),
+        "utf8",
+      ),
+    ) as { verdict: string; content: string };
+    assert.equal(findings.verdict, "UNRESOLVED");
+    assert.match(findings.content, /long-entry/);
   } finally {
     await rm(unresolved.root, { recursive: true, force: true });
   }
@@ -311,5 +341,89 @@ test("orchestrator preserves unresolved and contradiction verdicts without retry
     );
   } finally {
     await rm(contradiction.root, { recursive: true, force: true });
+  }
+});
+
+test("a post-write reconciliation failure becomes an unresolved handoff", async () => {
+  const { result, output, root, store } = await runFixture({
+    throwAfterWrite: true,
+  });
+  try {
+    assert.equal(result.verdict, "UNRESOLVED");
+    assert.match(output, /verdict: UNRESOLVED/);
+    const saved = await store.listSavedRuns();
+    assert.equal(
+      saved.find((run) => run.runId === "probe-test")?.verdict,
+      "UNRESOLVED",
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("failed recovery preserves the prior run ID and reports the current run separately", async () => {
+  const root = await mkdtemp(
+    join(tmpdir(), "bybit-capability-probe-recovery-"),
+  );
+  try {
+    const store = new ProbeStore({
+      rootDir: root,
+      clock: () => 1_000,
+      processId: 7_002,
+      isProcessAlive: () => false,
+    });
+    const priorPlan = buildProbePlan({
+      environment: "testnet",
+      accountId: "prior-account",
+      scenario: "long-entry",
+      expiresAt: 100_000,
+      method: "POST",
+      endpoint: "/v5/order/create",
+      params: {
+        category: "linear",
+        symbol: "DOGEUSDT",
+        side: "Buy",
+        orderLinkId: "prior-run-long",
+        price: "0.1",
+        qty: "51",
+        takeProfit: "0.102",
+        stopLoss: "0.098",
+        orderType: "Limit",
+        timeInForce: "PostOnly",
+        reduceOnly: false,
+        positionIdx: 0,
+      },
+    });
+    await store.writeIntent({
+      runId: "prior-run",
+      attemptId: "attempt-1",
+      scenario: priorPlan.scenario,
+      plan: priorPlan,
+      planDigest: hashProbePlan(priorPlan),
+      approvedAt: 1_000,
+      approvalExpiresAt: 100_000,
+      createdAt: 1_000,
+      orderLinkId: priorPlan.params.orderLinkId,
+      exchangeOrderId: "prior-order",
+      baselineSignedQty: "0",
+    });
+    const fixture = fixtureTransport();
+    const result = await runCapabilityProbe({
+      environment: { TRADER_ENV: "testnet" },
+      accountId: "testnet-account",
+      transport: fixture.transport,
+      store,
+      runId: "current-run",
+      clock: () => 1_000,
+      sleep: async () => undefined,
+      confirmExclusiveUse: async () => true,
+      approve: approved(1_000),
+      output: { write: () => undefined },
+    });
+    assert.equal(result.verdict, "UNRESOLVED");
+    assert.equal(result.runId, "prior-run");
+    assert.equal(result.currentRunId, "current-run");
+  } finally {
+    await rm(root, { recursive: true, force: true });
   }
 });

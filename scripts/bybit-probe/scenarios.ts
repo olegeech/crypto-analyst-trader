@@ -1,4 +1,5 @@
 import { reverifyProbeApproval, type ProbeApproval } from "./approval.js";
+import { decimalIsZero, parseDecimal } from "./decimal.js";
 import {
   buildProbePlan,
   type ProbePlan,
@@ -327,11 +328,22 @@ function attachedExitEvidence(
   order: ValidatedOrder | undefined,
 ): "accepted" | "silent-drop" | "not-observed" {
   if (!order) return "not-observed";
-  if (order.takeProfit !== undefined && order.stopLoss !== undefined)
-    return "accepted";
-  if (order.takeProfit === undefined && order.stopLoss === undefined)
-    return "silent-drop";
+  const takeProfit = classifyExitValue(order.takeProfit);
+  const stopLoss = classifyExitValue(order.stopLoss);
+  if (takeProfit === "present" && stopLoss === "present") return "accepted";
+  if (takeProfit === "absent" && stopLoss === "absent") return "silent-drop";
   return "not-observed";
+}
+
+function classifyExitValue(
+  value: string | undefined,
+): "present" | "absent" | "invalid" {
+  if (value === undefined) return "absent";
+  try {
+    return decimalIsZero(parseDecimal(value)) ? "absent" : "present";
+  } catch {
+    return "invalid";
+  }
 }
 
 function resultOrderId(response: BybitResponse): string | undefined {
@@ -445,6 +457,11 @@ export async function runEntryScenario(
     ? "rejected-110057"
     : attachedExitEvidence(order);
   const kind = isDeterministicRejection ? "rejected" : reconciliation.kind;
+  const duplicateScenarioOutcome =
+    options.plan.scenario === "duplicate-client-order-id"
+      ? (duplicateOutcome ??
+        (acknowledgement === undefined ? undefined : "accepted"))
+      : undefined;
   return {
     kind,
     acknowledgement: isDeterministicRejection ? "rejected" : "pending",
@@ -454,7 +471,7 @@ export async function runEntryScenario(
     side: options.plan.params.side,
     orderLinkId,
     exchangeOrderId: order?.orderId ?? reconciliationOrderId,
-    duplicateOutcome,
+    duplicateOutcome: duplicateScenarioOutcome,
   };
 }
 

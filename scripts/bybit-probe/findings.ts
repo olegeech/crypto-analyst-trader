@@ -12,6 +12,7 @@ export interface SanitizedScenarioFinding {
   readonly orderLinkId: string | undefined;
   readonly attachedExits: AttachedExitFinding;
   readonly protectionAfterFill: "observed" | "unverified";
+  readonly duplicateOutcome?: "accepted" | "rejected" | "unverified";
 }
 
 export interface FindingsInput {
@@ -53,6 +54,9 @@ export function renderSanitizedFindings(input: FindingsInput): string {
     lines.push(`  orderLinkId: ${display(scenario.orderLinkId)}`);
     lines.push(`  attached exits: ${scenario.attachedExits}`);
     lines.push(`  protection after fill: ${scenario.protectionAfterFill}`);
+    lines.push(
+      `  duplicate client-order-ID outcome: ${scenario.duplicateOutcome ?? "unverified"}`,
+    );
   }
   return `${lines.join("\n")}\n`;
 }

@@ -171,6 +171,30 @@ test("run records remain readable after a simulated interrupted dispatch", async
   }
 });
 
+test("sanitized findings are persisted with their terminal verdict", async () => {
+  const { root, store } = await tempStore();
+  try {
+    const findings = await store.writeFindings(
+      "run-1",
+      "UNRESOLVED",
+      "Bybit Testnet capability probe findings\nverdict: UNRESOLVED\n",
+    );
+    const persisted = JSON.parse(await readFile(findings.path, "utf8")) as {
+      verdict: string;
+      content: string;
+    };
+    assert.equal(persisted.verdict, "UNRESOLVED");
+    assert.match(persisted.content, /verdict: UNRESOLVED/);
+    assert.equal((await stat(findings.path)).mode & 0o777, 0o600);
+    assert.equal(
+      (await readdir(join(root, "run-1"))).includes("findings.json"),
+      true,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("corrupt persisted intent shapes fail closed during recovery discovery", async () => {
   const { root, store } = await tempStore();
   try {

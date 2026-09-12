@@ -20,11 +20,11 @@ function response(result: Record<string, unknown>): BybitResponse {
   return { retCode: 0, retMsg: "OK", result };
 }
 
-function entryPlan() {
+function entryPlan(scenario = "long-entry") {
   return buildProbePlan({
     environment: "testnet",
     accountId: "trading-account",
-    scenario: "long-entry",
+    scenario,
     expiresAt: 100_000,
     method: "POST",
     endpoint: "/v5/order/create",
@@ -235,6 +235,111 @@ test("entry dispatch persists the exact approved plan before POST and records at
     assert.equal(calls.length, 1);
     assert.equal(result.acknowledgement, "pending");
     assert.equal(result.attachedExits, "accepted");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("zero-valued attached exits are reported as a silent drop", async () => {
+  const root = await mkdtemp(join(tmpdir(), "bybit-probe-scenario-"));
+  try {
+    const store = new ProbeStore({
+      rootDir: root,
+      clock: () => 1_000,
+      processId: 102,
+      isProcessAlive: () => false,
+    });
+    const transport: ScenarioTransport = {
+      async get() {
+        return response({
+          list: [
+            {
+              orderId: "exchange-zero-exits",
+              orderLinkId: "run-1-long",
+              orderStatus: "New",
+              takeProfit: "0.00",
+              stopLoss: "0",
+            },
+          ],
+        });
+      },
+      async post() {
+        return response({ orderId: "exchange-zero-exits" });
+      },
+    };
+    const plan = entryPlan();
+    const result = await runEntryScenario({
+      runId: "run-1",
+      attemptId: "attempt-zero-exits",
+      plan,
+      transport,
+      store,
+      clock: () => 1_000,
+      sleep: async () => undefined,
+      approve: async () => ({
+        kind: "approved",
+        plan,
+        digest: hashProbePlan(plan),
+        approvedAt: 1_000,
+        expiresAt: plan.expiresAt,
+      }),
+      realtimeAttempts: 2,
+      historyAttempts: 0,
+    });
+    assert.equal(result.attachedExits, "silent-drop");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("accepted duplicate client-order IDs are surfaced in scenario results", async () => {
+  const root = await mkdtemp(join(tmpdir(), "bybit-probe-scenario-"));
+  try {
+    const store = new ProbeStore({
+      rootDir: root,
+      clock: () => 1_000,
+      processId: 103,
+      isProcessAlive: () => false,
+    });
+    const transport: ScenarioTransport = {
+      async get() {
+        return response({
+          list: [
+            {
+              orderId: "exchange-duplicate",
+              orderLinkId: "run-1-long",
+              orderStatus: "New",
+              takeProfit: "0.102",
+              stopLoss: "0.098",
+            },
+          ],
+        });
+      },
+      async post() {
+        return response({ orderId: "exchange-duplicate" });
+      },
+    };
+    const plan = entryPlan("duplicate-client-order-id");
+    const result = await runEntryScenario({
+      runId: "run-1",
+      attemptId: "attempt-duplicate",
+      plan,
+      transport,
+      store,
+      clock: () => 1_000,
+      sleep: async () => undefined,
+      approve: async () => ({
+        kind: "approved",
+        plan,
+        digest: hashProbePlan(plan),
+        approvedAt: 1_000,
+        expiresAt: plan.expiresAt,
+      }),
+      realtimeAttempts: 2,
+      historyAttempts: 0,
+    });
+    if (result.kind === "refused") throw new Error("scenario was refused");
+    assert.equal(result.duplicateOutcome, "accepted");
   } finally {
     await rm(root, { recursive: true, force: true });
   }

@@ -10,6 +10,7 @@ import {
 } from "./decimal.js";
 import { reverifyProbeApproval, type ProbeApproval } from "./approval.js";
 import { buildProbePlan, type ProbePlan } from "./probe-plan.js";
+import { TERMINAL_ORDER_STATUSES } from "./scenarios.js";
 import type { ProbeStore } from "./store.js";
 import {
   responseList,
@@ -165,8 +166,11 @@ function sameStringSet(
   left: readonly string[],
   right: readonly string[],
 ): boolean {
+  const leftSet = new Set(left);
+  const rightSet = new Set(right);
   return (
-    left.length === right.length && left.every((value) => right.includes(value))
+    leftSet.size === rightSet.size &&
+    [...leftSet].every((value) => rightSet.has(value))
   );
 }
 
@@ -241,10 +245,7 @@ export async function cleanupOwnedEntry(
       message: "entry identity is not proven to belong to this run",
     };
   }
-  if (
-    options.order.orderStatus !== "New" &&
-    options.order.orderStatus !== "PartiallyFilled"
-  ) {
+  if (TERMINAL_ORDER_STATUSES.has(options.order.orderStatus)) {
     return {
       kind: "already-flat",
       message: "entry is already terminal; no cancel write was needed",
@@ -395,10 +396,15 @@ export async function flattenOwnedExposure(
         }
       : { kind: "unresolved", message: "flat position still has open orders" };
   }
-  const orderLinkId = `${options.runId}-flatten-${options.attemptId}`.slice(
-    0,
-    36,
-  );
+  const flattenSuffix = `-flatten-${options.attemptId}`;
+  const runIdLength = 36 - flattenSuffix.length;
+  if (runIdLength < 1) {
+    return {
+      kind: "unresolved",
+      message: "flatten attempt identity does not fit the exchange limit",
+    };
+  }
+  const orderLinkId = `${options.runId.slice(-runIdLength)}${flattenSuffix}`;
   const plan = buildProbePlan({
     environment: "testnet",
     accountId: options.accountId,

@@ -23,6 +23,7 @@ import {
 } from "./bybit-probe/cleanup.js";
 import { resolveProbeConfig } from "./bybit-probe/config.js";
 import {
+  assertSanitizedOutput,
   renderSanitizedFindings,
   type SanitizedScenarioFinding,
 } from "./bybit-probe/findings.js";
@@ -53,6 +54,7 @@ export interface ProbeRunResult {
   readonly verdict: ProbeVerdict;
   readonly message: string;
   readonly runId: string;
+  readonly currentRunId?: string;
 }
 
 type Output = { write(message: string): void };
@@ -338,6 +340,7 @@ function findingFromResult(
       orderLinkId: undefined,
       attachedExits: "unverified",
       protectionAfterFill: "unverified",
+      duplicateOutcome: "unverified",
     };
   }
   return {
@@ -353,6 +356,7 @@ function findingFromResult(
         : result.attachedExits,
     protectionAfterFill:
       result.protectionAfterFill === "not-tested" ? "unverified" : "observed",
+    duplicateOutcome: result.duplicateOutcome ?? "unverified",
   };
 }
 
@@ -369,7 +373,24 @@ async function recordVerdict(
   runId: string,
   verdict: ProbeVerdict,
   message: string,
+  options: {
+    readonly accountId?: string;
+    readonly scenarios?: readonly SanitizedScenarioFinding[];
+    readonly secrets?: readonly string[];
+    readonly output?: Output;
+  } = {},
 ): Promise<ProbeRunResult> {
+  if (options.accountId !== undefined) {
+    const findings = renderSanitizedFindings({
+      runId,
+      verdict,
+      accountId: options.accountId,
+      scenarios: options.scenarios ?? [],
+    });
+    assertSanitizedOutput(findings, options.secrets ?? []);
+    await store.writeFindings(runId, verdict, findings);
+    options.output?.write(findings);
+  }
   if (verdict === "UNRESOLVED") {
     await store.writeVerdict(runId, verdict, {
       runId,
@@ -392,6 +413,10 @@ export async function runCapabilityProbe(
   const input = options.input ?? process.stdin;
   const runId = options.runId ?? newRunId(clock);
   const store = options.store ?? new ProbeStore();
+  const findings: SanitizedScenarioFinding[] = [];
+  let accountId: string | undefined;
+  let secrets: readonly string[] = [];
+  let writeDispatched = false;
   try {
     const config = resolveProbeConfig(options.environment ?? process.env);
     let credentials = options.credentials;
@@ -400,10 +425,15 @@ export async function runCapabilityProbe(
         options.credentialProvider ?? createMacOSKeychainProvider();
       credentials = await provider.load("testnet");
     }
-    const accountId = options.accountId ?? credentials?.accountId;
+    accountId = options.accountId ?? credentials?.accountId;
     if (!accountId)
       throw new Error("the Testnet account identity is unavailable");
-    const transport =
+    const verifiedAccountId = accountId;
+    secrets =
+      credentials === undefined
+        ? []
+        : [credentials.apiKey, credentials.apiSecret];
+    const rawTransport =
       options.transport ??
       new BybitProbeTransport({
         baseUrl: config.baseUrl,
@@ -411,6 +441,13 @@ export async function runCapabilityProbe(
         ...(options.request === undefined ? {} : { request: options.request }),
         clock,
       });
+    const transport: ScenarioTransport = {
+      get: (path, query) => rawTransport.get(path, query),
+      post: async (path, body) => {
+        writeDispatched = true;
+        return rawTransport.post(path, body);
+      },
+    };
 
     const priorRuns = (await store.listSavedRuns()).filter(
       (run) =>
@@ -456,7 +493,7 @@ export async function runCapabilityProbe(
         },
       });
       if (recovered.verdict !== "CONFIRMED_CLEAN")
-        return { ...recovered, runId };
+        return { ...recovered, currentRunId: runId };
     }
 
     await store.acquireLock(runId);
@@ -469,7 +506,6 @@ export async function runCapabilityProbe(
           (() => confirmExclusiveUse(input, output)),
       });
       const approve = options.approve ?? defaultApproval(input, output, clock);
-      const findings: SanitizedScenarioFinding[] = [];
       const runScenario = async (
         side: "Buy" | "Sell",
         attemptId: string,
@@ -483,7 +519,7 @@ export async function runCapabilityProbe(
         const size = preflight.sizes[side];
         const plan = buildAttachedEntryPlan({
           environment: "testnet",
-          accountId,
+          accountId: verifiedAccountId,
           scenario,
           expiresAt: clock() + 120_000,
           category: preflight.category,
@@ -519,7 +555,7 @@ export async function runCapabilityProbe(
         const cleanup = await cleanupScenario(result, {
           runId,
           attemptId,
-          accountId,
+          accountId: verifiedAccountId,
           category: preflight.category,
           symbol: preflight.symbol,
           baselineSignedQty: preflight.baseline.positionSize,
@@ -548,6 +584,7 @@ export async function runCapabilityProbe(
               ? "CONTRADICTION"
               : "UNRESOLVED",
           long.message,
+          { accountId, scenarios: findings, secrets, output },
         );
       }
       const short = await runScenario(
@@ -566,6 +603,7 @@ export async function runCapabilityProbe(
               ? "CONTRADICTION"
               : "UNRESOLVED",
           short.message,
+          { accountId, scenarios: findings, secrets, output },
         );
       }
       const lostAcknowledgement = await runScenario(
@@ -585,6 +623,7 @@ export async function runCapabilityProbe(
               ? "CONTRADICTION"
               : "UNRESOLVED",
           lostAcknowledgement.message,
+          { accountId, scenarios: findings, secrets, output },
         );
       }
       const duplicate = await runScenario(
@@ -603,23 +642,17 @@ export async function runCapabilityProbe(
               ? "CONTRADICTION"
               : "UNRESOLVED",
           duplicate.message,
+          { accountId, scenarios: findings, secrets, output },
         );
       }
       const verdict: ProbeVerdict = "CONFIRMED_CLEAN";
-      output.write(
-        renderSanitizedFindings({
-          runId,
-          verdict,
-          accountId,
-          scenarios: findings,
-        }),
-      );
-      await store.writeVerdict(runId, verdict);
-      return {
-        verdict,
-        message: "all deterministic/live probe scenarios reconciled clean",
+      return await recordVerdict(
+        store,
         runId,
-      };
+        verdict,
+        "all deterministic/live probe scenarios reconciled clean",
+        { accountId, scenarios: findings, secrets, output },
+      );
     } finally {
       await store.releaseLock(runId);
     }
@@ -627,9 +660,24 @@ export async function runCapabilityProbe(
     const message =
       error instanceof Error ? error.message : "the probe could not start";
     try {
-      return await recordVerdict(store, runId, "PRECONDITION_FAILED", message);
+      return await recordVerdict(
+        store,
+        runId,
+        writeDispatched ? "UNRESOLVED" : "PRECONDITION_FAILED",
+        message,
+        {
+          ...(accountId === undefined ? {} : { accountId }),
+          scenarios: findings,
+          secrets,
+          output,
+        },
+      );
     } catch {
-      return { verdict: "PRECONDITION_FAILED", message, runId };
+      return {
+        verdict: writeDispatched ? "UNRESOLVED" : "PRECONDITION_FAILED",
+        message,
+        runId,
+      };
     }
   }
 }

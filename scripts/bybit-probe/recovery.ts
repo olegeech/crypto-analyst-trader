@@ -44,6 +44,7 @@ export interface RecoveryOptions {
 }
 
 export interface RecoveryResult {
+  readonly runId: string;
   readonly verdict: ProbeVerdict;
   readonly message: string;
 }
@@ -78,7 +79,7 @@ async function finalize(
   } else {
     await store.writeVerdict(runId, verdict);
   }
-  return { verdict, message };
+  return { runId, verdict, message };
 }
 
 function orderIdentities(
@@ -113,6 +114,7 @@ export async function recoverInterruptedRun(
     await options.store.acquireLock(options.runId);
   } catch (error) {
     return {
+      runId: options.runId,
       verdict: "PRECONDITION_FAILED",
       message:
         error instanceof Error
@@ -126,11 +128,13 @@ export async function recoverInterruptedRun(
     const saved = savedRuns.find((run) => run.runId === options.runId);
     if (!saved)
       return {
+        runId: options.runId,
         verdict: "PRECONDITION_FAILED",
         message: "the saved probe run was not found",
       };
     if (saved.verdict === "CONFIRMED_CLEAN") {
       return {
+        runId: options.runId,
         verdict: "CONFIRMED_CLEAN",
         message: "the original run was already proven clean",
       };

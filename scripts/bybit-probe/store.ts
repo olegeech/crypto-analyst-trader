@@ -94,6 +94,15 @@ export interface StoredVerdict {
   readonly path: string;
 }
 
+export interface StoredFindings {
+  readonly recordVersion: 1;
+  readonly runId: string;
+  readonly verdict: ProbeVerdict;
+  readonly recordedAt: number;
+  readonly content: string;
+  readonly path: string;
+}
+
 interface LockRecord {
   readonly pid: number;
   readonly runId: string;
@@ -774,6 +783,39 @@ export class ProbeStore {
               reference: "SECURITY.md" as const,
             },
           }),
+    };
+    await atomicJsonWrite(path, record);
+    return { ...record, path };
+  }
+
+  async writeFindings(
+    runId: string,
+    verdict: ProbeVerdict,
+    content: string,
+  ): Promise<StoredFindings> {
+    safeId(runId, "runId");
+    if (!(verdict in EXIT_CODES))
+      throw new ProbeStoreError("invalid-record", "verdict is invalid");
+    if (
+      typeof content !== "string" ||
+      !content ||
+      /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(content)
+    ) {
+      throw new ProbeStoreError(
+        "invalid-record",
+        "findings content is invalid",
+      );
+    }
+    const directory = this.runDir(runId);
+    await mkdir(directory, { recursive: true, mode: 0o700 });
+    await chmod(directory, 0o700);
+    const path = join(directory, "findings.json");
+    const record = {
+      recordVersion: 1 as const,
+      runId,
+      verdict,
+      recordedAt: this.clock(),
+      content,
     };
     await atomicJsonWrite(path, record);
     return { ...record, path };

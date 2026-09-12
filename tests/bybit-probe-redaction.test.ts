@@ -5,6 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 import {
+  assertSanitizedOutput,
   renderSanitizedFindings,
   truncateExchangeOrderId,
 } from "../scripts/bybit-probe/findings.js";
@@ -33,6 +34,16 @@ test("findings use an account hash prefix and never print a full exchange ID", (
   assert.doesNotMatch(output, /1234567890abcdef/);
   assert.match(output, new RegExp(truncateExchangeOrderId("1234567890abcdef")));
   assert.match(output, /protection after fill: unverified/);
+});
+
+test("sanitized-output enforcement rejects a credential-shaped value", () => {
+  assert.throws(
+    () =>
+      assertSanitizedOutput("signature: sentinel-secret\n", [
+        "sentinel-secret",
+      ]),
+    /credential or signature/,
+  );
 });
 
 test("sentinel credentials never reach a persisted verdict artifact", async () => {

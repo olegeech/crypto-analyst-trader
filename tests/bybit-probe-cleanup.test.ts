@@ -153,6 +153,61 @@ test("cleanup cancels only a proven-owned resting entry and proves clean state",
   }
 });
 
+test("cleanup cancels exchange-active statuses outside the terminal set", async () => {
+  const { root, store } = await storeFixture();
+  try {
+    const calls: string[] = [];
+    const transport: CleanupTransport = {
+      async get(path) {
+        calls.push(`GET ${path}`);
+        if (path === "/v5/order/realtime") return response({ list: [] });
+        if (path === "/v5/position/list")
+          return response({ list: [{ size: "0", side: "", positionIdx: 0 }] });
+        return response({ list: [] });
+      },
+      async post(path, body) {
+        calls.push(`POST ${path}`);
+        assert.equal(body.orderId, "entry-1");
+        return response({ orderId: "entry-1" });
+      },
+    };
+    const result = await cleanupOwnedEntry({
+      runId: "run-1",
+      attemptId: "cancel-triggered",
+      accountId: "trading-account",
+      category: "linear",
+      symbol: "DOGEUSDT",
+      order: {
+        orderId: "entry-1",
+        orderLinkId: "run-1-long",
+        side: "Buy",
+        orderStatus: "Triggered",
+      },
+      entryOrderIds: new Set(["entry-1"]),
+      protectiveExitOrderIds: new Set(),
+      store,
+      transport,
+      clock: () => 1_000,
+      approve: async (plan) => ({
+        kind: "approved",
+        plan,
+        digest: hashProbePlan(plan),
+        approvedAt: 1_000,
+        expiresAt: plan.expiresAt,
+      }),
+      readOwnership: async () => true,
+      sleep: async () => undefined,
+    });
+    assert.equal(result.kind, "confirmed-clean");
+    assert.deepEqual(
+      calls.filter((call) => call.startsWith("POST")),
+      ["POST /v5/order/cancel"],
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("protective exits and foreign runs are never routine-cancelled", async () => {
   const { root, store } = await storeFixture();
   try {
@@ -218,6 +273,7 @@ test("flatten uses a fresh approved reduce-only order and no attached exits", as
   const { root, store } = await storeFixture();
   try {
     let posts = 0;
+    let flattenOrderLinkId: string | undefined;
     const transport: CleanupTransport = {
       async get(path) {
         if (path === "/v5/order/realtime") return response({ list: [] });
@@ -226,6 +282,7 @@ test("flatten uses a fresh approved reduce-only order and no attached exits", as
       async post(path, body) {
         posts += 1;
         assert.equal(path, "/v5/order/create");
+        flattenOrderLinkId = String(body.orderLinkId);
         assert.equal(body.reduceOnly, true);
         assert.equal(body.qty, "3");
         assert.equal(body.takeProfit, undefined);
@@ -248,7 +305,7 @@ test("flatten uses a fresh approved reduce-only order and no attached exits", as
       ],
     };
     const result = await flattenOwnedExposure({
-      runId: "run-1",
+      runId: "probe-1700000000000-12345678",
       attemptId: "flatten-1",
       accountId: "trading-account",
       category: "linear",
@@ -264,6 +321,7 @@ test("flatten uses a fresh approved reduce-only order and no attached exits", as
           qty: "3",
         },
       ],
+      ownedOrderIdentities: new Map([["entry-1", "run-1-long"]]),
       store,
       transport,
       clock: () => 1_000,
@@ -279,6 +337,8 @@ test("flatten uses a fresh approved reduce-only order and no attached exits", as
     });
     assert.equal(result.kind, "confirmed-clean");
     assert.equal(posts, 1);
+    assert.equal(flattenOrderLinkId?.length, 36);
+    assert.equal(flattenOrderLinkId?.endsWith("-flatten-flatten-1"), true);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -384,6 +444,63 @@ test("flatten refuses when execution evidence changes during approval", async ()
       readOwnership: async () => changedState,
     });
     assert.equal(result.kind, "unresolved");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("flatten rejects ownership arrays that differ after deduplication", async () => {
+  const { root, store } = await storeFixture();
+  try {
+    let posts = 0;
+    const execution: OwnedExecution = {
+      executionId: "exec-entry",
+      orderId: "entry-1",
+      orderLinkId: "run-1-long",
+      side: "Buy",
+      qty: "3",
+    };
+    const state: OwnershipState = {
+      currentSignedQty: "3",
+      ownedOrderIds: ["entry-1", "entry-1"],
+      protectiveExitOrderIds: [],
+      executionFingerprints: [ownedExecutionFingerprint(execution)],
+    };
+    const transport: CleanupTransport = {
+      async get() {
+        return response({ list: [] });
+      },
+      async post() {
+        posts += 1;
+        throw new Error("must not write");
+      },
+    };
+    const result = await flattenOwnedExposure({
+      runId: "run-1",
+      attemptId: "flatten-duplicate-set",
+      accountId: "trading-account",
+      category: "linear",
+      symbol: "DOGEUSDT",
+      baselineSignedQty: "0",
+      currentState: state,
+      executions: [execution],
+      ownedOrderIdentities: new Map([["entry-1", "run-1-long"]]),
+      store,
+      transport,
+      approve: async (plan) => ({
+        kind: "approved",
+        plan,
+        digest: hashProbePlan(plan),
+        approvedAt: 1_000,
+        expiresAt: plan.expiresAt,
+      }),
+      readOwnership: async () => ({
+        ...state,
+        ownedOrderIds: ["entry-1", "entry-2"],
+      }),
+    });
+    assert.equal(result.kind, "unresolved");
+    assert.equal(posts, 0);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
