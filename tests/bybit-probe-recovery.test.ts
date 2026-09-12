@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -173,6 +173,61 @@ test("recovery refuses account mismatch and never writes unknown ownership", asy
     assert.equal(result.verdict, "UNRESOLVED");
     assert.equal(writes, 0);
     assert.match(result.message, /account/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("recovery refuses a persisted intent whose plan digest was tampered", async () => {
+  const root = await mkdtemp(join(tmpdir(), "bybit-probe-recovery-"));
+  try {
+    const store = new ProbeStore({
+      rootDir: root,
+      clock: () => 1_000,
+      processId: 303,
+      isProcessAlive: () => false,
+    });
+    const plan = fixturePlan();
+    const record = await store.writeIntent({
+      runId: "run-1",
+      attemptId: "attempt-1",
+      scenario: plan.scenario,
+      plan,
+      planDigest: hashProbePlan(plan),
+      approvedAt: 1_000,
+      approvalExpiresAt: 100_000,
+      createdAt: 1_000,
+      orderLinkId: plan.params.orderLinkId,
+      exchangeOrderId: "entry-1",
+      baselineSignedQty: "0",
+    });
+    const persisted = JSON.parse(await readFile(record.path, "utf8")) as {
+      plan: { params: { qty: string } };
+    };
+    persisted.plan.params.qty = "4";
+    await writeFile(record.path, `${JSON.stringify(persisted)}\n`, "utf8");
+    let reads = 0;
+    const transport: RecoveryTransport = {
+      async get() {
+        reads += 1;
+        return response({ list: [] });
+      },
+      async post() {
+        throw new Error("must not write");
+      },
+    };
+    const result = await recoverInterruptedRun({
+      runId: "run-1",
+      accountId: "trading-account",
+      store,
+      transport,
+      approve: async () => {
+        throw new Error("must not approve");
+      },
+    });
+    assert.equal(result.verdict, "UNRESOLVED");
+    assert.match(result.message, /digest/);
+    assert.equal(reads, 0);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

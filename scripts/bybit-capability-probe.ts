@@ -15,6 +15,7 @@ import {
 import {
   cleanupOwnedEntry,
   flattenOwnedExposure,
+  ownedExecutionFingerprint,
   proveCleanState,
   type CleanupTransport,
   type OwnedExecution,
@@ -106,6 +107,7 @@ async function confirmExclusiveUse(
 function signedPosition(response: BybitResponse): string | undefined {
   const list = responseList(response);
   if (!list) return undefined;
+  if (list.length > 1) return undefined;
   const item = list[0];
   if (!item) return "0";
   if (typeof item.size !== "string") return undefined;
@@ -119,7 +121,7 @@ async function readOwnedExposure(
   transport: ScenarioTransport,
   category: string,
   symbol: string,
-  ownedOrderIds: ReadonlySet<string>,
+  ownedOrderIdentities: ReadonlyMap<string, string>,
   baselineSignedQty = "0",
 ): Promise<
   | {
@@ -155,7 +157,11 @@ async function readOwnedExposure(
       const qty = typeof item.execQty === "string" ? item.execQty : undefined;
       if (!executionId || !orderId || !orderLinkId || !side || !qty)
         return undefined;
-      executions.push({ executionId, orderId, orderLinkId, side, qty });
+      const expectedOrderLinkId = ownedOrderIdentities.get(orderId);
+      if (expectedOrderLinkId !== undefined) {
+        if (expectedOrderLinkId !== orderLinkId) return undefined;
+        executions.push({ executionId, orderId, orderLinkId, side, qty });
+      }
     }
     const nextCursor = executionResponse.result.nextPageCursor;
     if (nextCursor === undefined || nextCursor === "") break;
@@ -169,8 +175,9 @@ async function readOwnedExposure(
     baselineSignedQty,
     currentState: {
       currentSignedQty: position,
-      ownedOrderIds: [...ownedOrderIds],
+      ownedOrderIds: [...ownedOrderIdentities.keys()],
       protectiveExitOrderIds: [],
+      executionFingerprints: executions.map(ownedExecutionFingerprint),
     },
     executions,
   };
@@ -246,10 +253,12 @@ async function cleanupScenario(
           symbol: options.symbol,
           orderId: order.orderId,
         });
-        return (responseList(response) ?? []).some(
-          (candidate) =>
-            candidate.orderId === order.orderId &&
-            candidate.orderLinkId === order.orderLinkId,
+        const values = responseList(response);
+        return (
+          values !== undefined &&
+          values.length === 1 &&
+          values[0]?.orderId === order.orderId &&
+          values[0]?.orderLinkId === order.orderLinkId
         );
       },
       clock: options.clock,
@@ -267,12 +276,14 @@ async function cleanupScenario(
       message: "terminal state and clean account state reconciled",
     };
   }
-  const ownedOrderIds = new Set<string>(order ? [order.orderId] : []);
+  const ownedOrderIdentities = new Map<string, string>(
+    order ? [[order.orderId, order.orderLinkId]] : [],
+  );
   const exposure = await readOwnedExposure(
     options.transport,
     options.category,
     options.symbol,
-    ownedOrderIds,
+    ownedOrderIdentities,
     options.baselineSignedQty,
   );
   if (!exposure)
@@ -292,12 +303,13 @@ async function cleanupScenario(
     store: options.store,
     transport: options.transport,
     approve: options.approve,
+    ownedOrderIdentities,
     readOwnership: async () => {
       const latest = await readOwnedExposure(
         options.transport,
         options.category,
         options.symbol,
-        ownedOrderIds,
+        ownedOrderIdentities,
         options.baselineSignedQty,
       );
       if (!latest) throw new Error("owned exposure could not be revalidated");
@@ -330,7 +342,7 @@ function findingFromResult(
   }
   return {
     name,
-    requestAccepted: result.kind !== "rejected",
+    requestAccepted: result.kind === "resting" || result.kind === "terminal",
     acknowledgement: result.kind === "rejected" ? "rejected" : "pending",
     terminalState: result.reconciliation.terminalState,
     exchangeOrderId: result.exchangeOrderId,
@@ -405,7 +417,7 @@ export async function runCapabilityProbe(
         run.runId !== runId &&
         run.verdict !== "CONFIRMED_CLEAN" &&
         run.verdict !== "REFUSED" &&
-        run.verdict !== "PRECONDITION_FAILED",
+        (run.verdict !== "PRECONDITION_FAILED" || run.intents.length > 0),
     );
     await store.assertNoBlockingPriorRuns(runId, priorRuns);
     for (const prior of priorRuns) {
@@ -423,7 +435,7 @@ export async function runCapabilityProbe(
         ...(options.historyAttempts === undefined
           ? {}
           : { historyAttempts: options.historyAttempts }),
-        readOwnedExposure: async (intent, ownedOrderIds) => {
+        readOwnedExposure: async (intent, ownedOrderIdentities) => {
           const category = intent.plan.params.category;
           const symbol = intent.plan.params.symbol;
           if (typeof category !== "string" || typeof symbol !== "string") {
@@ -436,7 +448,7 @@ export async function runCapabilityProbe(
             transport,
             category,
             symbol,
-            ownedOrderIds,
+            ownedOrderIdentities,
             intent.baselineSignedQty,
           );
           if (!exposure) throw new Error("owned exposure could not be read");

@@ -1,5 +1,12 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, readdir, stat, rm } from "node:fs/promises";
+import {
+  mkdtemp,
+  readFile,
+  readdir,
+  stat,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -116,7 +123,7 @@ test("unresolved and aged prior runs are preconditions, and verdicts map to exit
     isProcessAlive: () => false,
   });
   try {
-    await store.writeIntent(intent("old-run", plan(1_000)));
+    await store.writeIntent(intent("old-run"));
     await assert.rejects(
       store.assertNoBlockingPriorRuns("new-run"),
       /older than seven days|unresolved/,
@@ -135,6 +142,22 @@ test("unresolved and aged prior runs are preconditions, and verdicts map to exit
   }
 });
 
+test("a precondition failure with durable intent evidence still blocks new runs", async () => {
+  const { root, store } = await tempStore();
+  try {
+    await store.writeIntent(intent("failed-run-1"));
+    await store.writeVerdict("failed-run-1", "PRECONDITION_FAILED");
+    await store.writeIntent(intent("failed-run-2"));
+    await store.writeVerdict("failed-run-2", "PRECONDITION_FAILED");
+    await assert.rejects(
+      store.assertNoBlockingPriorRuns("new-run"),
+      /multiple unresolved prior probe runs require manual recovery/,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("run records remain readable after a simulated interrupted dispatch", async () => {
   const { root, store } = await tempStore();
   try {
@@ -143,6 +166,45 @@ test("run records remain readable after a simulated interrupted dispatch", async
     assert.equal(runs.length, 1);
     assert.equal(runs[0]?.intents.length, 1);
     assert.equal(runs[0]?.verdict, undefined);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("corrupt persisted intent shapes fail closed during recovery discovery", async () => {
+  const { root, store } = await tempStore();
+  try {
+    const record = await store.writeIntent(intent());
+    const parsed = JSON.parse(await readFile(record.path, "utf8")) as Record<
+      string,
+      unknown
+    >;
+    const persistedPlan = parsed.plan as Record<string, unknown>;
+    persistedPlan.params = { category: "linear", symbol: "DOGEUSDT" };
+    await writeFile(record.path, `${JSON.stringify(parsed)}\n`, "utf8");
+    await assert.rejects(
+      store.listSavedRuns(),
+      /stored side is invalid|stored order parameters are invalid/,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("persisted intent identities cannot diverge from the approved plan", async () => {
+  const { root, store } = await tempStore();
+  try {
+    const record = await store.writeIntent(intent());
+    const parsed = JSON.parse(await readFile(record.path, "utf8")) as Record<
+      string,
+      unknown
+    >;
+    parsed.orderLinkId = "other-run-order";
+    await writeFile(record.path, `${JSON.stringify(parsed)}\n`, "utf8");
+    await assert.rejects(
+      store.listSavedRuns(),
+      /orderLinkId does not match its plan/,
+    );
   } finally {
     await rm(root, { recursive: true, force: true });
   }

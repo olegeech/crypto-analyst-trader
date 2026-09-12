@@ -9,6 +9,7 @@ import {
   cleanupOwnedEntry,
   flattenOwnedExposure,
   isOwnedEntry,
+  ownedExecutionFingerprint,
   type CleanupTransport,
   type OwnedExecution,
   type OwnershipState,
@@ -236,6 +237,15 @@ test("flatten uses a fresh approved reduce-only order and no attached exits", as
       currentSignedQty: "3",
       ownedOrderIds: ["entry-1"],
       protectiveExitOrderIds: [],
+      executionFingerprints: [
+        ownedExecutionFingerprint({
+          executionId: "exec-entry",
+          orderId: "entry-1",
+          orderLinkId: "run-1-long",
+          side: "Buy",
+          qty: "3",
+        }),
+      ],
     };
     const result = await flattenOwnedExposure({
       runId: "run-1",
@@ -269,6 +279,111 @@ test("flatten uses a fresh approved reduce-only order and no attached exits", as
     });
     assert.equal(result.kind, "confirmed-clean");
     assert.equal(posts, 1);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("flatten refuses an execution whose client identity disagrees with the saved order", async () => {
+  const { root, store } = await storeFixture();
+  try {
+    const transport: CleanupTransport = {
+      async get() {
+        return response({ list: [] });
+      },
+      async post() {
+        throw new Error("must not write");
+      },
+    };
+    const result = await flattenOwnedExposure({
+      runId: "run-1",
+      attemptId: "flatten-identity",
+      accountId: "trading-account",
+      category: "linear",
+      symbol: "DOGEUSDT",
+      baselineSignedQty: "0",
+      currentState: {
+        currentSignedQty: "3",
+        ownedOrderIds: ["entry-1"],
+        protectiveExitOrderIds: [],
+        executionFingerprints: [],
+      },
+      executions: [
+        {
+          executionId: "exec-entry",
+          orderId: "entry-1",
+          orderLinkId: "other-run-long",
+          side: "Buy",
+          qty: "3",
+        },
+      ],
+      ownedOrderIdentities: new Map([["entry-1", "run-1-long"]]),
+      store,
+      transport,
+      approve: async () => {
+        throw new Error("must not approve");
+      },
+    });
+    assert.equal(result.kind, "unresolved");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("flatten refuses when execution evidence changes during approval", async () => {
+  const { root, store } = await storeFixture();
+  try {
+    const execution: OwnedExecution = {
+      executionId: "exec-entry",
+      orderId: "entry-1",
+      orderLinkId: "run-1-long",
+      side: "Buy",
+      qty: "3",
+    };
+    const transport: CleanupTransport = {
+      async get() {
+        return response({ list: [] });
+      },
+      async post() {
+        throw new Error("must not write");
+      },
+    };
+    const state: OwnershipState = {
+      currentSignedQty: "3",
+      ownedOrderIds: ["entry-1"],
+      protectiveExitOrderIds: [],
+      executionFingerprints: [ownedExecutionFingerprint(execution)],
+    };
+    const changedState: OwnershipState = {
+      ...state,
+      executionFingerprints: [
+        ownedExecutionFingerprint({
+          ...execution,
+          executionId: "foreign-exec",
+        }),
+      ],
+    };
+    const result = await flattenOwnedExposure({
+      runId: "run-1",
+      attemptId: "flatten-race",
+      accountId: "trading-account",
+      category: "linear",
+      symbol: "DOGEUSDT",
+      baselineSignedQty: "0",
+      currentState: state,
+      executions: [execution],
+      store,
+      transport,
+      approve: async (plan) => ({
+        kind: "approved",
+        plan,
+        digest: hashProbePlan(plan),
+        approvedAt: 1_000,
+        expiresAt: plan.expiresAt,
+      }),
+      readOwnership: async () => changedState,
+    });
+    assert.equal(result.kind, "unresolved");
   } finally {
     await rm(root, { recursive: true, force: true });
   }

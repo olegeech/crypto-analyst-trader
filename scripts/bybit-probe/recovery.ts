@@ -9,7 +9,7 @@ import { accountHash, type ProbeVerdict, type StoredIntent } from "./store.js";
 import type { ProbeStore } from "./store.js";
 import { reconcileOrder } from "./scenarios.js";
 import type { ProbeApproval } from "./approval.js";
-import type { ProbePlan } from "./probe-plan.js";
+import { hashProbePlan, type ProbePlan } from "./probe-plan.js";
 import {
   responseList,
   type BybitResponse,
@@ -39,7 +39,7 @@ export interface RecoveryOptions {
   readonly historyAttempts?: number;
   readonly readOwnedExposure?: (
     intent: StoredIntent,
-    ownedOrderIds: ReadonlySet<string>,
+    ownedOrderIdentities: ReadonlyMap<string, string>,
   ) => Promise<RecoveryOwnedExposure>;
 }
 
@@ -81,26 +81,28 @@ async function finalize(
   return { verdict, message };
 }
 
-function orderIdentityIds(intents: readonly StoredIntent[]): Set<string> {
-  return new Set(
-    intents
-      .map((intent) => intent.exchangeOrderId)
-      .filter((id): id is string => id !== undefined),
-  );
+function orderIdentities(
+  intents: readonly StoredIntent[],
+): Map<string, string> {
+  const identities = new Map<string, string>();
+  for (const intent of intents) {
+    if (
+      intent.exchangeOrderId !== undefined &&
+      intent.orderLinkId !== undefined
+    ) {
+      identities.set(intent.exchangeOrderId, intent.orderLinkId);
+    }
+  }
+  return identities;
 }
 
 async function cleanAfterTerminal(
   transport: RecoveryTransport,
   intent: StoredIntent,
 ): Promise<boolean> {
-  const symbol =
-    typeof intent.plan.params.symbol === "string"
-      ? intent.plan.params.symbol
-      : "";
-  const category =
-    typeof intent.plan.params.category === "string"
-      ? intent.plan.params.category
-      : "linear";
+  const symbol = intent.plan.params.symbol;
+  const category = intent.plan.params.category;
+  if (typeof symbol !== "string" || typeof category !== "string") return false;
   return proveCleanState(transport, category, symbol);
 }
 
@@ -156,8 +158,35 @@ export async function recoverInterruptedRun(
         "account identity mismatch",
       );
     }
+    if (
+      saved.intents.some((intent) => {
+        const redactedPlan = {
+          schemaVersion: intent.plan.schemaVersion,
+          environment: intent.plan.environment,
+          scenario: intent.plan.scenario,
+          expiresAt: intent.plan.expiresAt,
+          method: intent.plan.method,
+          endpoint: intent.plan.endpoint,
+          params: intent.plan.params,
+        };
+        return (
+          hashProbePlan({
+            ...redactedPlan,
+            accountId: options.accountId,
+          }) !== intent.planDigest
+        );
+      })
+    ) {
+      return finalize(
+        options.store,
+        options.runId,
+        "UNRESOLVED",
+        "the saved probe plan digest does not match its persisted intent",
+        "persisted plan identity mismatch",
+      );
+    }
 
-    const entryOrderIds = orderIdentityIds(saved.intents);
+    const entryOrderIdentities = orderIdentities(saved.intents);
     for (const intent of saved.intents) {
       const orderLinkId = intent.orderLinkId ?? intent.plan.params.orderLinkId;
       const symbol = intent.plan.params.symbol;
@@ -224,7 +253,10 @@ export async function recoverInterruptedRun(
           "reconciliation returned no order identity",
         );
       }
-      entryOrderIds.add(reconciledOrder.orderId);
+      entryOrderIdentities.set(
+        reconciledOrder.orderId,
+        reconciledOrder.orderLinkId,
+      );
       if (intent.exchangeOrderId === undefined) {
         await options.store.updateIntent(options.runId, intent.attemptId, {
           exchangeOrderId: reconciledOrder.orderId,
@@ -255,7 +287,7 @@ export async function recoverInterruptedRun(
             side,
             orderStatus: order.orderStatus,
           },
-          entryOrderIds,
+          entryOrderIds: new Set(entryOrderIdentities.keys()),
           protectiveExitOrderIds: new Set<string>(),
           store: options.store,
           transport: options.transport,
@@ -306,7 +338,7 @@ export async function recoverInterruptedRun(
           );
         }
         const readExposure = () =>
-          options.readOwnedExposure!(intent, entryOrderIds);
+          options.readOwnedExposure!(intent, entryOrderIdentities);
         const exposure = await readExposure();
         const cleanup = await flattenOwnedExposure({
           runId: options.runId,
@@ -320,6 +352,7 @@ export async function recoverInterruptedRun(
           store: options.store,
           transport: options.transport,
           approve: options.approve,
+          ownedOrderIdentities: entryOrderIdentities,
           readOwnership: async () => (await readExposure()).currentState,
           ...(options.clock === undefined ? {} : { clock: options.clock }),
           ...(options.sleep === undefined ? {} : { sleep: options.sleep }),

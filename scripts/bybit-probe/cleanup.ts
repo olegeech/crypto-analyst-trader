@@ -32,10 +32,21 @@ export interface OwnedExecution {
   readonly qty: string;
 }
 
+export function ownedExecutionFingerprint(execution: OwnedExecution): string {
+  return JSON.stringify([
+    execution.executionId,
+    execution.orderId,
+    execution.orderLinkId,
+    execution.side,
+    execution.qty,
+  ]);
+}
+
 export interface OwnershipState {
   readonly currentSignedQty: string;
   readonly ownedOrderIds: readonly string[];
   readonly protectiveExitOrderIds: readonly string[];
+  readonly executionFingerprints: readonly string[];
 }
 
 export interface EntryOrderIdentity {
@@ -334,6 +345,7 @@ export interface FlattenOwnedExposureOptions {
   readonly store: ProbeStore;
   readonly transport: CleanupTransport;
   readonly approve: (plan: ProbePlan) => Promise<ProbeApproval>;
+  readonly ownedOrderIdentities?: ReadonlyMap<string, string>;
   readonly readOwnership?: () => Promise<OwnershipState>;
   readonly clock?: () => number;
   readonly sleep?: (milliseconds: number) => Promise<void>;
@@ -347,7 +359,16 @@ export async function flattenOwnedExposure(
     ...options.currentState.protectiveExitOrderIds,
   ]);
   for (const execution of options.executions) {
-    if (!knownOrderIds.has(execution.orderId)) {
+    const expectedOrderLinkId = options.ownedOrderIdentities?.get(
+      execution.orderId,
+    );
+    if (
+      !knownOrderIds.has(execution.orderId) ||
+      (expectedOrderLinkId !== undefined &&
+        expectedOrderLinkId !== execution.orderLinkId) ||
+      (expectedOrderLinkId === undefined &&
+        !execution.orderLinkId.startsWith(`${options.runId}-`))
+    ) {
       return {
         kind: "unresolved",
         message:
@@ -436,6 +457,10 @@ export async function flattenOwnedExposure(
         !sameStringSet(
           reread.protectiveExitOrderIds,
           options.currentState.protectiveExitOrderIds,
+        ) ||
+        !sameStringSet(
+          reread.executionFingerprints,
+          options.currentState.executionFingerprints,
         )
       ) {
         return {

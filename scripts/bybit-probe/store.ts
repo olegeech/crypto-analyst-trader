@@ -12,6 +12,7 @@ import {
 import process from "node:process";
 import { join } from "node:path";
 
+import { parseDecimal, toDecimalString } from "./decimal.js";
 import { hashProbePlan, type ProbePlan } from "./probe-plan.js";
 
 export const DEFAULT_PROBE_DATA_ROOT = "data/private/bybit-probe";
@@ -111,6 +112,177 @@ function safeText(value: string, field: string): string {
     throw new ProbeStoreError("invalid-record", `${field} is invalid`);
   }
   return value;
+}
+
+const STORED_PLAN_FIELDS = new Set([
+  "schemaVersion",
+  "environment",
+  "scenario",
+  "expiresAt",
+  "method",
+  "endpoint",
+  "params",
+  "accountIdHash",
+]);
+
+const STORED_PARAM_FIELDS = new Set([
+  "category",
+  "symbol",
+  "side",
+  "orderLinkId",
+  "orderId",
+  "price",
+  "qty",
+  "takeProfit",
+  "stopLoss",
+  "orderType",
+  "timeInForce",
+  "reduceOnly",
+  "positionIdx",
+  "tpslMode",
+  "tpOrderType",
+  "slOrderType",
+  "tpTriggerBy",
+  "slTriggerBy",
+  "closeOnTrigger",
+]);
+
+const STORED_DECIMAL_FIELDS = new Set([
+  "price",
+  "qty",
+  "takeProfit",
+  "stopLoss",
+]);
+
+function recordObject(value: unknown, field: string): Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new ProbeStoreError("invalid-record", `${field} is invalid`);
+  }
+  return value as Record<string, unknown>;
+}
+
+function storedString(
+  record: Record<string, unknown>,
+  field: string,
+  required = false,
+): string | undefined {
+  const value = record[field];
+  if (value === undefined && !required) return undefined;
+  if (typeof value !== "string") {
+    throw new ProbeStoreError("invalid-record", `${field} is invalid`);
+  }
+  return safeText(value, field);
+}
+
+function storedTimestamp(value: unknown, field: string): number {
+  if (!Number.isInteger(value) || (value as number) <= 0) {
+    throw new ProbeStoreError("invalid-record", `${field} is invalid`);
+  }
+  return value as number;
+}
+
+function validateStoredPlan(value: unknown): StoredPlan {
+  const plan = recordObject(value, "plan");
+  if (
+    Object.keys(plan).some((field) => !STORED_PLAN_FIELDS.has(field)) ||
+    plan.schemaVersion !== 1 ||
+    plan.environment !== "testnet"
+  ) {
+    throw new ProbeStoreError("invalid-record", "the stored plan is invalid");
+  }
+  const accountIdHash = plan.accountIdHash;
+  if (
+    typeof accountIdHash !== "string" ||
+    !/^[a-f0-9]{12}$/.test(accountIdHash)
+  ) {
+    throw new ProbeStoreError(
+      "invalid-record",
+      "the stored account identity is invalid",
+    );
+  }
+  const scenario = storedString(plan, "scenario", true);
+  const endpoint = storedString(plan, "endpoint", true);
+  if (scenario === undefined || endpoint === undefined) {
+    throw new ProbeStoreError("invalid-record", "the stored plan is invalid");
+  }
+  storedTimestamp(plan.expiresAt, "plan.expiresAt");
+  if (plan.method !== "GET" && plan.method !== "POST") {
+    throw new ProbeStoreError("invalid-record", "the stored method is invalid");
+  }
+  if (
+    !endpoint.startsWith("/") ||
+    endpoint.includes("//") ||
+    endpoint.includes("#")
+  ) {
+    throw new ProbeStoreError(
+      "invalid-record",
+      "the stored endpoint is invalid",
+    );
+  }
+  const params = recordObject(plan.params, "plan.params");
+  if (Object.keys(params).some((field) => !STORED_PARAM_FIELDS.has(field))) {
+    throw new ProbeStoreError(
+      "invalid-record",
+      "the stored order parameters are invalid",
+    );
+  }
+  storedString(params, "category", true);
+  storedString(params, "symbol", true);
+  const side = params.side;
+  if (side !== "Buy" && side !== "Sell") {
+    throw new ProbeStoreError("invalid-record", "the stored side is invalid");
+  }
+  for (const field of ["orderLinkId", "orderId"]) {
+    storedString(params, field);
+  }
+  for (const field of STORED_DECIMAL_FIELDS) {
+    const raw = params[field];
+    if (raw === undefined) continue;
+    if (typeof raw !== "string") {
+      throw new ProbeStoreError("invalid-record", `${field} is invalid`);
+    }
+    try {
+      if (toDecimalString(parseDecimal(raw)) !== raw) {
+        throw new Error("non-canonical decimal");
+      }
+    } catch {
+      throw new ProbeStoreError("invalid-record", `${field} is invalid`);
+    }
+  }
+  const enumFields: Record<string, readonly string[]> = {
+    orderType: ["Limit", "Market"],
+    timeInForce: ["GTC", "IOC", "FOK", "PostOnly"],
+    tpslMode: ["Full"],
+    tpOrderType: ["Market", "Limit"],
+    slOrderType: ["Market", "Limit"],
+    tpTriggerBy: ["LastPrice", "MarkPrice", "IndexPrice"],
+    slTriggerBy: ["LastPrice", "MarkPrice", "IndexPrice"],
+  };
+  for (const [field, allowed] of Object.entries(enumFields)) {
+    const raw = params[field];
+    if (
+      raw !== undefined &&
+      (typeof raw !== "string" || !allowed.includes(raw))
+    ) {
+      throw new ProbeStoreError("invalid-record", `${field} is invalid`);
+    }
+  }
+  for (const field of ["reduceOnly", "closeOnTrigger"]) {
+    const raw = params[field];
+    if (raw !== undefined && typeof raw !== "boolean") {
+      throw new ProbeStoreError("invalid-record", `${field} is invalid`);
+    }
+  }
+  const positionIdx = params.positionIdx;
+  if (
+    positionIdx !== undefined &&
+    (typeof positionIdx !== "number" ||
+      !Number.isInteger(positionIdx) ||
+      positionIdx < 0)
+  ) {
+    throw new ProbeStoreError("invalid-record", "positionIdx is invalid");
+  }
+  return plan as unknown as StoredPlan;
 }
 
 export function accountHash(accountId: string): string {
@@ -357,17 +529,16 @@ export class ProbeStore {
         "the probe intent record is unavailable or invalid",
       );
     }
-    return this.validateStoredIntent(parsed, path);
+    return this.validateStoredIntent(parsed, path, runId, attemptId);
   }
 
-  private validateStoredIntent(value: unknown, path: string): StoredIntent {
-    if (typeof value !== "object" || value === null || Array.isArray(value)) {
-      throw new ProbeStoreError(
-        "invalid-record",
-        "the probe intent record is invalid",
-      );
-    }
-    const record = value as Record<string, unknown>;
+  private validateStoredIntent(
+    value: unknown,
+    path: string,
+    expectedRunId?: string,
+    expectedAttemptId?: string,
+  ): StoredIntent {
+    const record = recordObject(value, "probe intent record");
     if (
       record.recordVersion !== 1 ||
       typeof record.runId !== "string" ||
@@ -385,17 +556,95 @@ export class ProbeStore {
         "the probe intent record is invalid",
       );
     }
-    const plan = record.plan as Record<string, unknown>;
+    const runId = safeId(record.runId, "runId");
+    const attemptId = safeId(record.attemptId, "attemptId");
     if (
-      typeof plan.accountIdHash !== "string" ||
-      !/^[a-f0-9]{12}$/.test(plan.accountIdHash)
+      (expectedRunId !== undefined && runId !== expectedRunId) ||
+      (expectedAttemptId !== undefined && attemptId !== expectedAttemptId)
     ) {
       throw new ProbeStoreError(
         "invalid-record",
-        "the stored account identity is invalid",
+        "the probe intent identity does not match its path",
       );
     }
-    return { ...(record as unknown as Omit<StoredIntent, "path">), path };
+    const scenario = safeText(record.scenario, "scenario");
+    const planDigest = safeText(record.planDigest, "planDigest");
+    if (!/^[a-f0-9]{64}$/.test(planDigest)) {
+      throw new ProbeStoreError("invalid-record", "planDigest is invalid");
+    }
+    const plan = validateStoredPlan(record.plan);
+    if (plan.scenario !== scenario) {
+      throw new ProbeStoreError(
+        "invalid-record",
+        "the intent scenario does not match its plan",
+      );
+    }
+    const approvedAt = storedTimestamp(record.approvedAt, "approvedAt");
+    const approvalExpiresAt = storedTimestamp(
+      record.approvalExpiresAt,
+      "approvalExpiresAt",
+    );
+    const createdAt = storedTimestamp(record.createdAt, "createdAt");
+    if (approvalExpiresAt > plan.expiresAt || approvalExpiresAt <= approvedAt) {
+      throw new ProbeStoreError(
+        "invalid-record",
+        "the persisted approval window is invalid",
+      );
+    }
+    const orderLinkId = storedString(record, "orderLinkId");
+    const exchangeOrderId = storedString(record, "exchangeOrderId");
+    const baselineSignedQty = storedString(record, "baselineSignedQty");
+    const planOrderLinkId = plan.params.orderLinkId;
+    const planOrderId = plan.params.orderId;
+    if (
+      orderLinkId !== undefined &&
+      planOrderLinkId !== undefined &&
+      orderLinkId !== planOrderLinkId
+    ) {
+      throw new ProbeStoreError(
+        "invalid-record",
+        "the intent orderLinkId does not match its plan",
+      );
+    }
+    if (
+      exchangeOrderId !== undefined &&
+      planOrderId !== undefined &&
+      exchangeOrderId !== planOrderId
+    ) {
+      throw new ProbeStoreError(
+        "invalid-record",
+        "the intent exchangeOrderId does not match its plan",
+      );
+    }
+    if (baselineSignedQty !== undefined) {
+      try {
+        if (
+          toDecimalString(parseDecimal(baselineSignedQty)) !== baselineSignedQty
+        ) {
+          throw new Error("non-canonical decimal");
+        }
+      } catch {
+        throw new ProbeStoreError(
+          "invalid-record",
+          "baselineSignedQty is invalid",
+        );
+      }
+    }
+    return {
+      recordVersion: 1,
+      runId,
+      attemptId,
+      scenario,
+      plan,
+      planDigest,
+      approvedAt,
+      approvalExpiresAt,
+      createdAt,
+      orderLinkId,
+      exchangeOrderId,
+      baselineSignedQty,
+      path,
+    };
   }
 
   async listSavedRuns(): Promise<readonly StoredRun[]> {
@@ -409,7 +658,7 @@ export class ProbeStore {
     const runs: StoredRun[] = [];
     for (const entry of entries) {
       if (!entry.isDirectory() || entry.name === ".") continue;
-      const runId = entry.name;
+      const runId = safeId(entry.name, "runId");
       const directory = join(this.rootDir, runId);
       const files = await readdir(directory, { withFileTypes: true });
       const intents: StoredIntent[] = [];
@@ -426,7 +675,8 @@ export class ProbeStore {
             `saved probe run ${runId} contains invalid JSON`,
           );
         }
-        intents.push(this.validateStoredIntent(parsed, path));
+        const attemptId = file.name.slice("intent-".length, -".json".length);
+        intents.push(this.validateStoredIntent(parsed, path, runId, attemptId));
       }
       intents.sort((left, right) => left.createdAt - right.createdAt);
       let verdict: ProbeVerdict | undefined;
@@ -472,7 +722,7 @@ export class ProbeStore {
         run.runId !== currentRunId &&
         run.verdict !== "CONFIRMED_CLEAN" &&
         run.verdict !== "REFUSED" &&
-        run.verdict !== "PRECONDITION_FAILED",
+        (run.verdict !== "PRECONDITION_FAILED" || run.intents.length > 0),
     );
     if (prior.length > 1) {
       throw new ProbeStoreError(
