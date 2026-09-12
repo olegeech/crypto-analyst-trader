@@ -112,12 +112,37 @@ export function multiplyByRational(
   if (denominator <= 0n || numerator < 0n) {
     throw new Error("decimal rational factor must be non-negative with a positive denominator");
   }
-  const coefficient = integerQuotient(
-    value.coefficient * numerator,
-    denominator,
-    rounding,
-  );
+  let reducedDenominator = denominator;
+  let extraScale = 0;
+  while (reducedDenominator % 10n === 0n) {
+    reducedDenominator /= 10n;
+    extraScale += 1;
+  }
+  if (reducedDenominator === 1n) {
+    return normalized(value.coefficient * numerator, value.scale + extraScale);
+  }
+  const coefficient = integerQuotient(value.coefficient * numerator, denominator, rounding);
   return normalized(coefficient, value.scale);
+}
+
+export function ceilRatioToStep(
+  numerator: Decimal,
+  denominator: Decimal,
+  step: Decimal,
+): Decimal {
+  if (
+    numerator.coefficient < 0n ||
+    denominator.coefficient <= 0n ||
+    step.coefficient <= 0n
+  ) {
+    throw new Error("decimal ratio inputs must be non-negative with positive denominator and step");
+  }
+  const unitsNumerator =
+    numerator.coefficient * power10(denominator.scale) * power10(step.scale);
+  const unitsDenominator =
+    denominator.coefficient * power10(numerator.scale) * step.coefficient;
+  const units = integerQuotient(unitsNumerator, unitsDenominator, "ceil");
+  return multiplyDecimals(step, decimal(units, 0));
 }
 
 function stepUnits(value: Decimal, step: Decimal, rounding: StepRounding): bigint {
