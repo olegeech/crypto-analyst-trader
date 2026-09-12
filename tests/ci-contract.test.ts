@@ -90,4 +90,13 @@ test("default CI delegates to the same release command without secrets or option
     /secrets\.|BYBIT_API_|credentials:(?:setup|remove|connect)|test:testnet|audit:dependencies|api-testnet\.bybit\.com|placeOrder|create-order/i,
   );
   assert.doesNotMatch(ciWorkflow, /review:target|scripts\/review-target\.ts/);
+  assert.doesNotMatch(
+    ciWorkflow,
+    /probe:bybit:testnet|scripts\/bybit-capability-probe\.ts/,
+  );
+});
+
+test("the write probe is absent from release execution", () => {
+  assert.doesNotMatch(releaseScript, /probe:bybit:testnet/);
+  assert.doesNotMatch(releaseScript, /scripts\/bybit-capability-probe\.ts/);
 });
