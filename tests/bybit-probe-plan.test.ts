@@ -6,6 +6,7 @@ import {
   canonicalize,
   hashProbePlan,
   isProbePlanExpired,
+  type ProbePlanInput,
 } from "../scripts/bybit-probe/probe-plan.js";
 
 const baseInput = {
@@ -34,7 +35,7 @@ const baseInput = {
     tpTriggerBy: "LastPrice",
     slTriggerBy: "LastPrice",
   },
-};
+} as const satisfies ProbePlanInput;
 
 test("equivalent plans have one canonical serialization and digest", () => {
   const one = buildProbePlan(baseInput);
@@ -70,7 +71,9 @@ test("every material request field changes the digest", () => {
     assert.notEqual(hashProbePlan(candidate), hashProbePlan(original), field);
   }
   assert.notEqual(
-    hashProbePlan(buildProbePlan({ ...baseInput, endpoint: "/v5/order/cancel" })),
+    hashProbePlan(
+      buildProbePlan({ ...baseInput, endpoint: "/v5/order/cancel" }),
+    ),
     hashProbePlan(original),
   );
   assert.notEqual(
@@ -85,7 +88,11 @@ test("every material request field changes the digest", () => {
 
 test("plans reject secrets and expire at the exact boundary", () => {
   assert.throws(
-    () => buildProbePlan({ ...baseInput, params: { ...baseInput.params, apiSecret: "sentinel" } as never }),
+    () =>
+      buildProbePlan({
+        ...baseInput,
+        params: { ...baseInput.params, apiSecret: "sentinel" } as never,
+      }),
     /unsupported sensitive plan field/,
   );
   const plan = buildProbePlan(baseInput);
@@ -95,7 +102,11 @@ test("plans reject secrets and expire at the exact boundary", () => {
 
 test("invalid plan decimal values never become hash input", () => {
   assert.throws(
-    () => buildProbePlan({ ...baseInput, params: { ...baseInput.params, qty: 1 as never } as never }),
+    () =>
+      buildProbePlan({
+        ...baseInput,
+        params: { ...baseInput.params, qty: 1 as never } as never,
+      }),
     /decimal string/,
   );
 });

@@ -33,7 +33,11 @@ test("probe configuration reuses the Testnet lock and rejects unsafe origins", (
 test("probe configuration accepts only uppercase alphanumeric symbols", () => {
   for (const symbol of ["dogeusdt", "DOGE-USDT", "DOGE/USDT", "DOGE USDT"]) {
     assert.throws(
-      () => resolveProbeConfig({ TRADER_ENV: "testnet", BYBIT_PROBE_SYMBOL: symbol }),
+      () =>
+        resolveProbeConfig({
+          TRADER_ENV: "testnet",
+          BYBIT_PROBE_SYMBOL: symbol,
+        }),
       /BYBIT_PROBE_SYMBOL/,
     );
   }
@@ -49,10 +53,16 @@ test("the write probe remains outside release and every workflow", async () => {
   const packageJson = JSON.parse(await readFile("package.json", "utf8")) as {
     scripts: Record<string, string>;
   };
-  assert.match(packageJson.scripts["probe:bybit:testnet"] ?? "", /TRADER_ENV=testnet/);
+  assert.match(
+    packageJson.scripts["probe:bybit:testnet"] ?? "",
+    /TRADER_ENV=testnet/,
+  );
   assert.match(
     packageJson.scripts["probe:bybit:testnet"] ?? "",
     /scripts\/bybit-capability-probe\.ts/,
   );
-  assert.doesNotMatch(packageJson.scripts["test:release"] ?? "", /probe:bybit:testnet/);
+  assert.doesNotMatch(
+    packageJson.scripts["test:release"] ?? "",
+    /probe:bybit:testnet/,
+  );
 });

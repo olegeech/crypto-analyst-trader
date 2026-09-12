@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import process from "node:process";
 
 import {
@@ -12,6 +11,7 @@ import {
   isProbePlanExpired,
   type ProbePlan,
 } from "./probe-plan.js";
+import { accountHash } from "./store.js";
 
 export const DEFAULT_APPROVAL_TTL_MS = 120_000;
 export const DEFAULT_APPROVAL_ATTEMPTS = 3;
@@ -52,15 +52,11 @@ export interface ApprovalOptions {
   readonly maxAttempts?: number;
 }
 
-function accountFingerprint(accountId: string): string {
-  return createHash("sha256").update(accountId, "utf8").digest("hex").slice(0, 12);
-}
-
 function approvalBlock(plan: ProbePlan, digest: string): string {
   const printablePlan = {
     schemaVersion: plan.schemaVersion,
     environment: plan.environment,
-    account: accountFingerprint(plan.accountId),
+    account: accountHash(plan.accountId),
     scenario: plan.scenario,
     expiresAt: plan.expiresAt,
     method: plan.method,
@@ -75,7 +71,10 @@ function approvalBlock(plan: ProbePlan, digest: string): string {
   ].join("\n");
 }
 
-function refused(reason: ApprovalRefusalReason, message: string): ProbeApproval {
+function refused(
+  reason: ApprovalRefusalReason,
+  message: string,
+): ProbeApproval {
   return { kind: "refused", reason, message };
 }
 
@@ -102,35 +101,56 @@ export async function approveProbePlan(
 
   const input = options.input ?? process.stdin;
   if (options.prompt === undefined && input.isTTY !== true) {
-    return refused("non-tty", "Interactive exact-digest approval requires a terminal.");
+    return refused(
+      "non-tty",
+      "Interactive exact-digest approval requires a terminal.",
+    );
   }
 
   output.write(`${approvalBlock(plan, digest)}\n`);
   const prompt =
     options.prompt ??
     ((label: string) =>
-      promptVisible(label, "Interactive exact-digest approval requires a terminal.", {
-        timeoutMs: Math.min(ttlMs, DEFAULT_APPROVAL_TTL_MS),
-        input,
-        output: output as unknown as NodeJS.WritableStream,
-      }));
+      promptVisible(
+        label,
+        "Interactive exact-digest approval requires a terminal.",
+        {
+          timeoutMs: Math.min(ttlMs, DEFAULT_APPROVAL_TTL_MS),
+          input,
+          output: output as unknown as NodeJS.WritableStream,
+        },
+      ));
 
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
     const currentNow = clock();
-    if (isProbePlanExpired(plan, currentNow) || currentNow >= approvalExpiresAt) {
-      return refused("expired", "The probe plan expired before approval completed.");
+    if (
+      isProbePlanExpired(plan, currentNow) ||
+      currentNow >= approvalExpiresAt
+    ) {
+      return refused(
+        "expired",
+        "The probe plan expired before approval completed.",
+      );
     }
     let answer: string;
     try {
-      answer = await prompt(`Retype probe-plan digest (${attempt + 1}/${maxAttempts})`);
+      answer = await prompt(
+        `Retype probe-plan digest (${attempt + 1}/${maxAttempts})`,
+      );
     } catch (error) {
       if (error instanceof PromptInterruptedError) {
         return refused(error.reason, error.message);
       }
       if (error instanceof Error && /terminal|tty/i.test(error.message)) {
-        return refused("non-tty", "Interactive exact-digest approval requires a terminal.");
+        return refused(
+          "non-tty",
+          "Interactive exact-digest approval requires a terminal.",
+        );
       }
-      return refused("prompt-failed", "The approval prompt could not be completed.");
+      return refused(
+        "prompt-failed",
+        "The approval prompt could not be completed.",
+      );
     }
     const normalizedAnswer = answer.trim().toLowerCase();
     if (!normalizedAnswer) {
@@ -138,8 +158,14 @@ export async function approveProbePlan(
     }
     if (normalizedAnswer === digest) {
       const finalApprovedAt = clock();
-      if (isProbePlanExpired(plan, finalApprovedAt) || finalApprovedAt >= approvalExpiresAt) {
-        return refused("expired", "The probe plan expired before approval completed.");
+      if (
+        isProbePlanExpired(plan, finalApprovedAt) ||
+        finalApprovedAt >= approvalExpiresAt
+      ) {
+        return refused(
+          "expired",
+          "The probe plan expired before approval completed.",
+        );
       }
       return {
         kind: "approved",
@@ -153,7 +179,10 @@ export async function approveProbePlan(
       output.write("The digest did not match; no write was dispatched.\n");
     }
   }
-  return refused("digest-mismatch", "The exact probe-plan digest was not approved.");
+  return refused(
+    "digest-mismatch",
+    "The exact probe-plan digest was not approved.",
+  );
 }
 
 export function reverifyProbeApproval(
@@ -162,8 +191,14 @@ export function reverifyProbeApproval(
   now: number,
 ): void {
   if (now >= approval.expiresAt) throw new Error("probe plan approval expired");
-  assertProbePlanCurrent(approval.plan, approval.digest, now, approval.plan.accountId);
-  if (isProbePlanExpired(actualPlan, now)) throw new Error("probe plan approval expired");
+  assertProbePlanCurrent(
+    approval.plan,
+    approval.digest,
+    now,
+    approval.plan.accountId,
+  );
+  if (isProbePlanExpired(actualPlan, now))
+    throw new Error("probe plan approval expired");
   if (actualPlan.accountId !== approval.plan.accountId) {
     throw new Error("probe plan account mismatch");
   }

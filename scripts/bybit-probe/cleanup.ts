@@ -8,13 +8,14 @@ import {
   subtractDecimals,
   toDecimalString,
 } from "./decimal.js";
-import {
-  reverifyProbeApproval,
-  type ProbeApproval,
-} from "./approval.js";
+import { reverifyProbeApproval, type ProbeApproval } from "./approval.js";
 import { buildProbePlan, type ProbePlan } from "./probe-plan.js";
-import { ProbeStore } from "./store.js";
-import type { BybitResponse, QueryInput } from "./transport.js";
+import type { ProbeStore } from "./store.js";
+import {
+  responseList,
+  type BybitResponse,
+  type QueryInput,
+} from "./transport.js";
 
 type JsonObject = Record<string, unknown>;
 
@@ -88,7 +89,10 @@ export function deriveOwnedExposure(input: {
       !execution.orderId ||
       !execution.orderLinkId
     ) {
-      return { kind: "unresolved", message: "execution ownership is incomplete or duplicated" };
+      return {
+        kind: "unresolved",
+        message: "execution ownership is incomplete or duplicated",
+      };
     }
     executionIds.add(execution.executionId);
     try {
@@ -103,13 +107,21 @@ export function deriveOwnedExposure(input: {
     baseline = parseDecimal(input.baselineSignedQty);
     current = parseDecimal(input.currentSignedQty);
   } catch {
-    return { kind: "unresolved", message: "baseline or current position is invalid" };
+    return {
+      kind: "unresolved",
+      message: "baseline or current position is invalid",
+    };
   }
   const actualDelta = subtractDecimals(current, baseline);
   if (compareDecimals(actualDelta, expectedDelta) !== 0) {
-    return { kind: "unresolved", message: "current position is not explained by owned entry and exit executions" };
+    return {
+      kind: "unresolved",
+      message:
+        "current position is not explained by owned entry and exit executions",
+    };
   }
-  if (decimalIsZero(actualDelta)) return { kind: "already-flat", remainingSignedQty: "0" };
+  if (decimalIsZero(actualDelta))
+    return { kind: "already-flat", remainingSignedQty: "0" };
   const flattenSide = actualDelta.coefficient > 0n ? "Sell" : "Buy";
   return {
     kind: "owned",
@@ -120,7 +132,11 @@ export function deriveOwnedExposure(input: {
 }
 
 export type CleanupResult =
-  | Readonly<{ kind: "confirmed-clean"; exchangeOrderId?: string; message: string }>
+  | Readonly<{
+      kind: "confirmed-clean";
+      exchangeOrderId?: string;
+      message: string;
+    }>
   | Readonly<{ kind: "already-flat"; message: string }>
   | Readonly<{ kind: "unresolved"; message: string }>;
 
@@ -130,18 +146,17 @@ function refusalMessage(approval: ProbeApproval): string {
     : "cleanup was not approved";
 }
 
-function orderList(response: BybitResponse): readonly JsonObject[] {
-  const list = response.result.list;
-  return Array.isArray(list)
-    ? list.filter(
-        (value): value is JsonObject =>
-          typeof value === "object" && value !== null && !Array.isArray(value),
-      )
-    : [];
-}
-
 function stringValue(value: unknown): string | undefined {
   return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function sameStringSet(
+  left: readonly string[],
+  right: readonly string[],
+): boolean {
+  return (
+    left.length === right.length && left.every((value) => right.includes(value))
+  );
 }
 
 export async function proveCleanState(
@@ -149,9 +164,20 @@ export async function proveCleanState(
   category: string,
   symbol: string,
 ): Promise<boolean> {
-  const orders = orderList(await transport.get("/v5/order/realtime", { category, symbol, openOnly: "0" }));
+  const orders = responseList(
+    await transport.get("/v5/order/realtime", {
+      category,
+      symbol,
+      openOnly: "0",
+      limit: "1",
+    }),
+  );
+  if (!orders) return false;
   if (orders.length > 0) return false;
-  const positions = orderList(await transport.get("/v5/position/list", { category, symbol }));
+  const positions = responseList(
+    await transport.get("/v5/position/list", { category, symbol }),
+  );
+  if (!positions) return false;
   for (const position of positions) {
     const size = stringValue(position.size);
     if (size === undefined) return false;
@@ -160,7 +186,12 @@ export async function proveCleanState(
     } catch {
       return false;
     }
-    if (position.side !== undefined && position.side !== "" && position.side !== "None") return false;
+    if (
+      position.side !== undefined &&
+      position.side !== "" &&
+      position.side !== "None"
+    )
+      return false;
   }
   return true;
 }
@@ -171,7 +202,10 @@ export interface CleanupOwnedEntryOptions {
   readonly accountId: string;
   readonly category: string;
   readonly symbol: string;
-  readonly order: EntryOrderIdentity & { readonly side: "Buy" | "Sell"; readonly orderStatus: string };
+  readonly order: EntryOrderIdentity & {
+    readonly side: "Buy" | "Sell";
+    readonly orderStatus: string;
+  };
   readonly entryOrderIds: ReadonlySet<string>;
   readonly protectiveExitOrderIds: ReadonlySet<string>;
   readonly store: ProbeStore;
@@ -182,17 +216,28 @@ export interface CleanupOwnedEntryOptions {
   readonly sleep?: (milliseconds: number) => Promise<void>;
 }
 
-export async function cleanupOwnedEntry(options: CleanupOwnedEntryOptions): Promise<CleanupResult> {
+export async function cleanupOwnedEntry(
+  options: CleanupOwnedEntryOptions,
+): Promise<CleanupResult> {
   const context = {
     runId: options.runId,
     entryOrderIds: options.entryOrderIds,
     protectiveExitOrderIds: options.protectiveExitOrderIds,
   };
   if (!isOwnedEntry(options.order, context)) {
-    return { kind: "unresolved", message: "entry identity is not proven to belong to this run" };
+    return {
+      kind: "unresolved",
+      message: "entry identity is not proven to belong to this run",
+    };
   }
-  if (options.order.orderStatus !== "New" && options.order.orderStatus !== "PartiallyFilled") {
-    return { kind: "already-flat", message: "entry is already terminal; no cancel write was needed" };
+  if (
+    options.order.orderStatus !== "New" &&
+    options.order.orderStatus !== "PartiallyFilled"
+  ) {
+    return {
+      kind: "already-flat",
+      message: "entry is already terminal; no cancel write was needed",
+    };
   }
   const plan = buildProbePlan({
     environment: "testnet",
@@ -211,7 +256,8 @@ export async function cleanupOwnedEntry(options: CleanupOwnedEntryOptions): Prom
     },
   });
   const approval = await options.approve(plan);
-  if (approval.kind === "refused") return { kind: "unresolved", message: refusalMessage(approval) };
+  if (approval.kind === "refused")
+    return { kind: "unresolved", message: refusalMessage(approval) };
   await options.store.writeIntent({
     runId: options.runId,
     attemptId: options.attemptId,
@@ -225,23 +271,55 @@ export async function cleanupOwnedEntry(options: CleanupOwnedEntryOptions): Prom
     exchangeOrderId: options.order.orderId,
     baselineSignedQty: undefined,
   });
-  if (options.readOwnership !== undefined && !(await options.readOwnership())) {
-    return { kind: "unresolved", message: "entry ownership changed during cleanup approval" };
+  if (options.readOwnership !== undefined) {
+    try {
+      if (!(await options.readOwnership())) {
+        return {
+          kind: "unresolved",
+          message: "entry ownership changed during cleanup approval",
+        };
+      }
+    } catch {
+      return {
+        kind: "unresolved",
+        message: "entry ownership could not be revalidated before cancel",
+      };
+    }
   }
   try {
     reverifyProbeApproval(approval, plan, (options.clock ?? Date.now)());
   } catch (error) {
-    return { kind: "unresolved", message: error instanceof Error ? error.message : "cleanup approval expired" };
+    return {
+      kind: "unresolved",
+      message:
+        error instanceof Error ? error.message : "cleanup approval expired",
+    };
   }
   try {
-    await options.transport.post("/v5/order/cancel", plan.params as unknown as JsonObject);
+    await options.transport.post(
+      "/v5/order/cancel",
+      plan.params as unknown as JsonObject,
+    );
   } catch {
     return { kind: "unresolved", message: "cancel outcome was ambiguous" };
   }
-  if (!(await proveCleanState(options.transport, options.category, options.symbol))) {
-    return { kind: "unresolved", message: "clean state could not be proven after cancel" };
+  if (
+    !(await proveCleanState(
+      options.transport,
+      options.category,
+      options.symbol,
+    ))
+  ) {
+    return {
+      kind: "unresolved",
+      message: "clean state could not be proven after cancel",
+    };
   }
-  return { kind: "confirmed-clean", exchangeOrderId: options.order.orderId, message: "owned entry cancelled and clean state reconciled" };
+  return {
+    kind: "confirmed-clean",
+    exchangeOrderId: options.order.orderId,
+    message: "owned entry cancelled and clean state reconciled",
+  };
 }
 
 export interface FlattenOwnedExposureOptions {
@@ -261,14 +339,20 @@ export interface FlattenOwnedExposureOptions {
   readonly sleep?: (milliseconds: number) => Promise<void>;
 }
 
-export async function flattenOwnedExposure(options: FlattenOwnedExposureOptions): Promise<CleanupResult> {
+export async function flattenOwnedExposure(
+  options: FlattenOwnedExposureOptions,
+): Promise<CleanupResult> {
   const knownOrderIds = new Set([
     ...options.currentState.ownedOrderIds,
     ...options.currentState.protectiveExitOrderIds,
   ]);
   for (const execution of options.executions) {
     if (!knownOrderIds.has(execution.orderId)) {
-      return { kind: "unresolved", message: "execution refers to an order not proven to belong to this run" };
+      return {
+        kind: "unresolved",
+        message:
+          "execution refers to an order not proven to belong to this run",
+      };
     }
   }
   const exposure = deriveOwnedExposure({
@@ -278,11 +362,22 @@ export async function flattenOwnedExposure(options: FlattenOwnedExposureOptions)
   });
   if (exposure.kind === "unresolved") return exposure;
   if (exposure.kind === "already-flat") {
-    return (await proveCleanState(options.transport, options.category, options.symbol))
-      ? { kind: "already-flat", message: "owned exposure is already flat and clean state is reconciled" }
+    return (await proveCleanState(
+      options.transport,
+      options.category,
+      options.symbol,
+    ))
+      ? {
+          kind: "already-flat",
+          message:
+            "owned exposure is already flat and clean state is reconciled",
+        }
       : { kind: "unresolved", message: "flat position still has open orders" };
   }
-  const orderLinkId = `${options.runId}-flatten-${options.attemptId}`.slice(0, 36);
+  const orderLinkId = `${options.runId}-flatten-${options.attemptId}`.slice(
+    0,
+    36,
+  );
   const plan = buildProbePlan({
     environment: "testnet",
     accountId: options.accountId,
@@ -303,7 +398,8 @@ export async function flattenOwnedExposure(options: FlattenOwnedExposureOptions)
     },
   });
   const approval = await options.approve(plan);
-  if (approval.kind === "refused") return { kind: "unresolved", message: refusalMessage(approval) };
+  if (approval.kind === "refused")
+    return { kind: "unresolved", message: refusalMessage(approval) };
   await options.store.writeIntent({
     runId: options.runId,
     attemptId: options.attemptId,
@@ -318,28 +414,76 @@ export async function flattenOwnedExposure(options: FlattenOwnedExposureOptions)
     baselineSignedQty: options.baselineSignedQty,
   });
   if (options.readOwnership !== undefined) {
-    const reread = await options.readOwnership();
-    if (
-      reread.currentSignedQty !== options.currentState.currentSignedQty ||
-      reread.ownedOrderIds.some((id) => !options.currentState.ownedOrderIds.includes(id))
-    ) {
-      return { kind: "unresolved", message: "ownership changed during flatten approval" };
+    let reread: OwnershipState;
+    try {
+      reread = await options.readOwnership();
+    } catch {
+      return {
+        kind: "unresolved",
+        message: "ownership could not be revalidated before flatten",
+      };
+    }
+    try {
+      if (
+        compareDecimals(
+          parseDecimal(reread.currentSignedQty),
+          parseDecimal(options.currentState.currentSignedQty),
+        ) !== 0 ||
+        !sameStringSet(
+          reread.ownedOrderIds,
+          options.currentState.ownedOrderIds,
+        ) ||
+        !sameStringSet(
+          reread.protectiveExitOrderIds,
+          options.currentState.protectiveExitOrderIds,
+        )
+      ) {
+        return {
+          kind: "unresolved",
+          message: "ownership changed during flatten approval",
+        };
+      }
+    } catch {
+      return {
+        kind: "unresolved",
+        message: "ownership could not be validated before flatten",
+      };
     }
   }
   try {
     reverifyProbeApproval(approval, plan, (options.clock ?? Date.now)());
   } catch (error) {
-    return { kind: "unresolved", message: error instanceof Error ? error.message : "cleanup approval expired" };
+    return {
+      kind: "unresolved",
+      message:
+        error instanceof Error ? error.message : "cleanup approval expired",
+    };
   }
   try {
-    await options.transport.post("/v5/order/create", plan.params as unknown as JsonObject);
+    await options.transport.post(
+      "/v5/order/create",
+      plan.params as unknown as JsonObject,
+    );
   } catch {
     return { kind: "unresolved", message: "flatten outcome was ambiguous" };
   }
-  if (!(await proveCleanState(options.transport, options.category, options.symbol))) {
-    return { kind: "unresolved", message: "clean state could not be proven after flatten" };
+  if (
+    !(await proveCleanState(
+      options.transport,
+      options.category,
+      options.symbol,
+    ))
+  ) {
+    return {
+      kind: "unresolved",
+      message: "clean state could not be proven after flatten",
+    };
   }
-  return { kind: "confirmed-clean", message: "owned exposure flattened with reduce-only order and clean state reconciled" };
+  return {
+    kind: "confirmed-clean",
+    message:
+      "owned exposure flattened with reduce-only order and clean state reconciled",
+  };
 }
 
 export const reconcileOwnedExposure = deriveOwnedExposure;

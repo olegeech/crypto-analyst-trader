@@ -1,9 +1,18 @@
 import { createHash } from "node:crypto";
-import { chmod, mkdir, open, readFile, readdir, rename, rm, unlink } from "node:fs/promises";
+import {
+  chmod,
+  mkdir,
+  open,
+  readFile,
+  readdir,
+  rename,
+  rm,
+  unlink,
+} from "node:fs/promises";
 import process from "node:process";
 import { join } from "node:path";
 
-import type { ProbePlan } from "./probe-plan.js";
+import { hashProbePlan, type ProbePlan } from "./probe-plan.js";
 
 export const DEFAULT_PROBE_DATA_ROOT = "data/private/bybit-probe";
 export const UNRESOLVED_RUN_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1_000;
@@ -78,7 +87,9 @@ export interface StoredVerdict {
   readonly verdict: ProbeVerdict;
   readonly exitCode: number;
   readonly recordedAt: number;
-  readonly recoveryHandoff?: RecoveryHandoff & { readonly reference: "SECURITY.md" };
+  readonly recoveryHandoff?: RecoveryHandoff & {
+    readonly reference: "SECURITY.md";
+  };
   readonly path: string;
 }
 
@@ -103,7 +114,10 @@ function safeText(value: string, field: string): string {
 }
 
 export function accountHash(accountId: string): string {
-  return createHash("sha256").update(safeText(accountId, "accountId"), "utf8").digest("hex").slice(0, 12);
+  return createHash("sha256")
+    .update(safeText(accountId, "accountId"), "utf8")
+    .digest("hex")
+    .slice(0, 12);
 }
 
 function sanitizedPlan(plan: ProbePlan): StoredPlan {
@@ -200,16 +214,24 @@ export class ProbeStore {
 
     let existing: LockRecord;
     try {
-      existing = JSON.parse(await readFile(this.lockPath(), "utf8")) as LockRecord;
+      existing = JSON.parse(
+        await readFile(this.lockPath(), "utf8"),
+      ) as LockRecord;
     } catch {
-      throw new ProbeStoreError("invalid-lock", "the probe lock is unreadable; inspect it manually");
+      throw new ProbeStoreError(
+        "invalid-lock",
+        "the probe lock is unreadable; inspect it manually",
+      );
     }
     if (
       !Number.isInteger(existing.pid) ||
       typeof existing.runId !== "string" ||
       !Number.isInteger(existing.startedAt)
     ) {
-      throw new ProbeStoreError("invalid-lock", "the probe lock is invalid; inspect it manually");
+      throw new ProbeStoreError(
+        "invalid-lock",
+        "the probe lock is invalid; inspect it manually",
+      );
     }
     if (this.isProcessAlive(existing.pid)) {
       throw new ProbeStoreError("live-lock", "another probe run is active");
@@ -231,10 +253,16 @@ export class ProbeStore {
       existing = JSON.parse(await readFile(path, "utf8")) as LockRecord;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
-      throw new ProbeStoreError("invalid-lock", "the probe lock is unreadable; inspect it manually");
+      throw new ProbeStoreError(
+        "invalid-lock",
+        "the probe lock is unreadable; inspect it manually",
+      );
     }
     if (existing.runId !== runId || existing.pid !== this.processId) {
-      throw new ProbeStoreError("not-owner", "the probe lock is owned by another run");
+      throw new ProbeStoreError(
+        "not-owner",
+        "the probe lock is owned by another run",
+      );
     }
     await unlink(path);
   }
@@ -246,16 +274,28 @@ export class ProbeStore {
     if (!/^[a-f0-9]{64}$/.test(input.planDigest)) {
       throw new ProbeStoreError("invalid-record", "planDigest is invalid");
     }
+    if (input.planDigest !== hashProbePlan(input.plan)) {
+      throw new ProbeStoreError(
+        "invalid-record",
+        "planDigest does not match the persisted probe plan",
+      );
+    }
     ensureFiniteTimestamp(input.approvedAt, "approvedAt");
     ensureFiniteTimestamp(input.approvalExpiresAt, "approvalExpiresAt");
     ensureFiniteTimestamp(input.createdAt, "createdAt");
-    if (input.orderLinkId !== undefined) safeText(input.orderLinkId, "orderLinkId");
-    if (input.exchangeOrderId !== undefined) safeText(input.exchangeOrderId, "exchangeOrderId");
-    if (input.baselineSignedQty !== undefined) safeText(input.baselineSignedQty, "baselineSignedQty");
+    if (input.orderLinkId !== undefined)
+      safeText(input.orderLinkId, "orderLinkId");
+    if (input.exchangeOrderId !== undefined)
+      safeText(input.exchangeOrderId, "exchangeOrderId");
+    if (input.baselineSignedQty !== undefined)
+      safeText(input.baselineSignedQty, "baselineSignedQty");
     const directory = this.runDir(input.runId);
     await mkdir(directory, { recursive: true, mode: 0o700 });
     await chmod(directory, 0o700);
-    const path = join(directory, `intent-${safeId(input.attemptId, "attemptId")}.json`);
+    const path = join(
+      directory,
+      `intent-${safeId(input.attemptId, "attemptId")}.json`,
+    );
     const stored: Omit<StoredIntent, "path"> = {
       recordVersion: 1,
       runId: input.runId,
@@ -277,7 +317,9 @@ export class ProbeStore {
   async updateIntent(
     runId: string,
     attemptId: string,
-    patch: Pick<StoredIntentInput, "exchangeOrderId" | "baselineSignedQty">,
+    patch: Partial<
+      Pick<StoredIntentInput, "exchangeOrderId" | "baselineSignedQty">
+    >,
   ): Promise<StoredIntent> {
     const existing = await this.readIntent(runId, attemptId);
     const stored: Omit<StoredIntent, "path"> = {
@@ -291,27 +333,39 @@ export class ProbeStore {
       approvalExpiresAt: existing.approvalExpiresAt,
       createdAt: existing.createdAt,
       orderLinkId: existing.orderLinkId,
-      exchangeOrderId: patch.exchangeOrderId,
-      baselineSignedQty: patch.baselineSignedQty,
+      exchangeOrderId: patch.exchangeOrderId ?? existing.exchangeOrderId,
+      baselineSignedQty: patch.baselineSignedQty ?? existing.baselineSignedQty,
     };
     await atomicJsonWrite(existing.path, stored);
     return { ...stored, path: existing.path };
   }
 
-  private async readIntent(runId: string, attemptId: string): Promise<StoredIntent> {
-    const path = join(this.runDir(runId), `intent-${safeId(attemptId, "attemptId")}.json`);
+  private async readIntent(
+    runId: string,
+    attemptId: string,
+  ): Promise<StoredIntent> {
+    const path = join(
+      this.runDir(runId),
+      `intent-${safeId(attemptId, "attemptId")}.json`,
+    );
     let parsed: unknown;
     try {
       parsed = JSON.parse(await readFile(path, "utf8"));
     } catch {
-      throw new ProbeStoreError("invalid-record", "the probe intent record is unavailable or invalid");
+      throw new ProbeStoreError(
+        "invalid-record",
+        "the probe intent record is unavailable or invalid",
+      );
     }
     return this.validateStoredIntent(parsed, path);
   }
 
   private validateStoredIntent(value: unknown, path: string): StoredIntent {
     if (typeof value !== "object" || value === null || Array.isArray(value)) {
-      throw new ProbeStoreError("invalid-record", "the probe intent record is invalid");
+      throw new ProbeStoreError(
+        "invalid-record",
+        "the probe intent record is invalid",
+      );
     }
     const record = value as Record<string, unknown>;
     if (
@@ -326,11 +380,20 @@ export class ProbeStore {
       typeof record.approvalExpiresAt !== "number" ||
       typeof record.createdAt !== "number"
     ) {
-      throw new ProbeStoreError("invalid-record", "the probe intent record is invalid");
+      throw new ProbeStoreError(
+        "invalid-record",
+        "the probe intent record is invalid",
+      );
     }
     const plan = record.plan as Record<string, unknown>;
-    if (typeof plan.accountIdHash !== "string" || !/^[a-f0-9]{12}$/.test(plan.accountIdHash)) {
-      throw new ProbeStoreError("invalid-record", "the stored account identity is invalid");
+    if (
+      typeof plan.accountIdHash !== "string" ||
+      !/^[a-f0-9]{12}$/.test(plan.accountIdHash)
+    ) {
+      throw new ProbeStoreError(
+        "invalid-record",
+        "the stored account identity is invalid",
+      );
     }
     return { ...(record as unknown as Omit<StoredIntent, "path">), path };
   }
@@ -351,13 +414,17 @@ export class ProbeStore {
       const files = await readdir(directory, { withFileTypes: true });
       const intents: StoredIntent[] = [];
       for (const file of files) {
-        if (!file.isFile() || !/^intent-[A-Za-z0-9._-]+\.json$/.test(file.name)) continue;
+        if (!file.isFile() || !/^intent-[A-Za-z0-9._-]+\.json$/.test(file.name))
+          continue;
         const path = join(directory, file.name);
         let parsed: unknown;
         try {
           parsed = JSON.parse(await readFile(path, "utf8"));
         } catch {
-          throw new ProbeStoreError("invalid-record", `saved probe run ${runId} contains invalid JSON`);
+          throw new ProbeStoreError(
+            "invalid-record",
+            `saved probe run ${runId} contains invalid JSON`,
+          );
         }
         intents.push(this.validateStoredIntent(parsed, path));
       }
@@ -365,14 +432,22 @@ export class ProbeStore {
       let verdict: ProbeVerdict | undefined;
       const verdictPath = join(directory, "verdict.json");
       try {
-        const parsed = JSON.parse(await readFile(verdictPath, "utf8")) as Record<string, unknown>;
-        if (typeof parsed.verdict !== "string" || !(parsed.verdict in EXIT_CODES)) {
+        const parsed = JSON.parse(
+          await readFile(verdictPath, "utf8"),
+        ) as Record<string, unknown>;
+        if (
+          typeof parsed.verdict !== "string" ||
+          !(parsed.verdict in EXIT_CODES)
+        ) {
           throw new Error("invalid verdict");
         }
         verdict = parsed.verdict as ProbeVerdict;
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-          throw new ProbeStoreError("invalid-record", `saved probe run ${runId} contains an invalid verdict`);
+          throw new ProbeStoreError(
+            "invalid-record",
+            `saved probe run ${runId} contains an invalid verdict`,
+          );
         }
       }
       runs.push({
@@ -383,19 +458,37 @@ export class ProbeStore {
         path: directory,
       });
     }
-    return runs.sort((left, right) => (left.createdAt ?? 0) - (right.createdAt ?? 0));
+    return runs.sort(
+      (left, right) => (left.createdAt ?? 0) - (right.createdAt ?? 0),
+    );
   }
 
-  async assertNoBlockingPriorRuns(currentRunId: string): Promise<void> {
-    const prior = (await this.listSavedRuns()).filter(
-      (run) => run.runId !== currentRunId && run.verdict !== "CONFIRMED_CLEAN" && run.verdict !== "REFUSED" && run.verdict !== "PRECONDITION_FAILED",
+  async assertNoBlockingPriorRuns(
+    currentRunId: string,
+    savedRuns?: readonly StoredRun[],
+  ): Promise<void> {
+    const prior = (savedRuns ?? (await this.listSavedRuns())).filter(
+      (run) =>
+        run.runId !== currentRunId &&
+        run.verdict !== "CONFIRMED_CLEAN" &&
+        run.verdict !== "REFUSED" &&
+        run.verdict !== "PRECONDITION_FAILED",
     );
     if (prior.length > 1) {
-      throw new ProbeStoreError("blocking-prior-runs", "multiple unresolved prior probe runs require manual recovery");
+      throw new ProbeStoreError(
+        "blocking-prior-runs",
+        "multiple unresolved prior probe runs require manual recovery",
+      );
     }
     const oldest = prior[0]?.createdAt;
-    if (oldest !== undefined && this.clock() - oldest > UNRESOLVED_RUN_MAX_AGE_MS) {
-      throw new ProbeStoreError("blocking-prior-runs", "an unresolved probe run is older than seven days and requires manual recovery");
+    if (
+      oldest !== undefined &&
+      this.clock() - oldest > UNRESOLVED_RUN_MAX_AGE_MS
+    ) {
+      throw new ProbeStoreError(
+        "blocking-prior-runs",
+        "an unresolved probe run is older than seven days and requires manual recovery",
+      );
     }
   }
 
@@ -405,7 +498,8 @@ export class ProbeStore {
     handoff?: RecoveryHandoff,
   ): Promise<StoredVerdict> {
     safeId(runId, "runId");
-    if (!(verdict in EXIT_CODES)) throw new ProbeStoreError("invalid-record", "verdict is invalid");
+    if (!(verdict in EXIT_CODES))
+      throw new ProbeStoreError("invalid-record", "verdict is invalid");
     const directory = this.runDir(runId);
     await mkdir(directory, { recursive: true, mode: 0o700 });
     await chmod(directory, 0o700);
@@ -421,7 +515,10 @@ export class ProbeStore {
         : {
             recoveryHandoff: {
               runId: safeId(handoff.runId, "handoff.runId"),
-              lastConfirmedState: safeText(handoff.lastConfirmedState, "lastConfirmedState"),
+              lastConfirmedState: safeText(
+                handoff.lastConfirmedState,
+                "lastConfirmedState",
+              ),
               uncertainty: safeText(handoff.uncertainty, "uncertainty"),
               nextAction: safeText(handoff.nextAction, "nextAction"),
               reference: "SECURITY.md" as const,

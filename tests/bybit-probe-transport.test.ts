@@ -18,7 +18,12 @@ const credentials = {
 
 test("Bybit HMAC pre-sign strings preserve the exact GET and POST bytes", () => {
   assert.equal(
-    buildSignaturePayload("1672052955758", "api-key", "5000", "category=linear&symbol=BTCUSDT"),
+    buildSignaturePayload(
+      "1672052955758",
+      "api-key",
+      "5000",
+      "category=linear&symbol=BTCUSDT",
+    ),
     "1672052955758api-key5000category=linear&symbol=BTCUSDT",
   );
   const body = '{"category":"linear","symbol":"BTCUSDT","qty":"1"}';
@@ -29,7 +34,8 @@ test("Bybit HMAC pre-sign strings preserve the exact GET and POST bytes", () => 
 });
 
 test("HMAC digest is the independently calculated lowercase hexadecimal value", () => {
-  const payload = "1672052955758synthetic-api-key5000category=linear&symbol=BTCUSDT";
+  const payload =
+    "1672052955758synthetic-api-key5000category=linear&symbol=BTCUSDT";
   const expected = createHmac("sha256", credentials.apiSecret)
     .update(payload)
     .digest("hex");
@@ -51,7 +57,10 @@ test("retCode classification keeps signing defects separate from credential reco
     assert.equal(failure.recommendReconnect, reconnect);
   }
   assert.equal(classifyRetCode(99999).kind, "exchange-failure");
-  assert.equal(classifyRetCode(10004).message.includes("credentials:connect:testnet"), false);
+  assert.equal(
+    classifyRetCode(10004).message.includes("credentials:connect:testnet"),
+    false,
+  );
   assert.match(classifyRetCode(10003).message, /credentials:connect:testnet/);
 });
 
@@ -67,7 +76,10 @@ test("invalid response shapes fail before evidence can be consumed", () => {
     { retCode: 0, result: {} },
     { retCode: 0, retMsg: "OK", result: null },
   ]) {
-    assert.throws(() => validateBybitResponse(payload), /invalid Bybit response/);
+    assert.throws(
+      () => validateBybitResponse(payload),
+      /invalid Bybit response/,
+    );
   }
 });
 
@@ -83,10 +95,17 @@ test("the transmitted POST body is the body that was signed", async () => {
         body: String(init?.body ?? ""),
         headers: new Headers(init?.headers),
       });
-      return new Response(JSON.stringify({ retCode: 0, retMsg: "OK", result: { orderId: "safe-id" } }), {
-        status: 200,
-        headers: { "content-type": "application/json" },
-      });
+      return new Response(
+        JSON.stringify({
+          retCode: 0,
+          retMsg: "OK",
+          result: { orderId: "safe-id" },
+        }),
+        {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        },
+      );
     },
     clockOffsetMs: 0,
   });
@@ -97,7 +116,12 @@ test("the transmitted POST body is the body that was signed", async () => {
   assert.equal(
     requests[0]?.headers.get("X-BAPI-SIGN"),
     hmacSha256(
-      buildSignaturePayload(String(clock()), credentials.apiKey, "5000", requests[0]?.body ?? ""),
+      buildSignaturePayload(
+        String(clock()),
+        credentials.apiKey,
+        "5000",
+        requests[0]?.body ?? "",
+      ),
       credentials.apiSecret,
     ),
   );
@@ -115,12 +139,19 @@ test("a measured server offset is applied to later signed timestamps", async () 
       request: async (_url, init) => {
         call += 1;
         if (call === 2) {
-          timestamps.push(String(new Headers(init?.headers).get("X-BAPI-TIMESTAMP")));
+          timestamps.push(
+            String(new Headers(init?.headers).get("X-BAPI-TIMESTAMP")),
+          );
         }
         return new Response(
           JSON.stringify(
             call === 1
-              ? { retCode: 0, retMsg: "OK", time: localTime + delta, result: {} }
+              ? {
+                  retCode: 0,
+                  retMsg: "OK",
+                  time: localTime + delta,
+                  result: {},
+                }
               : { retCode: 0, retMsg: "OK", result: {} },
           ),
           { status: 200 },

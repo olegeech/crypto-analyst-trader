@@ -12,6 +12,32 @@ It applies to direct Bybit execution. Product boundaries live in `README.md`,
 and mandatory safety rules live in `docs/architecture/invariants.md`. If this
 runbook conflicts with an invariant, the invariant wins.
 
+## Bybit Testnet capability probe (issue #7)
+
+Before #8 freezes daily-order contracts, the bounded live capability check is
+operator-executed only:
+
+```text
+TRADER_ENV=testnet npm run probe:bybit:testnet
+```
+
+The command is opt-in and absent from `test:release`, default tests and CI.
+It is locked to the canonical Bybit Testnet origin and the Testnet Keychain
+credential. Reserve the account and configured symbol for the whole run, and
+approve the full exact probe-plan hash separately for every create, cancel or
+reduce-only cleanup write. No TTY, refusal, expiry or request mismatch fails
+closed; there is no environment-variable auto-approval path.
+
+Only sanitized, runtime-validated fields belong in PR or issue evidence:
+account hash prefix, run-scoped `orderLinkId`, truncated exchange order IDs,
+acknowledgement, terminal REST state and attached-exit read-back. Protection
+after a fill remains **unverified** unless an execution was actually
+observed. `CONFIRMED_CLEAN` is the only clean completion verdict; `REFUSED`,
+`PRECONDITION_FAILED` and `CONTRADICTION` stop new scenarios, while
+`UNRESOLVED` requires recovery of the saved run before any new write. Follow
+the handoff and the exchange-UI manual fallback in `SECURITY.md`; never
+cancel all orders or flatten unowned exposure.
+
 CLI names in this document describe application use cases. Invoke only commands
 implemented by the current `package.json` and released for the selected
 environment. A missing capability is `CAPABILITY_NOT_RELEASED`; do not replace

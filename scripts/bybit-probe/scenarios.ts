@@ -1,18 +1,12 @@
-import {
-  reverifyProbeApproval,
-  type ProbeApproval,
-} from "./approval.js";
+import { reverifyProbeApproval, type ProbeApproval } from "./approval.js";
 import {
   buildProbePlan,
   type ProbePlan,
   type ProbeOrderParameters,
 } from "./probe-plan.js";
-import { ProbeStore } from "./store.js";
-import {
-  BybitProbeTransportError,
-  type BybitResponse,
-  type QueryInput,
-} from "./transport.js";
+import type { ProbeStore } from "./store.js";
+import { BybitProbeTransportError, responseList } from "./transport.js";
+import type { BybitResponse, QueryInput } from "./transport.js";
 
 type JsonObject = Record<string, unknown>;
 export type ScenarioTransport = {
@@ -34,9 +28,19 @@ export interface ValidatedOrder {
   readonly takeProfit: string | undefined;
   readonly stopLoss: string | undefined;
   readonly cancelType: string | undefined;
+  readonly cancelOrigin: "exchange-post-only" | "intentional" | undefined;
 }
 
 export type ReconciliationResult =
+  | Readonly<{
+      kind: "rejected";
+      acknowledgement: "pending";
+      order: undefined;
+      lookupCount: 0;
+      terminalState: undefined;
+      source: undefined;
+      message: string;
+    }>
   | Readonly<{
       kind: "resting";
       acknowledgement: "pending";
@@ -66,25 +70,18 @@ export type ReconciliationResult =
 export interface ReconcileOrderOptions {
   readonly orderLinkId: string;
   readonly exchangeOrderId?: string;
-  readonly category?: string;
-  readonly symbol?: string;
+  readonly category: string;
+  readonly symbol: string;
   readonly realtimeAttempts?: number;
   readonly historyAttempts?: number;
   readonly sleep?: (milliseconds: number) => Promise<void>;
   readonly clock?: () => number;
 }
 
-function responseList(response: BybitResponse): readonly JsonObject[] {
-  const list = response.result.list;
-  if (!Array.isArray(list)) return [];
-  return list.filter(
-    (item): item is JsonObject =>
-      typeof item === "object" && item !== null && !Array.isArray(item),
-  );
-}
-
 function safeString(value: unknown): string | undefined {
-  return typeof value === "string" && value.length > 0 && !/[\u0000-\u001f\u007f\r\n]/.test(value)
+  return typeof value === "string" &&
+    value.length > 0 &&
+    !/[\u0000-\u001f\u007f\r\n]/.test(value)
     ? value
     : undefined;
 }
@@ -101,6 +98,13 @@ function validateOrder(value: JsonObject): ValidatedOrder | undefined {
     takeProfit: safeString(value.takeProfit),
     stopLoss: safeString(value.stopLoss),
     cancelType: safeString(value.cancelType),
+    cancelOrigin:
+      typeof value.cancelType === "string" &&
+      /post.?only/i.test(value.cancelType)
+        ? "exchange-post-only"
+        : typeof value.cancelType === "string"
+          ? "intentional"
+          : undefined,
   };
 }
 
@@ -108,13 +112,18 @@ function matchingOrders(
   values: readonly JsonObject[],
   options: ReconcileOrderOptions,
 ): readonly ValidatedOrder[] {
-  return values
-    .map(validateOrder)
-    .filter((order): order is ValidatedOrder => order !== undefined)
-    .filter((order) => {
-      if (options.exchangeOrderId !== undefined) return order.orderId === options.exchangeOrderId;
-      return order.orderLinkId === options.orderLinkId;
-    });
+  const matches: ValidatedOrder[] = [];
+  for (const value of values) {
+    const order = validateOrder(value);
+    if (!order || order.orderLinkId !== options.orderLinkId) continue;
+    if (
+      options.exchangeOrderId !== undefined &&
+      order.orderId !== options.exchangeOrderId
+    )
+      continue;
+    matches.push(order);
+  }
+  return matches;
 }
 
 function terminal(order: ValidatedOrder): boolean {
@@ -148,12 +157,25 @@ function selectOrder(
   if (candidates.length === 0) return undefined;
   if (candidates.length === 1) return candidates[0];
   const active = candidates.filter(isActive);
-  if (active.length > 1) return unresolved("ambiguous", lookupCount, "multiple active exchange orders matched one client order ID");
+  if (active.length > 1)
+    return unresolved(
+      "ambiguous",
+      lookupCount,
+      "multiple active exchange orders matched one client order ID",
+    );
   if (active.length === 1) return active[0];
-  return unresolved("ambiguous", lookupCount, "multiple exchange orders matched without a unique active identity");
+  return unresolved(
+    "ambiguous",
+    lookupCount,
+    "multiple exchange orders matched without a unique active identity",
+  );
 }
 
-function resultFor(order: ValidatedOrder, lookupCount: number, source: "realtime" | "history"): ReconciliationResult {
+function resultFor(
+  order: ValidatedOrder,
+  lookupCount: number,
+  source: "realtime" | "history",
+): ReconciliationResult {
   if (terminal(order)) {
     return {
       kind: "terminal",
@@ -180,7 +202,10 @@ export async function reconcileOrder(
 ): Promise<ReconciliationResult> {
   const realtimeAttempts = options.realtimeAttempts ?? 10;
   const historyAttempts = options.historyAttempts ?? 3;
-  const sleep = options.sleep ?? ((milliseconds: number) => new Promise<void>((resolve) => setTimeout(resolve, milliseconds)));
+  const sleep =
+    options.sleep ??
+    ((milliseconds: number) =>
+      new Promise<void>((resolve) => setTimeout(resolve, milliseconds)));
   let lookupCount = 0;
   let restingObservations = 0;
   let lastResting: ValidatedOrder | undefined;
@@ -194,14 +219,23 @@ export async function reconcileOrder(
         : { orderId: options.exchangeOrderId }),
     });
     lookupCount += 1;
-    const selected = selectOrder(matchingOrders(responseList(response), options), lookupCount);
+    const values = responseList(response);
+    if (values === undefined)
+      return unresolved(
+        "unresolved",
+        lookupCount,
+        "realtime order response did not contain a validated list",
+      );
+    const selected = selectOrder(matchingOrders(values, options), lookupCount);
     if (selected && typeof selected !== "object") return selected;
     if (selected && "kind" in selected) return selected;
     if (selected) {
-      if (terminal(selected)) return resultFor(selected, lookupCount, "realtime");
+      if (terminal(selected))
+        return resultFor(selected, lookupCount, "realtime");
       restingObservations += 1;
       lastResting = selected;
-      if (restingObservations >= 2) return resultFor(selected, lookupCount, "realtime");
+      if (restingObservations >= 2)
+        return resultFor(selected, lookupCount, "realtime");
     }
     if (attempt + 1 < realtimeAttempts) await sleep(1_000);
   }
@@ -210,24 +244,43 @@ export async function reconcileOrder(
     const response = await transport.get("/v5/order/history", {
       category: options.category ?? "linear",
       symbol: options.symbol ?? "",
-      orderLinkId: options.orderLinkId,
+      ...(options.exchangeOrderId === undefined
+        ? { orderLinkId: options.orderLinkId }
+        : { orderId: options.exchangeOrderId }),
     });
     lookupCount += 1;
-    const selected = selectOrder(matchingOrders(responseList(response), options), lookupCount);
+    const values = responseList(response);
+    if (values === undefined)
+      return unresolved(
+        "unresolved",
+        lookupCount,
+        "order history response did not contain a validated list",
+      );
+    const selected = selectOrder(matchingOrders(values, options), lookupCount);
     if (selected && typeof selected !== "object") return selected;
     if (selected && "kind" in selected) return selected;
     if (selected) {
-      if (terminal(selected)) return resultFor(selected, lookupCount, "history");
+      if (terminal(selected))
+        return resultFor(selected, lookupCount, "history");
       restingObservations += 1;
       lastResting = selected;
-      if (restingObservations >= 2) return resultFor(selected, lookupCount, "history");
+      if (restingObservations >= 2)
+        return resultFor(selected, lookupCount, "history");
     }
     if (attempt + 1 < historyAttempts) await sleep(2_000);
   }
   if (lastResting) {
-    return unresolved("unresolved", lookupCount, "order remained non-terminal after bounded reconciliation");
+    return unresolved(
+      "unresolved",
+      lookupCount,
+      "order remained non-terminal after bounded reconciliation",
+    );
   }
-  return unresolved("unresolved", lookupCount, "order was not visible; not-found does not prove non-submission");
+  return unresolved(
+    "unresolved",
+    lookupCount,
+    "order was not visible; not-found does not prove non-submission",
+  );
 }
 
 export interface EntryScenarioOptions {
@@ -237,6 +290,8 @@ export interface EntryScenarioOptions {
   readonly transport: ScenarioTransport;
   readonly store: ProbeStore;
   readonly approve: (plan: ProbePlan) => Promise<ProbeApproval>;
+  readonly baselineSignedQty?: string;
+  readonly discardAcknowledgement?: boolean;
   readonly clock?: () => number;
   readonly sleep?: (milliseconds: number) => Promise<void>;
   readonly realtimeAttempts?: number;
@@ -252,18 +307,30 @@ export type EntryScenarioResult =
     }>
   | Readonly<{
       kind: "rejected" | "resting" | "terminal" | "unresolved" | "ambiguous";
-      acknowledgement: "pending";
-      attachedExits: "accepted" | "silent-drop" | "not-observed" | "rejected-110057";
+      acknowledgement: "pending" | "rejected";
+      attachedExits:
+        "accepted" | "silent-drop" | "not-observed" | "rejected-110057";
       protectionAfterFill: "not-tested";
       reconciliation: ReconciliationResult;
+      side: "Buy" | "Sell";
       orderLinkId: string;
       exchangeOrderId: string | undefined;
+      duplicateOutcome: "rejected" | "accepted" | undefined;
     }>;
 
-function attachedExitEvidence(order: ValidatedOrder | undefined): "accepted" | "silent-drop" | "not-observed" {
+export type DispatchedEntryScenarioResult = Exclude<
+  EntryScenarioResult,
+  Readonly<{ kind: "refused" }>
+>;
+
+function attachedExitEvidence(
+  order: ValidatedOrder | undefined,
+): "accepted" | "silent-drop" | "not-observed" {
   if (!order) return "not-observed";
-  if (order.takeProfit !== undefined && order.stopLoss !== undefined) return "accepted";
-  if (order.takeProfit === undefined && order.stopLoss === undefined) return "silent-drop";
+  if (order.takeProfit !== undefined && order.stopLoss !== undefined)
+    return "accepted";
+  if (order.takeProfit === undefined && order.stopLoss === undefined)
+    return "silent-drop";
   return "not-observed";
 }
 
@@ -272,11 +339,30 @@ function resultOrderId(response: BybitResponse): string | undefined {
   return safeString(value);
 }
 
-export async function runEntryScenario(options: EntryScenarioOptions): Promise<EntryScenarioResult> {
+function rejectionReconciliation(message: string): ReconciliationResult {
+  return {
+    kind: "rejected",
+    acknowledgement: "pending",
+    order: undefined,
+    lookupCount: 0,
+    terminalState: undefined,
+    source: undefined,
+    message,
+  };
+}
+
+export async function runEntryScenario(
+  options: EntryScenarioOptions,
+): Promise<EntryScenarioResult> {
   const clock = options.clock ?? Date.now;
   const approval = await options.approve(options.plan);
   if (approval.kind === "refused") {
-    return { kind: "refused", acknowledgement: "not-dispatched", approval, attachedExits: "not-observed" };
+    return {
+      kind: "refused",
+      acknowledgement: "not-dispatched",
+      approval,
+      attachedExits: "not-observed",
+    };
   }
   const orderLinkId = safeString(options.plan.params.orderLinkId);
   if (!orderLinkId) throw new Error("entry probe plan requires an orderLinkId");
@@ -291,48 +377,84 @@ export async function runEntryScenario(options: EntryScenarioOptions): Promise<E
     createdAt: clock(),
     orderLinkId,
     exchangeOrderId: undefined,
-    baselineSignedQty: undefined,
+    baselineSignedQty: options.baselineSignedQty,
   });
   reverifyProbeApproval(approval, options.plan, clock());
 
   let acknowledgement: BybitResponse | undefined;
   let dispatchError: unknown;
   try {
-    acknowledgement = await options.transport.post(options.plan.endpoint, options.plan.params as unknown as JsonObject);
+    acknowledgement = await options.transport.post(
+      options.plan.endpoint,
+      options.plan.params as unknown as JsonObject,
+    );
   } catch (error) {
     dispatchError = error;
   }
-  const acknowledgedOrderId = acknowledgement ? resultOrderId(acknowledgement) : undefined;
-  if (acknowledgedOrderId !== undefined) {
+  const acknowledgedOrderId = acknowledgement
+    ? resultOrderId(acknowledgement)
+    : undefined;
+  const reconciliationOrderId = options.discardAcknowledgement
+    ? undefined
+    : acknowledgedOrderId;
+  if (reconciliationOrderId !== undefined) {
     await options.store.updateIntent(options.runId, options.attemptId, {
-      exchangeOrderId: acknowledgedOrderId,
-      baselineSignedQty: undefined,
+      exchangeOrderId: reconciliationOrderId,
+      baselineSignedQty: options.baselineSignedQty,
     });
   }
-  const reconciliation = await reconcileOrder(options.transport, {
-    orderLinkId,
-    ...(acknowledgedOrderId === undefined ? {} : { exchangeOrderId: acknowledgedOrderId }),
-    ...(options.realtimeAttempts === undefined ? {} : { realtimeAttempts: options.realtimeAttempts }),
-    ...(options.historyAttempts === undefined ? {} : { historyAttempts: options.historyAttempts }),
-    ...(options.sleep === undefined ? {} : { sleep: options.sleep }),
-  });
-  const order = reconciliation.order;
-  const attachedExits =
-    dispatchError instanceof BybitProbeTransportError && dispatchError.retCode === 110057
-      ? "rejected-110057"
-      : attachedExitEvidence(order);
-  const kind =
-    attachedExits === "rejected-110057"
+  const duplicateOutcome =
+    dispatchError instanceof BybitProbeTransportError &&
+    (dispatchError.retCode === 10014 || dispatchError.retCode === 110072)
       ? "rejected"
-      : reconciliation.kind;
+      : undefined;
+  const attachedExitRejection =
+    dispatchError instanceof BybitProbeTransportError &&
+    dispatchError.retCode === 110057;
+  const isDeterministicRejection =
+    duplicateOutcome === "rejected" || attachedExitRejection;
+  const reconciliation = isDeterministicRejection
+    ? rejectionReconciliation(
+        duplicateOutcome === "rejected"
+          ? "Bybit rejected the reused client order ID; the prior order identity was not reused."
+          : "Bybit rejected attached TP/SL parameters with 110057.",
+      )
+    : await reconcileOrder(options.transport, {
+        orderLinkId,
+        category: options.plan.params.category,
+        symbol: options.plan.params.symbol,
+        ...(reconciliationOrderId === undefined
+          ? {}
+          : { exchangeOrderId: reconciliationOrderId }),
+        ...(options.realtimeAttempts === undefined
+          ? {}
+          : { realtimeAttempts: options.realtimeAttempts }),
+        ...(options.historyAttempts === undefined
+          ? {}
+          : { historyAttempts: options.historyAttempts }),
+        ...(options.sleep === undefined ? {} : { sleep: options.sleep }),
+      });
+  const order = reconciliation.order;
+  if (order && reconciliationOrderId === undefined) {
+    await options.store.updateIntent(options.runId, options.attemptId, {
+      exchangeOrderId: order.orderId,
+      baselineSignedQty: options.baselineSignedQty,
+    });
+  }
+  const attachedExits = attachedExitRejection
+    ? "rejected-110057"
+    : attachedExitEvidence(order);
+  const kind = isDeterministicRejection ? "rejected" : reconciliation.kind;
   return {
     kind,
-    acknowledgement: "pending",
+    acknowledgement: isDeterministicRejection ? "rejected" : "pending",
     attachedExits,
     protectionAfterFill: "not-tested",
     reconciliation,
+    side: options.plan.params.side,
     orderLinkId,
-    exchangeOrderId: order?.orderId ?? acknowledgedOrderId,
+    exchangeOrderId: order?.orderId ?? reconciliationOrderId,
+    duplicateOutcome,
   };
 }
 

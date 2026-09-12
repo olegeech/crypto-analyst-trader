@@ -6,6 +6,11 @@ export const PROBE_PLAN_SCHEMA_VERSION = 1 as const;
 
 export type ProbePlanMethod = "GET" | "POST";
 export type ProbeSide = "Buy" | "Sell";
+export type ProbeOrderType = "Limit" | "Market";
+export type ProbeTimeInForce = "GTC" | "IOC" | "FOK" | "PostOnly";
+export type ProbeTpslMode = "Full";
+export type ProbeTriggerOrderType = "Market" | "Limit";
+export type ProbeTriggerBy = "LastPrice" | "MarkPrice" | "IndexPrice";
 
 export interface ProbeOrderParameters {
   readonly category: string;
@@ -17,15 +22,15 @@ export interface ProbeOrderParameters {
   readonly qty?: string;
   readonly takeProfit?: string;
   readonly stopLoss?: string;
-  readonly orderType?: string;
-  readonly timeInForce?: string;
+  readonly orderType?: ProbeOrderType;
+  readonly timeInForce?: ProbeTimeInForce;
   readonly reduceOnly?: boolean;
   readonly positionIdx?: number;
-  readonly tpslMode?: string;
-  readonly tpOrderType?: string;
-  readonly slOrderType?: string;
-  readonly tpTriggerBy?: string;
-  readonly slTriggerBy?: string;
+  readonly tpslMode?: ProbeTpslMode;
+  readonly tpOrderType?: ProbeTriggerOrderType;
+  readonly slOrderType?: ProbeTriggerOrderType;
+  readonly tpTriggerBy?: ProbeTriggerBy;
+  readonly slTriggerBy?: ProbeTriggerBy;
   readonly closeOnTrigger?: boolean;
 }
 
@@ -50,12 +55,7 @@ export interface ProbePlan {
   readonly params: ProbeOrderParameters;
 }
 
-const DECIMAL_FIELDS = new Set([
-  "price",
-  "qty",
-  "takeProfit",
-  "stopLoss",
-]);
+const DECIMAL_FIELDS = new Set(["price", "qty", "takeProfit", "stopLoss"]);
 const ALLOWED_FIELDS = new Set([
   "category",
   "symbol",
@@ -77,6 +77,24 @@ const ALLOWED_FIELDS = new Set([
   "slTriggerBy",
   "closeOnTrigger",
 ]);
+
+const ENUM_FIELDS = {
+  orderType: new Set<ProbeOrderType>(["Limit", "Market"]),
+  timeInForce: new Set<ProbeTimeInForce>(["GTC", "IOC", "FOK", "PostOnly"]),
+  tpslMode: new Set<ProbeTpslMode>(["Full"]),
+  tpOrderType: new Set<ProbeTriggerOrderType>(["Market", "Limit"]),
+  slOrderType: new Set<ProbeTriggerOrderType>(["Market", "Limit"]),
+  tpTriggerBy: new Set<ProbeTriggerBy>([
+    "LastPrice",
+    "MarkPrice",
+    "IndexPrice",
+  ]),
+  slTriggerBy: new Set<ProbeTriggerBy>([
+    "LastPrice",
+    "MarkPrice",
+    "IndexPrice",
+  ]),
+} as const;
 
 function safeText(value: unknown, field: string): string {
   if (
@@ -101,7 +119,8 @@ function normalizedParams(input: ProbeOrderParameters): ProbeOrderParameters {
   rejectSensitiveKeys(input);
   const source = input as unknown as Record<string, unknown>;
   for (const key of Object.keys(source)) {
-    if (!ALLOWED_FIELDS.has(key)) throw new Error(`unsupported probe plan field: ${key}`);
+    if (!ALLOWED_FIELDS.has(key))
+      throw new Error(`unsupported probe plan field: ${key}`);
   }
   const params: Record<string, unknown> = {};
   for (const field of ALLOWED_FIELDS) {
@@ -118,6 +137,12 @@ function normalizedParams(input: ProbeOrderParameters): ProbeOrderParameters {
   if (params.side !== "Buy" && params.side !== "Sell") {
     throw new Error("side must be Buy or Sell");
   }
+  for (const [field, allowed] of Object.entries(ENUM_FIELDS)) {
+    const value = params[field];
+    if (value !== undefined && !allowed.has(value as never)) {
+      throw new Error(`${field} has an unsupported value`);
+    }
+  }
   const positionIdx = params.positionIdx;
   if (
     positionIdx !== undefined &&
@@ -127,22 +152,29 @@ function normalizedParams(input: ProbeOrderParameters): ProbeOrderParameters {
   ) {
     throw new Error("positionIdx must be a non-negative integer");
   }
-  if (params.orderLinkId !== undefined) safeText(params.orderLinkId, "orderLinkId");
+  if (params.orderLinkId !== undefined)
+    safeText(params.orderLinkId, "orderLinkId");
   if (params.orderId !== undefined) safeText(params.orderId, "orderId");
   return params as unknown as ProbeOrderParameters;
 }
 
 export function buildProbePlan(input: ProbePlanInput): ProbePlan {
   rejectSensitiveKeys(input);
-  if (input.environment !== "testnet") throw new Error("probe plan environment must be testnet");
+  if (input.environment !== "testnet")
+    throw new Error("probe plan environment must be testnet");
   const accountId = safeText(input.accountId, "accountId");
   const scenario = safeText(input.scenario, "scenario");
   if (!Number.isInteger(input.expiresAt) || input.expiresAt <= 0) {
     throw new Error("expiresAt must be a positive integer timestamp");
   }
-  if (input.method !== "GET" && input.method !== "POST") throw new Error("method must be GET or POST");
+  if (input.method !== "GET" && input.method !== "POST")
+    throw new Error("method must be GET or POST");
   const endpoint = safeText(input.endpoint, "endpoint");
-  if (!endpoint.startsWith("/") || endpoint.includes("//") || endpoint.includes("#")) {
+  if (
+    !endpoint.startsWith("/") ||
+    endpoint.includes("//") ||
+    endpoint.includes("#")
+  ) {
     throw new Error("endpoint must be a relative API path");
   }
   return {
@@ -158,7 +190,12 @@ export function buildProbePlan(input: ProbePlanInput): ProbePlan {
 }
 
 function canonicalValue(value: unknown): string {
-  if (value === null || typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+  if (
+    value === null ||
+    typeof value === "string" ||
+    typeof value === "number" ||
+    typeof value === "boolean"
+  ) {
     return JSON.stringify(value);
   }
   if (Array.isArray(value)) return `[${value.map(canonicalValue).join(",")}]`;
@@ -191,8 +228,10 @@ export function assertProbePlanCurrent(
   now: number,
   expectedAccountId = plan.accountId,
 ): void {
-  if (isProbePlanExpired(plan, now)) throw new Error("probe plan approval expired");
-  if (plan.accountId !== expectedAccountId) throw new Error("probe plan account mismatch");
+  if (isProbePlanExpired(plan, now))
+    throw new Error("probe plan approval expired");
+  if (plan.accountId !== expectedAccountId)
+    throw new Error("probe plan account mismatch");
   if (hashProbePlan(plan) !== expectedDigest.toLowerCase()) {
     throw new Error("probe plan digest mismatch");
   }

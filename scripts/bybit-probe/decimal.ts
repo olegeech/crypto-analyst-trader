@@ -34,12 +34,17 @@ export function parseDecimal(value: unknown): Decimal {
   }
   const match = /^(?<sign>-?)(?<whole>\d+)(?:\.(?<fraction>\d+))?$/.exec(value);
   if (!match?.groups) {
-    throw new Error("value must be a decimal string without exponent or trailing characters");
+    throw new Error(
+      "value must be a decimal string without exponent or trailing characters",
+    );
   }
   const fraction = match.groups.fraction ?? "";
   const digits = `${match.groups.whole}${fraction}`;
   const unsigned = BigInt(digits);
-  return normalized(match.groups.sign === "-" ? -unsigned : unsigned, fraction.length);
+  return normalized(
+    match.groups.sign === "-" ? -unsigned : unsigned,
+    fraction.length,
+  );
 }
 
 export function decimal(coefficient: bigint, scale: number): Decimal {
@@ -52,9 +57,13 @@ export function toDecimalString(value: Decimal): string {
   const negative = coefficient < 0n;
   const digits = (negative ? -coefficient : coefficient).toString();
   const scale = value.scale;
-  const padded = digits.length <= scale ? digits.padStart(scale + 1, "0") : digits;
+  const padded =
+    digits.length <= scale ? digits.padStart(scale + 1, "0") : digits;
   const splitAt = padded.length - scale;
-  const text = scale === 0 ? padded : `${padded.slice(0, splitAt)}.${padded.slice(splitAt)}`;
+  const text =
+    scale === 0
+      ? padded
+      : `${padded.slice(0, splitAt)}.${padded.slice(splitAt)}`;
   return negative ? `-${text}` : text;
 }
 
@@ -87,7 +96,10 @@ export function subtractDecimals(left: Decimal, right: Decimal): Decimal {
 }
 
 export function multiplyDecimals(left: Decimal, right: Decimal): Decimal {
-  return normalized(left.coefficient * right.coefficient, left.scale + right.scale);
+  return normalized(
+    left.coefficient * right.coefficient,
+    left.scale + right.scale,
+  );
 }
 
 function integerQuotient(
@@ -95,7 +107,8 @@ function integerQuotient(
   denominator: bigint,
   rounding: StepRounding,
 ): bigint {
-  if (denominator <= 0n) throw new Error("decimal denominator must be positive");
+  if (denominator <= 0n)
+    throw new Error("decimal denominator must be positive");
   const quotient = numerator / denominator;
   const remainder = numerator % denominator;
   if (remainder === 0n) return quotient;
@@ -110,7 +123,9 @@ export function multiplyByRational(
   rounding: StepRounding = "floor",
 ): Decimal {
   if (denominator <= 0n || numerator < 0n) {
-    throw new Error("decimal rational factor must be non-negative with a positive denominator");
+    throw new Error(
+      "decimal rational factor must be non-negative with a positive denominator",
+    );
   }
   let reducedDenominator = denominator;
   let extraScale = 0;
@@ -121,7 +136,11 @@ export function multiplyByRational(
   if (reducedDenominator === 1n) {
     return normalized(value.coefficient * numerator, value.scale + extraScale);
   }
-  const coefficient = integerQuotient(value.coefficient * numerator, denominator, rounding);
+  const coefficient = integerQuotient(
+    value.coefficient * numerator,
+    denominator,
+    rounding,
+  );
   return normalized(coefficient, value.scale);
 }
 
@@ -135,7 +154,9 @@ export function ceilRatioToStep(
     denominator.coefficient <= 0n ||
     step.coefficient <= 0n
   ) {
-    throw new Error("decimal ratio inputs must be non-negative with positive denominator and step");
+    throw new Error(
+      "decimal ratio inputs must be non-negative with positive denominator and step",
+    );
   }
   const unitsNumerator =
     numerator.coefficient * power10(denominator.scale) * power10(step.scale);
@@ -145,7 +166,11 @@ export function ceilRatioToStep(
   return multiplyDecimals(step, decimal(units, 0));
 }
 
-function stepUnits(value: Decimal, step: Decimal, rounding: StepRounding): bigint {
+function stepUnits(
+  value: Decimal,
+  step: Decimal,
+  rounding: StepRounding,
+): bigint {
   if (step.coefficient <= 0n) throw new Error("decimal step must be positive");
   const numerator = value.coefficient * power10(step.scale);
   const denominator = step.coefficient * power10(value.scale);

@@ -1,25 +1,38 @@
 import { createHmac } from "node:crypto";
-import process from "node:process";
 
 import { createMacOSKeychainProvider } from "../../src/adapters/macos-keychain.js";
 import {
+  connectCommand,
   CredentialProviderError,
   type CredentialProvider,
   type ExchangeCredentials,
 } from "../../src/ports/credential-provider.js";
+import { TIME_PATH } from "../testnet-smoke.js";
 
 type JsonObject = Record<string, unknown>;
 type HttpMethod = "GET" | "POST";
 
 export const DEFAULT_RECV_WINDOW = "5000";
 export const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
-export const TESTNET_TIME_PATH = "/v5/market/time";
+export const TESTNET_TIME_PATH = TIME_PATH;
 
 export interface BybitResponse {
   readonly retCode: number;
   readonly retMsg: string;
   readonly result: JsonObject;
   readonly time?: number;
+}
+
+export function responseList(
+  response: BybitResponse,
+): readonly JsonObject[] | undefined {
+  const list = response.result.list;
+  if (!Array.isArray(list)) return undefined;
+  const records = list.filter(
+    (value): value is JsonObject =>
+      typeof value === "object" && value !== null && !Array.isArray(value),
+  );
+  return records.length === list.length ? records : undefined;
 }
 
 export type TransportFailureKind =
@@ -95,42 +108,45 @@ export function classifyRetCode(retCode: number): RetCodeClassification {
         kind: "clock-skew",
         retCode,
         recommendReconnect: false,
-        message: "Bybit rejected the request because the signing clock is outside the allowed window.",
+        message:
+          "Bybit rejected the request because the signing clock is outside the allowed window.",
       };
     case 10004:
       return {
         kind: "signing-defect",
         retCode,
         recommendReconnect: false,
-        message: "Bybit rejected the signature; inspect the probe signing implementation before reconnecting credentials.",
+        message:
+          "Bybit rejected the signature; inspect the probe signing implementation before reconnecting credentials.",
       };
     case 10003:
       return {
         kind: "invalid-credentials",
         retCode,
         recommendReconnect: true,
-        message: "Bybit rejected the API key or environment. Verify the Testnet credential with npm run credentials:connect:testnet.",
+        message: `Bybit rejected the API key or environment. Verify the Testnet credential with ${connectCommand("testnet")}.`,
       };
     case 33004:
       return {
         kind: "expired-credentials",
         retCode,
         recommendReconnect: true,
-        message: "The Bybit API key is expired. Reconnect the Testnet credential with npm run credentials:connect:testnet.",
+        message: `The Bybit API key is expired. Reconnect the Testnet credential with ${connectCommand("testnet")}.`,
       };
     case 10005:
       return {
         kind: "permission-denied",
         retCode,
         recommendReconnect: true,
-        message: "The Testnet credential lacks the required permission. Reconnect it with npm run credentials:connect:testnet.",
+        message: `The Testnet credential lacks the required permission. Reconnect it with ${connectCommand("testnet")}.`,
       };
     case 10010:
       return {
         kind: "ip-restriction",
         retCode,
         recommendReconnect: false,
-        message: "Bybit rejected the request because the caller IP is not allowed for this key.",
+        message:
+          "Bybit rejected the request because the caller IP is not allowed for this key.",
       };
     default:
       return {
@@ -207,13 +223,19 @@ function requestUrl(baseUrl: URL, path: string, query: string): string {
   return url.toString();
 }
 
-function errorForResponse(response: BybitResponse): BybitProbeTransportError | null {
+function errorForResponse(
+  response: BybitResponse,
+): BybitProbeTransportError | null {
   if (response.retCode === 0) return null;
   const classification = classifyRetCode(response.retCode);
-  return new BybitProbeTransportError(classification.kind, classification.message, {
-    retCode: classification.retCode,
-    recommendReconnect: classification.recommendReconnect,
-  });
+  return new BybitProbeTransportError(
+    classification.kind,
+    classification.message,
+    {
+      retCode: classification.retCode,
+      recommendReconnect: classification.recommendReconnect,
+    },
+  );
 }
 
 function parseServerTime(response: BybitResponse): number {
@@ -223,17 +245,17 @@ function parseServerTime(response: BybitResponse): number {
       : safeResponseTime(response.result.timeNano) !== undefined
         ? Math.trunc(safeResponseTime(response.result.timeNano)! / 1_000_000)
         : response.time;
-  if (resultTime === undefined || !Number.isFinite(resultTime) || resultTime <= 0) {
+  if (
+    resultTime === undefined ||
+    !Number.isFinite(resultTime) ||
+    resultTime <= 0
+  ) {
     throw new BybitProbeTransportError(
       "invalid-response",
       "Bybit time response did not contain a valid server timestamp.",
     );
   }
   return resultTime;
-}
-
-function abortSignal(timeoutMs: number): AbortSignal {
-  return AbortSignal.timeout(timeoutMs);
 }
 
 export class BybitProbeTransport {
@@ -276,7 +298,8 @@ export class BybitProbeTransport {
     if (this.credentials) return this.credentials;
     try {
       this.credentials =
-        this.injectedCredentials ?? (await this.credentialProvider.load("testnet"));
+        this.injectedCredentials ??
+        (await this.credentialProvider.load("testnet"));
       return this.credentials;
     } catch (error) {
       if (error instanceof CredentialProviderError) throw error;
@@ -308,7 +331,12 @@ export class BybitProbeTransport {
     const timestamp = String(Math.trunc(this.clock() + offset));
     const signedBytes = body ?? query;
     const signature = hmacSha256(
-      buildSignaturePayload(timestamp, credentials.apiKey, this.recvWindow, signedBytes),
+      buildSignaturePayload(
+        timestamp,
+        credentials.apiKey,
+        this.recvWindow,
+        signedBytes,
+      ),
       credentials.apiSecret,
     );
     const headers: Record<string, string> = {
@@ -341,7 +369,7 @@ export class BybitProbeTransport {
     try {
       response = await this.request(url, {
         ...init,
-        signal: abortSignal(this.timeoutMs),
+        signal: AbortSignal.timeout(this.timeoutMs),
       });
     } catch {
       throw new BybitProbeTransportError(

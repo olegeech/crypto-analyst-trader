@@ -8,7 +8,10 @@ import {
   recoverInterruptedRun,
   type RecoveryTransport,
 } from "../scripts/bybit-probe/recovery.js";
-import { buildProbePlan, hashProbePlan } from "../scripts/bybit-probe/probe-plan.js";
+import {
+  buildProbePlan,
+  hashProbePlan,
+} from "../scripts/bybit-probe/probe-plan.js";
 import { ProbeStore } from "../scripts/bybit-probe/store.js";
 import type { BybitResponse } from "../scripts/bybit-probe/transport.js";
 
@@ -41,7 +44,12 @@ function fixturePlan() {
 test("interrupted dispatch is reconciled under the original run before a clean verdict", async () => {
   const root = await mkdtemp(join(tmpdir(), "bybit-probe-recovery-"));
   try {
-    const store = new ProbeStore({ rootDir: root, clock: () => 1_000, processId: 301, isProcessAlive: () => false });
+    const store = new ProbeStore({
+      rootDir: root,
+      clock: () => 1_000,
+      processId: 301,
+      isProcessAlive: () => false,
+    });
     const plan = fixturePlan();
     await store.writeIntent({
       runId: "run-1",
@@ -62,9 +70,21 @@ test("interrupted dispatch is reconciled under the original run before a clean v
       async get(path) {
         if (path === "/v5/order/realtime") {
           realtimeCalls += 1;
-          return response({ list: realtimeCalls <= 2 ? [{ orderId: "entry-1", orderLinkId: "run-1-long", orderStatus: "New" }] : [] });
+          return response({
+            list:
+              realtimeCalls <= 3
+                ? [
+                    {
+                      orderId: "entry-1",
+                      orderLinkId: "run-1-long",
+                      orderStatus: "New",
+                    },
+                  ]
+                : [],
+          });
         }
-        if (path === "/v5/position/list") return response({ list: [{ size: "0", side: "", positionIdx: 0 }] });
+        if (path === "/v5/position/list")
+          return response({ list: [{ size: "0", side: "", positionIdx: 0 }] });
         return response({ list: [] });
       },
       async post(path) {
@@ -80,7 +100,13 @@ test("interrupted dispatch is reconciled under the original run before a clean v
       transport,
       clock: () => 1_000,
       sleep: async () => undefined,
-      approve: async (approvedPlan) => ({ kind: "approved", plan: approvedPlan, digest: hashProbePlan(approvedPlan), approvedAt: 1_000, expiresAt: approvedPlan.expiresAt }),
+      approve: async (approvedPlan) => ({
+        kind: "approved",
+        plan: approvedPlan,
+        digest: hashProbePlan(approvedPlan),
+        approvedAt: 1_000,
+        expiresAt: approvedPlan.expiresAt,
+      }),
       realtimeAttempts: 2,
       historyAttempts: 0,
     });
@@ -95,7 +121,12 @@ test("interrupted dispatch is reconciled under the original run before a clean v
 test("recovery refuses account mismatch and never writes unknown ownership", async () => {
   const root = await mkdtemp(join(tmpdir(), "bybit-probe-recovery-"));
   try {
-    const store = new ProbeStore({ rootDir: root, clock: () => 1_000, processId: 302, isProcessAlive: () => false });
+    const store = new ProbeStore({
+      rootDir: root,
+      clock: () => 1_000,
+      processId: 302,
+      isProcessAlive: () => false,
+    });
     const plan = fixturePlan();
     await store.writeIntent({
       runId: "run-1",
@@ -112,15 +143,30 @@ test("recovery refuses account mismatch and never writes unknown ownership", asy
     });
     let writes = 0;
     const transport: RecoveryTransport = {
-      async get() { return response({ list: [{ orderId: "entry-1", orderLinkId: "run-1-long", orderStatus: "New" }] }); },
-      async post() { writes += 1; return response({}); },
+      async get() {
+        return response({
+          list: [
+            {
+              orderId: "entry-1",
+              orderLinkId: "run-1-long",
+              orderStatus: "New",
+            },
+          ],
+        });
+      },
+      async post() {
+        writes += 1;
+        return response({});
+      },
     };
     const result = await recoverInterruptedRun({
       runId: "run-1",
       accountId: "different-account",
       store,
       transport,
-      approve: async () => { throw new Error("must not approve"); },
+      approve: async () => {
+        throw new Error("must not approve");
+      },
       realtimeAttempts: 1,
       historyAttempts: 0,
     });

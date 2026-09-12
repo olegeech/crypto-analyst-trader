@@ -2,7 +2,7 @@ import process from "node:process";
 import { pathToFileURL } from "node:url";
 
 const TESTNET_BASE_URL = "https://api-testnet.bybit.com";
-const TIME_PATH = "/v5/market/time";
+export const TIME_PATH = "/v5/market/time";
 
 export function testnetConfig(environment: Record<string, string | undefined>) {
   if (environment.TRADER_ENV !== "testnet") {

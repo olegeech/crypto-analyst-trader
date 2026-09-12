@@ -6,7 +6,10 @@ import {
   approveProbePlan,
   reverifyProbeApproval,
 } from "../scripts/bybit-probe/approval.js";
-import { buildProbePlan, hashProbePlan } from "../scripts/bybit-probe/probe-plan.js";
+import {
+  buildProbePlan,
+  hashProbePlan,
+} from "../scripts/bybit-probe/probe-plan.js";
 
 const plan = buildProbePlan({
   environment: "testnet",
@@ -85,7 +88,8 @@ test("final re-verification rejects expiry, account changes, and request mutatio
   assert.doesNotThrow(() => reverifyProbeApproval(approved, plan, 9_999));
   assert.throws(() => reverifyProbeApproval(approved, plan, 10_000), /expired/);
   assert.throws(
-    () => reverifyProbeApproval(approved, { ...plan, accountId: "other" }, 1_000),
+    () =>
+      reverifyProbeApproval(approved, { ...plan, accountId: "other" }, 1_000),
     /digest mismatch|account mismatch/,
   );
   assert.throws(

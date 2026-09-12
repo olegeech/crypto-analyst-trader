@@ -9,7 +9,10 @@ import {
   ProbeStore,
   type StoredIntentInput,
 } from "../scripts/bybit-probe/store.js";
-import { buildProbePlan, hashProbePlan } from "../scripts/bybit-probe/probe-plan.js";
+import {
+  buildProbePlan,
+  hashProbePlan,
+} from "../scripts/bybit-probe/probe-plan.js";
 
 function plan(expiresAt = 20_000) {
   return buildProbePlan({
@@ -67,9 +70,17 @@ test("intent is fully present before dispatch and contains no secret-shaped data
     const record = await store.writeIntent(intent());
     const serialized = await readFile(record.path, "utf8");
     assert.equal(JSON.parse(serialized).plan.accountIdHash.length, 12);
-    assert.doesNotMatch(serialized, /private-account-id|sentinel-secret|signature|X-BAPI/);
+    assert.doesNotMatch(
+      serialized,
+      /private-account-id|sentinel-secret|signature|X-BAPI/,
+    );
     assert.equal((await stat(record.path)).mode & 0o777, 0o600);
-    assert.equal((await readdir(join(root, "run-1"))).some((name) => name.endsWith(".tmp")), false);
+    assert.equal(
+      (await readdir(join(root, "run-1"))).some((name) =>
+        name.endsWith(".tmp"),
+      ),
+      false,
+    );
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -84,7 +95,10 @@ test("a live lock blocks a second run while a dead lock is reclaimed", async () 
       processId: 99,
       isProcessAlive: () => true,
     });
-    await assert.rejects(live.acquireLock("run-2"), /another probe run is active/);
+    await assert.rejects(
+      live.acquireLock("run-2"),
+      /another probe run is active/,
+    );
     await store.releaseLock("run-1");
     await live.acquireLock("run-2");
     await live.releaseLock("run-2");
@@ -103,7 +117,10 @@ test("unresolved and aged prior runs are preconditions, and verdicts map to exit
   });
   try {
     await store.writeIntent(intent("old-run", plan(1_000)));
-    await assert.rejects(store.assertNoBlockingPriorRuns("new-run"), /older than seven days|unresolved/);
+    await assert.rejects(
+      store.assertNoBlockingPriorRuns("new-run"),
+      /older than seven days|unresolved/,
+    );
     const handoff = {
       runId: "new-run",
       lastConfirmedState: "no dispatch",
