@@ -6,6 +6,7 @@ import test from "node:test";
 
 import {
   deriveOwnedExposure,
+  buildFlattenOrderLinkId,
   cleanupOwnedEntry,
   flattenOwnedExposure,
   isOwnedEntry,
@@ -337,11 +338,36 @@ test("flatten uses a fresh approved reduce-only order and no attached exits", as
     });
     assert.equal(result.kind, "confirmed-clean");
     assert.equal(posts, 1);
-    assert.equal(flattenOrderLinkId?.length, 36);
-    assert.equal(flattenOrderLinkId?.endsWith("-flatten-flatten-1"), true);
+    assert.equal(
+      flattenOrderLinkId,
+      buildFlattenOrderLinkId("probe-1700000000000-12345678", "flatten-1"),
+    );
+    assert.equal(flattenOrderLinkId?.length <= 36, true);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("flatten IDs compactly distinguish long recovery attempts", () => {
+  const runId = "probe-1700000000000-12345678";
+  const attemptIds = [
+    "long-1-recover-flatten",
+    "lost-ack-1-recover-flatten",
+    "duplicate-1-recover-flatten",
+  ];
+  const orderLinkIds = attemptIds.map((attemptId) =>
+    buildFlattenOrderLinkId(runId, attemptId),
+  );
+
+  assert.equal(new Set(orderLinkIds).size, attemptIds.length);
+  for (const orderLinkId of orderLinkIds) {
+    assert.equal(orderLinkId.length <= 36, true);
+    assert.match(orderLinkId, /^flatten-12345678-[0-9a-f]{8}$/);
+  }
+  assert.deepEqual(
+    orderLinkIds,
+    attemptIds.map((attemptId) => buildFlattenOrderLinkId(runId, attemptId)),
+  );
 });
 
 test("flatten refuses an execution whose client identity disagrees with the saved order", async () => {

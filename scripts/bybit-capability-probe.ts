@@ -380,6 +380,19 @@ async function recordVerdict(
     readonly output?: Output;
   } = {},
 ): Promise<ProbeRunResult> {
+  await store.writeVerdict(
+    runId,
+    verdict,
+    verdict === "UNRESOLVED"
+      ? {
+          runId,
+          lastConfirmedState: message,
+          uncertainty: message,
+          nextAction:
+            "Reconcile this saved run with the manual fallback in SECURITY.md before any new write.",
+        }
+      : undefined,
+  );
   if (options.accountId !== undefined) {
     const findings = renderSanitizedFindings({
       runId,
@@ -390,17 +403,6 @@ async function recordVerdict(
     assertSanitizedOutput(findings, options.secrets ?? []);
     await store.writeFindings(runId, verdict, findings);
     options.output?.write(findings);
-  }
-  if (verdict === "UNRESOLVED") {
-    await store.writeVerdict(runId, verdict, {
-      runId,
-      lastConfirmedState: message,
-      uncertainty: message,
-      nextAction:
-        "Reconcile this saved run with the manual fallback in SECURITY.md before any new write.",
-    });
-  } else {
-    await store.writeVerdict(runId, verdict);
   }
   return { verdict, message, runId };
 }
@@ -417,6 +419,7 @@ export async function runCapabilityProbe(
   let accountId: string | undefined;
   let secrets: readonly string[] = [];
   let writeDispatched = false;
+  let trackCurrentRunWrites = false;
   try {
     const config = resolveProbeConfig(options.environment ?? process.env);
     let credentials = options.credentials;
@@ -444,7 +447,7 @@ export async function runCapabilityProbe(
     const transport: ScenarioTransport = {
       get: (path, query) => rawTransport.get(path, query),
       post: async (path, body) => {
-        writeDispatched = true;
+        if (trackCurrentRunWrites) writeDispatched = true;
         return rawTransport.post(path, body);
       },
     };
@@ -497,6 +500,7 @@ export async function runCapabilityProbe(
     }
 
     await store.acquireLock(runId);
+    trackCurrentRunWrites = true;
     try {
       const preflight = await runReadOnlyPreflight({
         transport,

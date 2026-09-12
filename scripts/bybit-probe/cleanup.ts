@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import {
   absDecimal,
   addDecimals,
@@ -172,6 +174,28 @@ function sameStringSet(
     leftSet.size === rightSet.size &&
     [...leftSet].every((value) => rightSet.has(value))
   );
+}
+
+const FLATTEN_ORDER_LINK_ID_PREFIX = "flatten";
+const FLATTEN_ORDER_LINK_ID_HASH_LENGTH = 8;
+const STANDARD_RUN_ID_PATTERN = /^probe-\d+-([0-9a-f]{8})$/;
+
+function shortIdentityHash(value: string): string {
+  return createHash("sha256")
+    .update(value, "utf8")
+    .digest("hex")
+    .slice(0, FLATTEN_ORDER_LINK_ID_HASH_LENGTH);
+}
+
+function runDiscriminator(runId: string): string {
+  return STANDARD_RUN_ID_PATTERN.exec(runId)?.[1] ?? shortIdentityHash(runId);
+}
+
+export function buildFlattenOrderLinkId(
+  runId: string,
+  attemptId: string,
+): string {
+  return `${FLATTEN_ORDER_LINK_ID_PREFIX}-${runDiscriminator(runId)}-${shortIdentityHash(attemptId)}`;
 }
 
 export async function proveCleanState(
@@ -396,15 +420,7 @@ export async function flattenOwnedExposure(
         }
       : { kind: "unresolved", message: "flat position still has open orders" };
   }
-  const flattenSuffix = `-flatten-${options.attemptId}`;
-  const runIdLength = 36 - flattenSuffix.length;
-  if (runIdLength < 1) {
-    return {
-      kind: "unresolved",
-      message: "flatten attempt identity does not fit the exchange limit",
-    };
-  }
-  const orderLinkId = `${options.runId.slice(-runIdLength)}${flattenSuffix}`;
+  const orderLinkId = buildFlattenOrderLinkId(options.runId, options.attemptId);
   const plan = buildProbePlan({
     environment: "testnet",
     accountId: options.accountId,

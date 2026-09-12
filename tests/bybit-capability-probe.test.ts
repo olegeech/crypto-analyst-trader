@@ -23,6 +23,7 @@ function response(result: Record<string, unknown>): BybitResponse {
 
 type ProbeFixtureOptions = {
   readonly pendingOpen?: boolean;
+  readonly recoveryOrder?: boolean;
   readonly rejectionCode?: 10014 | 110057;
   readonly invisibleOrders?: boolean;
   readonly lostAcknowledgement?: boolean;
@@ -40,7 +41,15 @@ function fixtureTransport(options: ProbeFixtureOptions = {}) {
         readonly takeProfit: string;
         readonly stopLoss: string;
       }
-    | undefined;
+    | undefined = options.recoveryOrder
+    ? {
+        orderId: "prior-order",
+        orderLinkId: "prior-run-long",
+        orderStatus: "New",
+        takeProfit: "0.102",
+        stopLoss: "0.098",
+      }
+    : undefined;
   const events: Array<{
     readonly kind: "get" | "post";
     readonly path: string;
@@ -361,6 +370,64 @@ test("a post-write reconciliation failure becomes an unresolved handoff", async 
   }
 });
 
+test("unresolved verdict and recovery handoff survive findings persistence failure", async () => {
+  const root = await mkdtemp(
+    join(tmpdir(), "bybit-capability-probe-findings-failure-"),
+  );
+  try {
+    const store = new (class extends ProbeStore {
+      override async writeFindings(): Promise<never> {
+        throw new Error("findings persistence failed");
+      }
+    })({
+      rootDir: root,
+      clock: () => 1_000,
+      processId: 7_004,
+      isProcessAlive: () => false,
+    });
+    const fixture = fixtureTransport({ throwAfterWrite: true });
+    const result = await runCapabilityProbe({
+      environment: { TRADER_ENV: "testnet" },
+      accountId: "testnet-account",
+      transport: fixture.transport,
+      store,
+      runId: "probe-test",
+      clock: () => 1_000,
+      sleep: async () => undefined,
+      realtimeAttempts: 2,
+      historyAttempts: 0,
+      confirmExclusiveUse: async () => true,
+      approve: approved(1_000),
+      output: { write: () => undefined },
+    });
+
+    assert.equal(result.verdict, "UNRESOLVED");
+    const savedVerdict = JSON.parse(
+      await readFile(join(root, "probe-test", "verdict.json"), "utf8"),
+    ) as {
+      verdict: string;
+      recoveryHandoff?: {
+        runId: string;
+        lastConfirmedState: string;
+        uncertainty: string;
+        nextAction: string;
+        reference: string;
+      };
+    };
+    assert.equal(savedVerdict.verdict, "UNRESOLVED");
+    assert.deepEqual(savedVerdict.recoveryHandoff, {
+      runId: "probe-test",
+      lastConfirmedState: "post-write reconciliation read failed",
+      uncertainty: "post-write reconciliation read failed",
+      nextAction:
+        "Reconcile this saved run with the manual fallback in SECURITY.md before any new write.",
+      reference: "SECURITY.md",
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("failed recovery preserves the prior run ID and reports the current run separately", async () => {
   const root = await mkdtemp(
     join(tmpdir(), "bybit-capability-probe-recovery-"),
@@ -423,6 +490,83 @@ test("failed recovery preserves the prior run ID and reports the current run sep
     assert.equal(result.verdict, "UNRESOLVED");
     assert.equal(result.runId, "prior-run");
     assert.equal(result.currentRunId, "current-run");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("recovery writes do not make a current preflight failure unresolved", async () => {
+  const root = await mkdtemp(
+    join(tmpdir(), "bybit-capability-probe-recovery-preflight-"),
+  );
+  try {
+    const store = new ProbeStore({
+      rootDir: root,
+      clock: () => 1_000,
+      processId: 7_003,
+      isProcessAlive: () => false,
+    });
+    const priorPlan = buildProbePlan({
+      environment: "testnet",
+      accountId: "testnet-account",
+      scenario: "long-entry",
+      expiresAt: 100_000,
+      method: "POST",
+      endpoint: "/v5/order/create",
+      params: {
+        category: "linear",
+        symbol: "DOGEUSDT",
+        side: "Buy",
+        orderLinkId: "prior-run-long",
+        price: "0.1",
+        qty: "51",
+        takeProfit: "0.102",
+        stopLoss: "0.098",
+        orderType: "Limit",
+        timeInForce: "PostOnly",
+        reduceOnly: false,
+        positionIdx: 0,
+      },
+    });
+    await store.writeIntent({
+      runId: "prior-run",
+      attemptId: "attempt-1",
+      scenario: priorPlan.scenario,
+      plan: priorPlan,
+      planDigest: hashProbePlan(priorPlan),
+      approvedAt: 1_000,
+      approvalExpiresAt: 100_000,
+      createdAt: 1_000,
+      orderLinkId: priorPlan.params.orderLinkId,
+      exchangeOrderId: "prior-order",
+      baselineSignedQty: "0",
+    });
+    const fixture = fixtureTransport({
+      pendingOpen: true,
+      recoveryOrder: true,
+    });
+    const result = await runCapabilityProbe({
+      environment: { TRADER_ENV: "testnet" },
+      accountId: "testnet-account",
+      transport: fixture.transport,
+      store,
+      runId: "current-run",
+      clock: () => 1_000,
+      sleep: async () => undefined,
+      realtimeAttempts: 2,
+      historyAttempts: 0,
+      confirmExclusiveUse: async () => true,
+      approve: approved(1_000),
+      output: { write: () => undefined },
+    });
+    assert.equal(result.verdict, "PRECONDITION_FAILED");
+    assert.equal(result.runId, "current-run");
+    assert.deepEqual(
+      fixture.events
+        .filter((event) => event.kind === "post")
+        .map((event) => event.path),
+      ["/v5/order/cancel"],
+    );
   } finally {
     await rm(root, { recursive: true, force: true });
   }
