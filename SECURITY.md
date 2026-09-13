@@ -48,17 +48,18 @@ A suspected execution or accounting incident requires:
 ## Bybit probe manual recovery
 
 When a Testnet capability probe records `UNRESOLVED`, do not delete its intent
-or change the original verdict. After checking the exact saved run in the
-Bybit Testnet UI, run:
+or change the original verdict. Run the read-only recovery command for the
+saved run:
 
 `npm run probe:bybit:testnet:recover -- <saved-run-id>`
 
 The command displays the saved run, account hash, symbol and client order ID,
 then revalidates realtime and history orders, executions, open orders and
-position through read-only endpoints. It requires an operator identity, a
-recovery reference and an explicit `YES` confirmation of the UI check. A
-clean result is stored as `MANUAL_RECOVERY_CONFIRMED` with sanitized evidence
-and the `SECURITY.md` reference; the original `UNRESOLVED` result remains
-unverified. Any owned order or exposure is routed through the normal exact
-plan approval, durable intent and recovery path instead of being confirmed
-manually.
+position through read-only endpoints. When those checks prove clean, it stores
+`RECOVERED_CLEAN` with a timestamp, sanitized evidence and the `SECURITY.md`
+reference; the original `UNRESOLVED` result remains unverified. Any owned
+order or exposure is routed through the normal exact-plan, durable-intent and
+reconciliation path automatically. If ownership or clean state remains
+ambiguous, the command stops and directs the operator to the exchange UI
+fallback for the concrete unresolved decision instead of declaring the run
+clean.

@@ -103,6 +103,14 @@ export function hmacSha256(payload: string, secret: string): string {
 
 export function classifyRetCode(retCode: number): RetCodeClassification {
   switch (retCode) {
+    case 10000:
+      return {
+        kind: "exchange-failure",
+        retCode,
+        recommendReconnect: false,
+        message:
+          "Bybit timed out the request; the outcome is ambiguous, so reconcile order and account state before retrying.",
+      };
     case 10002:
       return {
         kind: "clock-skew",
@@ -147,6 +155,22 @@ export function classifyRetCode(retCode: number): RetCodeClassification {
         recommendReconnect: false,
         message:
           "Bybit rejected the request because the caller IP is not allowed for this key.",
+      };
+    case 10024:
+      return {
+        kind: "exchange-failure",
+        retCode,
+        recommendReconnect: false,
+        message:
+          "Bybit rejected the write because compliance rules were triggered; review the Testnet account eligibility before retrying.",
+      };
+    case 10016:
+      return {
+        kind: "exchange-failure",
+        retCode,
+        recommendReconnect: false,
+        message:
+          "Bybit reported a server failure; the outcome is ambiguous, so reconcile order and account state before retrying.",
       };
     default:
       return {

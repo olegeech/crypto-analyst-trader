@@ -23,10 +23,12 @@ TRADER_ENV=testnet npm run probe:bybit:testnet
 
 The command is opt-in and absent from `test:release`, default tests and CI.
 It is locked to the canonical Bybit Testnet origin and the Testnet Keychain
-credential. Reserve the account and configured symbol for the whole run, and
-approve the full exact probe-plan hash separately for every create, cancel or
-reduce-only cleanup write. No TTY, refusal, expiry or request mismatch fails
-closed; there is no environment-variable auto-approval path.
+credential. Explicit invocation authorizes the documented scenarios and
+necessary probe-owned cleanup for this dedicated Testnet account. The probe
+still constructs an exact, expiring plan hash and revalidates it immediately
+before every write; there are no repeated create/cancel/cleanup prompts, full
+digest retyping or exclusive-use confirmation prompts. Dirty account or symbol
+state remains a read-only precondition failure.
 
 Only sanitized, runtime-validated fields belong in PR or issue evidence:
 account hash prefix, run-scoped `orderLinkId`, truncated exchange order IDs,
@@ -38,17 +40,17 @@ observed. `CONFIRMED_CLEAN` is the only clean completion verdict; `REFUSED`,
 the handoff and the exchange-UI manual fallback in `SECURITY.md`; never
 cancel all orders or flatten unowned exposure.
 
-For a saved run whose UI and read-only checks show no matching order, open
-orders, executions or position, use the explicit manual closure flow:
+For a saved run whose read-only checks show no matching order, open orders,
+executions or position, use the recovery flow:
 
 ```text
 npm run probe:bybit:testnet:recover -- <saved-run-id>
 ```
 
-It records `MANUAL_RECOVERY_CONFIRMED` with the operator, timestamp, recovery
-reference and sanitized read-only evidence while preserving the original
-`UNRESOLVED` result as unverified. Owned state is routed through the normal
-exact-plan recovery path.
+It automatically records `RECOVERED_CLEAN` with a timestamp and sanitized
+read-only evidence while preserving the original `UNRESOLVED` result as
+unverified. Owned state is routed through the normal exact-plan recovery path;
+ambiguous state stops and requires the documented exchange-UI fallback.
 
 CLI names in this document describe application use cases. Invoke only commands
 implemented by the current `package.json` and released for the selected

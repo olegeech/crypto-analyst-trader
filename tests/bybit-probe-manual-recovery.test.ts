@@ -96,7 +96,7 @@ function cleanTransport() {
   };
 }
 
-function approve(planToApprove: Parameters<typeof hashProbePlan>[0]) {
+function authorize(planToApprove: Parameters<typeof hashProbePlan>[0]) {
   return Promise.resolve({
     kind: "approved" as const,
     plan: planToApprove,
@@ -106,7 +106,7 @@ function approve(planToApprove: Parameters<typeof hashProbePlan>[0]) {
   });
 }
 
-test("manual recovery records a clean confirmation without rewriting UNRESOLVED", async () => {
+test("manual recovery closes clean read-only state without ceremony", async () => {
   const { root, store } = await unresolvedRun();
   try {
     const output: string[] = [];
@@ -114,12 +114,9 @@ test("manual recovery records a clean confirmation without rewriting UNRESOLVED"
     const result = await runManualRecovery({
       runId: "probe-manual",
       accountId: "manual-account",
-      actor: "operator@example.test",
-      recoveryReference: "INC-7-ui-check",
       store,
       transport,
-      confirmUi: async () => true,
-      approve,
+      authorize,
       clock: () => 2_000,
       sleep: async () => undefined,
       realtimeAttempts: 1,
@@ -166,46 +163,16 @@ test("manual recovery records a clean confirmation without rewriting UNRESOLVED"
   }
 });
 
-test("manual recovery requires explicit UI confirmation and leaves the run blocking", async () => {
-  const { root, store } = await unresolvedRun();
-  try {
-    const { transport } = cleanTransport();
-    const result = await runManualRecovery({
-      runId: "probe-manual",
-      accountId: "manual-account",
-      actor: "operator",
-      recoveryReference: "INC-7",
-      store,
-      transport,
-      confirmUi: async () => false,
-      approve,
-      clock: () => 2_000,
-      sleep: async () => undefined,
-      realtimeAttempts: 1,
-      historyAttempts: 1,
-    });
-    assert.equal(result.status, "MANUAL_RECOVERY_BLOCKED");
-    const saved = await store.listSavedRuns();
-    assert.equal(saved[0]?.manualRecovery, undefined);
-    assert.equal(saved[0]?.verdict, "UNRESOLVED");
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
-});
-
-test("a confirmed manual recovery is the only prior-run status that permits the next preflight", async () => {
+test("an automatic clean recovery is the only prior-run status that permits the next preflight", async () => {
   const { root, store } = await unresolvedRun();
   try {
     const { transport } = cleanTransport();
     await runManualRecovery({
       runId: "probe-manual",
       accountId: "manual-account",
-      actor: "operator",
-      recoveryReference: "INC-7",
       store,
       transport,
-      confirmUi: async () => true,
-      approve,
+      authorize,
       clock: () => 2_000,
       sleep: async () => undefined,
       realtimeAttempts: 1,
@@ -269,8 +236,7 @@ test("a confirmed manual recovery is the only prior-run status that permits the 
       sleep: async () => undefined,
       realtimeAttempts: 1,
       historyAttempts: 0,
-      confirmExclusiveUse: async () => true,
-      approve,
+      authorize,
       output: { write: () => undefined },
     });
     assert.equal(result.runId, "new-run");
@@ -331,14 +297,9 @@ test("owned state uses the normal approved durable recovery path", async () => {
     const result = await runManualRecovery({
       runId: "probe-manual",
       accountId: "manual-account",
-      actor: "operator",
-      recoveryReference: "INC-7-owned-order",
       store,
       transport,
-      confirmUi: async () => {
-        throw new Error("UI confirmation is not used for owned state");
-      },
-      approve,
+      authorize,
       clock: () => 2_000,
       sleep: async () => undefined,
       realtimeAttempts: 2,

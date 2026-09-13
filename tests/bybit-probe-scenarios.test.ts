@@ -225,7 +225,7 @@ test("entry dispatch persists the exact approved plan before POST and records at
       store,
       clock: () => 1_000,
       sleep: async () => undefined,
-      approve: async () => ({
+      authorize: async () => ({
         kind: "approved",
         plan,
         digest: hashProbePlan(plan),
@@ -279,7 +279,7 @@ test("zero-valued attached exits are reported as a silent drop", async () => {
       store,
       clock: () => 1_000,
       sleep: async () => undefined,
-      approve: async () => ({
+      authorize: async () => ({
         kind: "approved",
         plan,
         digest: hashProbePlan(plan),
@@ -331,7 +331,7 @@ test("accepted duplicate client-order IDs are surfaced in scenario results", asy
       store,
       clock: () => 1_000,
       sleep: async () => undefined,
-      approve: async () => ({
+      authorize: async () => ({
         kind: "approved",
         plan,
         digest: hashProbePlan(plan),
@@ -373,7 +373,7 @@ async function runDispatchFailure(error: unknown, processId: number) {
     store,
     clock: () => 1_000,
     sleep: async () => undefined,
-    approve: async () => ({
+    authorize: async () => ({
       kind: "approved",
       plan,
       digest: hashProbePlan(plan),
@@ -402,8 +402,45 @@ test("unknown exchange rejection codes are retained without bypassing reconcilia
       classification: "exchange-rejection",
       transportKind: "exchange-failure",
       retCode: 12345,
+      explanation: "Bybit returned an unclassified failure code (12345).",
     });
     assert.doesNotMatch(JSON.stringify(result), new RegExp(privateMessage));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("10024 remains an explicit compliance rejection instead of a not-found ambiguity", async () => {
+  const { result, root } = await runDispatchFailure(
+    new BybitProbeTransportError("exchange-failure", "private detail", {
+      retCode: 10024,
+    }),
+    106,
+  );
+  try {
+    if (result.kind === "refused") throw new Error("scenario was refused");
+    assert.equal(result.kind, "rejected");
+    assert.equal(result.reconciliation.kind, "rejected");
+    assert.match(result.reconciliation.message, /compliance rules/i);
+    assert.match(result.dispatchError?.explanation ?? "", /compliance rules/i);
+    assert.equal(result.reconciliation.lookupCount, 0);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("server timeout diagnostics remain ambiguous even with an exchange retCode", async () => {
+  const { result, root } = await runDispatchFailure(
+    new BybitProbeTransportError("exchange-failure", "private detail", {
+      retCode: 10000,
+    }),
+    107,
+  );
+  try {
+    if (result.kind === "refused") throw new Error("scenario was refused");
+    assert.equal(result.kind, "unresolved");
+    assert.equal(result.dispatchError?.classification, "ambiguous-transport");
+    assert.match(result.dispatchError?.explanation ?? "", /ambiguous/i);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -422,6 +459,8 @@ test("generic dispatch failures retain only an ambiguous transport classificatio
       classification: "ambiguous-transport",
       transportKind: undefined,
       retCode: undefined,
+      explanation:
+        "The request outcome is ambiguous; reconcile saved order and account state before any retry.",
     });
     assert.doesNotMatch(JSON.stringify(result), new RegExp(privateMessage));
   } finally {

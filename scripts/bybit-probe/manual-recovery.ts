@@ -1,6 +1,7 @@
 import { decimalIsZero, parseDecimal } from "./decimal.js";
 import {
   accountHash,
+  isManualRecoveryClosedStatus,
   MANUAL_RECOVERY_STATUS,
   type ManualRecoveryCheck,
   type ProbeVerdict,
@@ -38,14 +39,9 @@ export interface ManualRecoveryTarget {
 export interface ManualRecoveryOptions {
   readonly runId: string;
   readonly accountId: string;
-  readonly actor: string;
-  readonly recoveryReference: string;
   readonly store: ProbeStore;
   readonly transport: ManualRecoveryTransport;
-  readonly confirmUi: (
-    target: ManualRecoveryTarget,
-  ) => boolean | Promise<boolean>;
-  readonly approve: (plan: ProbePlan) => Promise<ProbeApproval>;
+  readonly authorize: (plan: ProbePlan) => Promise<ProbeApproval>;
   readonly readOwnedExposure?: Parameters<
     typeof recoverInterruptedRun
   >[0]["readOwnedExposure"];
@@ -82,14 +78,6 @@ function display(value: string): string {
   return value && !/[\u0000-\u001f\u007f\r\n]/.test(value)
     ? value
     : "unverified";
-}
-
-function validOperatorText(value: string): boolean {
-  return (
-    value.trim().length > 0 &&
-    value.length <= 256 &&
-    !/[\u0000-\u001f\u007f\r\n]/.test(value)
-  );
 }
 
 function intentIdentity(intent: StoredIntent):
@@ -394,7 +382,7 @@ export async function runManualRecovery(
         message: "the saved probe run was not found",
       };
     }
-    if (saved.manualRecovery?.status === MANUAL_RECOVERY_STATUS) {
+    if (isManualRecoveryClosedStatus(saved.manualRecovery?.status)) {
       return {
         status: MANUAL_RECOVERY_STATUS,
         runId: options.runId,
@@ -464,6 +452,9 @@ export async function runManualRecovery(
         ...target.checks.flatMap((check) => [
           `symbol: ${display(check.symbol)}`,
           `orderLinkId: ${display(check.orderLinkId)}`,
+          ...(check.exchangeOrderId === undefined
+            ? []
+            : [`exchangeOrderId: ${display(check.exchangeOrderId)}`]),
         ]),
         "original capability result: UNRESOLVED (unverified)",
       ].join("\n") + "\n",
@@ -492,7 +483,7 @@ export async function runManualRecovery(
         accountId: options.accountId,
         store: options.store,
         transport: options.transport,
-        approve: options.approve,
+        authorize: options.authorize,
         ...(options.readOwnedExposure === undefined
           ? {}
           : { readOwnedExposure: options.readOwnedExposure }),
@@ -526,39 +517,18 @@ export async function runManualRecovery(
         ...originalVerdict(saved.verdict),
       };
     }
-    if (
-      !validOperatorText(options.actor) ||
-      !validOperatorText(options.recoveryReference)
-    ) {
-      return {
-        status: "PRECONDITION_FAILED",
-        runId: options.runId,
-        message: "manual recovery actor and reference are required",
-        ...originalVerdict(saved.verdict),
-      };
-    }
-    if (!(await options.confirmUi(target))) {
-      return {
-        status: "MANUAL_RECOVERY_BLOCKED",
-        runId: options.runId,
-        message: "the operator did not confirm the exchange UI check",
-        ...originalVerdict(saved.verdict),
-      };
-    }
     await options.store.writeManualRecovery({
       runId: options.runId,
-      actor: options.actor.trim(),
       confirmedAt: clock(),
       accountIdHash: target.accountIdHash,
       originalVerdict: "UNRESOLVED",
-      recoveryReference: options.recoveryReference.trim(),
       checks: inspections.map((inspection) => inspection.check),
     });
     return {
       status: MANUAL_RECOVERY_STATUS,
       runId: options.runId,
       message:
-        "manual recovery confirmed clean state; the original UNRESOLVED capability result remains unverified",
+        "recovery reconciled clean state automatically; the original UNRESOLVED capability result remains unverified",
       ...originalVerdict(saved.verdict),
     };
   } catch (error) {

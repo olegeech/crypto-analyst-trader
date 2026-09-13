@@ -1,29 +1,13 @@
-import process from "node:process";
-
-import {
-  PromptInterruptedError,
-  promptVisible,
-} from "../../src/cli/interactive-prompt.js";
 import {
   assertProbePlanCurrent,
-  canonicalize,
   hashProbePlan,
   isProbePlanExpired,
   type ProbePlan,
 } from "./probe-plan.js";
-import { accountHash } from "./store.js";
 
 export const DEFAULT_APPROVAL_TTL_MS = 120_000;
-export const DEFAULT_APPROVAL_ATTEMPTS = 3;
 
-export type ApprovalRefusalReason =
-  | "expired"
-  | "non-tty"
-  | "cancelled"
-  | "timeout"
-  | "empty-input"
-  | "digest-mismatch"
-  | "prompt-failed";
+export type ApprovalRefusalReason = "expired" | "invalid-ttl";
 
 export type ProbeApproval =
   | Readonly<{
@@ -39,36 +23,9 @@ export type ProbeApproval =
       message: string;
     }>;
 
-type Output = { write(message: string): void };
-type Prompt = (label: string) => Promise<string>;
-type PromptInput = NodeJS.ReadableStream & { isTTY?: boolean };
-
 export interface ApprovalOptions {
   readonly clock?: () => number;
-  readonly prompt?: Prompt;
-  readonly input?: PromptInput;
-  readonly output?: Output;
   readonly ttlMs?: number;
-  readonly maxAttempts?: number;
-}
-
-function approvalBlock(plan: ProbePlan, digest: string): string {
-  const printablePlan = {
-    schemaVersion: plan.schemaVersion,
-    environment: plan.environment,
-    account: accountHash(plan.accountId),
-    scenario: plan.scenario,
-    expiresAt: plan.expiresAt,
-    method: plan.method,
-    endpoint: plan.endpoint,
-    params: plan.params,
-  };
-  return [
-    "Approve exactly this Bybit Testnet write:",
-    canonicalize(printablePlan),
-    `probe-plan-sha256: ${digest}`,
-    "Retype the complete digest to approve",
-  ].join("\n");
 }
 
 function refused(
@@ -78,112 +35,48 @@ function refused(
   return { kind: "refused", reason, message };
 }
 
-export async function approveProbePlan(
+/**
+ * The bounded Testnet probe is authorized by its explicit invocation. Each
+ * write still receives an exact, expiring plan identity and is revalidated
+ * immediately before dispatch; this function records that run-scoped
+ * authorization without adding a redundant prompt for every write.
+ */
+export async function authorizeProbePlan(
   plan: ProbePlan,
   options: ApprovalOptions = {},
 ): Promise<ProbeApproval> {
   const clock = options.clock ?? Date.now;
-  const output = options.output ?? process.stdout;
   const digest = hashProbePlan(plan);
   const ttlMs = options.ttlMs ?? DEFAULT_APPROVAL_TTL_MS;
-  const maxAttempts = options.maxAttempts ?? DEFAULT_APPROVAL_ATTEMPTS;
   const approvedAt = clock();
   if (isProbePlanExpired(plan, approvedAt)) {
     return refused("expired", "The probe plan has already expired.");
   }
   if (!Number.isInteger(ttlMs) || ttlMs < 1) {
-    return refused("prompt-failed", "The approval TTL is invalid.");
-  }
-  const approvalExpiresAt = Math.min(plan.expiresAt, approvedAt + ttlMs);
-  if (!Number.isInteger(maxAttempts) || maxAttempts < 1) {
-    return refused("prompt-failed", "The approval attempt budget is invalid.");
-  }
-
-  const input = options.input ?? process.stdin;
-  if (options.prompt === undefined && input.isTTY !== true) {
     return refused(
-      "non-tty",
-      "Interactive exact-digest approval requires a terminal.",
+      "invalid-ttl",
+      "The probe-plan authorization TTL is invalid.",
     );
   }
-
-  output.write(`${approvalBlock(plan, digest)}\n`);
-  const prompt =
-    options.prompt ??
-    ((label: string) =>
-      promptVisible(
-        label,
-        "Interactive exact-digest approval requires a terminal.",
-        {
-          timeoutMs: Math.min(ttlMs, DEFAULT_APPROVAL_TTL_MS),
-          input,
-          output: output as unknown as NodeJS.WritableStream,
-        },
-      ));
-
-  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
-    const currentNow = clock();
-    if (
-      isProbePlanExpired(plan, currentNow) ||
-      currentNow >= approvalExpiresAt
-    ) {
-      return refused(
-        "expired",
-        "The probe plan expired before approval completed.",
-      );
-    }
-    let answer: string;
-    try {
-      answer = await prompt(
-        `Retype probe-plan digest (${attempt + 1}/${maxAttempts})`,
-      );
-    } catch (error) {
-      if (error instanceof PromptInterruptedError) {
-        return refused(error.reason, error.message);
-      }
-      if (error instanceof Error && /terminal|tty/i.test(error.message)) {
-        return refused(
-          "non-tty",
-          "Interactive exact-digest approval requires a terminal.",
-        );
-      }
-      return refused(
-        "prompt-failed",
-        "The approval prompt could not be completed.",
-      );
-    }
-    const normalizedAnswer = answer.trim().toLowerCase();
-    if (!normalizedAnswer) {
-      return refused("empty-input", "An empty digest is not approval.");
-    }
-    if (normalizedAnswer === digest) {
-      const finalApprovedAt = clock();
-      if (
-        isProbePlanExpired(plan, finalApprovedAt) ||
-        finalApprovedAt >= approvalExpiresAt
-      ) {
-        return refused(
-          "expired",
-          "The probe plan expired before approval completed.",
-        );
-      }
-      return {
-        kind: "approved",
-        plan,
-        digest,
-        approvedAt: finalApprovedAt,
-        expiresAt: approvalExpiresAt,
-      };
-    }
-    if (attempt + 1 < maxAttempts) {
-      output.write("The digest did not match; no write was dispatched.\n");
-    }
+  const approvalExpiresAt = Math.min(plan.expiresAt, approvedAt + ttlMs);
+  if (approvalExpiresAt <= approvedAt) {
+    return refused(
+      "expired",
+      "The probe plan expired before authorization completed.",
+    );
   }
-  return refused(
-    "digest-mismatch",
-    "The exact probe-plan digest was not approved.",
-  );
+  return {
+    kind: "approved",
+    plan,
+    digest,
+    approvedAt,
+    expiresAt: approvalExpiresAt,
+  };
 }
+
+// Keep the old name as a source-compatible alias for spike-local callers. It
+// is intentionally non-interactive; explicit probe invocation is the UX gate.
+export const approveProbePlan = authorizeProbePlan;
 
 export function reverifyProbeApproval(
   approval: Extract<ProbeApproval, { kind: "approved" }>,

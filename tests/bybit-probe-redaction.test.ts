@@ -30,6 +30,7 @@ test("findings use an account hash prefix and never print a full exchange ID", (
           classification: "exchange-rejection",
           transportKind: "exchange-failure",
           retCode: 12345,
+          explanation: "Bybit returned an unclassified failure code (12345).",
         },
       },
     ],

@@ -134,7 +134,7 @@ test("cleanup cancels only a proven-owned resting entry and proves clean state",
       store,
       transport,
       clock: () => 1_000,
-      approve: async (plan) => ({
+      authorize: async (plan) => ({
         kind: "approved",
         plan,
         digest: hashProbePlan(plan),
@@ -189,7 +189,7 @@ test("cleanup cancels exchange-active statuses outside the terminal set", async 
       store,
       transport,
       clock: () => 1_000,
-      approve: async (plan) => ({
+      authorize: async (plan) => ({
         kind: "approved",
         plan,
         digest: hashProbePlan(plan),
@@ -246,8 +246,8 @@ test("protective exits and foreign runs are never routine-cancelled", async () =
         store,
         transport,
         clock: () => 1_000,
-        approve: async () => {
-          throw new Error("must not approve");
+        authorize: async () => {
+          throw new Error("must not authorize");
         },
       });
       assert.equal(result.kind, "unresolved");
@@ -326,7 +326,7 @@ test("flatten uses a fresh approved reduce-only order and no attached exits", as
       store,
       transport,
       clock: () => 1_000,
-      approve: async (plan) => ({
+      authorize: async (plan) => ({
         kind: "approved",
         plan,
         digest: hashProbePlan(plan),
@@ -406,8 +406,8 @@ test("flatten refuses an execution whose client identity disagrees with the save
       ownedOrderIdentities: new Map([["entry-1", "run-1-long"]]),
       store,
       transport,
-      approve: async () => {
-        throw new Error("must not approve");
+      authorize: async () => {
+        throw new Error("must not authorize");
       },
     });
     assert.equal(result.kind, "unresolved");
@@ -460,7 +460,7 @@ test("flatten refuses when execution evidence changes during approval", async ()
       executions: [execution],
       store,
       transport,
-      approve: async (plan) => ({
+      authorize: async (plan) => ({
         kind: "approved",
         plan,
         digest: hashProbePlan(plan),
@@ -513,7 +513,7 @@ test("flatten rejects ownership arrays that differ after deduplication", async (
       ownedOrderIdentities: new Map([["entry-1", "run-1-long"]]),
       store,
       transport,
-      approve: async (plan) => ({
+      authorize: async (plan) => ({
         kind: "approved",
         plan,
         digest: hashProbePlan(plan),

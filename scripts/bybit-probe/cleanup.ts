@@ -154,10 +154,10 @@ export type CleanupResult =
   | Readonly<{ kind: "already-flat"; message: string }>
   | Readonly<{ kind: "unresolved"; message: string }>;
 
-function refusalMessage(approval: ProbeApproval): string {
+function authorizationFailureMessage(approval: ProbeApproval): string {
   return approval.kind === "refused"
-    ? `cleanup approval refused (${approval.reason})`
-    : "cleanup was not approved";
+    ? `cleanup authorization refused (${approval.reason}): ${approval.message}`
+    : "cleanup was not authorized";
 }
 
 function stringValue(value: unknown): string | undefined {
@@ -249,7 +249,7 @@ export interface CleanupOwnedEntryOptions {
   readonly protectiveExitOrderIds: ReadonlySet<string>;
   readonly store: ProbeStore;
   readonly transport: CleanupTransport;
-  readonly approve: (plan: ProbePlan) => Promise<ProbeApproval>;
+  readonly authorize: (plan: ProbePlan) => Promise<ProbeApproval>;
   readonly readOwnership?: () => Promise<boolean>;
   readonly clock?: () => number;
   readonly sleep?: (milliseconds: number) => Promise<void>;
@@ -291,9 +291,12 @@ export async function cleanupOwnedEntry(
       positionIdx: 0,
     },
   });
-  const approval = await options.approve(plan);
+  const approval = await options.authorize(plan);
   if (approval.kind === "refused")
-    return { kind: "unresolved", message: refusalMessage(approval) };
+    return {
+      kind: "unresolved",
+      message: authorizationFailureMessage(approval),
+    };
   await options.store.writeIntent({
     runId: options.runId,
     attemptId: options.attemptId,
@@ -312,7 +315,7 @@ export async function cleanupOwnedEntry(
       if (!(await options.readOwnership())) {
         return {
           kind: "unresolved",
-          message: "entry ownership changed during cleanup approval",
+          message: "entry ownership changed before the cleanup cancel",
         };
       }
     } catch {
@@ -328,7 +331,9 @@ export async function cleanupOwnedEntry(
     return {
       kind: "unresolved",
       message:
-        error instanceof Error ? error.message : "cleanup approval expired",
+        error instanceof Error
+          ? error.message
+          : "cleanup authorization expired",
     };
   }
   try {
@@ -369,7 +374,7 @@ export interface FlattenOwnedExposureOptions {
   readonly executions: readonly OwnedExecution[];
   readonly store: ProbeStore;
   readonly transport: CleanupTransport;
-  readonly approve: (plan: ProbePlan) => Promise<ProbeApproval>;
+  readonly authorize: (plan: ProbePlan) => Promise<ProbeApproval>;
   readonly ownedOrderIdentities?: ReadonlyMap<string, string>;
   readonly readOwnership?: () => Promise<OwnershipState>;
   readonly clock?: () => number;
@@ -440,9 +445,12 @@ export async function flattenOwnedExposure(
       positionIdx: 0,
     },
   });
-  const approval = await options.approve(plan);
+  const approval = await options.authorize(plan);
   if (approval.kind === "refused")
-    return { kind: "unresolved", message: refusalMessage(approval) };
+    return {
+      kind: "unresolved",
+      message: authorizationFailureMessage(approval),
+    };
   await options.store.writeIntent({
     runId: options.runId,
     attemptId: options.attemptId,
@@ -487,7 +495,7 @@ export async function flattenOwnedExposure(
       ) {
         return {
           kind: "unresolved",
-          message: "ownership changed during flatten approval",
+          message: "ownership changed before the cleanup flatten",
         };
       }
     } catch {
@@ -503,7 +511,9 @@ export async function flattenOwnedExposure(
     return {
       kind: "unresolved",
       message:
-        error instanceof Error ? error.message : "cleanup approval expired",
+        error instanceof Error
+          ? error.message
+          : "cleanup authorization expired",
     };
   }
   try {

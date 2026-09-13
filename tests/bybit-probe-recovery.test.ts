@@ -100,7 +100,7 @@ test("interrupted dispatch is reconciled under the original run before a clean v
       transport,
       clock: () => 1_000,
       sleep: async () => undefined,
-      approve: async (approvedPlan) => ({
+      authorize: async (approvedPlan) => ({
         kind: "approved",
         plan: approvedPlan,
         digest: hashProbePlan(approvedPlan),
@@ -164,8 +164,8 @@ test("recovery refuses account mismatch and never writes unknown ownership", asy
       accountId: "different-account",
       store,
       transport,
-      approve: async () => {
-        throw new Error("must not approve");
+      authorize: async () => {
+        throw new Error("must not authorize");
       },
       realtimeAttempts: 1,
       historyAttempts: 0,
@@ -221,8 +221,8 @@ test("recovery refuses a persisted intent whose plan digest was tampered", async
       accountId: "trading-account",
       store,
       transport,
-      approve: async () => {
-        throw new Error("must not approve");
+      authorize: async () => {
+        throw new Error("must not authorize");
       },
     });
     assert.equal(result.verdict, "UNRESOLVED");

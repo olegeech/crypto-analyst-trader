@@ -6,7 +6,11 @@ import {
   type ProbeOrderParameters,
 } from "./probe-plan.js";
 import type { ProbeStore } from "./store.js";
-import { BybitProbeTransportError, responseList } from "./transport.js";
+import {
+  BybitProbeTransportError,
+  classifyRetCode,
+  responseList,
+} from "./transport.js";
 import type {
   BybitResponse,
   QueryInput,
@@ -294,7 +298,7 @@ export interface EntryScenarioOptions {
   readonly plan: ProbePlan;
   readonly transport: ScenarioTransport;
   readonly store: ProbeStore;
-  readonly approve: (plan: ProbePlan) => Promise<ProbeApproval>;
+  readonly authorize: (plan: ProbePlan) => Promise<ProbeApproval>;
   readonly baselineSignedQty?: string;
   readonly discardAcknowledgement?: boolean;
   readonly clock?: () => number;
@@ -307,6 +311,7 @@ export interface DispatchErrorEvidence {
   readonly classification: "exchange-rejection" | "ambiguous-transport";
   readonly transportKind: TransportFailureKind | undefined;
   readonly retCode: number | undefined;
+  readonly explanation: string;
 }
 
 export type EntryScenarioResult =
@@ -382,25 +387,36 @@ function sanitizedDispatchError(
     const retCode = Number.isSafeInteger(error.retCode)
       ? error.retCode
       : undefined;
+    const ambiguousExchangeOutcome =
+      retCode === undefined || retCode === 10000 || retCode === 10016;
     return {
-      classification:
-        retCode === undefined ? "ambiguous-transport" : "exchange-rejection",
+      classification: ambiguousExchangeOutcome
+        ? "ambiguous-transport"
+        : "exchange-rejection",
       transportKind: error.kind,
       retCode,
+      explanation:
+        retCode === undefined
+          ? "The request outcome is ambiguous; reconcile saved order and account state before any retry."
+          : classifyRetCode(retCode).message,
     };
   }
   return {
     classification: "ambiguous-transport",
     transportKind: undefined,
     retCode: undefined,
+    explanation:
+      "The request outcome is ambiguous; reconcile saved order and account state before any retry.",
   };
 }
+
+const DETERMINISTIC_REJECTION_CODES = new Set([10014, 10024, 110057, 110072]);
 
 export async function runEntryScenario(
   options: EntryScenarioOptions,
 ): Promise<EntryScenarioResult> {
   const clock = options.clock ?? Date.now;
-  const approval = await options.approve(options.plan);
+  const approval = await options.authorize(options.plan);
   if (approval.kind === "refused") {
     return {
       kind: "refused",
@@ -456,13 +472,23 @@ export async function runEntryScenario(
   const attachedExitRejection =
     dispatchError instanceof BybitProbeTransportError &&
     dispatchError.retCode === 110057;
+  const deterministicExchangeRejection =
+    dispatchError instanceof BybitProbeTransportError &&
+    dispatchError.retCode !== undefined &&
+    DETERMINISTIC_REJECTION_CODES.has(dispatchError.retCode);
   const isDeterministicRejection =
-    duplicateOutcome === "rejected" || attachedExitRejection;
+    duplicateOutcome === "rejected" ||
+    attachedExitRejection ||
+    deterministicExchangeRejection;
+  const dispatchErrorEvidence = sanitizedDispatchError(dispatchError);
   const reconciliation = isDeterministicRejection
     ? rejectionReconciliation(
         duplicateOutcome === "rejected"
           ? "Bybit rejected the reused client order ID; the prior order identity was not reused."
-          : "Bybit rejected attached TP/SL parameters with 110057.",
+          : attachedExitRejection
+            ? "Bybit rejected attached TP/SL parameters with 110057."
+            : (dispatchErrorEvidence?.explanation ??
+              "Bybit rejected the probe write before creating an order."),
       )
     : await reconcileOrder(options.transport, {
         orderLinkId,
@@ -495,7 +521,6 @@ export async function runEntryScenario(
       ? (duplicateOutcome ??
         (acknowledgement === undefined ? undefined : "accepted"))
       : undefined;
-  const dispatchErrorEvidence = sanitizedDispatchError(dispatchError);
   return {
     kind,
     acknowledgement: isDeterministicRejection ? "rejected" : "pending",

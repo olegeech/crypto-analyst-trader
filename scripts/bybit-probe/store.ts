@@ -17,7 +17,9 @@ import { hashProbePlan, type ProbePlan } from "./probe-plan.js";
 
 export const DEFAULT_PROBE_DATA_ROOT = "data/private/bybit-probe";
 export const UNRESOLVED_RUN_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1_000;
-export const MANUAL_RECOVERY_STATUS = "MANUAL_RECOVERY_CONFIRMED" as const;
+export const MANUAL_RECOVERY_STATUS = "RECOVERED_CLEAN" as const;
+export const LEGACY_MANUAL_RECOVERY_STATUS =
+  "MANUAL_RECOVERY_CONFIRMED" as const;
 
 export const EXIT_CODES = {
   CONFIRMED_CLEAN: 0,
@@ -28,7 +30,8 @@ export const EXIT_CODES = {
 } as const;
 
 export type ProbeVerdict = keyof typeof EXIT_CODES;
-export type ManualRecoveryStatus = typeof MANUAL_RECOVERY_STATUS;
+export type ManualRecoveryStatus =
+  typeof MANUAL_RECOVERY_STATUS | typeof LEGACY_MANUAL_RECOVERY_STATUS;
 
 export class ProbeStoreError extends Error {
   readonly code:
@@ -93,17 +96,17 @@ export interface ManualRecoveryCheck {
 
 export interface ManualRecoveryInput {
   readonly runId: string;
-  readonly actor: string;
   readonly confirmedAt: number;
   readonly accountIdHash: string;
   readonly originalVerdict: "UNRESOLVED";
-  readonly recoveryReference: string;
   readonly checks: readonly ManualRecoveryCheck[];
 }
 
 export interface StoredManualRecovery extends ManualRecoveryInput {
-  readonly recordVersion: 1;
+  readonly recordVersion: 1 | 2;
   readonly status: ManualRecoveryStatus;
+  readonly actor?: string;
+  readonly recoveryReference?: string;
   readonly reference: "SECURITY.md";
   readonly path: string;
 }
@@ -243,6 +246,15 @@ const MANUAL_RECOVERY_FIELDS = new Set([
   "reference",
 ]);
 
+export function isManualRecoveryClosedStatus(
+  status: string | undefined,
+): status is ManualRecoveryStatus {
+  return (
+    status === MANUAL_RECOVERY_STATUS ||
+    status === LEGACY_MANUAL_RECOVERY_STATUS
+  );
+}
+
 const MANUAL_RECOVERY_CHECK_FIELDS = new Set([
   "category",
   "symbol",
@@ -264,8 +276,10 @@ function validateManualRecovery(
   const record = recordObject(value, "manual recovery record");
   if (
     Object.keys(record).some((field) => !MANUAL_RECOVERY_FIELDS.has(field)) ||
-    record.recordVersion !== 1 ||
-    record.status !== MANUAL_RECOVERY_STATUS ||
+    (record.recordVersion !== 1 && record.recordVersion !== 2) ||
+    !isManualRecoveryClosedStatus(
+      typeof record.status === "string" ? record.status : undefined,
+    ) ||
     record.originalVerdict !== "UNRESOLVED" ||
     record.reference !== "SECURITY.md"
   ) {
@@ -284,14 +298,18 @@ function validateManualRecovery(
       "the manual recovery identity does not match its path",
     );
   }
-  const actor = storedString(record, "actor", true);
-  const recoveryReference = storedString(record, "recoveryReference", true);
+  const actor = storedString(record, "actor", record.recordVersion === 1);
+  const recoveryReference = storedString(
+    record,
+    "recoveryReference",
+    record.recordVersion === 1,
+  );
   const accountIdHash = storedString(record, "accountIdHash", true);
   if (
-    actor === undefined ||
-    recoveryReference === undefined ||
     accountIdHash === undefined ||
-    !/^[a-f0-9]{12}$/.test(accountIdHash)
+    !/^[a-f0-9]{12}$/.test(accountIdHash) ||
+    (record.recordVersion === 1 &&
+      (actor === undefined || recoveryReference === undefined))
   ) {
     throw new ProbeStoreError(
       "invalid-record",
@@ -361,17 +379,17 @@ function validateManualRecovery(
     };
   });
   return {
-    recordVersion: 1,
-    status: MANUAL_RECOVERY_STATUS,
+    recordVersion: record.recordVersion,
+    status: record.status as ManualRecoveryStatus,
     runId,
-    actor,
     confirmedAt,
     accountIdHash,
     originalVerdict: "UNRESOLVED",
-    recoveryReference,
     checks,
     reference: "SECURITY.md",
     path,
+    ...(actor === undefined ? {} : { actor }),
+    ...(recoveryReference === undefined ? {} : { recoveryReference }),
   };
 }
 
@@ -934,7 +952,7 @@ export class ProbeStore {
         run.runId !== currentRunId &&
         run.verdict !== "CONFIRMED_CLEAN" &&
         run.verdict !== "REFUSED" &&
-        run.manualRecovery?.status !== MANUAL_RECOVERY_STATUS &&
+        !isManualRecoveryClosedStatus(run.manualRecovery?.status) &&
         (run.verdict !== "PRECONDITION_FAILED" || run.intents.length > 0),
     );
     if (prior.length > 1) {
@@ -996,11 +1014,6 @@ export class ProbeStore {
     input: ManualRecoveryInput,
   ): Promise<StoredManualRecovery> {
     safeId(input.runId, "runId");
-    const actor = safeText(input.actor, "manualRecovery.actor");
-    const recoveryReference = safeText(
-      input.recoveryReference,
-      "manualRecovery.recoveryReference",
-    );
     if (!/^[a-f0-9]{12}$/.test(input.accountIdHash)) {
       throw new ProbeStoreError(
         "invalid-record",
@@ -1118,14 +1131,12 @@ export class ProbeStore {
     await chmod(directory, 0o700);
     const path = join(directory, "manual-recovery.json");
     const record = {
-      recordVersion: 1 as const,
+      recordVersion: 2 as const,
       status: MANUAL_RECOVERY_STATUS,
       runId: input.runId,
-      actor,
       confirmedAt: input.confirmedAt,
       accountIdHash: input.accountIdHash,
       originalVerdict: "UNRESOLVED" as const,
-      recoveryReference,
       checks,
       reference: "SECURITY.md" as const,
     };

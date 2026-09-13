@@ -32,7 +32,7 @@ export interface RecoveryOptions {
   readonly accountId: string;
   readonly store: ProbeStore;
   readonly transport: RecoveryTransport;
-  readonly approve: (plan: ProbePlan) => Promise<ProbeApproval>;
+  readonly authorize: (plan: ProbePlan) => Promise<ProbeApproval>;
   readonly clock?: () => number;
   readonly sleep?: (milliseconds: number) => Promise<void>;
   readonly realtimeAttempts?: number;
@@ -295,7 +295,7 @@ export async function recoverInterruptedRun(
           protectiveExitOrderIds: new Set<string>(),
           store: options.store,
           transport: options.transport,
-          approve: options.approve,
+          authorize: options.authorize,
           readOwnership: async () => {
             const response = await options.transport.get("/v5/order/realtime", {
               category,
@@ -355,7 +355,7 @@ export async function recoverInterruptedRun(
           executions: exposure.executions,
           store: options.store,
           transport: options.transport,
-          approve: options.approve,
+          authorize: options.authorize,
           ownedOrderIdentities: entryOrderIdentities,
           readOwnership: async () => (await readExposure()).currentState,
           ...(options.clock === undefined ? {} : { clock: options.clock }),

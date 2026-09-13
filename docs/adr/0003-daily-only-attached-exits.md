@@ -47,13 +47,18 @@ npm run probe:bybit:testnet
 
 The probe records the accepted create-request shape, acknowledgement versus
 terminal REST state, client-order-ID reuse and timeout reconciliation as
-sanitized findings. Every write requires a fresh interactive approval of the
-exact probe-plan hash and a durable pre-submit intent. A placement followed by
-cancellation without an observed fill leaves protection after fill
-**unverified**; it must never be reported as proven.
+sanitized findings. Explicit invocation authorizes the documented Testnet
+scenarios and necessary probe-owned cleanup. Each write still receives a fresh
+exact, expiring probe-plan hash, is revalidated immediately before dispatch,
+and has a durable pre-submit intent. The probe does not add a prompt for every
+create, cancel or flatten action. A placement followed by cancellation without
+an observed fill leaves protection after fill **unverified**; it must never be
+reported as proven.
 
 The live conclusion slot is intentionally unverified until an operator runs
 the bounded scenarios. `UNRESOLVED` means the saved run must be reconciled
-before another scenario; use the manual exchange-UI fallback in `SECURITY.md`.
+before another scenario; invoke the read-only recovery command in
+`SECURITY.md`, and use the exchange-UI fallback only when that command reports
+a concrete unresolved decision.
 The probe is excluded from release and CI and does not change the normative
 #8 execution adapter or decimal contracts.

@@ -67,7 +67,6 @@ export interface PreflightBaseline {
   readonly positionSize: string;
   readonly positionIdx: 0;
   readonly availableBalance: string;
-  readonly exclusiveUseConfirmed: true;
 }
 
 export interface PreflightResult {
@@ -84,14 +83,11 @@ interface JsonObject {
   readonly [key: string]: unknown;
 }
 
-type ConfirmExclusiveUse = () => boolean | Promise<boolean>;
-
 export interface PreflightOptions {
   readonly transport: ReadOnlyTransport;
   readonly symbol: string;
   readonly category?: string;
   readonly tickOffsetTicks?: bigint;
-  readonly confirmExclusiveUse?: ConfirmExclusiveUse;
 }
 
 function asObject(value: unknown, label: string): JsonObject {
@@ -446,15 +442,6 @@ export async function runReadOnlyPreflight(
     );
   }
 
-  const confirmExclusiveUse = options.confirmExclusiveUse;
-  const confirmed =
-    confirmExclusiveUse === undefined ? false : await confirmExclusiveUse();
-  if (!confirmed) {
-    throw precondition(
-      "exclusive account/symbol use was not confirmed for the run.",
-      "Reserve the configured Testnet account and symbol against other clients and rerun.",
-    );
-  }
   return {
     symbol: options.symbol,
     category,
@@ -466,7 +453,6 @@ export async function runReadOnlyPreflight(
       positionSize: position.size,
       positionIdx: 0,
       availableBalance: toDecimalString(availableBalance),
-      exclusiveUseConfirmed: true,
     },
     sizes,
     requestPaths,

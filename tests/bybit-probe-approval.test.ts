@@ -1,9 +1,8 @@
 import assert from "node:assert/strict";
-import { PassThrough } from "node:stream";
 import test from "node:test";
 
 import {
-  approveProbePlan,
+  authorizeProbePlan,
   reverifyProbeApproval,
 } from "../scripts/bybit-probe/approval.js";
 import {
@@ -31,49 +30,30 @@ const plan = buildProbePlan({
   },
 });
 
-test("approval accepts a case-insensitive exact digest after retyping", async () => {
+test("explicit probe invocation authorizes the exact plan without a prompt", async () => {
   const digest = hashProbePlan(plan);
-  const result = await approveProbePlan(plan, {
-    clock: () => 1_000,
-    prompt: async () => digest.toUpperCase(),
-    output: { write: () => undefined },
-  });
+  const result = await authorizeProbePlan(plan, { clock: () => 1_000 });
   assert.equal(result.kind, "approved");
   if (result.kind === "approved") {
     assert.equal(result.digest, digest);
     assert.equal(result.approvedAt, 1_000);
+    assert.equal(result.expiresAt, plan.expiresAt);
   }
 });
 
-test("a typo consumes an attempt and an empty line refuses", async () => {
-  let calls = 0;
-  const result = await approveProbePlan(plan, {
-    clock: () => 1_000,
-    prompt: async () => {
-      calls += 1;
-      return calls === 1 ? "not-the-digest" : "";
-    },
-    output: { write: () => undefined },
-  });
-  assert.equal(result.kind, "refused");
-  assert.equal(result.reason, "empty-input");
-  assert.equal(calls, 2);
-});
+test("expired plans and invalid authorization TTLs fail closed", async () => {
+  const expired = await authorizeProbePlan(plan, { clock: () => 10_000 });
+  assert.equal(expired.kind, "refused");
+  if (expired.kind === "refused") assert.equal(expired.reason, "expired");
 
-test("non-TTY approval fails closed before emitting an approval block", async () => {
-  const output = new PassThrough();
-  let printed = "";
-  output.on("data", (chunk: Buffer) => {
-    printed += chunk.toString();
-  });
-  const result = await approveProbePlan(plan, {
+  const invalidTtl = await authorizeProbePlan(plan, {
     clock: () => 1_000,
-    input: Object.assign(new PassThrough(), { isTTY: false }),
-    output,
+    ttlMs: 0,
   });
-  assert.equal(result.kind, "refused");
-  assert.equal(result.reason, "non-tty");
-  assert.equal(printed, "");
+  assert.equal(invalidTtl.kind, "refused");
+  if (invalidTtl.kind === "refused") {
+    assert.equal(invalidTtl.reason, "invalid-ttl");
+  }
 });
 
 test("final re-verification rejects expiry, account changes, and request mutation", async () => {
@@ -103,12 +83,10 @@ test("final re-verification rejects expiry, account changes, and request mutatio
   );
 });
 
-test("the injected approval TTL is enforced even before the plan expiry", async () => {
-  const result = await approveProbePlan(plan, {
+test("the run-scoped authorization TTL is enforced before the plan expiry", async () => {
+  const result = await authorizeProbePlan(plan, {
     clock: () => 1_000,
     ttlMs: 100,
-    prompt: async () => hashProbePlan(plan),
-    output: { write: () => undefined },
   });
   assert.equal(result.kind, "approved");
   if (result.kind === "approved") {

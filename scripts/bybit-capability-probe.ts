@@ -2,14 +2,13 @@ import { randomBytes } from "node:crypto";
 import process from "node:process";
 import { pathToFileURL } from "node:url";
 
-import { promptVisible } from "../src/cli/interactive-prompt.js";
 import {
   type CredentialProvider,
   type ExchangeCredentials,
 } from "../src/ports/credential-provider.js";
 import { createMacOSKeychainProvider } from "../src/adapters/macos-keychain.js";
 import {
-  approveProbePlan,
+  authorizeProbePlan,
   type ProbeApproval,
 } from "./bybit-probe/approval.js";
 import {
@@ -31,7 +30,6 @@ import { runReadOnlyPreflight } from "./bybit-probe/preflight.js";
 import {
   runManualRecovery as executeManualRecovery,
   type ManualRecoveryResult,
-  type ManualRecoveryTarget,
 } from "./bybit-probe/manual-recovery.js";
 import { recoverInterruptedRun } from "./bybit-probe/recovery.js";
 import {
@@ -43,7 +41,7 @@ import {
 } from "./bybit-probe/scenarios.js";
 import {
   EXIT_CODES,
-  MANUAL_RECOVERY_STATUS,
+  isManualRecoveryClosedStatus,
   ProbeStore,
   type ProbeVerdict,
 } from "./bybit-probe/store.js";
@@ -64,7 +62,6 @@ export interface ProbeRunResult {
 }
 
 type Output = { write(message: string): void };
-type PromptInput = NodeJS.ReadableStream & { isTTY?: boolean };
 
 export interface CapabilityProbeOptions {
   readonly environment?: Record<string, string | undefined>;
@@ -76,12 +73,10 @@ export interface CapabilityProbeOptions {
   readonly store?: ProbeStore;
   readonly clock?: () => number;
   readonly sleep?: (milliseconds: number) => Promise<void>;
-  readonly input?: PromptInput;
   readonly output?: Output;
-  readonly approve?: (
-    plan: Parameters<typeof approveProbePlan>[0],
+  readonly authorize?: (
+    plan: Parameters<typeof authorizeProbePlan>[0],
   ) => Promise<ProbeApproval>;
-  readonly confirmExclusiveUse?: () => boolean | Promise<boolean>;
   readonly runId?: string;
   readonly realtimeAttempts?: number;
   readonly historyAttempts?: number;
@@ -89,36 +84,10 @@ export interface CapabilityProbeOptions {
 
 export interface ManualRecoveryProbeOptions extends CapabilityProbeOptions {
   readonly runId: string;
-  readonly actor: string;
-  readonly recoveryReference: string;
-  readonly confirmManualRecovery?: (
-    target: ManualRecoveryTarget,
-  ) => boolean | Promise<boolean>;
 }
 
 function newRunId(clock: () => number): string {
   return `probe-${Math.trunc(clock())}-${randomBytes(4).toString("hex")}`;
-}
-
-async function confirmExclusiveUse(
-  input: PromptInput,
-  output: Output,
-): Promise<boolean> {
-  if (input.isTTY !== true) return false;
-  try {
-    const answer = await promptVisible(
-      "Confirm exclusive use of the configured Testnet account and symbol for this run (type YES)",
-      "Interactive probe confirmation requires a terminal.",
-      {
-        input,
-        output: output as unknown as NodeJS.WritableStream,
-        timeoutMs: 120_000,
-      },
-    );
-    return answer.trim() === "YES";
-  } catch {
-    return false;
-  }
 }
 
 function signedPosition(response: BybitResponse): string | undefined {
@@ -211,8 +180,8 @@ async function cleanupScenario(
     readonly baselineSignedQty: string;
     readonly store: ProbeStore;
     readonly transport: CleanupTransport;
-    readonly approve: (
-      plan: Parameters<typeof approveProbePlan>[0],
+    readonly authorize: (
+      plan: Parameters<typeof authorizeProbePlan>[0],
     ) => Promise<ProbeApproval>;
     readonly clock: () => number;
     readonly sleep?: (milliseconds: number) => Promise<void>;
@@ -221,14 +190,19 @@ async function cleanupScenario(
   kind: "clean" | "unresolved" | "contradiction";
   message: string;
 }> {
+  const withDispatchContext = (message: string): string => {
+    if (result.dispatchError === undefined) return message;
+    return `${result.dispatchError.explanation} Reconciliation: ${message}`;
+  };
   const order = result.reconciliation.order;
   if (result.kind === "unresolved" || result.kind === "ambiguous") {
     return {
       kind: "unresolved",
-      message:
+      message: withDispatchContext(
         "message" in result.reconciliation
           ? result.reconciliation.message
           : "bounded reconciliation did not prove a safe state",
+      ),
     };
   }
   if (result.attachedExits === "rejected-110057") {
@@ -243,7 +217,9 @@ async function cleanupScenario(
     }
     return {
       kind: "unresolved",
-      message: "attached-exit contradiction left state that is not clean",
+      message: withDispatchContext(
+        "attached-exit contradiction left state that is not clean",
+      ),
     };
   }
   if (order && result.kind === "resting") {
@@ -263,7 +239,7 @@ async function cleanupScenario(
       protectiveExitOrderIds: new Set(),
       store: options.store,
       transport: options.transport,
-      approve: options.approve,
+      authorize: options.authorize,
       readOwnership: async () => {
         const response = await options.transport.get("/v5/order/realtime", {
           category: options.category,
@@ -306,7 +282,9 @@ async function cleanupScenario(
   if (!exposure)
     return {
       kind: "unresolved",
-      message: "filled order lacks validated execution evidence",
+      message: withDispatchContext(
+        "filled order lacks validated execution evidence",
+      ),
     };
   const flattened = await flattenOwnedExposure({
     runId: options.runId,
@@ -319,7 +297,7 @@ async function cleanupScenario(
     executions: exposure.executions,
     store: options.store,
     transport: options.transport,
-    approve: options.approve,
+    authorize: options.authorize,
     ownedOrderIdentities,
     readOwnership: async () => {
       const latest = await readOwnedExposure(
@@ -338,7 +316,10 @@ async function cleanupScenario(
   return flattened.kind === "confirmed-clean" ||
     flattened.kind === "already-flat"
     ? { kind: "clean", message: flattened.message }
-    : { kind: "unresolved", message: flattened.message };
+    : {
+        kind: "unresolved",
+        message: withDispatchContext(flattened.message),
+      };
 }
 
 function findingFromResult(
@@ -378,33 +359,39 @@ function findingFromResult(
   };
 }
 
-function defaultApproval(
-  input: PromptInput,
-  output: Output,
+function defaultAuthorization(
   clock: () => number,
-): (plan: Parameters<typeof approveProbePlan>[0]) => Promise<ProbeApproval> {
-  return (plan) => approveProbePlan(plan, { input, output, clock });
+): (plan: Parameters<typeof authorizeProbePlan>[0]) => Promise<ProbeApproval> {
+  return (plan) => authorizeProbePlan(plan, { clock });
 }
 
-async function confirmManualRecovery(
-  target: ManualRecoveryTarget,
-  input: PromptInput,
-  output: Output,
-): Promise<boolean> {
-  if (input.isTTY !== true) return false;
-  try {
-    const answer = await promptVisible(
-      `Confirm the Bybit UI check for saved run ${target.runId} (type YES)`,
-      "Manual recovery confirmation requires a terminal.",
-      {
-        input,
-        output: output as unknown as NodeJS.WritableStream,
-        timeoutMs: 120_000,
-      },
-    );
-    return answer.trim() === "YES";
-  } catch {
-    return false;
+function errorMessage(error: unknown): string {
+  const message =
+    error instanceof Error ? error.message : "the probe could not start";
+  if (
+    typeof error === "object" &&
+    error !== null &&
+    "guidance" in error &&
+    typeof error.guidance === "string" &&
+    error.guidance.length > 0
+  ) {
+    return `${message} Next action: ${error.guidance}`;
+  }
+  return message;
+}
+
+function nextActionForVerdict(verdict: ProbeVerdict): string {
+  switch (verdict) {
+    case "CONFIRMED_CLEAN":
+      return "none; the bounded probe completed with clean state reconciled";
+    case "REFUSED":
+      return "inspect the refusal message; no further write was authorized";
+    case "PRECONDITION_FAILED":
+      return "correct the reported precondition, then rerun the Testnet probe";
+    case "CONTRADICTION":
+      return "stop the probe and review the contradiction before any new scenario";
+    case "UNRESOLVED":
+      return "reconcile the saved run through the SECURITY.md manual fallback before any new write";
   }
 }
 
@@ -413,7 +400,7 @@ export async function runManualRecovery(
 ): Promise<ManualRecoveryResult> {
   const clock = options.clock ?? Date.now;
   const output = options.output ?? process.stdout;
-  const input = options.input ?? process.stdin;
+  const authorize = options.authorize ?? defaultAuthorization(clock);
   try {
     const config = resolveProbeConfig(options.environment ?? process.env);
     let credentials = options.credentials;
@@ -437,14 +424,9 @@ export async function runManualRecovery(
     return await executeManualRecovery({
       runId: options.runId,
       accountId,
-      actor: options.actor,
-      recoveryReference: options.recoveryReference,
       store,
       transport,
-      approve: options.approve ?? defaultApproval(input, output, clock),
-      confirmUi:
-        options.confirmManualRecovery ??
-        ((target) => confirmManualRecovery(target, input, output)),
+      authorize,
       readOwnedExposure: async (intent, ownedOrderIdentities) => {
         const category = intent.plan.params.category;
         const symbol = intent.plan.params.symbol;
@@ -511,6 +493,9 @@ async function recordVerdict(
         }
       : undefined,
   );
+  options.output?.write(
+    `result: ${verdict}\nmessage: ${message}\nnext action: ${nextActionForVerdict(verdict)}\n`,
+  );
   if (options.accountId !== undefined) {
     const findings = renderSanitizedFindings({
       runId,
@@ -530,7 +515,7 @@ export async function runCapabilityProbe(
 ): Promise<ProbeRunResult> {
   const clock = options.clock ?? Date.now;
   const output = options.output ?? process.stdout;
-  const input = options.input ?? process.stdin;
+  const authorize = options.authorize ?? defaultAuthorization(clock);
   const runId = options.runId ?? newRunId(clock);
   const store = options.store ?? new ProbeStore();
   const findings: SanitizedScenarioFinding[] = [];
@@ -575,17 +560,18 @@ export async function runCapabilityProbe(
         run.runId !== runId &&
         run.verdict !== "CONFIRMED_CLEAN" &&
         run.verdict !== "REFUSED" &&
-        run.manualRecovery?.status !== MANUAL_RECOVERY_STATUS &&
+        !isManualRecoveryClosedStatus(run.manualRecovery?.status) &&
         (run.verdict !== "PRECONDITION_FAILED" || run.intents.length > 0),
     );
     await store.assertNoBlockingPriorRuns(runId, priorRuns);
     for (const prior of priorRuns) {
+      output.write(`stage: recovery; reconciling saved run ${prior.runId}\n`);
       const recovered = await recoverInterruptedRun({
         runId: prior.runId,
         accountId,
         store,
         transport,
-        approve: options.approve ?? defaultApproval(input, output, clock),
+        authorize,
         clock,
         ...(options.sleep === undefined ? {} : { sleep: options.sleep }),
         ...(options.realtimeAttempts === undefined
@@ -614,21 +600,24 @@ export async function runCapabilityProbe(
           return exposure;
         },
       });
-      if (recovered.verdict !== "CONFIRMED_CLEAN")
+      if (recovered.verdict !== "CONFIRMED_CLEAN") {
+        output.write(
+          `result: ${recovered.verdict}\nmessage: ${recovered.message}\nnext action: ${nextActionForVerdict(recovered.verdict)}\n`,
+        );
         return { ...recovered, currentRunId: runId };
+      }
     }
 
     await store.acquireLock(runId);
     trackCurrentRunWrites = true;
     try {
+      output.write(
+        "stage: preflight; reading Testnet instrument, account and symbol state\n",
+      );
       const preflight = await runReadOnlyPreflight({
         transport,
         symbol: config.symbol,
-        confirmExclusiveUse:
-          options.confirmExclusiveUse ??
-          (() => confirmExclusiveUse(input, output)),
       });
-      const approve = options.approve ?? defaultApproval(input, output, clock);
       const runScenario = async (
         side: "Buy" | "Sell",
         attemptId: string,
@@ -640,6 +629,9 @@ export async function runCapabilityProbe(
         message: string;
       }> => {
         const size = preflight.sizes[side];
+        output.write(
+          `stage: ${scenario}; dispatching ${side} probe write for ${preflight.symbol} (orderLinkId ${orderLinkId})\n`,
+        );
         const plan = buildAttachedEntryPlan({
           environment: "testnet",
           accountId: verifiedAccountId,
@@ -660,7 +652,7 @@ export async function runCapabilityProbe(
           plan,
           transport,
           store,
-          approve,
+          authorize,
           baselineSignedQty: preflight.baseline.positionSize,
           discardAcknowledgement,
           clock,
@@ -672,6 +664,12 @@ export async function runCapabilityProbe(
             ? {}
             : { historyAttempts: options.historyAttempts }),
         });
+        const dispatchContext =
+          result.kind === "refused"
+            ? result.approval.message
+            : (result.dispatchError?.explanation ??
+              `acknowledgement=${result.acknowledgement}; terminal=${result.reconciliation.terminalState ?? "unverified"}`);
+        output.write(`stage: ${scenario}; ${dispatchContext}\n`);
         findings.push(findingFromResult(scenario, result));
         if (result.kind === "refused")
           return { kind: "refused", message: result.approval.message };
@@ -684,7 +682,7 @@ export async function runCapabilityProbe(
           baselineSignedQty: preflight.baseline.positionSize,
           store,
           transport,
-          approve,
+          authorize,
           clock,
           ...(options.sleep === undefined ? {} : { sleep: options.sleep }),
         });
@@ -780,8 +778,7 @@ export async function runCapabilityProbe(
       await store.releaseLock(runId);
     }
   } catch (error) {
-    const message =
-      error instanceof Error ? error.message : "the probe could not start";
+    const message = errorMessage(error);
     try {
       return await recordVerdict(
         store,
@@ -816,29 +813,11 @@ if (invokedPath && import.meta.url === pathToFileURL(invokedPath).href) {
       );
       process.exitCode = EXIT_CODES.PRECONDITION_FAILED;
     } else {
-      let actor = "";
-      let recoveryReference = "";
-      try {
-        actor = await promptVisible(
-          "Recovery actor (operator name or ticket owner)",
-          "Manual recovery requires a terminal.",
-        );
-        recoveryReference = await promptVisible(
-          "Recovery reference (ticket, incident or UI evidence reference)",
-          "Manual recovery requires a terminal.",
-        );
-      } catch {
-        // The exported flow will fail closed when the required operator fields
-        // are absent or the terminal cannot complete the prompts.
-      }
       const result = await runManualRecovery({
         runId,
-        actor,
-        recoveryReference,
       });
       console.log(`${result.status}: ${result.message}`);
       process.exitCode =
-        result.status === "MANUAL_RECOVERY_CONFIRMED" ||
         result.status === "RECOVERED_CLEAN"
           ? EXIT_CODES.CONFIRMED_CLEAN
           : result.status === "PRECONDITION_FAILED"

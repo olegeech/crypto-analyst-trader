@@ -44,12 +44,14 @@ test("HMAC digest is the independently calculated lowercase hexadecimal value", 
 
 test("retCode classification keeps signing defects separate from credential recovery", () => {
   const expectations = new Map([
+    [10000, ["exchange-failure", false]],
     [10002, ["clock-skew", false]],
     [10004, ["signing-defect", false]],
     [10003, ["invalid-credentials", true]],
     [33004, ["expired-credentials", true]],
     [10005, ["permission-denied", true]],
     [10010, ["ip-restriction", false]],
+    [10024, ["exchange-failure", false]],
   ] as const);
   for (const [code, [kind, reconnect]] of expectations) {
     const failure = classifyRetCode(code);
@@ -62,6 +64,8 @@ test("retCode classification keeps signing defects separate from credential reco
     false,
   );
   assert.match(classifyRetCode(10003).message, /credentials:connect:testnet/);
+  assert.match(classifyRetCode(10024).message, /compliance rules/i);
+  assert.match(classifyRetCode(10000).message, /ambiguous/i);
 });
 
 test("invalid response shapes fail before evidence can be consumed", () => {

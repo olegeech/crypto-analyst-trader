@@ -59,7 +59,6 @@ test("read-only preflight sizes DOGEUSDT within the exact notional cap", async (
   const result = await runReadOnlyPreflight({
     transport,
     symbol: "DOGEUSDT",
-    confirmExclusiveUse: async () => true,
   });
   assert.equal(result.baseline.flat, true);
   assert.equal(result.baseline.openOrders, 0);
@@ -100,7 +99,6 @@ test("minimum notional above 10 USDT fails before any write path", async () => {
     runReadOnlyPreflight({
       transport,
       symbol: "BTCUSDT",
-      confirmExclusiveUse: async () => true,
     }),
     (error: unknown) =>
       error instanceof PreflightError && error.kind === "precondition-failed",
@@ -160,7 +158,6 @@ test("PendingOpen, hedge mode, dirty baseline, and low balance are all hard stop
       runReadOnlyPreflight({
         transport,
         symbol: "DOGEUSDT",
-        confirmExclusiveUse: async () => true,
       }),
       (error: unknown) =>
         error instanceof PreflightError && error.kind === "precondition-failed",
@@ -180,7 +177,6 @@ test("low balance reports the exact requirement and actionable shortfall", async
     runReadOnlyPreflight({
       transport,
       symbol: "DOGEUSDT",
-      confirmExclusiveUse: async () => true,
     }),
     (error: unknown) => {
       assert.ok(error instanceof PreflightError);
@@ -198,16 +194,9 @@ test("low balance reports the exact requirement and actionable shortfall", async
   );
 });
 
-test("exclusive-use refusal makes no account configuration call", async () => {
+test("preflight does not require an exclusive-use confirmation prompt", async () => {
   const { transport, requests } = transportFor();
-  await assert.rejects(
-    runReadOnlyPreflight({
-      transport,
-      symbol: "DOGEUSDT",
-      confirmExclusiveUse: async () => false,
-    }),
-    /exclusive account\/symbol use/,
-  );
+  await runReadOnlyPreflight({ transport, symbol: "DOGEUSDT" });
   assert.ok(
     !requests.some(
       (path) => path.includes("switch") || path.includes("position-mode"),

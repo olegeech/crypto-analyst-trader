@@ -24,7 +24,7 @@ function response(result: Record<string, unknown>): BybitResponse {
 type ProbeFixtureOptions = {
   readonly pendingOpen?: boolean;
   readonly recoveryOrder?: boolean;
-  readonly rejectionCode?: 10014 | 110057 | 12345;
+  readonly rejectionCode?: 10014 | 10024 | 110057 | 12345;
   readonly invisibleOrders?: boolean;
   readonly lostAcknowledgement?: boolean;
   readonly acceptDuplicate?: boolean;
@@ -175,7 +175,7 @@ function approved(clock: number): (plan: ProbePlan) => Promise<ProbeApproval> {
 
 async function runFixture(
   options: ProbeFixtureOptions = {},
-  approve: (plan: ProbePlan) => Promise<ProbeApproval> = approved(1_000),
+  authorize: (plan: ProbePlan) => Promise<ProbeApproval> = approved(1_000),
 ) {
   const root = await mkdtemp(join(tmpdir(), "bybit-capability-probe-"));
   const store = new ProbeStore({
@@ -196,8 +196,7 @@ async function runFixture(
     sleep: async () => undefined,
     realtimeAttempts: 2,
     historyAttempts: 0,
-    confirmExclusiveUse: async () => true,
-    approve,
+    authorize,
     output: { write: (message: string) => output.push(message) },
   });
   return { fixture, output: output.join(""), result, root, store };
@@ -293,8 +292,8 @@ test("orchestrator records an accepted duplicate client-order-ID outcome", async
 test("orchestrator stops before writes when preflight is refused or invalid", async () => {
   const refused = await runFixture({}, async () => ({
     kind: "refused" as const,
-    reason: "empty-input" as const,
-    message: "operator refused",
+    reason: "expired" as const,
+    message: "probe plan authorization expired",
   }));
   try {
     assert.equal(refused.result.verdict, "REFUSED");
@@ -388,6 +387,18 @@ test("unknown dispatch retCodes are persisted as sanitized diagnostics", async (
   }
 });
 
+test("explicit 10024 rejection remains visible with its actionable cause", async () => {
+  const { result, output, root } = await runFixture({ rejectionCode: 10024 });
+  try {
+    assert.equal(result.verdict, "CONFIRMED_CLEAN");
+    assert.match(output, /retCode: 10024/);
+    assert.match(output, /compliance rules/i);
+    assert.doesNotMatch(output, /order was not visible; not-found/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("unresolved verdict and recovery handoff survive findings persistence failure", async () => {
   const root = await mkdtemp(
     join(tmpdir(), "bybit-capability-probe-findings-failure-"),
@@ -414,8 +425,7 @@ test("unresolved verdict and recovery handoff survive findings persistence failu
       sleep: async () => undefined,
       realtimeAttempts: 2,
       historyAttempts: 0,
-      confirmExclusiveUse: async () => true,
-      approve: approved(1_000),
+      authorize: approved(1_000),
       output: { write: () => undefined },
     });
 
@@ -493,6 +503,7 @@ test("failed recovery preserves the prior run ID and reports the current run sep
       baselineSignedQty: "0",
     });
     const fixture = fixtureTransport();
+    const output: string[] = [];
     const result = await runCapabilityProbe({
       environment: { TRADER_ENV: "testnet" },
       accountId: "testnet-account",
@@ -501,13 +512,13 @@ test("failed recovery preserves the prior run ID and reports the current run sep
       runId: "current-run",
       clock: () => 1_000,
       sleep: async () => undefined,
-      confirmExclusiveUse: async () => true,
-      approve: approved(1_000),
-      output: { write: () => undefined },
+      authorize: approved(1_000),
+      output: { write: (message: string) => output.push(message) },
     });
     assert.equal(result.verdict, "UNRESOLVED");
     assert.equal(result.runId, "prior-run");
     assert.equal(result.currentRunId, "current-run");
+    assert.match(output.join(""), /next action: reconcile the saved run/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -573,8 +584,7 @@ test("recovery writes do not make a current preflight failure unresolved", async
       sleep: async () => undefined,
       realtimeAttempts: 2,
       historyAttempts: 0,
-      confirmExclusiveUse: async () => true,
-      approve: approved(1_000),
+      authorize: approved(1_000),
       output: { write: () => undefined },
     });
     assert.equal(result.verdict, "PRECONDITION_FAILED");

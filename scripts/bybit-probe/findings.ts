@@ -41,7 +41,7 @@ function displayDispatchError(error: DispatchErrorEvidence): string {
   const retCode = Number.isSafeInteger(error.retCode)
     ? `; retCode: ${error.retCode}`
     : "";
-  return `${error.classification}; transport kind: ${kind}${retCode}`;
+  return `${error.classification}; transport kind: ${kind}${retCode}; explanation: ${display(error.explanation)}`;
 }
 
 export function renderSanitizedFindings(input: FindingsInput): string {
