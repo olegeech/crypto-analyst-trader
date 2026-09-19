@@ -21,6 +21,10 @@ test("credential environments have deterministic, distinct Keychain services", (
     credentialServiceName("mainnet"),
     "com.crypto-analyst-trader.bybit.mainnet",
   );
+  assert.equal(
+    credentialServiceName("demo"),
+    "com.crypto-analyst-trader.bybit.demo",
+  );
 });
 
 test("preflight uses an isolated service instead of a fourth credential field", () => {

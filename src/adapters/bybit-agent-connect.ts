@@ -8,6 +8,7 @@ import {
 
 import {
   AgentConnectError,
+  type AgentConnectEnvironment,
   type AgentConnectAccount,
   type AgentConnectCallback,
   type AgentConnectChoice,
@@ -19,7 +20,6 @@ import {
 } from "../ports/agent-connect.js";
 import {
   connectCommand,
-  type CredentialEnvironment,
   type ExchangeCredentials,
 } from "../ports/credential-provider.js";
 
@@ -61,7 +61,7 @@ export const agentConnectEndpoints = {
     apiBaseUrl: "https://api2-testnet.bybit.com",
   },
 } as const satisfies Record<
-  CredentialEnvironment,
+  AgentConnectEnvironment,
   { authorizationUrl: string; apiBaseUrl: string }
 >;
 
@@ -203,7 +203,7 @@ function codeChallenge(verifier: string): string {
 }
 
 export function buildAuthorizationUrl(
-  environment: CredentialEnvironment,
+  environment: AgentConnectEnvironment,
   port: number,
   state: string,
   verifier: string,
@@ -415,7 +415,7 @@ function requestEvent(
 }
 
 export async function startAgentConnectSession(
-  environment: CredentialEnvironment,
+  environment: AgentConnectEnvironment,
   options: AgentConnectSessionOptions = {},
 ): Promise<AgentConnectSession> {
   const startPort = options.startPort ?? DEFAULT_START_PORT;

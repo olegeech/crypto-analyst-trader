@@ -5,7 +5,8 @@
 - Use a dedicated subaccount for production canaries.
 - Grant trading and read permissions only; withdrawal permission is forbidden.
 - Use an IP allowlist where the account and deployment support it.
-- Keep Testnet and mainnet keys separate.
+- Keep Testnet, Demo and mainnet keys separate; Demo keys belong to the Bybit
+  Demo Trading environment and are never reused as Testnet or mainnet keys.
 - Load secrets at runtime from environment or an approved secret manager such
   as the local macOS Keychain provider; authenticated local commands must not
   require plaintext values in shell history or repository files.
@@ -47,15 +48,20 @@ A suspected execution or accounting incident requires:
 
 ## Bybit probe manual recovery
 
-When a Testnet capability probe records `UNRESOLVED`, do not delete its intent
-or change the original verdict. Run the read-only recovery command for the
-saved run:
+When a Testnet or Demo capability probe records `UNRESOLVED`, do not delete its
+intent or change the original verdict. Run the same-environment, read-only
+recovery command for the saved run:
+
+`npm run probe:bybit:recover -- --environment <testnet|demo> <saved-run-id>`
+
+The Testnet alias remains available:
 
 `npm run probe:bybit:testnet:recover -- <saved-run-id>`
 
 The command displays the saved run, account hash, symbol and client order ID,
 then revalidates realtime and history orders, executions, open orders and
-position through read-only endpoints. When those checks prove clean, it stores
+position through read-only endpoints in the selected environment. When those
+checks prove clean, it stores
 `RECOVERED_CLEAN` with a timestamp, sanitized evidence and the `SECURITY.md`
 reference; the original `UNRESOLVED` result remains unverified. Any owned
 order or exposure is routed through the normal exact-plan, durable-intent and

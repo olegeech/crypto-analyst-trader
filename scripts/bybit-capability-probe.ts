@@ -20,7 +20,10 @@ import {
   type OwnedExecution,
   type OwnershipState,
 } from "./bybit-probe/cleanup.js";
-import { resolveProbeConfig } from "./bybit-probe/config.js";
+import {
+  resolveProbeConfig,
+  type ProbeEnvironment,
+} from "./bybit-probe/config.js";
 import {
   assertSanitizedOutput,
   renderSanitizedFindings,
@@ -65,6 +68,7 @@ type Output = { write(message: string): void };
 
 export interface CapabilityProbeOptions {
   readonly environment?: Record<string, string | undefined>;
+  readonly commandEnvironment?: ProbeEnvironment;
   readonly request?: typeof fetch;
   readonly credentials?: ExchangeCredentials;
   readonly accountId?: string;
@@ -172,6 +176,7 @@ async function readOwnedExposure(
 async function cleanupScenario(
   result: DispatchedEntryScenarioResult,
   options: {
+    readonly environment: ProbeEnvironment;
     readonly runId: string;
     readonly attemptId: string;
     readonly accountId: string;
@@ -224,6 +229,7 @@ async function cleanupScenario(
   }
   if (order && result.kind === "resting") {
     const cleanup = await cleanupOwnedEntry({
+      environment: options.environment,
       runId: options.runId,
       attemptId: `${options.attemptId}-cancel`,
       accountId: options.accountId,
@@ -287,6 +293,7 @@ async function cleanupScenario(
       ),
     };
   const flattened = await flattenOwnedExposure({
+    environment: options.environment,
     runId: options.runId,
     attemptId: `${options.attemptId}-flatten`,
     accountId: options.accountId,
@@ -380,18 +387,22 @@ function errorMessage(error: unknown): string {
   return message;
 }
 
-function nextActionForVerdict(verdict: ProbeVerdict): string {
+function nextActionForVerdict(
+  verdict: ProbeVerdict,
+  environment: ProbeEnvironment = "testnet",
+): string {
+  const label = environment === "demo" ? "Demo" : "Testnet";
   switch (verdict) {
     case "CONFIRMED_CLEAN":
       return "none; the bounded probe completed with clean state reconciled";
     case "REFUSED":
       return "inspect the refusal message; no further write was authorized";
     case "PRECONDITION_FAILED":
-      return "correct the reported precondition, then rerun the Testnet probe";
+      return `correct the reported precondition, then rerun the ${label} probe`;
     case "CONTRADICTION":
       return "stop the probe and review the contradiction before any new scenario";
     case "UNRESOLVED":
-      return "reconcile the saved run through the SECURITY.md manual fallback before any new write";
+      return `reconcile the saved run in ${label} through the SECURITY.md manual fallback before any new write`;
   }
 }
 
@@ -402,25 +413,31 @@ export async function runManualRecovery(
   const output = options.output ?? process.stdout;
   const authorize = options.authorize ?? defaultAuthorization(clock);
   try {
-    const config = resolveProbeConfig(options.environment ?? process.env);
+    const config = resolveProbeConfig(
+      options.environment ?? process.env,
+      options.commandEnvironment,
+    );
+    const store =
+      options.store ?? new ProbeStore({ environment: config.environment });
+    store.assertEnvironment(config.environment);
     let credentials = options.credentials;
     if (!credentials && !options.transport) {
       const provider =
         options.credentialProvider ?? createMacOSKeychainProvider();
-      credentials = await provider.load("testnet");
+      credentials = await provider.load(config.environment);
     }
     const accountId = options.accountId ?? credentials?.accountId;
     if (!accountId)
-      throw new Error("the Testnet account identity is unavailable");
+      throw new Error(`the ${config.label} account identity is unavailable`);
     const transport =
       options.transport ??
       new BybitProbeTransport({
+        environment: config.environment,
         baseUrl: config.baseUrl,
         ...(credentials === undefined ? {} : { credentials }),
         ...(options.request === undefined ? {} : { request: options.request }),
         clock,
       });
-    const store = options.store ?? new ProbeStore();
     return await executeManualRecovery({
       runId: options.runId,
       accountId,
@@ -474,6 +491,7 @@ async function recordVerdict(
   verdict: ProbeVerdict,
   message: string,
   options: {
+    readonly environment?: ProbeEnvironment;
     readonly accountId?: string;
     readonly scenarios?: readonly SanitizedScenarioFinding[];
     readonly secrets?: readonly string[];
@@ -494,11 +512,12 @@ async function recordVerdict(
       : undefined,
   );
   options.output?.write(
-    `result: ${verdict}\nmessage: ${message}\nnext action: ${nextActionForVerdict(verdict)}\n`,
+    `result: ${verdict}\nmessage: ${message}\nnext action: ${nextActionForVerdict(verdict, options.environment)}\n`,
   );
   if (options.accountId !== undefined) {
     const findings = renderSanitizedFindings({
       runId,
+      environment: options.environment ?? "testnet",
       verdict,
       accountId: options.accountId,
       scenarios: options.scenarios ?? [],
@@ -517,23 +536,34 @@ export async function runCapabilityProbe(
   const output = options.output ?? process.stdout;
   const authorize = options.authorize ?? defaultAuthorization(clock);
   const runId = options.runId ?? newRunId(clock);
-  const store = options.store ?? new ProbeStore();
+  const probeEnvironment = options.environment ?? process.env;
+  const inferredEnvironment: ProbeEnvironment =
+    options.commandEnvironment ??
+    (probeEnvironment.TRADER_ENV === "demo" ? "demo" : "testnet");
+  const store =
+    options.store ?? new ProbeStore({ environment: inferredEnvironment });
   const findings: SanitizedScenarioFinding[] = [];
   let accountId: string | undefined;
   let secrets: readonly string[] = [];
   let writeDispatched = false;
   let trackCurrentRunWrites = false;
+  let resolvedEnvironment: ProbeEnvironment = inferredEnvironment;
   try {
-    const config = resolveProbeConfig(options.environment ?? process.env);
+    const config = resolveProbeConfig(
+      probeEnvironment,
+      options.commandEnvironment,
+    );
+    resolvedEnvironment = config.environment;
+    store.assertEnvironment(config.environment);
     let credentials = options.credentials;
     if (!credentials && !options.transport) {
       const provider =
         options.credentialProvider ?? createMacOSKeychainProvider();
-      credentials = await provider.load("testnet");
+      credentials = await provider.load(config.environment);
     }
     accountId = options.accountId ?? credentials?.accountId;
     if (!accountId)
-      throw new Error("the Testnet account identity is unavailable");
+      throw new Error(`the ${config.label} account identity is unavailable`);
     const verifiedAccountId = accountId;
     secrets =
       credentials === undefined
@@ -542,6 +572,7 @@ export async function runCapabilityProbe(
     const rawTransport =
       options.transport ??
       new BybitProbeTransport({
+        environment: config.environment,
         baseUrl: config.baseUrl,
         ...(credentials === undefined ? {} : { credentials }),
         ...(options.request === undefined ? {} : { request: options.request }),
@@ -602,7 +633,7 @@ export async function runCapabilityProbe(
       });
       if (recovered.verdict !== "CONFIRMED_CLEAN") {
         output.write(
-          `result: ${recovered.verdict}\nmessage: ${recovered.message}\nnext action: ${nextActionForVerdict(recovered.verdict)}\n`,
+          `result: ${recovered.verdict}\nmessage: ${recovered.message}\nnext action: ${nextActionForVerdict(recovered.verdict, config.environment)}\n`,
         );
         return { ...recovered, currentRunId: runId };
       }
@@ -612,11 +643,13 @@ export async function runCapabilityProbe(
     trackCurrentRunWrites = true;
     try {
       output.write(
-        "stage: preflight; reading Testnet instrument, account and symbol state\n",
+        `stage: preflight; reading ${config.label} instrument, account and symbol state\n`,
       );
       const preflight = await runReadOnlyPreflight({
         transport,
         symbol: config.symbol,
+        environment: config.environment,
+        fundingGuidance: config.fundingGuidance,
       });
       const runScenario = async (
         side: "Buy" | "Sell",
@@ -633,7 +666,7 @@ export async function runCapabilityProbe(
           `stage: ${scenario}; dispatching ${side} probe write for ${preflight.symbol} (orderLinkId ${orderLinkId})\n`,
         );
         const plan = buildAttachedEntryPlan({
-          environment: "testnet",
+          environment: config.environment,
           accountId: verifiedAccountId,
           scenario,
           expiresAt: clock() + 120_000,
@@ -674,6 +707,7 @@ export async function runCapabilityProbe(
         if (result.kind === "refused")
           return { kind: "refused", message: result.approval.message };
         const cleanup = await cleanupScenario(result, {
+          environment: config.environment,
           runId,
           attemptId,
           accountId: verifiedAccountId,
@@ -705,7 +739,13 @@ export async function runCapabilityProbe(
               ? "CONTRADICTION"
               : "UNRESOLVED",
           long.message,
-          { accountId, scenarios: findings, secrets, output },
+          {
+            environment: config.environment,
+            accountId,
+            scenarios: findings,
+            secrets,
+            output,
+          },
         );
       }
       const short = await runScenario(
@@ -724,7 +764,13 @@ export async function runCapabilityProbe(
               ? "CONTRADICTION"
               : "UNRESOLVED",
           short.message,
-          { accountId, scenarios: findings, secrets, output },
+          {
+            environment: config.environment,
+            accountId,
+            scenarios: findings,
+            secrets,
+            output,
+          },
         );
       }
       const lostAcknowledgement = await runScenario(
@@ -744,7 +790,13 @@ export async function runCapabilityProbe(
               ? "CONTRADICTION"
               : "UNRESOLVED",
           lostAcknowledgement.message,
-          { accountId, scenarios: findings, secrets, output },
+          {
+            environment: config.environment,
+            accountId,
+            scenarios: findings,
+            secrets,
+            output,
+          },
         );
       }
       const duplicate = await runScenario(
@@ -763,7 +815,13 @@ export async function runCapabilityProbe(
               ? "CONTRADICTION"
               : "UNRESOLVED",
           duplicate.message,
-          { accountId, scenarios: findings, secrets, output },
+          {
+            environment: config.environment,
+            accountId,
+            scenarios: findings,
+            secrets,
+            output,
+          },
         );
       }
       const verdict: ProbeVerdict = "CONFIRMED_CLEAN";
@@ -772,7 +830,13 @@ export async function runCapabilityProbe(
         runId,
         verdict,
         "all deterministic/live probe scenarios reconciled clean",
-        { accountId, scenarios: findings, secrets, output },
+        {
+          environment: config.environment,
+          accountId,
+          scenarios: findings,
+          secrets,
+          output,
+        },
       );
     } finally {
       await store.releaseLock(runId);
@@ -786,6 +850,7 @@ export async function runCapabilityProbe(
         writeDispatched ? "UNRESOLVED" : "PRECONDITION_FAILED",
         message,
         {
+          environment: resolvedEnvironment,
           ...(accountId === undefined ? {} : { accountId }),
           scenarios: findings,
           secrets,
@@ -804,29 +869,58 @@ export async function runCapabilityProbe(
 
 const invokedPath = process.argv[1];
 if (invokedPath && import.meta.url === pathToFileURL(invokedPath).href) {
-  const manualRecoveryIndex = process.argv.indexOf("--manual-recover");
-  if (manualRecoveryIndex >= 0) {
-    const runId = process.argv[manualRecoveryIndex + 1];
-    if (!runId || runId.startsWith("--")) {
-      console.error(
-        "Usage: npm run probe:bybit:testnet:recover -- <saved-run-id>",
-      );
-      process.exitCode = EXIT_CODES.PRECONDITION_FAILED;
-    } else {
-      const result = await runManualRecovery({
-        runId,
-      });
-      console.log(`${result.status}: ${result.message}`);
-      process.exitCode =
-        result.status === "RECOVERED_CLEAN"
-          ? EXIT_CODES.CONFIRMED_CLEAN
-          : result.status === "PRECONDITION_FAILED"
-            ? EXIT_CODES.PRECONDITION_FAILED
-            : EXIT_CODES.UNRESOLVED;
-    }
+  const commandEnvironmentIndex = process.argv.indexOf("--environment");
+  const commandEnvironmentValue =
+    commandEnvironmentIndex >= 0
+      ? process.argv[commandEnvironmentIndex + 1]
+      : undefined;
+  const commandEnvironment: ProbeEnvironment | undefined =
+    commandEnvironmentValue === "testnet" || commandEnvironmentValue === "demo"
+      ? commandEnvironmentValue
+      : undefined;
+  if (commandEnvironmentIndex >= 0 && commandEnvironment === undefined) {
+    console.error("Usage: --environment <testnet|demo>");
+    process.exitCode = EXIT_CODES.PRECONDITION_FAILED;
   } else {
-    const result = await runCapabilityProbe();
-    console.log(`${result.verdict}: ${result.message}`);
-    process.exitCode = EXIT_CODES[result.verdict];
+    const manualRecoveryIndex = process.argv.indexOf("--manual-recover");
+    const commandOptions =
+      commandEnvironment === undefined ? {} : { commandEnvironment };
+    let runId: string | undefined;
+    for (let index = 2; index < process.argv.length; index += 1) {
+      const argument = process.argv[index];
+      if (argument === "--environment") {
+        index += 1;
+        continue;
+      }
+      if (argument === "--manual-recover" || argument === "--") continue;
+      if (argument && !argument.startsWith("--")) {
+        runId = argument;
+        break;
+      }
+    }
+    if (manualRecoveryIndex >= 0) {
+      if (!runId || runId.startsWith("--")) {
+        console.error(
+          "Usage: npm run probe:bybit:recover -- --environment <testnet|demo> <saved-run-id>",
+        );
+        process.exitCode = EXIT_CODES.PRECONDITION_FAILED;
+      } else {
+        const result = await runManualRecovery({
+          runId,
+          ...commandOptions,
+        });
+        console.log(`${result.status}: ${result.message}`);
+        process.exitCode =
+          result.status === "RECOVERED_CLEAN"
+            ? EXIT_CODES.CONFIRMED_CLEAN
+            : result.status === "PRECONDITION_FAILED"
+              ? EXIT_CODES.PRECONDITION_FAILED
+              : EXIT_CODES.UNRESOLVED;
+      }
+    } else {
+      const result = await runCapabilityProbe(commandOptions);
+      console.log(`${result.verdict}: ${result.message}`);
+      process.exitCode = EXIT_CODES[result.verdict];
+    }
   }
 }

@@ -5,6 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 import {
+  buildAttachedEntryPlan,
   reconcileOrder,
   runEntryScenario,
   type ScenarioTransport,
@@ -96,6 +97,25 @@ test("reconciliation treats acknowledgement as pending and delayed visibility as
   assert.equal(result.acknowledgement, "pending");
   assert.equal(result.lookupCount, 3);
   assert.equal(result.terminalState, undefined);
+});
+
+test("attached entry plans preserve the selected environment", () => {
+  const plan = buildAttachedEntryPlan({
+    environment: "demo",
+    accountId: "demo-account",
+    scenario: "long-entry",
+    expiresAt: 100_000,
+    category: "linear",
+    symbol: "DOGEUSDT",
+    side: "Buy",
+    orderLinkId: "demo-run-long",
+    price: "0.1",
+    qty: "51",
+    takeProfit: "0.102",
+    stopLoss: "0.098",
+  });
+  assert.equal(plan.environment, "demo");
+  assert.equal(plan.schemaVersion, 1);
 });
 
 test("history fallback resolves only after realtime budget is exhausted", async () => {

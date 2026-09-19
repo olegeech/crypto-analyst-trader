@@ -19,9 +19,9 @@ function response(result: Record<string, unknown>): BybitResponse {
   return { retCode: 0, retMsg: "OK", result };
 }
 
-function fixturePlan() {
+function fixturePlan(environment: "testnet" | "demo" = "testnet") {
   return buildProbePlan({
-    environment: "testnet",
+    environment,
     accountId: "trading-account",
     scenario: "long-entry",
     expiresAt: 100_000,
@@ -40,6 +40,60 @@ function fixturePlan() {
     },
   });
 }
+
+test("a Demo retention miss remains UNRESOLVED and never writes during recovery", async () => {
+  const root = await mkdtemp(join(tmpdir(), "bybit-probe-demo-recovery-"));
+  try {
+    const store = new ProbeStore({
+      rootDir: root,
+      environment: "demo",
+      clock: () => 1_000,
+      processId: 304,
+      isProcessAlive: () => false,
+    });
+    const plan = fixturePlan("demo");
+    await store.writeIntent({
+      runId: "demo-retention-run",
+      attemptId: "attempt-1",
+      scenario: plan.scenario,
+      plan,
+      planDigest: hashProbePlan(plan),
+      approvedAt: 1_000,
+      approvalExpiresAt: 100_000,
+      createdAt: 1_000,
+      orderLinkId: plan.params.orderLinkId,
+      exchangeOrderId: "entry-1",
+      baselineSignedQty: "0",
+    });
+    let writes = 0;
+    const transport: RecoveryTransport = {
+      async get() {
+        return response({ list: [] });
+      },
+      async post() {
+        writes += 1;
+        throw new Error("retention-miss recovery must not write");
+      },
+    };
+    const result = await recoverInterruptedRun({
+      runId: "demo-retention-run",
+      accountId: "trading-account",
+      store,
+      transport,
+      authorize: async () => {
+        throw new Error("retention-miss recovery must not authorize");
+      },
+      sleep: async () => undefined,
+      realtimeAttempts: 1,
+      historyAttempts: 1,
+    });
+    assert.equal(result.verdict, "UNRESOLVED");
+    assert.match(result.message, /could not be reconciled/);
+    assert.equal(writes, 0);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 test("interrupted dispatch is reconciled under the original run before a clean verdict", async () => {
   const root = await mkdtemp(join(tmpdir(), "bybit-probe-recovery-"));

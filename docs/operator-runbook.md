@@ -41,16 +41,43 @@ the handoff and the exchange-UI manual fallback in `SECURITY.md`; never
 cancel all orders or flatten unowned exposure.
 
 For a saved run whose read-only checks show no matching order, open orders,
-executions or position, use the recovery flow:
+executions or position, use the same-environment recovery flow:
 
 ```text
-npm run probe:bybit:testnet:recover -- <saved-run-id>
+npm run probe:bybit:recover -- --environment <testnet|demo> <saved-run-id>
 ```
 
 It automatically records `RECOVERED_CLEAN` with a timestamp and sanitized
 read-only evidence while preserving the original `UNRESOLVED` result as
 unverified. Owned state is routed through the normal exact-plan recovery path;
 ambiguous state stops and requires the documented exchange-UI fallback.
+
+## Bybit Demo capability probe (issue #75)
+
+The Demo probe is an explicit, operator-only capability check against the
+separate Bybit Demo Trading environment. It is never a production or Testnet
+write and is excluded from default tests, release checks and CI:
+
+```text
+TRADER_ENV=demo npm run probe:bybit:demo
+```
+
+The command accepts only `https://api-demo.bybit.com`, loads only the dedicated
+Demo Keychain service, uses the Demo UID only for sanitized ownership hashing,
+and records evidence as `Demo-observed, Testnet/mainnet unverified`. Demo
+credentials are created with `npm run credentials:setup:demo`; Agent Connect is
+not supported for Demo. If the preflight needs funds, add the exact reported
+shortfall through the Bybit Demo UI. The probe never calls a funding endpoint
+or auto-funds the account.
+
+Before any Demo write, the read-only preflight validates the reconciliation
+reads needed for ambiguous acknowledgements and cleanup. Unsupported or
+invalid reconciliation reads stop the run before the first write. A subsequent
+Demo probe invocation automatically re-reconciles an unresolved Demo run. If
+that cannot prove clean state, use the same-environment read-only recovery
+command above; it never switches the run to Testnet or mainnet. If ownership
+or clean state remains ambiguous, stop and use the exchange UI fallback rather
+than retrying an ambiguous write blindly.
 
 CLI names in this document describe application use cases. Invoke only commands
 implemented by the current `package.json` and released for the selected

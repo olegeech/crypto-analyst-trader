@@ -30,6 +30,52 @@ test("probe configuration reuses the Testnet lock and rejects unsafe origins", (
   );
 });
 
+test("probe configuration accepts only the exact Demo origin", () => {
+  const config = resolveProbeConfig({ TRADER_ENV: "demo" });
+
+  assert.equal(config.environment, "demo");
+  assert.equal(config.baseUrl.toString(), "https://api-demo.bybit.com/");
+  assert.throws(
+    () =>
+      resolveProbeConfig({
+        TRADER_ENV: "demo",
+        BYBIT_API_BASE_URL: "https://api-testnet.bybit.com",
+      }),
+    /BYBIT_API_BASE_URL must be the Bybit Demo base URL/,
+  );
+  assert.throws(
+    () =>
+      resolveProbeConfig({
+        TRADER_ENV: "demo",
+        BYBIT_API_BASE_URL: "https://api.bybit.com",
+      }),
+    /BYBIT_API_BASE_URL must be the Bybit Demo base URL/,
+  );
+  assert.throws(
+    () =>
+      resolveProbeConfig({
+        TRADER_ENV: "demo",
+        BYBIT_API_BASE_URL: "https://api-demo.bybit.com/v5",
+      }),
+    /BYBIT_API_BASE_URL must be the Bybit Demo base URL/,
+  );
+});
+
+test("probe command environment rejects conflicting TRADER_ENV before access", () => {
+  assert.throws(
+    () => resolveProbeConfig({ TRADER_ENV: "testnet" }, "demo"),
+    /probe command requires demo but TRADER_ENV is testnet/,
+  );
+  assert.throws(
+    () => resolveProbeConfig({ TRADER_ENV: "mainnet" }, "testnet"),
+    /probe command requires testnet but TRADER_ENV is mainnet/,
+  );
+  assert.throws(
+    () => resolveProbeConfig({ TRADER_ENV: "mainnet" }),
+    /TRADER_ENV must be testnet or demo/,
+  );
+});
+
 test("probe configuration accepts only uppercase alphanumeric symbols", () => {
   for (const symbol of ["dogeusdt", "DOGE-USDT", "DOGE/USDT", "DOGE USDT"]) {
     assert.throws(
@@ -55,7 +101,7 @@ test("the write probe remains outside release and every workflow", async () => {
   };
   assert.match(
     packageJson.scripts["probe:bybit:testnet"] ?? "",
-    /TRADER_ENV=testnet/,
+    /--environment testnet/,
   );
   assert.match(
     packageJson.scripts["probe:bybit:testnet"] ?? "",
@@ -64,5 +110,17 @@ test("the write probe remains outside release and every workflow", async () => {
   assert.doesNotMatch(
     packageJson.scripts["test:release"] ?? "",
     /probe:bybit:testnet/,
+  );
+  assert.match(
+    packageJson.scripts["probe:bybit:demo"] ?? "",
+    /--environment demo/,
+  );
+  assert.match(
+    packageJson.scripts["probe:bybit:recover"] ?? "",
+    /--manual-recover/,
+  );
+  assert.match(
+    packageJson.scripts["probe:bybit:testnet:recover"] ?? "",
+    /--environment testnet/,
   );
 });

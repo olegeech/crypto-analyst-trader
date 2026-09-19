@@ -1,4 +1,5 @@
 import { reverifyProbeApproval, type ProbeApproval } from "./approval.js";
+import type { ProbeEnvironment } from "./config.js";
 import { decimalIsZero, parseDecimal } from "./decimal.js";
 import {
   buildProbePlan,
@@ -381,6 +382,7 @@ function rejectionReconciliation(message: string): ReconciliationResult {
 
 function sanitizedDispatchError(
   error: unknown,
+  environment: ProbeEnvironment = "testnet",
 ): DispatchErrorEvidence | undefined {
   if (error === undefined) return undefined;
   if (error instanceof BybitProbeTransportError) {
@@ -398,7 +400,7 @@ function sanitizedDispatchError(
       explanation:
         retCode === undefined
           ? "The request outcome is ambiguous; reconcile saved order and account state before any retry."
-          : classifyRetCode(retCode).message,
+          : classifyRetCode(retCode, environment).message,
     };
   }
   return {
@@ -480,7 +482,10 @@ export async function runEntryScenario(
     duplicateOutcome === "rejected" ||
     attachedExitRejection ||
     deterministicExchangeRejection;
-  const dispatchErrorEvidence = sanitizedDispatchError(dispatchError);
+  const dispatchErrorEvidence = sanitizedDispatchError(
+    dispatchError,
+    options.plan.environment,
+  );
   const reconciliation = isDeterministicRejection
     ? rejectionReconciliation(
         duplicateOutcome === "rejected"
@@ -536,7 +541,7 @@ export async function runEntryScenario(
 }
 
 export function buildAttachedEntryPlan(input: {
-  readonly environment: "testnet";
+  readonly environment: ProbeEnvironment;
   readonly accountId: string;
   readonly scenario: string;
   readonly expiresAt: number;

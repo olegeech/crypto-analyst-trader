@@ -824,6 +824,26 @@ test("mainnet load never falls back to Testnet", async () => {
   );
 });
 
+test("Demo load uses only the dedicated Demo service", async () => {
+  const { calls, runner } = runnerFor((args) => ({
+    stdout:
+      args[args.indexOf("-a") + 1] === "api-key"
+        ? `${credentials.apiKey}\n`
+        : args[args.indexOf("-a") + 1] === "api-secret"
+          ? `${credentials.apiSecret}\n`
+          : `${credentials.accountId}\n`,
+    stderr: "",
+    exitCode: 0,
+  }));
+  const provider = createMacOSKeychainProvider({ runner, platform: "darwin" });
+
+  assert.deepEqual(await provider.load("demo"), credentials);
+  assert.deepEqual(
+    [...new Set(calls.map(({ args }) => args[args.indexOf("-s") + 1]))],
+    ["com.crypto-analyst-trader.bybit.demo"],
+  );
+});
+
 test("locked Keychain access returns a safe actionable error", async () => {
   const { runner } = runnerFor(() => ({
     stdout: "",

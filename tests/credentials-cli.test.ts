@@ -89,6 +89,46 @@ test("remove CLI passes only the selected environment", async () => {
   assert.equal(removed, "mainnet");
 });
 
+test("setup and remove CLI support the isolated Demo environment", async () => {
+  const events: string[] = [];
+  let promptIndex = 0;
+  const code = await runCredentialsCli(["setup", "demo"], {
+    output: { write: (message) => events.push(message) },
+    prompt: async () => values[promptIndex++] ?? "",
+    provider: {
+      load: async () => {
+        throw new Error("unused");
+      },
+      save: async (environment, credentials) => {
+        events.push(`save:${environment}:${credentials.accountId}`);
+      },
+      remove: async () => undefined,
+    },
+  });
+
+  assert.equal(code, 0);
+  assert.match(events.join(""), /Stored Bybit demo credentials/);
+  assert.match(events.join(""), /save:demo:test-account/);
+
+  let removed: string | undefined;
+  assert.equal(
+    await runCredentialsCli(["remove", "demo"], {
+      output: { write: () => undefined },
+      provider: {
+        load: async () => {
+          throw new Error("unused");
+        },
+        save: async () => undefined,
+        remove: async (environment) => {
+          removed = environment;
+        },
+      },
+    }),
+    0,
+  );
+  assert.equal(removed, "demo");
+});
+
 test("CLI rejects invalid commands without touching the provider", async () => {
   let touched = false;
   const code = await runCredentialsCli(["status", "testnet"], {

@@ -12,10 +12,12 @@ import {
 import process from "node:process";
 import { join } from "node:path";
 
+import type { ProbeEnvironment } from "./config.js";
 import { parseDecimal, toDecimalString } from "./decimal.js";
 import { hashProbePlan, type ProbePlan } from "./probe-plan.js";
 
 export const DEFAULT_PROBE_DATA_ROOT = "data/private/bybit-probe";
+export const DEFAULT_DEMO_PROBE_DATA_ROOT = "data/private/bybit-probe-demo";
 export const UNRESOLVED_RUN_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1_000;
 export const MANUAL_RECOVERY_STATUS = "RECOVERED_CLEAN" as const;
 export const LEGACY_MANUAL_RECOVERY_STATUS =
@@ -398,7 +400,7 @@ function validateStoredPlan(value: unknown): StoredPlan {
   if (
     Object.keys(plan).some((field) => !STORED_PLAN_FIELDS.has(field)) ||
     plan.schemaVersion !== 1 ||
-    plan.environment !== "testnet"
+    (plan.environment !== "testnet" && plan.environment !== "demo")
   ) {
     throw new ProbeStoreError("invalid-record", "the stored plan is invalid");
   }
@@ -541,25 +543,42 @@ function defaultIsProcessAlive(pid: number): boolean {
 
 export class ProbeStore {
   readonly rootDir: string;
+  readonly environment: ProbeEnvironment;
   private readonly clock: () => number;
   private readonly processId: number;
   private readonly isProcessAlive: (pid: number) => boolean;
 
   constructor({
-    rootDir = DEFAULT_PROBE_DATA_ROOT,
+    rootDir,
+    environment = "testnet",
     clock = Date.now,
     processId = process.pid,
     isProcessAlive = defaultIsProcessAlive,
   }: {
     rootDir?: string;
+    environment?: ProbeEnvironment;
     clock?: () => number;
     processId?: number;
     isProcessAlive?: (pid: number) => boolean;
   } = {}) {
-    this.rootDir = rootDir;
+    this.environment = environment;
+    this.rootDir =
+      rootDir ??
+      (environment === "demo"
+        ? DEFAULT_DEMO_PROBE_DATA_ROOT
+        : DEFAULT_PROBE_DATA_ROOT);
     this.clock = clock;
     this.processId = processId;
     this.isProcessAlive = isProcessAlive;
+  }
+
+  assertEnvironment(environment: ProbeEnvironment): void {
+    if (environment !== this.environment) {
+      throw new ProbeStoreError(
+        "invalid-record",
+        `probe store is for ${this.environment}, not ${environment}`,
+      );
+    }
   }
 
   private async ensureRoot(): Promise<void> {
@@ -655,6 +674,7 @@ export class ProbeStore {
     safeId(input.runId, "runId");
     safeId(input.attemptId, "attemptId");
     safeText(input.scenario, "scenario");
+    this.assertEnvironment(input.plan.environment);
     if (!/^[a-f0-9]{64}$/.test(input.planDigest)) {
       throw new ProbeStoreError("invalid-record", "planDigest is invalid");
     }
@@ -785,6 +805,7 @@ export class ProbeStore {
       throw new ProbeStoreError("invalid-record", "planDigest is invalid");
     }
     const plan = validateStoredPlan(record.plan);
+    this.assertEnvironment(plan.environment);
     if (plan.scenario !== scenario) {
       throw new ProbeStoreError(
         "invalid-record",

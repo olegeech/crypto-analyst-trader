@@ -22,11 +22,11 @@ function promptVisible(label: string): Promise<string> {
 function isEnvironment(
   value: string | undefined,
 ): value is CredentialEnvironment {
-  return value === "testnet" || value === "mainnet";
+  return value === "testnet" || value === "mainnet" || value === "demo";
 }
 
 function usage(): string {
-  return "Usage: npm run credentials:setup:<testnet|mainnet> or npm run credentials:remove:<testnet|mainnet>";
+  return "Usage: npm run credentials:setup:<testnet|mainnet|demo> or npm run credentials:remove:<testnet|mainnet|demo>";
 }
 
 function promptHidden(label: string): Promise<string> {

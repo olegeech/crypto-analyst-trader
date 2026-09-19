@@ -3,6 +3,8 @@ import type {
   ExchangeCredentials,
 } from "./credential-provider.js";
 
+export type AgentConnectEnvironment = Exclude<CredentialEnvironment, "demo">;
+
 export type AgentConnectSelection =
   | { kind: "existing"; accountId: string }
   | { kind: "create"; existingAccountIds: readonly string[] };
@@ -83,19 +85,19 @@ export interface AgentConnectTransport {
 
 export interface AgentConnectClient {
   createSession(
-    environment: CredentialEnvironment,
+    environment: AgentConnectEnvironment,
     options?: AgentConnectSessionOptions,
   ): Promise<AgentConnectSession>;
   exchangeCode(
-    environment: CredentialEnvironment,
+    environment: AgentConnectEnvironment,
     callback: AgentConnectCallback,
   ): Promise<string>;
   listAccounts(
-    environment: CredentialEnvironment,
+    environment: AgentConnectEnvironment,
     accessToken: string,
   ): Promise<AgentConnectAccount[]>;
   fetchAccountCredentials(
-    environment: CredentialEnvironment,
+    environment: AgentConnectEnvironment,
     accessToken: string,
     selection: AgentConnectSelection,
   ): Promise<ExchangeCredentials>;

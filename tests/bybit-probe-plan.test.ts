@@ -52,6 +52,15 @@ test("equivalent plans have one canonical serialization and digest", () => {
   assert.match(hashProbePlan(one), /^[a-f0-9]{64}$/);
 });
 
+test("Demo plans keep schema v1 while remaining distinct from Testnet plans", () => {
+  const testnet = buildProbePlan(baseInput);
+  const demo = buildProbePlan({ ...baseInput, environment: "demo" });
+  assert.equal(testnet.schemaVersion, 1);
+  assert.equal(demo.schemaVersion, 1);
+  assert.equal(demo.environment, "demo");
+  assert.notEqual(hashProbePlan(demo), hashProbePlan(testnet));
+});
+
 test("every material request field changes the digest", () => {
   const original = buildProbePlan(baseInput);
   for (const [field, value] of [

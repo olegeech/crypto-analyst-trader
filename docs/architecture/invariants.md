@@ -7,9 +7,9 @@ rationale and decision history.
 1. Stale, incomplete, mixed-run or contradictory state never authorizes new
    exposure.
 2. An exchange write requires an approved, unexpired exact plan hash. The
-   bounded Testnet capability probe treats explicit invocation as its
-   run-scoped authorization, while still hashing and revalidating every exact
-   write plan before dispatch.
+   bounded Testnet and Demo capability probes treat explicit invocation as
+   their run-scoped authorization, while still hashing and revalidating every
+   exact write plan before dispatch.
 3. A strategy exclusively owns `account + symbol + side` in the MVP.
 4. Only orders with durable local ownership and matching exchange identity may
    be changed or cancelled.

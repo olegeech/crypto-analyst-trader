@@ -12,6 +12,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 import {
+  DEFAULT_DEMO_PROBE_DATA_ROOT,
   EXIT_CODES,
   ProbeStore,
   type StoredIntentInput,
@@ -90,6 +91,49 @@ test("intent is fully present before dispatch and contains no secret-shaped data
     );
   } finally {
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Demo uses its own default root and cannot share Testnet intents", async () => {
+  assert.equal(
+    new ProbeStore({ environment: "demo" }).rootDir,
+    DEFAULT_DEMO_PROBE_DATA_ROOT,
+  );
+  const testnetRoot = await mkdtemp(join(tmpdir(), "bybit-probe-testnet-"));
+  const demoRoot = await mkdtemp(join(tmpdir(), "bybit-probe-demo-"));
+  const testnetStore = new ProbeStore({
+    rootDir: testnetRoot,
+    environment: "testnet",
+    clock: () => 1_000,
+    processId: 12_345,
+    isProcessAlive: () => false,
+  });
+  const demoStore = new ProbeStore({
+    rootDir: demoRoot,
+    environment: "demo",
+    clock: () => 1_000,
+    processId: 12_345,
+    isProcessAlive: () => false,
+  });
+  const demoPlan = buildProbePlan({ ...plan(), environment: "demo" });
+  try {
+    await testnetStore.writeIntent(intent("testnet-run"));
+    await demoStore.writeIntent(intent("demo-run", demoPlan));
+    assert.deepEqual(
+      (await testnetStore.listSavedRuns()).map((run) => run.runId),
+      ["testnet-run"],
+    );
+    assert.deepEqual(
+      (await demoStore.listSavedRuns()).map((run) => run.runId),
+      ["demo-run"],
+    );
+    await assert.rejects(
+      testnetStore.writeIntent(intent("crossed-run", demoPlan)),
+      /probe store is for testnet, not demo/,
+    );
+  } finally {
+    await rm(testnetRoot, { recursive: true, force: true });
+    await rm(demoRoot, { recursive: true, force: true });
   }
 });
 
