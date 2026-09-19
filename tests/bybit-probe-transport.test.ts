@@ -64,8 +64,46 @@ test("retCode classification keeps signing defects separate from credential reco
     false,
   );
   assert.match(classifyRetCode(10003).message, /credentials:connect:testnet/);
+  for (const code of [10003, 10005, 33004]) {
+    const failure = classifyRetCode(code, "demo");
+    assert.match(failure.message, /credentials:setup:demo/);
+    assert.doesNotMatch(failure.message, /credentials:connect/);
+  }
   assert.match(classifyRetCode(10024).message, /compliance rules/i);
   assert.match(classifyRetCode(10000).message, /ambiguous/i);
+});
+
+test("Demo transport loads only Demo credentials and sends only to the Demo origin", async () => {
+  const requests: string[] = [];
+  let loadedEnvironment: string | undefined;
+  const transport = createBybitProbeTransport({
+    environment: "demo",
+    baseUrl: new URL("https://api-demo.bybit.com/"),
+    credentialProvider: {
+      load: async (environment) => {
+        loadedEnvironment = environment;
+        return credentials;
+      },
+    },
+    clock: () => 1_672_052_955_758,
+    clockOffsetMs: 0,
+    request: async (url) => {
+      requests.push(String(url));
+      return new Response(
+        JSON.stringify({ retCode: 0, retMsg: "OK", result: {} }),
+        { status: 200 },
+      );
+    },
+  });
+
+  await transport.get("/v5/account/wallet-balance", {
+    accountType: "UNIFIED",
+  });
+  assert.equal(loadedEnvironment, "demo");
+  assert.equal(
+    new URL(requests[0] ?? "https://invalid").origin,
+    "https://api-demo.bybit.com",
+  );
 });
 
 test("invalid response shapes fail before evidence can be consumed", () => {

@@ -14,6 +14,7 @@ import { accountHash, ProbeStore } from "../scripts/bybit-probe/store.js";
 test("findings use an account hash prefix and never print a full exchange ID", () => {
   const output = renderSanitizedFindings({
     runId: "run-1",
+    environment: "testnet",
     verdict: "CONFIRMED_CLEAN",
     accountId: "private-account-id",
     scenarios: [
@@ -44,6 +45,21 @@ test("findings use an account hash prefix and never print a full exchange ID", (
     output,
     /dispatch error: exchange-rejection; transport kind: exchange-failure; retCode: 12345/,
   );
+});
+
+test("Demo findings identify the observed environment and transfer boundary", () => {
+  const output = renderSanitizedFindings({
+    runId: "demo-run",
+    environment: "demo",
+    verdict: "UNRESOLVED",
+    accountId: "demo-uid-private",
+    scenarios: [],
+  });
+
+  assert.match(output, /Bybit Demo capability probe findings/);
+  assert.match(output, /environment: demo/);
+  assert.match(output, /Demo-observed, Testnet\/mainnet unverified/);
+  assert.doesNotMatch(output, /demo-uid-private/);
 });
 
 test("sanitized-output enforcement rejects a credential-shaped value", () => {

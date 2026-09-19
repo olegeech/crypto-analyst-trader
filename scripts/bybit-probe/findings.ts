@@ -1,5 +1,6 @@
 import { accountHash, type ProbeVerdict } from "./store.js";
 import type { DispatchErrorEvidence } from "./scenarios.js";
+import type { ProbeEnvironment } from "./config.js";
 
 export type AttachedExitFinding =
   "accepted" | "silent-drop" | "rejected-110057" | "unverified";
@@ -19,6 +20,7 @@ export interface SanitizedScenarioFinding {
 
 export interface FindingsInput {
   readonly runId: string;
+  readonly environment: ProbeEnvironment;
   readonly verdict: ProbeVerdict;
   readonly accountId: string;
   readonly scenarios: readonly SanitizedScenarioFinding[];
@@ -45,8 +47,11 @@ function displayDispatchError(error: DispatchErrorEvidence): string {
 }
 
 export function renderSanitizedFindings(input: FindingsInput): string {
+  const label = input.environment === "demo" ? "Demo" : "Testnet";
   const lines = [
-    "Bybit Testnet capability probe findings",
+    `Bybit ${label} capability probe findings`,
+    `environment: ${input.environment}`,
+    `transfer status: ${input.environment === "demo" ? "Demo-observed, Testnet/mainnet unverified" : "Testnet-observed, Demo/mainnet unverified"}`,
     `run: ${display(input.runId)}`,
     `verdict: ${input.verdict}`,
     `account: ${accountHash(input.accountId)}`,

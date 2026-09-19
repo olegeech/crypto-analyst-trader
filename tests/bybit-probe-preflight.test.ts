@@ -79,6 +79,55 @@ test("read-only preflight sizes DOGEUSDT within the exact notional cap", async (
   ]);
 });
 
+test("Demo preflight checks reconciliation reads before allowing a write", async () => {
+  const { transport, requests } = transportFor({
+    "/v5/order/history": { list: [] },
+    "/v5/execution/list": { list: [] },
+  });
+  const result = await runReadOnlyPreflight({
+    transport,
+    symbol: "DOGEUSDT",
+    environment: "demo",
+  });
+
+  assert.equal(result.baseline.flat, true);
+  const historyIndex = requests.indexOf("/v5/order/history");
+  const executionIndex = requests.indexOf("/v5/execution/list");
+  assert.ok(historyIndex >= 0);
+  assert.equal(executionIndex, historyIndex + 1);
+  assert.ok(executionIndex < requests.indexOf("/v5/account/wallet-balance"));
+});
+
+test("unsupported Demo reconciliation reads produce a limitation before writes", async () => {
+  const { transport } = transportFor({
+    "/v5/order/history": {},
+  });
+  const originalGet = transport.get;
+  const limitedTransport = {
+    async get(path: string) {
+      if (path === "/v5/order/history") {
+        throw new Error("unsupported Demo endpoint");
+      }
+      return originalGet(path);
+    },
+  };
+
+  await assert.rejects(
+    runReadOnlyPreflight({
+      transport: limitedTransport,
+      symbol: "DOGEUSDT",
+      environment: "demo",
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof PreflightError);
+      assert.equal(error.kind, "invalid-response");
+      assert.match(error.message, /Demo.*reconciliation/);
+      assert.match(error.message, /no exchange write was attempted/);
+      return true;
+    },
+  );
+});
+
 test("minimum notional above 10 USDT fails before any write path", async () => {
   const { transport } = transportFor({
     "/v5/market/instruments-info": {

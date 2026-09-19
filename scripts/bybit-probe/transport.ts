@@ -4,9 +4,11 @@ import { createMacOSKeychainProvider } from "../../src/adapters/macos-keychain.j
 import {
   connectCommand,
   CredentialProviderError,
+  setupCommand,
   type CredentialProvider,
   type ExchangeCredentials,
 } from "../../src/ports/credential-provider.js";
+import type { ProbeEnvironment } from "./config.js";
 import { TIME_PATH } from "../testnet-smoke.js";
 
 type JsonObject = Record<string, unknown>;
@@ -72,6 +74,7 @@ export class BybitProbeTransportError extends Error {
 }
 
 export interface ProbeTransportRequestOptions {
+  readonly environment?: ProbeEnvironment;
   readonly baseUrl: URL;
   readonly credentials?: ExchangeCredentials;
   readonly credentialProvider?: Pick<CredentialProvider, "load">;
@@ -101,7 +104,13 @@ export function hmacSha256(payload: string, secret: string): string {
   return createHmac("sha256", secret).update(payload, "utf8").digest("hex");
 }
 
-export function classifyRetCode(retCode: number): RetCodeClassification {
+export function classifyRetCode(
+  retCode: number,
+  environment: ProbeEnvironment = "testnet",
+): RetCodeClassification {
+  const label = environment === "demo" ? "Demo" : "Testnet";
+  const credentialCommand =
+    environment === "demo" ? setupCommand("demo") : connectCommand("testnet");
   switch (retCode) {
     case 10000:
       return {
@@ -132,21 +141,21 @@ export function classifyRetCode(retCode: number): RetCodeClassification {
         kind: "invalid-credentials",
         retCode,
         recommendReconnect: true,
-        message: `Bybit rejected the API key or environment. Verify the Testnet credential with ${connectCommand("testnet")}.`,
+        message: `Bybit rejected the API key or environment. Verify the ${label} credential with ${credentialCommand}.`,
       };
     case 33004:
       return {
         kind: "expired-credentials",
         retCode,
         recommendReconnect: true,
-        message: `The Bybit API key is expired. Reconnect the Testnet credential with ${connectCommand("testnet")}.`,
+        message: `The Bybit API key is expired. Verify the ${label} credential with ${credentialCommand}.`,
       };
     case 10005:
       return {
         kind: "permission-denied",
         retCode,
         recommendReconnect: true,
-        message: `The Testnet credential lacks the required permission. Reconnect it with ${connectCommand("testnet")}.`,
+        message: `The ${label} credential lacks the required permission. Verify it with ${credentialCommand}.`,
       };
     case 10010:
       return {
@@ -161,8 +170,7 @@ export function classifyRetCode(retCode: number): RetCodeClassification {
         kind: "exchange-failure",
         retCode,
         recommendReconnect: false,
-        message:
-          "Bybit rejected the write because compliance rules were triggered; review the Testnet account eligibility before retrying.",
+        message: `Bybit rejected the write because compliance rules were triggered; review the ${label} account eligibility before retrying.`,
       };
     case 10016:
       return {
@@ -249,9 +257,10 @@ function requestUrl(baseUrl: URL, path: string, query: string): string {
 
 function errorForResponse(
   response: BybitResponse,
+  environment: ProbeEnvironment,
 ): BybitProbeTransportError | null {
   if (response.retCode === 0) return null;
-  const classification = classifyRetCode(response.retCode);
+  const classification = classifyRetCode(response.retCode, environment);
   return new BybitProbeTransportError(
     classification.kind,
     classification.message,
@@ -283,6 +292,7 @@ function parseServerTime(response: BybitResponse): number {
 }
 
 export class BybitProbeTransport {
+  private readonly environment: ProbeEnvironment;
   private readonly baseUrl: URL;
   private readonly credentialProvider: Pick<CredentialProvider, "load">;
   private readonly injectedCredentials: ExchangeCredentials | undefined;
@@ -294,6 +304,7 @@ export class BybitProbeTransport {
   private credentials: ExchangeCredentials | undefined;
 
   constructor(options: ProbeTransportRequestOptions) {
+    this.environment = options.environment ?? "testnet";
     this.baseUrl = new URL(options.baseUrl.toString());
     this.injectedCredentials = options.credentials;
     this.credentialProvider =
@@ -323,13 +334,13 @@ export class BybitProbeTransport {
     try {
       this.credentials =
         this.injectedCredentials ??
-        (await this.credentialProvider.load("testnet"));
+        (await this.credentialProvider.load(this.environment));
       return this.credentials;
     } catch (error) {
       if (error instanceof CredentialProviderError) throw error;
       throw new BybitProbeTransportError(
         "transport-failed",
-        "The Testnet credential provider could not be accessed.",
+        `The ${this.environment === "demo" ? "Demo" : "Testnet"} credential provider could not be accessed.`,
       );
     }
   }
@@ -398,13 +409,13 @@ export class BybitProbeTransport {
     } catch {
       throw new BybitProbeTransportError(
         "transport-failed",
-        "The Bybit Testnet request could not be completed.",
+        `The Bybit ${this.environment === "demo" ? "Demo" : "Testnet"} request could not be completed.`,
       );
     }
     if (!response.ok) {
       throw new BybitProbeTransportError(
         "transport-failed",
-        `Bybit Testnet returned HTTP ${response.status}.`,
+        `Bybit ${this.environment === "demo" ? "Demo" : "Testnet"} returned HTTP ${response.status}.`,
       );
     }
     let payload: unknown;
@@ -417,7 +428,7 @@ export class BybitProbeTransport {
       );
     }
     const validated = validateBybitResponse(payload);
-    const failure = errorForResponse(validated);
+    const failure = errorForResponse(validated, this.environment);
     if (failure) throw failure;
     return validated;
   }

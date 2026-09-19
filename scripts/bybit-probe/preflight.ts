@@ -14,6 +14,7 @@ import {
   type Decimal,
 } from "./decimal.js";
 import type { QueryInput, BybitResponse } from "./transport.js";
+import type { ProbeEnvironment } from "./config.js";
 
 const MAX_NOTIONAL = parseDecimal("10");
 const BALANCE_MULTIPLIER = parseDecimal("5");
@@ -88,6 +89,8 @@ export interface PreflightOptions {
   readonly symbol: string;
   readonly category?: string;
   readonly tickOffsetTicks?: bigint;
+  readonly environment?: ProbeEnvironment;
+  readonly fundingGuidance?: string;
 }
 
 function asObject(value: unknown, label: string): JsonObject {
@@ -374,6 +377,13 @@ export async function runReadOnlyPreflight(
   options: PreflightOptions,
 ): Promise<PreflightResult> {
   const category = options.category ?? "linear";
+  const environment = options.environment ?? "testnet";
+  const label = environment === "demo" ? "Demo" : "Testnet";
+  const fundingGuidance =
+    options.fundingGuidance ??
+    (environment === "demo"
+      ? "through the Bybit Demo UI"
+      : "using the Bybit Testnet faucet");
   const tickOffsetTicks = options.tickOffsetTicks ?? DEFAULT_TICK_OFFSET;
   const requestPaths: string[] = [];
   const get = async (
@@ -412,6 +422,28 @@ export async function runReadOnlyPreflight(
     );
   }
 
+  if (environment === "demo") {
+    const capabilityRead = async (
+      path: string,
+      readLabel: string,
+    ): Promise<void> => {
+      try {
+        listFrom(
+          await get(path, { category, symbol: options.symbol, limit: "1" }),
+          readLabel,
+        );
+      } catch {
+        throw new PreflightError(
+          "invalid-response",
+          `Bybit ${label} ${readLabel} reconciliation read is unsupported or invalid; no exchange write was attempted.`,
+          `Use a ${label} account where ${readLabel} reconciliation reads are supported, then rerun the read-only preflight.`,
+        );
+      }
+    };
+    await capabilityRead("/v5/order/history", "order/history");
+    await capabilityRead("/v5/execution/list", "execution/list");
+  }
+
   const sizes = {
     Buy: deriveSize("Buy", book, instrument, tickOffsetTicks),
     Sell: deriveSize("Sell", book, instrument, tickOffsetTicks),
@@ -437,8 +469,8 @@ export async function runReadOnlyPreflight(
       subtractDecimals(requiredBalance, availableBalance),
     );
     throw precondition(
-      `Available Testnet USDT is ${availableBalanceText}; at least ${requiredBalanceText} USDT is required (five times the planned probe notional). Add at least ${shortfallText} USDT using the Bybit Testnet faucet, then rerun the probe.`,
-      `Add at least ${shortfallText} USDT using the Bybit Testnet faucet, then rerun the read-only preflight.`,
+      `Available ${label} USDT is ${availableBalanceText}; at least ${requiredBalanceText} USDT is required (five times the planned probe notional). Add at least ${shortfallText} USDT ${fundingGuidance}, then rerun the probe.`,
+      `Add at least ${shortfallText} USDT ${fundingGuidance}, then rerun the read-only preflight.`,
     );
   }
 
