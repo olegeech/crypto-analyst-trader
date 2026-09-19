@@ -13,12 +13,19 @@ import {
   toDecimalString,
   type Decimal,
 } from "./decimal.js";
-import type { QueryInput, BybitResponse } from "./transport.js";
+import {
+  BybitProbeTransportError,
+  type QueryInput,
+  type BybitResponse,
+} from "./transport.js";
 import type { ProbeEnvironment } from "./config.js";
 
 const MAX_NOTIONAL = parseDecimal("10");
 const BALANCE_MULTIPLIER = parseDecimal("5");
 const DEFAULT_TICK_OFFSET = 2n;
+// A valid, deterministic non-owned ID lets the Demo gate exercise the same
+// ownership-filtered reads used by reconciliation without creating an order.
+const CAPABILITY_PROBE_ORDER_LINK_ID = "capability-probe-no-match";
 
 export interface ReadOnlyTransport {
   get(path: string, query?: QueryInput): Promise<BybitResponse>;
@@ -428,11 +435,43 @@ export async function runReadOnlyPreflight(
       readLabel: string,
     ): Promise<void> => {
       try {
-        listFrom(
-          await get(path, { category, symbol: options.symbol, limit: "1" }),
-          readLabel,
-        );
-      } catch {
+        const response = await get(path, {
+          category,
+          symbol: options.symbol,
+          orderLinkId: CAPABILITY_PROBE_ORDER_LINK_ID,
+          limit: "1",
+        });
+        let records: readonly JsonObject[];
+        try {
+          records = listFrom(response, readLabel);
+        } catch {
+          throw new PreflightError(
+            "invalid-response",
+            `Bybit ${label} ${readLabel} reconciliation read is unsupported or invalid; no exchange write was attempted.`,
+            `Use a ${label} account where ${readLabel} reconciliation reads are supported, then rerun the read-only preflight.`,
+          );
+        }
+        if (records.length > 0) {
+          throw new PreflightError(
+            "invalid-response",
+            `Bybit ${label} ${readLabel} reconciliation read did not honor the synthetic ownership filter; no exchange write was attempted.`,
+            `Use a ${label} account where ${readLabel} ownership-filtered reads are supported, then rerun the read-only preflight.`,
+          );
+        }
+        const nextPageCursor = response.result.nextPageCursor;
+        if (
+          nextPageCursor !== undefined &&
+          typeof nextPageCursor !== "string"
+        ) {
+          throw new PreflightError(
+            "invalid-response",
+            `Bybit ${label} ${readLabel} reconciliation read returned an invalid pagination cursor; no exchange write was attempted.`,
+            `Use a ${label} account where ${readLabel} pagination is supported, then rerun the read-only preflight.`,
+          );
+        }
+      } catch (error) {
+        if (error instanceof BybitProbeTransportError) throw error;
+        if (error instanceof PreflightError) throw error;
         throw new PreflightError(
           "invalid-response",
           `Bybit ${label} ${readLabel} reconciliation read is unsupported or invalid; no exchange write was attempted.`,
@@ -440,6 +479,7 @@ export async function runReadOnlyPreflight(
         );
       }
     };
+    await capabilityRead("/v5/order/realtime", "order/realtime");
     await capabilityRead("/v5/order/history", "order/history");
     await capabilityRead("/v5/execution/list", "execution/list");
   }
