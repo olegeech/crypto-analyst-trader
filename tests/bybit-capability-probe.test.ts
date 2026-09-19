@@ -22,6 +22,8 @@ function response(result: Record<string, unknown>): BybitResponse {
 }
 
 type ProbeFixtureOptions = {
+  readonly environment?: "testnet" | "demo";
+  readonly unsupportedDemoReconciliation?: boolean;
   readonly pendingOpen?: boolean;
   readonly recoveryOrder?: boolean;
   readonly rejectionCode?: 10014 | 10024 | 110057 | 12345;
@@ -97,6 +99,13 @@ function fixtureTransport(options: ProbeFixtureOptions = {}) {
       }
       if (path === "/v5/account/wallet-balance") {
         return response({ list: [{ totalAvailableBalance: "100" }] });
+      }
+      if (
+        options.environment === "demo" &&
+        options.unsupportedDemoReconciliation &&
+        (path === "/v5/order/history" || path === "/v5/execution/list")
+      ) {
+        return response({ list: "unsupported" });
       }
       if (path === "/v5/execution/list") return response({ list: [] });
       if (path === "/v5/order/realtime") {
@@ -177,9 +186,11 @@ async function runFixture(
   options: ProbeFixtureOptions = {},
   authorize: (plan: ProbePlan) => Promise<ProbeApproval> = approved(1_000),
 ) {
+  const environment = options.environment ?? "testnet";
   const root = await mkdtemp(join(tmpdir(), "bybit-capability-probe-"));
   const store = new ProbeStore({
     rootDir: root,
+    environment,
     clock: () => 1_000,
     processId: 7_001,
     isProcessAlive: () => false,
@@ -187,8 +198,8 @@ async function runFixture(
   const fixture = fixtureTransport(options);
   const output: string[] = [];
   const result = await runCapabilityProbe({
-    environment: { TRADER_ENV: "testnet" },
-    accountId: "testnet-account",
+    environment: { TRADER_ENV: environment },
+    accountId: `${environment}-account`,
     transport: fixture.transport,
     store,
     runId: "probe-test",
@@ -274,6 +285,44 @@ test("orchestrator runs preflight, long, short, lost acknowledgement, duplicate,
       ),
     );
     assert.match(output, /duplicate-client-order-id/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Demo runs use Demo plans and the isolated store through the bounded flow", async () => {
+  const { result, root, store, output } = await runFixture({
+    environment: "demo",
+  });
+  try {
+    assert.equal(result.verdict, "CONFIRMED_CLEAN");
+    const saved = await store.listSavedRuns();
+    assert.equal(saved[0]?.intents[0]?.plan.environment, "demo");
+    assert.match(output, /Bybit Demo capability probe findings/);
+    assert.match(output, /transfer status: Demo-observed/);
+    assert.equal(store.environment, "demo");
+    assert.match(store.rootDir, /bybit-capability-probe-/);
+    assert.ok(root.length > 0);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Demo reconciliation capability is a write gate", async () => {
+  const { result, fixture, output, root } = await runFixture({
+    environment: "demo",
+    unsupportedDemoReconciliation: true,
+  });
+  try {
+    assert.equal(result.verdict, "PRECONDITION_FAILED");
+    assert.match(
+      output,
+      /Demo .*reconciliation read is unsupported or invalid/,
+    );
+    assert.equal(
+      fixture.events.filter((event) => event.kind === "post").length,
+      0,
+    );
   } finally {
     await rm(root, { recursive: true, force: true });
   }

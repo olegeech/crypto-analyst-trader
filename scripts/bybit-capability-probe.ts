@@ -176,6 +176,7 @@ async function readOwnedExposure(
 async function cleanupScenario(
   result: DispatchedEntryScenarioResult,
   options: {
+    readonly environment: ProbeEnvironment;
     readonly runId: string;
     readonly attemptId: string;
     readonly accountId: string;
@@ -228,6 +229,7 @@ async function cleanupScenario(
   }
   if (order && result.kind === "resting") {
     const cleanup = await cleanupOwnedEntry({
+      environment: options.environment,
       runId: options.runId,
       attemptId: `${options.attemptId}-cancel`,
       accountId: options.accountId,
@@ -291,6 +293,7 @@ async function cleanupScenario(
       ),
     };
   const flattened = await flattenOwnedExposure({
+    environment: options.environment,
     runId: options.runId,
     attemptId: `${options.attemptId}-flatten`,
     accountId: options.accountId,
@@ -414,6 +417,9 @@ export async function runManualRecovery(
       options.environment ?? process.env,
       options.commandEnvironment,
     );
+    const store =
+      options.store ?? new ProbeStore({ environment: config.environment });
+    store.assertEnvironment(config.environment);
     let credentials = options.credentials;
     if (!credentials && !options.transport) {
       const provider =
@@ -432,7 +438,6 @@ export async function runManualRecovery(
         ...(options.request === undefined ? {} : { request: options.request }),
         clock,
       });
-    const store = options.store ?? new ProbeStore();
     return await executeManualRecovery({
       runId: options.runId,
       accountId,
@@ -531,20 +536,25 @@ export async function runCapabilityProbe(
   const output = options.output ?? process.stdout;
   const authorize = options.authorize ?? defaultAuthorization(clock);
   const runId = options.runId ?? newRunId(clock);
-  const store = options.store ?? new ProbeStore();
+  const probeEnvironment = options.environment ?? process.env;
+  const inferredEnvironment: ProbeEnvironment =
+    options.commandEnvironment ??
+    (probeEnvironment.TRADER_ENV === "demo" ? "demo" : "testnet");
+  const store =
+    options.store ?? new ProbeStore({ environment: inferredEnvironment });
   const findings: SanitizedScenarioFinding[] = [];
   let accountId: string | undefined;
   let secrets: readonly string[] = [];
   let writeDispatched = false;
   let trackCurrentRunWrites = false;
-  let resolvedEnvironment: ProbeEnvironment =
-    options.commandEnvironment ?? "testnet";
+  let resolvedEnvironment: ProbeEnvironment = inferredEnvironment;
   try {
     const config = resolveProbeConfig(
-      options.environment ?? process.env,
+      probeEnvironment,
       options.commandEnvironment,
     );
     resolvedEnvironment = config.environment;
+    store.assertEnvironment(config.environment);
     let credentials = options.credentials;
     if (!credentials && !options.transport) {
       const provider =
@@ -656,7 +666,7 @@ export async function runCapabilityProbe(
           `stage: ${scenario}; dispatching ${side} probe write for ${preflight.symbol} (orderLinkId ${orderLinkId})\n`,
         );
         const plan = buildAttachedEntryPlan({
-          environment: "testnet",
+          environment: config.environment,
           accountId: verifiedAccountId,
           scenario,
           expiresAt: clock() + 120_000,
@@ -697,6 +707,7 @@ export async function runCapabilityProbe(
         if (result.kind === "refused")
           return { kind: "refused", message: result.approval.message };
         const cleanup = await cleanupScenario(result, {
+          environment: config.environment,
           runId,
           attemptId,
           accountId: verifiedAccountId,

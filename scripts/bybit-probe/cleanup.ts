@@ -11,6 +11,7 @@ import {
   toDecimalString,
 } from "./decimal.js";
 import { reverifyProbeApproval, type ProbeApproval } from "./approval.js";
+import type { ProbeEnvironment } from "./config.js";
 import { buildProbePlan, type ProbePlan } from "./probe-plan.js";
 import { TERMINAL_ORDER_STATUSES } from "./scenarios.js";
 import type { ProbeStore } from "./store.js";
@@ -236,6 +237,7 @@ export async function proveCleanState(
 }
 
 export interface CleanupOwnedEntryOptions {
+  readonly environment?: ProbeEnvironment;
   readonly runId: string;
   readonly attemptId: string;
   readonly accountId: string;
@@ -276,7 +278,7 @@ export async function cleanupOwnedEntry(
     };
   }
   const plan = buildProbePlan({
-    environment: "testnet",
+    environment: options.environment ?? "testnet",
     accountId: options.accountId,
     scenario: "cleanup-cancel-entry",
     expiresAt: (options.clock ?? Date.now)() + 120_000,
@@ -364,6 +366,7 @@ export async function cleanupOwnedEntry(
 }
 
 export interface FlattenOwnedExposureOptions {
+  readonly environment?: ProbeEnvironment;
   readonly runId: string;
   readonly attemptId: string;
   readonly accountId: string;
@@ -427,7 +430,7 @@ export async function flattenOwnedExposure(
   }
   const orderLinkId = buildFlattenOrderLinkId(options.runId, options.attemptId);
   const plan = buildProbePlan({
-    environment: "testnet",
+    environment: options.environment ?? "testnet",
     accountId: options.accountId,
     scenario: "cleanup-flatten-exposure",
     expiresAt: (options.clock ?? Date.now)() + 120_000,

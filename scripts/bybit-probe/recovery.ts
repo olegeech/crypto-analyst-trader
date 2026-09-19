@@ -158,7 +158,7 @@ export async function recoverInterruptedRun(
         options.store,
         options.runId,
         "UNRESOLVED",
-        "the current Testnet account does not match the original run",
+        `the current ${options.store.environment === "demo" ? "Demo" : "Testnet"} account does not match the original run`,
         "account identity mismatch",
       );
     }
@@ -280,6 +280,7 @@ export async function recoverInterruptedRun(
           );
         }
         const cleanup = await cleanupOwnedEntry({
+          environment: options.store.environment,
           runId: options.runId,
           attemptId: `${intent.attemptId}-recover-cancel`,
           accountId: options.accountId,
@@ -345,6 +346,7 @@ export async function recoverInterruptedRun(
           options.readOwnedExposure!(intent, entryOrderIdentities);
         const exposure = await readExposure();
         const cleanup = await flattenOwnedExposure({
+          environment: options.store.environment,
           runId: options.runId,
           attemptId: `${intent.attemptId}-recover-flatten`,
           accountId: options.accountId,

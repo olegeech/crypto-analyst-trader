@@ -414,7 +414,7 @@ export async function runManualRecovery(
       return {
         status: "MANUAL_RECOVERY_BLOCKED",
         runId: options.runId,
-        message: "the current Testnet account does not match the saved run",
+        message: `the current ${options.store.environment === "demo" ? "Demo" : "Testnet"} account does not match the saved run`,
         ...originalVerdict(saved.verdict),
       };
     }

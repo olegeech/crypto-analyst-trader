@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 
+import type { ProbeEnvironment } from "./config.js";
 import { parseDecimal, toDecimalString } from "./decimal.js";
 
 export const PROBE_PLAN_SCHEMA_VERSION = 1 as const;
@@ -35,7 +36,7 @@ export interface ProbeOrderParameters {
 }
 
 export interface ProbePlanInput {
-  readonly environment: "testnet";
+  readonly environment: ProbeEnvironment;
   readonly accountId: string;
   readonly scenario: string;
   readonly expiresAt: number;
@@ -46,7 +47,7 @@ export interface ProbePlanInput {
 
 export interface ProbePlan {
   readonly schemaVersion: typeof PROBE_PLAN_SCHEMA_VERSION;
-  readonly environment: "testnet";
+  readonly environment: ProbeEnvironment;
   readonly accountId: string;
   readonly scenario: string;
   readonly expiresAt: number;
@@ -160,8 +161,8 @@ function normalizedParams(input: ProbeOrderParameters): ProbeOrderParameters {
 
 export function buildProbePlan(input: ProbePlanInput): ProbePlan {
   rejectSensitiveKeys(input);
-  if (input.environment !== "testnet")
-    throw new Error("probe plan environment must be testnet");
+  if (input.environment !== "testnet" && input.environment !== "demo")
+    throw new Error("probe plan environment must be testnet or demo");
   const accountId = safeText(input.accountId, "accountId");
   const scenario = safeText(input.scenario, "scenario");
   if (!Number.isInteger(input.expiresAt) || input.expiresAt <= 0) {
@@ -179,7 +180,7 @@ export function buildProbePlan(input: ProbePlanInput): ProbePlan {
   }
   return {
     schemaVersion: PROBE_PLAN_SCHEMA_VERSION,
-    environment: "testnet",
+    environment: input.environment,
     accountId,
     scenario,
     expiresAt: input.expiresAt,

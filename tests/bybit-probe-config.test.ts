@@ -107,4 +107,12 @@ test("the write probe remains outside release and every workflow", async () => {
     packageJson.scripts["probe:bybit:demo"] ?? "",
     /--environment demo/,
   );
+  assert.match(
+    packageJson.scripts["probe:bybit:recover"] ?? "",
+    /--manual-recover/,
+  );
+  assert.match(
+    packageJson.scripts["probe:bybit:testnet:recover"] ?? "",
+    /--environment testnet/,
+  );
 });
