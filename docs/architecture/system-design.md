@@ -83,6 +83,44 @@ files are untrusted until runtime validation succeeds. Boundary parsers and
 adapters normalize validated payloads into domain contracts; TypeScript casts do
 not establish runtime validity.
 
+## Exchange-neutral domain contracts
+
+The `src/domain` surface is the exchange-neutral contract boundary for the M0
+daily batch. It is pure with respect to exchange adapters and persistence, and
+its constructors return immutable values or typed domain failures:
+
+- market and account snapshots carry exact decimal values and evidence refs;
+- capability observations are tri-state and scoped by exchange, environment,
+  category and position mode, so Demo evidence cannot authorize Testnet or
+  mainnet behavior;
+- each order-bearing plan declares the same execution scope, and risk rejects
+  capability requirements that do not match that target scope;
+- market and account snapshots carry the exchange, environment, category and
+  position-mode scope that risk compares with the planned execution scope;
+- semantic `OrderIntentId` values are separate from execution client-order IDs;
+  the latter belong to an execution attempt and do not perturb equivalent plan
+  identity;
+- risk accepts the candidate projection, computes its input hash before the
+  final immutable execution plan hash is created, and avoids a risk-to-plan
+  identity cycle;
+- risk evaluates every semantic intent against strategy protection and notional
+  limits, and carries the full intent identity set into the decision;
+- canonical material identity normalizes decimals, UTC timestamps and NFC text,
+  while presentation metadata is excluded from the plan hash;
+- adapters may map neutral contracts to Bybit V5 field names and wire encoding,
+  but may not re-round or mutate approved price, quantity or protection values;
+- M0 accounting exposes signed economic ledger events. Balanced posting sets,
+  journal transactions and durable recovery remain persistence/accounting work
+  outside this contract boundary.
+- lifecycle state derives its evidence references from the approved plan and
+  refuses execution after evidence freshness expires; reconciliation binds the
+  attempt to that plan and a known exchange order, then verifies observed
+  instrument, side and quantity against the approved intent.
+
+External payload parsers validate required known fields and tolerate additive
+unknown fields. Domain-owned artifacts remain versioned and exact so their
+canonical identities cannot drift silently.
+
 ## Time model
 
 Business timestamps, freshness and expiry use an injected UTC clock. Elapsed

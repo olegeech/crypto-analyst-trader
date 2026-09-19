@@ -1,0 +1,59 @@
+export const domainErrorCodes = {
+  INVALID_ARGUMENT: "INVALID_ARGUMENT",
+  INVALID_DECIMAL: "INVALID_DECIMAL",
+  INVALID_IDENTIFIER: "INVALID_IDENTIFIER",
+  INVALID_TEXT: "INVALID_TEXT",
+  INVALID_TIMESTAMP: "INVALID_TIMESTAMP",
+  INVALID_HASH: "INVALID_HASH",
+  INVALID_VALUE: "INVALID_VALUE",
+  INVALID_CONSTRAINT: "INVALID_CONSTRAINT",
+  INVALID_CAPABILITY: "INVALID_CAPABILITY",
+  INVALID_EVIDENCE: "INVALID_EVIDENCE",
+  INVALID_PLAN: "INVALID_PLAN",
+  INVALID_APPROVAL: "INVALID_APPROVAL",
+  INVALID_TRANSITION: "INVALID_TRANSITION",
+  INVALID_ACCOUNTING: "INVALID_ACCOUNTING",
+  DIVISION_BY_ZERO: "DIVISION_BY_ZERO",
+  CONSTRAINT_VIOLATION: "CONSTRAINT_VIOLATION",
+  QUANTITY_TOO_SMALL: "QUANTITY_TOO_SMALL",
+  NOTIONAL_TOO_SMALL: "NOTIONAL_TOO_SMALL",
+  STALE_EVIDENCE: "STALE_EVIDENCE",
+  INCOMPATIBLE_EVIDENCE: "INCOMPATIBLE_EVIDENCE",
+  CAPABILITY_UNSUPPORTED: "CAPABILITY_UNSUPPORTED",
+  CAPABILITY_UNKNOWN: "CAPABILITY_UNKNOWN",
+  PROTECTION_REQUIRED: "PROTECTION_REQUIRED",
+  PLAN_HASH_MISMATCH: "PLAN_HASH_MISMATCH",
+  PLAN_EXPIRED: "PLAN_EXPIRED",
+  UNSUPPORTED_TRANSITION: "UNSUPPORTED_TRANSITION",
+  UNSUPPORTED_CONTRACT: "UNSUPPORTED_CONTRACT",
+  OWNERSHIP_MISMATCH: "OWNERSHIP_MISMATCH",
+  UNRESOLVED_RECONCILIATION: "UNRESOLVED_RECONCILIATION",
+} as const;
+
+export type DomainErrorCode =
+  (typeof domainErrorCodes)[keyof typeof domainErrorCodes];
+
+export type DomainErrorDetails = Readonly<
+  Record<string, string | number | boolean | null>
+>;
+
+export interface DomainError {
+  readonly code: DomainErrorCode;
+  readonly message: string;
+  readonly details?: DomainErrorDetails;
+}
+
+export function domainError(
+  code: DomainErrorCode,
+  message: string,
+  details?: DomainErrorDetails,
+): DomainError {
+  if (details === undefined) {
+    return Object.freeze({ code, message });
+  }
+  return Object.freeze({
+    code,
+    message,
+    details: Object.freeze({ ...details }),
+  });
+}
