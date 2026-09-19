@@ -4,7 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { runCapabilityProbe } from "../scripts/bybit-capability-probe.js";
+import {
+  runCapabilityProbe,
+  runManualRecovery as runProbeManualRecovery,
+} from "../scripts/bybit-capability-probe.js";
 import { runManualRecovery } from "../scripts/bybit-probe/manual-recovery.js";
 import {
   buildProbePlan,
@@ -21,9 +24,9 @@ function response(result: Record<string, unknown>): BybitResponse {
   return { retCode: 0, retMsg: "OK", result };
 }
 
-function plan() {
+function plan(environment: "testnet" | "demo" = "testnet") {
   return buildProbePlan({
-    environment: "testnet",
+    environment,
     accountId: "manual-account",
     scenario: "timeout-after-accept",
     expiresAt: 100_000,
@@ -46,15 +49,19 @@ function plan() {
   });
 }
 
-async function unresolvedRun(exchangeOrderId?: string) {
+async function unresolvedRun(
+  exchangeOrderId?: string,
+  environment: "testnet" | "demo" = "testnet",
+) {
   const root = await mkdtemp(join(tmpdir(), "bybit-probe-manual-recovery-"));
   const store = new ProbeStore({
     rootDir: root,
+    environment,
     clock: () => 2_000,
     processId: 501,
     isProcessAlive: () => false,
   });
-  const savedPlan = plan();
+  const savedPlan = plan(environment);
   await store.writeIntent({
     runId: "probe-manual",
     attemptId: "attempt-1",
@@ -76,6 +83,41 @@ async function unresolvedRun(exchangeOrderId?: string) {
   });
   return { root, store };
 }
+
+test("Demo manual recovery is unavailable and remains read-only", async () => {
+  const { root, store } = await unresolvedRun(undefined, "demo");
+  try {
+    const { transport, events } = cleanTransport();
+    const result = await runManualRecovery({
+      runId: "probe-manual",
+      accountId: "manual-account",
+      store,
+      transport,
+      authorize,
+    });
+    assert.equal(result.status, "PRECONDITION_FAILED");
+    assert.match(result.message, /Demo manual recovery is not supported/);
+    assert.deepEqual(events, []);
+    const saved = await store.listSavedRuns();
+    assert.equal(saved[0]?.verdict, "UNRESOLVED");
+    assert.equal(saved[0]?.manualRecovery, undefined);
+
+    const cliResult = await runProbeManualRecovery({
+      runId: "probe-manual",
+      environment: { TRADER_ENV: "demo" },
+      commandEnvironment: "demo",
+      credentialProvider: {
+        load: async () => {
+          throw new Error("Demo recovery must not load credentials");
+        },
+      },
+    });
+    assert.equal(cliResult.status, "PRECONDITION_FAILED");
+    assert.match(cliResult.message, /Demo manual recovery is not supported/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 function cleanTransport() {
   const events: string[] = [];

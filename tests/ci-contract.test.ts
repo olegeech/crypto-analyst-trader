@@ -92,7 +92,7 @@ test("default CI delegates to the same release command without secrets or option
   assert.doesNotMatch(ciWorkflow, /review:target|scripts\/review-target\.ts/);
   assert.doesNotMatch(
     ciWorkflow,
-    /probe:bybit:(?:testnet|demo)|scripts\/bybit-capability-probe\.ts/,
+    /probe:bybit:|scripts\/bybit-capability-probe\.ts/,
   );
 });
 

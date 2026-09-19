@@ -52,6 +52,7 @@ test("retCode classification keeps signing defects separate from credential reco
     [10005, ["permission-denied", true]],
     [10010, ["ip-restriction", false]],
     [10024, ["exchange-failure", false]],
+    [110072, ["exchange-failure", false]],
   ] as const);
   for (const [code, [kind, reconnect]] of expectations) {
     const failure = classifyRetCode(code);
@@ -70,6 +71,7 @@ test("retCode classification keeps signing defects separate from credential reco
     assert.doesNotMatch(failure.message, /credentials:connect/);
   }
   assert.match(classifyRetCode(10024).message, /compliance rules/i);
+  assert.match(classifyRetCode(110072).message, /orderLinkId.*already in use/i);
   assert.match(classifyRetCode(10000).message, /ambiguous/i);
 });
 

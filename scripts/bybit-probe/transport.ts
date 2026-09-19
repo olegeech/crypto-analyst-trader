@@ -172,6 +172,14 @@ export function classifyRetCode(
         recommendReconnect: false,
         message: `Bybit rejected the write because compliance rules were triggered; review the ${label} account eligibility before retrying.`,
       };
+    case 110072:
+      return {
+        kind: "exchange-failure",
+        retCode,
+        recommendReconnect: false,
+        message:
+          "Bybit rejected the write because orderLinkId is already in use; use a fresh client order ID.",
+      };
     case 10016:
       return {
         kind: "exchange-failure",

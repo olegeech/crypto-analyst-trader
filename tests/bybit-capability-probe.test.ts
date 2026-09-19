@@ -26,7 +26,7 @@ type ProbeFixtureOptions = {
   readonly unsupportedDemoReconciliation?: boolean;
   readonly pendingOpen?: boolean;
   readonly recoveryOrder?: boolean;
-  readonly rejectionCode?: 10014 | 10024 | 110057 | 12345;
+  readonly rejectionCode?: 10014 | 10024 | 110057 | 110072 | 12345;
   readonly invisibleOrders?: boolean;
   readonly lostAcknowledgement?: boolean;
   readonly acceptDuplicate?: boolean;
@@ -212,6 +212,185 @@ async function runFixture(
   });
   return { fixture, output: output.join(""), result, root, store };
 }
+
+async function seedUnresolvedRun(
+  store: ProbeStore,
+  environment: "testnet" | "demo",
+  runId: string,
+): Promise<void> {
+  const plan = buildProbePlan({
+    environment,
+    accountId: `${environment}-account`,
+    scenario: "long-entry",
+    expiresAt: 100_000,
+    method: "POST",
+    endpoint: "/v5/order/create",
+    params: {
+      category: "linear",
+      symbol: "DOGEUSDT",
+      side: "Buy",
+      orderLinkId: `${runId}-long`,
+      price: "0.1",
+      qty: "3",
+      takeProfit: "0.102",
+      stopLoss: "0.098",
+      positionIdx: 0,
+    },
+  });
+  await store.writeIntent({
+    runId,
+    attemptId: "attempt-1",
+    scenario: plan.scenario,
+    plan,
+    planDigest: hashProbePlan(plan),
+    approvedAt: 1_000,
+    approvalExpiresAt: 100_000,
+    createdAt: 1_000,
+    orderLinkId: plan.params.orderLinkId,
+    exchangeOrderId: "prior-order",
+    baselineSignedQty: "0",
+  });
+  await store.writeVerdict(runId, "UNRESOLVED");
+}
+
+function isolatedStore(
+  rootDir: string,
+  environment: "testnet" | "demo",
+  processId: number,
+): ProbeStore {
+  return new ProbeStore({
+    rootDir,
+    environment,
+    clock: () => 1_000,
+    processId,
+    isProcessAlive: () => false,
+  });
+}
+
+test("Demo and Testnet probes ignore unresolved runs in the other environment root", async () => {
+  const testnetRootForDemo = await mkdtemp(
+    join(tmpdir(), "bybit-probe-testnet-source-"),
+  );
+  const demoTargetRoot = await mkdtemp(
+    join(tmpdir(), "bybit-probe-demo-target-"),
+  );
+  const demoRootForTestnet = await mkdtemp(
+    join(tmpdir(), "bybit-probe-demo-source-"),
+  );
+  const testnetTargetRoot = await mkdtemp(
+    join(tmpdir(), "bybit-probe-testnet-target-"),
+  );
+  try {
+    await seedUnresolvedRun(
+      isolatedStore(testnetRootForDemo, "testnet", 7_010),
+      "testnet",
+      "testnet-prior",
+    );
+    const demoStore = isolatedStore(demoTargetRoot, "demo", 7_011);
+    const demoFixture = fixtureTransport({
+      environment: "demo",
+      lostAcknowledgement: false,
+    });
+    const demoResult = await runCapabilityProbe({
+      environment: { TRADER_ENV: "demo" },
+      commandEnvironment: "demo",
+      accountId: "demo-account",
+      transport: demoFixture.transport,
+      store: demoStore,
+      runId: "demo-current",
+      clock: () => 1_000,
+      sleep: async () => undefined,
+      realtimeAttempts: 2,
+      historyAttempts: 0,
+      authorize: approved(1_000),
+      output: { write: () => undefined },
+    });
+    assert.equal(demoResult.verdict, "CONFIRMED_CLEAN");
+    assert.equal(
+      demoFixture.events.some(
+        (event) => event.query?.orderLinkId === "testnet-prior-long",
+      ),
+      false,
+    );
+
+    await seedUnresolvedRun(
+      isolatedStore(demoRootForTestnet, "demo", 7_012),
+      "demo",
+      "demo-prior",
+    );
+    const testnetStore = isolatedStore(testnetTargetRoot, "testnet", 7_013);
+    const testnetFixture = fixtureTransport({
+      environment: "testnet",
+      lostAcknowledgement: false,
+    });
+    const testnetResult = await runCapabilityProbe({
+      environment: { TRADER_ENV: "testnet" },
+      commandEnvironment: "testnet",
+      accountId: "testnet-account",
+      transport: testnetFixture.transport,
+      store: testnetStore,
+      runId: "testnet-current",
+      clock: () => 1_000,
+      sleep: async () => undefined,
+      realtimeAttempts: 2,
+      historyAttempts: 0,
+      authorize: approved(1_000),
+      output: { write: () => undefined },
+    });
+    assert.equal(testnetResult.verdict, "CONFIRMED_CLEAN");
+    assert.equal(
+      testnetFixture.events.some(
+        (event) => event.query?.orderLinkId === "demo-prior-long",
+      ),
+      false,
+    );
+  } finally {
+    await Promise.all([
+      rm(testnetRootForDemo, { recursive: true, force: true }),
+      rm(demoTargetRoot, { recursive: true, force: true }),
+      rm(demoRootForTestnet, { recursive: true, force: true }),
+      rm(testnetTargetRoot, { recursive: true, force: true }),
+    ]);
+  }
+});
+
+test("a Demo record placed in the Testnet root fails closed before any write", async () => {
+  const root = await mkdtemp(join(tmpdir(), "bybit-probe-cross-root-"));
+  try {
+    await seedUnresolvedRun(
+      isolatedStore(root, "demo", 7_014),
+      "demo",
+      "demo-misplaced",
+    );
+    const testnetStore = isolatedStore(root, "testnet", 7_015);
+    const fixture = fixtureTransport({
+      environment: "testnet",
+      lostAcknowledgement: false,
+    });
+    const result = await runCapabilityProbe({
+      environment: { TRADER_ENV: "testnet" },
+      commandEnvironment: "testnet",
+      accountId: "testnet-account",
+      transport: fixture.transport,
+      store: testnetStore,
+      runId: "testnet-current",
+      clock: () => 1_000,
+      sleep: async () => undefined,
+      realtimeAttempts: 1,
+      historyAttempts: 0,
+      authorize: approved(1_000),
+      output: { write: () => undefined },
+    });
+    assert.equal(result.verdict, "PRECONDITION_FAILED");
+    assert.match(result.message, /probe store is for testnet, not demo/);
+    assert.equal(
+      fixture.events.filter((event) => event.kind === "post").length,
+      0,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 test("orchestrator runs preflight, long, short, lost acknowledgement, duplicate, and cleanup in order", async () => {
   const { fixture, output, result, root } = await runFixture();

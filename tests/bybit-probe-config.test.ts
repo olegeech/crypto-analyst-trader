@@ -47,6 +47,14 @@ test("probe configuration accepts only the exact Demo origin", () => {
     () =>
       resolveProbeConfig({
         TRADER_ENV: "demo",
+        BYBIT_API_BASE_URL: "https://api.bybit.com",
+      }),
+    /BYBIT_API_BASE_URL must be the Bybit Demo base URL/,
+  );
+  assert.throws(
+    () =>
+      resolveProbeConfig({
+        TRADER_ENV: "demo",
         BYBIT_API_BASE_URL: "https://api-demo.bybit.com/v5",
       }),
     /BYBIT_API_BASE_URL must be the Bybit Demo base URL/,
