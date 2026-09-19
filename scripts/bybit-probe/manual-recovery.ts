@@ -65,9 +65,6 @@ export interface ManualRecoveryResult {
   readonly originalVerdict?: ProbeVerdict;
 }
 
-export const DEMO_MANUAL_RECOVERY_UNSUPPORTED_MESSAGE =
-  "Demo manual recovery is not supported; use the exchange UI manual fallback described in SECURITY.md.";
-
 const DEFAULT_LOOKUP_ATTEMPTS = 2;
 const MAX_READ_PAGES = 5;
 
@@ -366,13 +363,6 @@ function targetFromRun(
 export async function runManualRecovery(
   options: ManualRecoveryOptions,
 ): Promise<ManualRecoveryResult> {
-  if (options.store.environment === "demo") {
-    return {
-      status: "PRECONDITION_FAILED",
-      runId: options.runId,
-      message: DEMO_MANUAL_RECOVERY_UNSUPPORTED_MESSAGE,
-    };
-  }
   const clock = options.clock ?? Date.now;
   const sleep =
     options.sleep ??
@@ -424,7 +414,7 @@ export async function runManualRecovery(
       return {
         status: "MANUAL_RECOVERY_BLOCKED",
         runId: options.runId,
-        message: "the current Testnet account does not match the saved run",
+        message: `the current ${options.store.environment === "demo" ? "Demo" : "Testnet"} account does not match the saved run`,
         ...originalVerdict(saved.verdict),
       };
     }

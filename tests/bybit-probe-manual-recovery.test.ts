@@ -84,36 +84,35 @@ async function unresolvedRun(
   return { root, store };
 }
 
-test("Demo manual recovery is unavailable and remains read-only", async () => {
+test("Demo manual recovery stays same-environment and remains read-only", async () => {
   const { root, store } = await unresolvedRun(undefined, "demo");
   try {
     const { transport, events } = cleanTransport();
-    const result = await runManualRecovery({
+    const result = await runProbeManualRecovery({
       runId: "probe-manual",
       accountId: "manual-account",
+      environment: { TRADER_ENV: "demo" },
+      commandEnvironment: "demo",
       store,
       transport,
       authorize,
+      clock: () => 2_000,
+      sleep: async () => undefined,
+      realtimeAttempts: 1,
+      historyAttempts: 1,
     });
-    assert.equal(result.status, "PRECONDITION_FAILED");
-    assert.match(result.message, /Demo manual recovery is not supported/);
-    assert.deepEqual(events, []);
+    assert.equal(result.status, MANUAL_RECOVERY_STATUS);
+    assert.equal(
+      events.some((path) => path.startsWith("/v5/order/")),
+      true,
+    );
+    assert.equal(
+      events.some((path) => path === "POST"),
+      false,
+    );
     const saved = await store.listSavedRuns();
     assert.equal(saved[0]?.verdict, "UNRESOLVED");
-    assert.equal(saved[0]?.manualRecovery, undefined);
-
-    const cliResult = await runProbeManualRecovery({
-      runId: "probe-manual",
-      environment: { TRADER_ENV: "demo" },
-      commandEnvironment: "demo",
-      credentialProvider: {
-        load: async () => {
-          throw new Error("Demo recovery must not load credentials");
-        },
-      },
-    });
-    assert.equal(cliResult.status, "PRECONDITION_FAILED");
-    assert.match(cliResult.message, /Demo manual recovery is not supported/);
+    assert.equal(saved[0]?.manualRecovery?.status, MANUAL_RECOVERY_STATUS);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

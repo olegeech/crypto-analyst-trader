@@ -40,11 +40,11 @@ observed. `CONFIRMED_CLEAN` is the only clean completion verdict; `REFUSED`,
 the handoff and the exchange-UI manual fallback in `SECURITY.md`; never
 cancel all orders or flatten unowned exposure.
 
-For a saved Testnet run whose read-only checks show no matching order, open
-orders, executions or position, use the recovery flow:
+For a saved run whose read-only checks show no matching order, open orders,
+executions or position, use the same-environment recovery flow:
 
 ```text
-npm run probe:bybit:testnet:recover -- <saved-run-id>
+npm run probe:bybit:recover -- --environment <testnet|demo> <saved-run-id>
 ```
 
 It automatically records `RECOVERED_CLEAN` with a timestamp and sanitized
@@ -74,9 +74,10 @@ Before any Demo write, the read-only preflight validates the reconciliation
 reads needed for ambiguous acknowledgements and cleanup. Unsupported or
 invalid reconciliation reads stop the run before the first write. A subsequent
 Demo probe invocation automatically re-reconciles an unresolved Demo run. If
-that cannot prove clean state, there is no Demo manual-recovery CLI; stop and
-use the exchange UI fallback. Never switch the run to Testnet or mainnet and
-never retry an ambiguous write blindly.
+that cannot prove clean state, use the same-environment read-only recovery
+command above; it never switches the run to Testnet or mainnet. If ownership
+or clean state remains ambiguous, stop and use the exchange UI fallback rather
+than retrying an ambiguous write blindly.
 
 CLI names in this document describe application use cases. Invoke only commands
 implemented by the current `package.json` and released for the selected

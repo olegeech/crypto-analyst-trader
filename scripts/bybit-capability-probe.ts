@@ -31,7 +31,6 @@ import {
 } from "./bybit-probe/findings.js";
 import { runReadOnlyPreflight } from "./bybit-probe/preflight.js";
 import {
-  DEMO_MANUAL_RECOVERY_UNSUPPORTED_MESSAGE,
   runManualRecovery as executeManualRecovery,
   type ManualRecoveryResult,
 } from "./bybit-probe/manual-recovery.js";
@@ -418,13 +417,6 @@ export async function runManualRecovery(
       options.environment ?? process.env,
       options.commandEnvironment,
     );
-    if (config.environment === "demo") {
-      return {
-        status: "PRECONDITION_FAILED",
-        runId: options.runId,
-        message: DEMO_MANUAL_RECOVERY_UNSUPPORTED_MESSAGE,
-      };
-    }
     const store =
       options.store ?? new ProbeStore({ environment: config.environment });
     store.assertEnvironment(config.environment);
@@ -909,7 +901,7 @@ if (invokedPath && import.meta.url === pathToFileURL(invokedPath).href) {
     if (manualRecoveryIndex >= 0) {
       if (!runId || runId.startsWith("--")) {
         console.error(
-          "Usage: npm run probe:bybit:recover -- --environment testnet <saved-run-id>",
+          "Usage: npm run probe:bybit:recover -- --environment <testnet|demo> <saved-run-id>",
         );
         process.exitCode = EXIT_CODES.PRECONDITION_FAILED;
       } else {

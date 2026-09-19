@@ -111,9 +111,9 @@ test("documentation records the probe as an operator-only, unverified capability
   assert.match(adr, /unverified/i);
   assert.match(runbook, /npm run probe:bybit:testnet/);
   assert.match(runbook, /npm run probe:bybit:demo/);
-  assert.doesNotMatch(
+  assert.match(
     runbook,
-    /npm run probe:bybit:recover -- --environment demo <saved-run-id>/,
+    /npm run probe:bybit:recover -- --environment <testnet\|demo> <saved-run-id>/,
   );
   assert.match(runbook, /exchange UI fallback/i);
   assert.match(

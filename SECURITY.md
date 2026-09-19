@@ -48,11 +48,11 @@ A suspected execution or accounting incident requires:
 
 ## Bybit probe manual recovery
 
-When a Testnet capability probe records `UNRESOLVED`, do not delete its intent
-or change the original verdict. Run the Testnet-only, read-only recovery
-command for the saved run:
+When a Testnet or Demo capability probe records `UNRESOLVED`, do not delete its
+intent or change the original verdict. Run the same-environment, read-only
+recovery command for the saved run:
 
-`npm run probe:bybit:recover -- --environment testnet <saved-run-id>`
+`npm run probe:bybit:recover -- --environment <testnet|demo> <saved-run-id>`
 
 The Testnet alias remains available:
 
@@ -60,7 +60,8 @@ The Testnet alias remains available:
 
 The command displays the saved run, account hash, symbol and client order ID,
 then revalidates realtime and history orders, executions, open orders and
-position through read-only Testnet endpoints. When those checks prove clean, it stores
+position through read-only endpoints in the selected environment. When those
+checks prove clean, it stores
 `RECOVERED_CLEAN` with a timestamp, sanitized evidence and the `SECURITY.md`
 reference; the original `UNRESOLVED` result remains unverified. Any owned
 order or exposure is routed through the normal exact-plan, durable-intent and
@@ -68,8 +69,3 @@ reconciliation path automatically. If ownership or clean state remains
 ambiguous, the command stops and directs the operator to the exchange UI
 fallback for the concrete unresolved decision instead of declaring the run
 clean.
-
-Demo runs do not use this recovery command. The next Demo probe invocation
-automatically retries reconciliation in the Demo environment; if it still
-cannot prove clean state, stop and use the exchange UI fallback. Never move a
-Demo run into the Testnet recovery flow or retry an ambiguous write blindly.
