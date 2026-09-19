@@ -20,6 +20,10 @@ link with a loopback callback. Open the link and authorize the requested
 `ai-account` scope. The callback is accepted once and expires after a bounded
 wait.
 
+Bybit Demo Trading does not support this Agent Connect flow. There is
+intentionally no `credentials:connect:demo` command; use the isolated manual
+Demo setup below instead.
+
 If Bybit requires two-factor authentication, the command stops with a fixed
 instruction to bind 2FA before proceeding; bind it and run the connect command
 again.
@@ -88,17 +92,19 @@ use this manual fallback in an interactive macOS Terminal:
 
 ```bash
 npm run credentials:setup:testnet
+npm run credentials:setup:demo
 npm run credentials:setup:mainnet
 ```
 
-Each command asks for the API key, API secret and account/subaccount ID. All
-three inputs are hidden because the account identifier is sensitive operational
-metadata. Setup is repeatable and updates only the selected environment's
-records.
+Each command asks for the API key, API secret and account/subaccount ID. For
+Demo, create the key after switching the main Bybit account to Demo Trading;
+the Demo UID is used only for ownership hashing. All three inputs are hidden
+because the account identifier is sensitive operational metadata. Setup is
+repeatable and updates only the selected environment's records.
 
-Testnet and mainnet use separate Keychain services and never fall back to one
-another. Storing mainnet credentials does not enable mainnet execution; the
-execution and approval gates remain separate.
+Testnet, Demo and mainnet use separate Keychain services and never fall back to
+one another. Storing Demo or mainnet credentials does not enable exchange
+execution; the environment, execution and approval gates remain separate.
 
 Each underlying Keychain command has a bounded timeout. If a permission dialog
 or locked Keychain blocks the command, setup fails closed instead of waiting
@@ -117,6 +123,7 @@ Remove only the selected environment's records:
 
 ```bash
 npm run credentials:remove:testnet
+npm run credentials:remove:demo
 npm run credentials:remove:mainnet
 ```
 
@@ -134,11 +141,11 @@ When the CLI is unavailable, open **Keychain Access**, choose the login
 keychain, and create three **generic password** items
 for the selected service:
 
-| Field                 | Testnet service                           | Mainnet service                           | Account      |
-| --------------------- | ----------------------------------------- | ----------------------------------------- | ------------ |
-| API key               | `com.crypto-analyst-trader.bybit.testnet` | `com.crypto-analyst-trader.bybit.mainnet` | `api-key`    |
-| API secret            | same service                              | same service                              | `api-secret` |
-| Account/subaccount ID | same service                              | same service                              | `account-id` |
+| Field                 | Testnet service                           | Demo service                           | Mainnet service                           | Account      |
+| --------------------- | ----------------------------------------- | -------------------------------------- | ----------------------------------------- | ------------ |
+| API key               | `com.crypto-analyst-trader.bybit.testnet` | `com.crypto-analyst-trader.bybit.demo` | `com.crypto-analyst-trader.bybit.mainnet` | `api-key`    |
+| API secret            | same service                              | same service                           | same service                              | `api-secret` |
+| Account/subaccount ID | same service                              | same service                           | same service                              | `account-id` |
 
 The CLI uses the macOS `security` tool's generic-password records with the
 service and account as the identity. Do not paste credentials into issue

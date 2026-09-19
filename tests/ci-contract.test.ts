@@ -92,11 +92,12 @@ test("default CI delegates to the same release command without secrets or option
   assert.doesNotMatch(ciWorkflow, /review:target|scripts\/review-target\.ts/);
   assert.doesNotMatch(
     ciWorkflow,
-    /probe:bybit:testnet|scripts\/bybit-capability-probe\.ts/,
+    /probe:bybit:(?:testnet|demo)|scripts\/bybit-capability-probe\.ts/,
   );
 });
 
 test("the write probe is absent from release execution", () => {
   assert.doesNotMatch(releaseScript, /probe:bybit:testnet/);
+  assert.doesNotMatch(releaseScript, /probe:bybit:demo/);
   assert.doesNotMatch(releaseScript, /scripts\/bybit-capability-probe\.ts/);
 });

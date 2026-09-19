@@ -24,6 +24,8 @@ test("the future authenticated probe has a typed vault seam and no dotenv fallba
   );
   assert.match(packageSource, /credentials:connect:testnet/);
   assert.match(packageSource, /credentials:connect:mainnet/);
+  assert.match(packageSource, /credentials:setup:demo/);
+  assert.match(packageSource, /credentials:remove:demo/);
   assert.doesNotMatch(ciWorkflow, /credentials:connect/);
 });
 
@@ -38,7 +40,10 @@ test("the credential guide presents Agent Connect as the only preferred onboardi
   assert.match(guide, /npm run credentials:connect:mainnet/);
   assert.match(guide, /^## Manual API credential fallback$/m);
   assert.match(guide, /npm run credentials:setup:testnet/);
+  assert.match(guide, /npm run credentials:setup:demo/);
   assert.match(guide, /npm run credentials:setup:mainnet/);
+  assert.match(guide, /com\.crypto-analyst-trader\.bybit\.demo/);
+  assert.match(guide, /Agent Connect flow/);
   assert.match(guide, /^## Manual Keychain Access fallback$/m);
   assert.doesNotMatch(guide, /^## .*recommended.*$/gim);
   assert.ok(

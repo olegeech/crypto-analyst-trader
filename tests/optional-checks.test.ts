@@ -62,6 +62,6 @@ test("audit workflow is manual or scheduled and remains separate from blocking C
   assert.doesNotMatch(workflow, /continue-on-error/);
   assert.doesNotMatch(
     workflow,
-    /BYBIT_API_|secrets\.|placeOrder|create-order|probe:bybit:testnet|scripts\/bybit-capability-probe\.ts/i,
+    /BYBIT_API_|secrets\.|placeOrder|create-order|probe:bybit:(?:testnet|demo)|scripts\/bybit-capability-probe\.ts/i,
   );
 });
