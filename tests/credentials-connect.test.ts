@@ -199,6 +199,22 @@ test("invalid connect command does not touch Keychain or OAuth", async () => {
   assert.match(text(), /credentials:connect/);
 });
 
+test("Demo connect is rejected before Keychain or OAuth and points to manual setup", async () => {
+  const events: string[] = [];
+  const { output, text } = outputBuffer();
+  const code = await runConnect(["demo"], {
+    provider: providerFor(events),
+    client: clientFor(events, []),
+    prompt: async () => "1",
+    output,
+  });
+
+  assert.equal(code, 2);
+  assert.deepEqual(events, []);
+  assert.match(text(), /credentials:setup:demo/);
+  assert.doesNotMatch(text(), /credentials:connect:demo/);
+});
+
 test("successful connect preflights first, requires explicit selection, and verifies the load seam", async () => {
   const events: string[] = [];
   const { output, text } = outputBuffer();

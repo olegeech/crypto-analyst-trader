@@ -1,4 +1,4 @@
-export type CredentialEnvironment = "testnet" | "mainnet";
+export type CredentialEnvironment = "testnet" | "mainnet" | "demo";
 
 export interface ExchangeCredentials {
   apiKey: string;

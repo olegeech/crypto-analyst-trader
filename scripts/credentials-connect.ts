@@ -8,6 +8,7 @@ import {
 } from "../src/cli/interactive-prompt.js";
 import {
   AgentConnectError,
+  type AgentConnectEnvironment,
   type AgentConnectAccount,
   type AgentConnectCallback,
   type AgentConnectChoice,
@@ -20,7 +21,6 @@ import { createMacOSKeychainProvider } from "../src/adapters/macos-keychain.js";
 import {
   connectCommand,
   CredentialProviderError,
-  type CredentialEnvironment,
   type CredentialProviderWithPreflight,
   type ExchangeCredentials,
   setupCommand,
@@ -58,7 +58,7 @@ async function waitForAuthorization(
   selectionMode: SelectionMode,
   promptCode: CodePrompt,
   output: Output,
-  environment: CredentialEnvironment,
+  environment: AgentConnectEnvironment,
 ): Promise<AgentConnectCallback> {
   const callback = session.waitForCallback();
   if (selectionMode !== "terminal") {
@@ -136,7 +136,7 @@ function requestEvidence(event: AgentConnectRequestEvent): string {
 
 function isEnvironment(
   value: string | undefined,
-): value is CredentialEnvironment {
+): value is AgentConnectEnvironment {
   return value === "testnet" || value === "mainnet";
 }
 
@@ -155,7 +155,7 @@ function safeAccountName(name: string): string {
 
 function selectionInputError(
   error: unknown,
-  environment: CredentialEnvironment,
+  environment: AgentConnectEnvironment,
 ): AgentConnectError {
   if (error instanceof AgentConnectError) {
     return error;
@@ -182,7 +182,7 @@ async function chooseSelection(
   accounts: AgentConnectAccount[],
   choose: ChooseOption,
   output: Output,
-  environment: CredentialEnvironment,
+  environment: AgentConnectEnvironment,
 ): Promise<AgentConnectSelection> {
   const choices: AgentConnectChoice[] = accounts.map((account, index) => ({
     id: String(index + 1),
@@ -243,7 +243,7 @@ function safeErrorMessage(error: unknown): string {
 
 async function readPreviousCredentials(
   provider: CredentialProviderWithPreflight,
-  environment: CredentialEnvironment,
+  environment: AgentConnectEnvironment,
 ): Promise<ExchangeCredentials | undefined> {
   try {
     return await provider.load(environment);
@@ -277,6 +277,12 @@ export async function runCredentialsConnectCli(
   } = {},
 ): Promise<number> {
   const [environmentValue, extra] = argv;
+  if (environmentValue === "demo" && extra === undefined) {
+    output.write(
+      "Bybit Demo does not support Agent Connect. Run npm run credentials:setup:demo.\n",
+    );
+    return 2;
+  }
   if (!isEnvironment(environmentValue) || extra !== undefined) {
     output.write(`${usage()}\n`);
     return 2;
