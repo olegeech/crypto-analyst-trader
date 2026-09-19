@@ -15,8 +15,12 @@ safety gates required for live capital.
 
 The canonical daily product boundary is defined in [README.md](../README.md).
 Preparation and execution remain separate as required by
-[invariant 16](architecture/invariants.md), and every exchange write remains
-bound to an approved exact plan hash by invariant 2.
+[invariant 16](architecture/invariants.md), and every production exchange
+write remains bound to an approved exact plan hash by invariant 2. The bounded
+Testnet capability probe is a scoped exception: its explicit invocation
+authorizes only the documented Testnet scenarios and necessary probe-owned
+cleanup, while each write still receives an exact, expiring plan hash and
+final revalidation.
 
 Required decision evidence includes, at minimum:
 
@@ -131,8 +135,11 @@ prioritization interview following the discovery recorded in issue #35.
    plan is valuable before any exchange write exists.
 2. **Fail closed.** Missing, stale, mixed-run or contradictory evidence blocks
    exposure increases.
-3. **Exact approval.** An operator approves one immutable plan hash, not a
-   strategy name or a mutable configuration.
+3. **Exact approval.** Production execution requires one immutable plan hash,
+   not a strategy name or mutable configuration. The bounded Testnet probe uses
+   explicit invocation as its run-scoped authorization and keeps the exact
+   plan hash as the write-integrity boundary without retyping it for every
+   scenario or cleanup action.
 4. **Owned orders only.** Manual and unrelated exchange orders are never
    changed.
 5. **Protection at entry.** A managed entry is submitted only with
