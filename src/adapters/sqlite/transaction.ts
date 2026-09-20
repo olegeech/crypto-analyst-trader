@@ -43,7 +43,24 @@ export function sqliteError(
 
 export type SqliteTransactionOperation<T> = (
   database: DatabaseSync,
-) => Result<T>;
+) => Result<T> | CommittedTransaction<T>;
+
+export interface CommittedTransaction<T> {
+  readonly commit: true;
+  readonly result: Result<T>;
+}
+
+export function commitTransaction<T>(
+  result: Result<T>,
+): CommittedTransaction<T> {
+  return { commit: true, result };
+}
+
+function isCommittedTransaction<T>(
+  outcome: Result<T> | CommittedTransaction<T>,
+): outcome is CommittedTransaction<T> {
+  return typeof outcome === "object" && outcome !== null && "commit" in outcome;
+}
 
 /**
  * Own the complete SQLite transaction boundary for a short local operation.
@@ -59,7 +76,13 @@ export function runInTransaction<T>(
   try {
     database.exec("BEGIN IMMEDIATE");
     began = true;
-    const result = operation(database);
+    const outcome = operation(database);
+    if (isCommittedTransaction(outcome)) {
+      database.exec("COMMIT");
+      began = false;
+      return outcome.result;
+    }
+    const result = outcome;
     if (!result.ok) {
       database.exec("ROLLBACK");
       began = false;

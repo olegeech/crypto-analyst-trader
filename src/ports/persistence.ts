@@ -131,6 +131,7 @@ export interface PrepareIntentRequest {
   readonly intentId: string;
   readonly planHash: PlanHash;
   readonly clientOrderId: string;
+  readonly now: UtcTimestamp;
   readonly preparedAt: UtcTimestamp;
 }
 
