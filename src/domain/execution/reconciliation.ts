@@ -180,6 +180,19 @@ export function rehydrateReconciliationResult(
     if (!parsed.ok) return parsed;
     exchangeOrderId = parsed.value;
   }
+  if (
+    exchangeOrderId === undefined &&
+    (input.status === "RECONCILED" ||
+      input.status === "PARTIAL" ||
+      input.status === "PENDING")
+  ) {
+    return fail(
+      domainError(
+        "INVALID_VALUE",
+        `reconciliation status ${input.status} requires exchange evidence`,
+      ),
+    );
+  }
   return ok(
     markReconciliationResult(
       Object.freeze({

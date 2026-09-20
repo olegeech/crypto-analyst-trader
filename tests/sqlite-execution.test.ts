@@ -4,7 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { openSqliteConnection } from "../src/adapters/sqlite/connection.js";
+import {
+  openSqliteConnection,
+  type SqliteConnection,
+} from "../src/adapters/sqlite/connection.js";
 import {
   createSqliteExecutionStore,
   type SqliteExecutionStore,
@@ -15,6 +18,7 @@ import {
   reconcileAttempt,
   rehydrateReconciliationResult,
 } from "../src/domain/execution/reconciliation.js";
+import { encodeCanonicalArtifact } from "../src/domain/identity/canonical-artifact.js";
 import {
   parseUtcTimestamp,
   type UtcTimestamp,
@@ -40,16 +44,20 @@ function time(value: string): UtcTimestamp {
 
 function createStore(): {
   readonly root: string;
+  readonly connection: SqliteConnection;
   readonly store: SqliteExecutionStore;
   readonly scope: PersistenceScope;
+  readonly setNow: (value: string) => void;
 } {
   const plan = createPlanFixture();
   const root = mkdtempSync(join(tmpdir(), "sqlite-execution-"));
+  const clockState = { value: time("2026-09-19T10:00:02Z") };
   const connection = unwrap(
     openSqliteConnection({
       environment: "demo",
       databasePath: join(root, "execution.db"),
       runtime: supportedRuntime,
+      clock: { now: () => clockState.value },
     }),
   );
   const scope: PersistenceScope = {
@@ -61,8 +69,12 @@ function createStore(): {
   };
   return {
     root,
+    connection,
     store: unwrap(createSqliteExecutionStore(connection, scope)),
     scope,
+    setNow(value: string): void {
+      clockState.value = time(value);
+    },
   };
 }
 
@@ -156,6 +168,7 @@ test("durable lineage and owned intent survive close/reopen and same-identity re
       environment: "demo",
       databasePath: join(first.root, "execution.db"),
       runtime: supportedRuntime,
+      clock: { now: () => time("2026-09-19T10:00:05Z") },
     }),
   );
   const reopened = unwrap(
@@ -176,6 +189,101 @@ test("durable lineage and owned intent survive close/reopen and same-identity re
     prepared.plan.materialHash,
   );
   reopened.close();
+});
+
+test("trusted time revalidates approval before creating a durable intent", () => {
+  const { store, scope, setNow } = createStore();
+  const plan = createPlanFixture();
+  const lineage = unwrap(
+    store.prepareLineage({
+      scope,
+      runId: "approval-run",
+      plan,
+      approval: approvalFor(plan),
+      preparedAt: time("2026-09-19T10:00:01Z"),
+    }),
+  );
+  const lease = unwrap(
+    store.acquireLease({
+      scope,
+      ownerRunId: "approval-run",
+      now: time("2026-09-19T10:00:02Z"),
+      ttlMs: 60 * 60 * 1_000,
+    }),
+  );
+  setNow("2026-09-19T10:06:00Z");
+  const result = store.prepareOwnedIntent({
+    authority: lease,
+    lineageId: lineage.lineageId,
+    intentId: plan.material.orderIntents[0]!.intentId,
+    planHash: plan.materialHash,
+    clientOrderId: "expired-approval-client",
+    now: time("2026-09-19T10:00:03Z"),
+    preparedAt: time("2026-09-19T10:00:03Z"),
+  });
+  assert.equal(result.ok, false);
+  if (!result.ok) assert.equal(result.error.code, "PLAN_EXPIRED");
+  assert.equal(
+    unwrap(store.readOwnedIntent(lineage.lineageId, "fixture-intent")),
+    undefined,
+  );
+  store.close();
+});
+
+test("lease and HALT authority are isolated by account", () => {
+  const first = createStore();
+  const otherScope: PersistenceScope = {
+    ...first.scope,
+    accountId: "demo:other-account",
+  };
+  const other = unwrap(
+    createSqliteExecutionStore(first.connection, otherScope),
+  );
+  const firstLease = unwrap(
+    first.store.acquireLease({
+      scope: first.scope,
+      ownerRunId: "first-account-run",
+      now: time("2026-09-19T10:00:00Z"),
+      ttlMs: 60_000,
+    }),
+  );
+  const otherLease = unwrap(
+    other.acquireLease({
+      scope: otherScope,
+      ownerRunId: "other-account-run",
+      now: time("2026-09-19T10:00:00Z"),
+      ttlMs: 60_000,
+    }),
+  );
+  assert.equal(firstLease.epoch, 1);
+  assert.equal(otherLease.epoch, 1);
+  assert.equal(
+    unwrap(
+      first.store.raiseHalt(
+        firstLease,
+        "first-account review",
+        time("2026-09-19T10:00:04Z"),
+      ),
+    ).active,
+    true,
+  );
+  assert.equal(unwrap(other.readHalt()).active, false);
+  const artifactEnvelope = unwrap(
+    encodeCanonicalArtifact("execution-plan", createPlanFixture()),
+  );
+  unwrap(
+    first.store.writeArtifact({
+      artifactId: "account-scoped-artifact",
+      artifactKind: "execution-plan",
+      envelope: artifactEnvelope,
+    }),
+  );
+  assert.ok(unwrap(first.store.readArtifact("account-scoped-artifact")));
+  assert.equal(
+    unwrap(other.readArtifact("account-scoped-artifact")),
+    undefined,
+  );
+  first.store.close();
 });
 
 test("independent duplicate lineages and conflicting client IDs raise account HALT", () => {
@@ -271,7 +379,8 @@ test("attempts and reconciliations remain append-only and project the latest sta
 });
 
 test("lease contention, expiry takeover and epoch fencing are fail-closed", () => {
-  const { store, scope } = createStore();
+  const { store, scope, setNow } = createStore();
+  setNow("2026-09-19T10:00:00Z");
   const firstLease = unwrap(
     store.acquireLease({
       scope,
@@ -291,6 +400,7 @@ test("lease contention, expiry takeover and epoch fencing are fail-closed", () =
     assert.equal(held.error.code, "RUN_LEASE_HELD");
     assert.deepEqual(Object.keys(held.error.details ?? {}), ["expiresAt"]);
   }
+  setNow("2026-09-19T10:00:01Z");
   const takeover = unwrap(
     store.acquireLease({
       scope,
@@ -314,6 +424,98 @@ test("lease contention, expiry takeover and epoch fencing are fail-closed", () =
   const staleRelease = store.releaseLease(firstLease);
   assert.equal(staleRelease.ok, false);
   if (!staleRelease.ok) assert.equal(staleRelease.error.code, "RUN_LEASE_LOST");
+  store.close();
+});
+
+test("current lease owner can reconcile a prior run after takeover", () => {
+  const { store, scope, setNow } = createStore();
+  const plan = createPlanFixture();
+  const lineage = unwrap(
+    store.prepareLineage({
+      scope,
+      runId: "crashed-run",
+      plan,
+      approval: approvalFor(plan),
+      preparedAt: time("2026-09-19T10:00:01Z"),
+    }),
+  );
+  const originalLease = unwrap(
+    store.acquireLease({
+      scope,
+      ownerRunId: "crashed-run",
+      now: time("2026-09-19T10:00:02Z"),
+      ttlMs: 1_000,
+    }),
+  );
+  const intent = unwrap(
+    store.prepareOwnedIntent({
+      authority: originalLease,
+      lineageId: lineage.lineageId,
+      intentId: plan.material.orderIntents[0]!.intentId,
+      planHash: plan.materialHash,
+      clientOrderId: "crashed-client",
+      now: time("2026-09-19T10:00:02Z"),
+      preparedAt: time("2026-09-19T10:00:02Z"),
+    }),
+  );
+  const attempt = unwrap(
+    createExecutionAttempt({
+      attemptId: "crashed-attempt",
+      planHash: plan.materialHash,
+      intentId: intent.intentId,
+      clientOrderId: intent.clientOrderId,
+      submittedAt: time("2026-09-19T10:00:02Z"),
+      acknowledgement: "accepted",
+      terminalStatus: "unverified",
+    }),
+  );
+  unwrap(
+    store.appendAttempt({
+      authority: originalLease,
+      lineageId: lineage.lineageId,
+      attempt,
+      dispatchedAt: time("2026-09-19T10:00:02Z"),
+    }),
+  );
+
+  setNow("2026-09-19T10:00:04Z");
+  const takeover = unwrap(
+    store.acquireLease({
+      scope,
+      ownerRunId: "recovery-run",
+      now: time("2026-09-19T10:00:04Z"),
+      ttlMs: 60_000,
+    }),
+  );
+  const failed = unwrap(
+    rehydrateReconciliationResult({
+      attemptId: attempt.attemptId,
+      intentId: intent.intentId,
+      planHash: plan.materialHash,
+      clientOrderId: intent.clientOrderId,
+      status: "FAILED",
+      observedAt: time("2026-09-19T10:00:05Z"),
+    }),
+  );
+  const stale = store.appendReconciliation({
+    authority: originalLease,
+    lineageId: lineage.lineageId,
+    result: failed,
+    recordedAt: time("2026-09-19T10:00:05Z"),
+  });
+  assert.equal(stale.ok, false);
+  if (!stale.ok) assert.equal(stale.error.code, "RUN_LEASE_LOST");
+  assert.equal(
+    unwrap(
+      store.appendReconciliation({
+        authority: takeover,
+        lineageId: lineage.lineageId,
+        result: failed,
+        recordedAt: time("2026-09-19T10:00:05Z"),
+      }),
+    ).result.status,
+    "FAILED",
+  );
   store.close();
 });
 

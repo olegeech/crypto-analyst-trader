@@ -120,7 +120,7 @@ export const executionOperationalMigration = {
         acquired_at TEXT NOT NULL,
         expires_at TEXT NOT NULL,
         reconciliation_required INTEGER NOT NULL CHECK (reconciliation_required IN (0, 1)),
-        PRIMARY KEY (exchange, environment, account_id, category, position_mode)
+        PRIMARY KEY (exchange, environment, account_id)
       );
 
       CREATE TABLE halt_state (
@@ -134,7 +134,7 @@ export const executionOperationalMigration = {
         reason TEXT,
         raised_at TEXT,
         reconciliation_required INTEGER NOT NULL CHECK (reconciliation_required IN (0, 1)),
-        PRIMARY KEY (exchange, environment, account_id, category, position_mode)
+        PRIMARY KEY (exchange, environment, account_id)
       );
 
       CREATE TABLE halt_events (
@@ -149,8 +149,11 @@ export const executionOperationalMigration = {
         reason TEXT NOT NULL,
         recorded_at TEXT NOT NULL,
         evidence_json TEXT,
-        UNIQUE (exchange, environment, account_id, category, position_mode, revision)
+        UNIQUE (exchange, environment, account_id, revision)
       );
+
+      CREATE INDEX halt_events_authority_scope_idx
+        ON halt_events (exchange, environment, account_id, revision);
 
       CREATE INDEX execution_attempts_lineage_idx
         ON execution_attempts (lineage_id, attempt_number);

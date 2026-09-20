@@ -69,6 +69,8 @@ export type PersistenceFactKind =
   | "audit";
 
 export interface IngestionFact {
+  /** The generated durable identifier is populated by persistence reads. */
+  readonly factId?: string;
   readonly factKind: PersistenceFactKind;
   readonly eventIdentity: string;
   readonly scope: PersistenceScope;
@@ -288,6 +290,7 @@ export function persistenceRecoveryMetadata(
         redactedDiagnosticFields: ["code"],
       };
     case "PERSISTENCE_BUSY":
+    case "CHECKPOINT_STALE":
       return {
         category: "contention",
         canRead: true,

@@ -43,6 +43,8 @@ import {
   validateAuthority,
 } from "./sqlite-authority.js";
 import {
+  AUTHORITY_SCOPE_WHERE,
+  authorityScopeValues,
   deterministicId,
   isEnvironment,
   persistenceFailure,
@@ -54,6 +56,7 @@ import {
   storedOptionalString,
   storedString,
   storedTimestamp,
+  trustedNow,
   type SqliteRow,
 } from "./sqlite-helpers.js";
 import {
@@ -276,7 +279,12 @@ function readPlanFromDatabase(
       `SELECT a.artifact_kind, a.schema_version, a.canonical_json, a.canonical_hash
        FROM artifacts a
        INNER JOIN execution_lineages l ON l.plan_id = a.artifact_id
-       WHERE ${SCOPE_WHERE} AND l.lineage_id = ?`,
+       WHERE l.exchange = ? AND l.environment = ? AND l.account_id = ?
+         AND l.category = ? AND l.position_mode = ?
+         AND a.exchange = l.exchange AND a.environment = l.environment
+         AND a.account_id = l.account_id AND a.category = l.category
+         AND a.position_mode = l.position_mode
+         AND l.lineage_id = ?`,
     )
     .get(...scopeValues(scope), lineageId) as SqliteRow | undefined;
   if (row === undefined) return ok(undefined);
@@ -296,6 +304,36 @@ function approvalFromRow(row: SqliteRow): Result<Approval> {
     return persistenceFailure("persisted approval failed domain rehydration");
   }
   return approval;
+}
+
+function approvalRow(
+  database: DatabaseSync,
+  scope: PersistenceScope,
+  lineageId: string,
+): SqliteRow | undefined {
+  return database
+    .prepare(
+      `SELECT a.artifact_kind, a.schema_version, a.canonical_json, a.canonical_hash
+       FROM approvals p
+       INNER JOIN execution_lineages l ON l.lineage_id = p.lineage_id
+       INNER JOIN artifacts a ON a.artifact_id = p.approval_id
+       WHERE l.exchange = ? AND l.environment = ? AND l.account_id = ?
+         AND l.category = ? AND l.position_mode = ?
+         AND a.exchange = l.exchange AND a.environment = l.environment
+         AND a.account_id = l.account_id AND a.category = l.category
+         AND a.position_mode = l.position_mode
+         AND l.lineage_id = ?`,
+    )
+    .get(...scopeValues(scope), lineageId) as SqliteRow | undefined;
+}
+
+function readApprovalFromDatabase(
+  database: DatabaseSync,
+  scope: PersistenceScope,
+  lineageId: string,
+): Result<Approval | undefined> {
+  const row = approvalRow(database, scope, lineageId);
+  return row === undefined ? ok(undefined) : approvalFromRow(row);
 }
 
 function attemptFromRow(row: SqliteRow): Result<AttemptRecord> {
@@ -339,6 +377,7 @@ function reconciliationFromRow(row: SqliteRow): Result<ReconciliationRecord> {
 function validateLeaseRequest(
   request: LeaseRequest,
   scope: PersistenceScope,
+  authoritativeNow: UtcTimestamp,
 ): Result<{
   readonly ownerRunId: string;
   readonly now: UtcTimestamp;
@@ -354,23 +393,23 @@ function validateLeaseRequest(
     );
   }
   const ownerRunId = requireIdentifier(request.ownerRunId, "ownerRunId");
-  const now = parseUtcTimestamp(request.now);
+  const requestNow = parseUtcTimestamp(request.now);
   const ttlMs = requireFiniteInteger(request.ttlMs, "ttlMs", 1);
   if (
     !ownerRunId.ok ||
-    !now.ok ||
+    !requestNow.ok ||
     !ttlMs.ok ||
     ttlMs.value > MAX_LEASE_TTL_MS
   ) {
     return fail(domainError("INVALID_ARGUMENT", "lease request is invalid"));
   }
   const expiresAt = timestampFromEpochMs(
-    timestampToEpochMs(now.value) + ttlMs.value,
+    timestampToEpochMs(authoritativeNow) + ttlMs.value,
   );
   if (!expiresAt.ok) return expiresAt;
   return ok({
     ownerRunId: ownerRunId.value,
-    now: now.value,
+    now: authoritativeNow,
     expiresAt: expiresAt.value,
     ttlMs: ttlMs.value,
   });
@@ -388,6 +427,7 @@ function validateTimestamp(
 
 function insertArtifact(
   database: DatabaseSync,
+  scope: PersistenceScope,
   artifactId: string,
   envelope: CanonicalArtifactEnvelope,
   materialHash: string | undefined,
@@ -395,10 +435,23 @@ function insertArtifact(
 ): Result<void> {
   const existing = database
     .prepare(
-      "SELECT artifact_kind, schema_version, canonical_json, canonical_hash, material_hash FROM artifacts WHERE artifact_id = ?",
+      `SELECT exchange, environment, account_id, category, position_mode,
+              artifact_kind, schema_version, canonical_json, canonical_hash, material_hash
+       FROM artifacts WHERE artifact_id = ?`,
     )
     .get(artifactId) as SqliteRow | undefined;
   if (existing !== undefined) {
+    const sameScope =
+      existing.exchange === scope.exchange &&
+      existing.environment === scope.environment &&
+      existing.account_id === scope.accountId &&
+      existing.category === scope.category &&
+      existing.position_mode === scope.positionMode;
+    if (!sameScope) {
+      return conflictFailure(
+        "artifact identity is already bound to a different persistence scope",
+      );
+    }
     const same =
       existing.artifact_kind === envelope.artifactKind &&
       existing.schema_version === envelope.schemaVersion &&
@@ -414,11 +467,13 @@ function insertArtifact(
   database
     .prepare(
       `INSERT INTO artifacts
-       (artifact_id, artifact_kind, schema_version, canonical_json, canonical_hash, material_hash, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+       (artifact_id, exchange, environment, account_id, category, position_mode,
+        artifact_kind, schema_version, canonical_json, canonical_hash, material_hash, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       artifactId,
+      ...scopeValues(scope),
       envelope.artifactKind,
       envelope.schemaVersion,
       envelope.canonicalJson,
@@ -579,9 +634,11 @@ export class SqliteExecutionStore {
       const row = this.database
         .prepare(
           `SELECT artifact_id, artifact_kind, schema_version, canonical_json, canonical_hash, material_hash
-           FROM artifacts WHERE artifact_id = ?`,
+           FROM artifacts
+           WHERE artifact_id = ? AND ${SCOPE_WHERE}`,
         )
-        .get(parsedArtifactId.value) as SqliteRow | undefined;
+        .get(parsedArtifactId.value, ...scopeValues(this.scope)) as
+        SqliteRow | undefined;
       return row === undefined
         ? ok(undefined)
         : artifactFromRow(row, parsedArtifactId.value);
@@ -600,6 +657,7 @@ export class SqliteExecutionStore {
       (database) =>
         insertArtifact(
           database,
+          this.scope,
           validated.value.artifactId,
           validated.value.envelope,
           validated.value.materialHash,
@@ -632,17 +690,11 @@ export class SqliteExecutionStore {
     const parsedLineageId = requireIdentifier(lineageId, "lineageId");
     if (!parsedLineageId.ok) return parsedLineageId;
     try {
-      const row = this.database
-        .prepare(
-          `SELECT a.artifact_kind, a.schema_version, a.canonical_json, a.canonical_hash
-           FROM approvals p
-           INNER JOIN execution_lineages l ON l.lineage_id = p.lineage_id
-           INNER JOIN artifacts a ON a.artifact_id = p.approval_id
-           WHERE ${SCOPE_WHERE} AND l.lineage_id = ?`,
-        )
-        .get(...scopeValues(this.scope), parsedLineageId.value) as
-        SqliteRow | undefined;
-      return row === undefined ? ok(undefined) : approvalFromRow(row);
+      return readApprovalFromDatabase(
+        this.database,
+        this.scope,
+        parsedLineageId.value,
+      );
     } catch (error) {
       return fail(sqliteError(error, "PERSISTENCE_INTEGRITY"));
     }
@@ -669,7 +721,7 @@ export class SqliteExecutionStore {
     try {
       const rows = this.database
         .prepare(
-          `SELECT ea.lineage_id, ea.submitted_at AS dispatched_at, 'execution-attempt' AS artifact_kind,
+          `SELECT ea.lineage_id, ea.dispatched_at, 'execution-attempt' AS artifact_kind,
              'artifact/v1' AS schema_version, canonical_json, canonical_hash
            FROM execution_attempts ea
            INNER JOIN execution_lineages l ON l.lineage_id = ea.lineage_id
@@ -694,7 +746,7 @@ export class SqliteExecutionStore {
     try {
       const rows = this.database
         .prepare(
-          `SELECT rr.lineage_id, rr.observed_at AS recorded_at, 'reconciliation-result' AS artifact_kind,
+          `SELECT rr.lineage_id, rr.recorded_at, 'reconciliation-result' AS artifact_kind,
              'artifact/v1' AS schema_version, canonical_json, canonical_hash
            FROM reconciliation_results rr
            INNER JOIN execution_lineages l ON l.lineage_id = rr.lineage_id
@@ -806,6 +858,7 @@ export class SqliteExecutionStore {
         }
         const planStored = insertArtifact(
           database,
+          this.scope,
           request.plan.planId,
           planArtifact.value,
           request.plan.materialHash,
@@ -814,6 +867,7 @@ export class SqliteExecutionStore {
         if (!planStored.ok) return planStored;
         const approvalStored = insertArtifact(
           database,
+          this.scope,
           approval.value.approvalId,
           approvalArtifact.value,
           approval.value.planHash,
@@ -973,6 +1027,25 @@ export class SqliteExecutionStore {
             "owned intent is not present in the committed plan",
           );
         }
+        const currentTime = trustedNow(database);
+        if (!currentTime.ok) return currentTime;
+        const approval = readApprovalFromDatabase(
+          database,
+          this.scope,
+          lineageId.value,
+        );
+        if (!approval.ok) return approval;
+        if (approval.value === undefined) {
+          return persistenceFailure(
+            "committed lineage has no rehydratable approval",
+          );
+        }
+        const validatedApproval = validateApproval(
+          approval.value,
+          plan.value.materialHash,
+          { now: () => currentTime.value },
+        );
+        if (!validatedApproval.ok) return validatedApproval;
 
         const sameClient = database
           .prepare(
@@ -1060,24 +1133,9 @@ export class SqliteExecutionStore {
           request.authority,
         );
         if (!lineage.ok) return lineage;
-        const intent = database
-          .prepare(
-            `SELECT intent_record_id FROM owned_intents
-             WHERE ${SCOPE_WHERE} AND lineage_id = ? AND intent_id = ? AND plan_hash = ? AND client_order_id = ?`,
-          )
-          .get(
-            ...scopeValues(this.scope),
-            request.lineageId,
-            request.attempt.intentId,
-            request.attempt.planHash,
-            request.attempt.clientOrderId,
-          ) as SqliteRow | undefined;
-        if (intent === undefined)
-          return conflictFailure("attempt has no committed owned intent");
-
         const existing = database
           .prepare(
-            `SELECT attempt_id, lineage_id, submitted_at AS dispatched_at, 'execution-attempt' AS artifact_kind,
+            `SELECT attempt_id, lineage_id, dispatched_at, 'execution-attempt' AS artifact_kind,
              'artifact/v1' AS schema_version, canonical_json, canonical_hash
              FROM execution_attempts WHERE attempt_id = ?`,
           )
@@ -1102,8 +1160,75 @@ export class SqliteExecutionStore {
           );
         }
 
+        const halt = haltRow(database, this.scope);
+        if (!halt.ok) return halt;
+        if (halt.value.active) {
+          return fail(
+            domainError(
+              "HALT_ACTIVE",
+              "account HALT blocks a new execution attempt",
+            ),
+          );
+        }
+        if (authority.value.reconciliationRequired) {
+          return fail(
+            domainError(
+              "UNRESOLVED_STATE",
+              "lease takeover requires reconciliation before a new execution attempt",
+            ),
+          );
+        }
+
+        const intent = database
+          .prepare(
+            `SELECT intent_record_id FROM owned_intents
+             WHERE ${SCOPE_WHERE} AND lineage_id = ? AND intent_id = ? AND plan_hash = ? AND client_order_id = ?`,
+          )
+          .get(
+            ...scopeValues(this.scope),
+            request.lineageId,
+            request.attempt.intentId,
+            request.attempt.planHash,
+            request.attempt.clientOrderId,
+          ) as SqliteRow | undefined;
+        if (intent === undefined)
+          return conflictFailure("attempt has no committed owned intent");
+
+        const plan = readPlanFromDatabase(
+          database,
+          this.scope,
+          request.lineageId,
+        );
+        if (!plan.ok) return plan;
+        if (
+          plan.value === undefined ||
+          plan.value.materialHash !== request.attempt.planHash
+        ) {
+          return conflictFailure("attempt is not bound to the committed plan");
+        }
+        const approval = readApprovalFromDatabase(
+          database,
+          this.scope,
+          request.lineageId,
+        );
+        if (!approval.ok) return approval;
+        if (approval.value === undefined) {
+          return persistenceFailure(
+            "committed lineage has no rehydratable approval",
+          );
+        }
+        const currentTime = trustedNow(database);
+        if (!currentTime.ok) return currentTime;
+        const validatedApproval = validateApproval(
+          approval.value,
+          plan.value.materialHash,
+          { now: () => currentTime.value },
+        );
+        if (!validatedApproval.ok) return validatedApproval;
+
         const storedArtifact = insertArtifact(
           database,
+          this.scope,
           request.attempt.attemptId,
           envelope.value,
           request.attempt.planHash,
@@ -1125,8 +1250,8 @@ export class SqliteExecutionStore {
         database
           .prepare(
             `INSERT INTO execution_attempts
-             (attempt_id, lineage_id, intent_record_id, attempt_number, plan_hash, intent_id, client_order_id, submitted_at, acknowledgement, terminal_status, exchange_order_id, canonical_json, canonical_hash)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             (attempt_id, lineage_id, intent_record_id, attempt_number, plan_hash, intent_id, client_order_id, dispatched_at, submitted_at, acknowledgement, terminal_status, exchange_order_id, canonical_json, canonical_hash)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           )
           .run(
             request.attempt.attemptId,
@@ -1136,6 +1261,7 @@ export class SqliteExecutionStore {
             request.attempt.planHash,
             request.attempt.intentId,
             request.attempt.clientOrderId,
+            dispatchedAt.value,
             request.attempt.submittedAt,
             request.attempt.acknowledgement,
             request.attempt.terminalStatus,
@@ -1170,34 +1296,64 @@ export class SqliteExecutionStore {
     return runInTransaction(
       this.database,
       (database) => {
-        const lineage = authorityLineageRow(
+        const authority = assertCurrentAuthorityWithinTransaction(
           database,
           this.scope,
-          request.lineageId,
           request.authority,
+          recordedAt.value,
         );
-        if (!lineage.ok) return lineage;
+        if (!authority.ok) return authority;
+        const lineage = lineageRow(database, this.scope, request.lineageId);
+        if (lineage === undefined) {
+          return conflictFailure(
+            "execution lineage does not exist in this scope",
+          );
+        }
         const attempt = database
           .prepare(
-            `SELECT attempt_id, lineage_id, plan_hash, intent_id, client_order_id
-             FROM execution_attempts WHERE attempt_id = ?`,
+            `SELECT ea.attempt_id, ea.lineage_id, ea.plan_hash, ea.intent_id,
+                    ea.client_order_id, ea.exchange_order_id
+             FROM execution_attempts ea
+             INNER JOIN execution_lineages l ON l.lineage_id = ea.lineage_id
+             WHERE ${SCOPE_WHERE} AND ea.attempt_id = ?`,
           )
-          .get(request.result.attemptId) as SqliteRow | undefined;
+          .get(...scopeValues(this.scope), request.result.attemptId) as
+          SqliteRow | undefined;
         if (attempt === undefined)
           return conflictFailure("reconciliation has no committed attempt");
+        const attemptId = storedIdentifier(attempt, "attempt_id");
         const attemptLineage = storedIdentifier(attempt, "lineage_id");
         const attemptPlan = storedHash(attempt, "plan_hash");
         const attemptIntent = storedIdentifier(attempt, "intent_id");
         const attemptClient = storedIdentifier(attempt, "client_order_id");
+        const persistedExchangeOrderId = storedOptionalString(
+          attempt,
+          "exchange_order_id",
+        );
         if (
+          !attemptId.ok ||
           !attemptLineage.ok ||
           !attemptPlan.ok ||
           !attemptIntent.ok ||
-          !attemptClient.ok
+          !attemptClient.ok ||
+          !persistedExchangeOrderId.ok
         ) {
           return persistenceFailure("persisted attempt ownership is invalid");
         }
+        const parsedPersistedExchangeOrderId =
+          persistedExchangeOrderId.value === undefined
+            ? ok<string | undefined>(undefined)
+            : requireIdentifier(
+                persistedExchangeOrderId.value,
+                "exchangeOrderId",
+              );
+        if (!parsedPersistedExchangeOrderId.ok) {
+          return persistenceFailure(
+            "persisted attempt exchange order is invalid",
+          );
+        }
         if (
+          attemptId.value !== request.result.attemptId ||
           attemptLineage.value !== request.lineageId ||
           attemptPlan.value !== request.result.planHash ||
           attemptIntent.value !== request.result.intentId ||
@@ -1211,10 +1367,36 @@ export class SqliteExecutionStore {
             "reconciliation does not match the committed attempt owner",
           );
         }
+        if (
+          request.result.exchangeOrderId !== undefined &&
+          request.result.exchangeOrderId !==
+            parsedPersistedExchangeOrderId.value
+        ) {
+          return appendConflictAfterHalt(
+            database,
+            this.scope,
+            "conflicting reconciliation exchange order",
+            recordedAt.value,
+            "reconciliation exchange order does not match the committed attempt",
+          );
+        }
+        if (
+          request.result.status === "RECONCILED" &&
+          (request.result.exchangeOrderId === undefined ||
+            parsedPersistedExchangeOrderId.value === undefined)
+        ) {
+          return appendConflictAfterHalt(
+            database,
+            this.scope,
+            "reconciled result lacks exchange proof",
+            recordedAt.value,
+            "RECONCILED reconciliation requires the persisted exchange order proof",
+          );
+        }
 
         const duplicate = database
           .prepare(
-            `SELECT lineage_id, observed_at AS recorded_at, 'reconciliation-result' AS artifact_kind,
+            `SELECT lineage_id, recorded_at, 'reconciliation-result' AS artifact_kind,
              'artifact/v1' AS schema_version, canonical_json, canonical_hash
              FROM reconciliation_results WHERE lineage_id = ? AND canonical_hash = ?`,
           )
@@ -1224,6 +1406,7 @@ export class SqliteExecutionStore {
 
         const storedArtifact = insertArtifact(
           database,
+          this.scope,
           deterministicId(
             "reconciliation-artifact",
             `${request.lineageId}:${envelope.value.canonicalHash}`,
@@ -1249,8 +1432,8 @@ export class SqliteExecutionStore {
         database
           .prepare(
             `INSERT INTO reconciliation_results
-             (reconciliation_id, lineage_id, attempt_id, intent_id, plan_hash, client_order_id, status, observed_at, exchange_order_id, canonical_json, canonical_hash, revision)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             (reconciliation_id, lineage_id, attempt_id, intent_id, plan_hash, client_order_id, status, recorded_at, observed_at, exchange_order_id, canonical_json, canonical_hash, revision)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           )
           .run(
             reconciliationId,
@@ -1260,6 +1443,7 @@ export class SqliteExecutionStore {
             request.result.planHash,
             request.result.clientOrderId,
             request.result.status,
+            recordedAt.value,
             request.result.observedAt,
             request.result.exchangeOrderId ?? null,
             envelope.value.canonicalJson,
@@ -1290,11 +1474,17 @@ export class SqliteExecutionStore {
   }
 
   public acquireLease(request: LeaseRequest): Result<LeaseState> {
-    const values = validateLeaseRequest(request, this.scope);
-    if (!values.ok) return values;
     return runInTransaction(
       this.database,
       (database) => {
+        const currentTime = trustedNow(database);
+        if (!currentTime.ok) return currentTime;
+        const values = validateLeaseRequest(
+          request,
+          this.scope,
+          currentTime.value,
+        );
+        if (!values.ok) return values;
         const existing = leaseRow(database, this.scope);
         if (!existing.ok) return existing;
         if (existing.value !== undefined) {
@@ -1320,14 +1510,14 @@ export class SqliteExecutionStore {
           database
             .prepare(
               `UPDATE leases SET owner_run_id = ?, epoch = ?, acquired_at = ?, expires_at = ?, reconciliation_required = 1
-               WHERE ${SCOPE_WHERE}`,
+               WHERE ${AUTHORITY_SCOPE_WHERE}`,
             )
             .run(
               values.value.ownerRunId,
               epoch,
               values.value.now,
               values.value.expiresAt,
-              ...scopeValues(this.scope),
+              ...authorityScopeValues(this.scope),
             );
           const raised = raiseHaltWithinTransaction(
             database,
@@ -1375,18 +1565,26 @@ export class SqliteExecutionStore {
   public renewLease(
     request: LeaseRequest & { readonly authority: LeaseAuthority },
   ): Result<LeaseState> {
-    const values = validateLeaseRequest(request, this.scope);
-    if (!values.ok) return values;
-    const authority = validateAuthority(request.authority);
-    if (
-      !authority.ok ||
-      authority.value.ownerRunId !== values.value.ownerRunId
-    ) {
-      return fail(domainError("RUN_LEASE_LOST", "lease authority is invalid"));
-    }
     return runInTransaction(
       this.database,
       (database) => {
+        const currentTime = trustedNow(database);
+        if (!currentTime.ok) return currentTime;
+        const values = validateLeaseRequest(
+          request,
+          this.scope,
+          currentTime.value,
+        );
+        if (!values.ok) return values;
+        const authority = validateAuthority(request.authority);
+        if (
+          !authority.ok ||
+          authority.value.ownerRunId !== values.value.ownerRunId
+        ) {
+          return fail(
+            domainError("RUN_LEASE_LOST", "lease authority is invalid"),
+          );
+        }
         const current = assertCurrentAuthorityWithinTransaction(
           database,
           this.scope,
@@ -1397,11 +1595,11 @@ export class SqliteExecutionStore {
         database
           .prepare(
             `UPDATE leases SET expires_at = ?
-             WHERE ${SCOPE_WHERE} AND owner_run_id = ? AND epoch = ?`,
+             WHERE ${AUTHORITY_SCOPE_WHERE} AND owner_run_id = ? AND epoch = ?`,
           )
           .run(
             values.value.expiresAt,
-            ...scopeValues(this.scope),
+            ...authorityScopeValues(this.scope),
             authority.value.ownerRunId,
             authority.value.epoch,
           );
@@ -1422,26 +1620,29 @@ export class SqliteExecutionStore {
     return runInTransaction(
       this.database,
       (database) => {
-        const current = leaseRow(database, this.scope);
+        const currentTime = trustedNow(database);
+        if (!currentTime.ok) return currentTime;
+        const current = assertCurrentAuthorityWithinTransaction(
+          database,
+          this.scope,
+          parsedAuthority.value,
+          currentTime.value,
+        );
         if (!current.ok) return current;
-        if (
-          current.value === undefined ||
-          current.value.ownerRunId !== parsedAuthority.value.ownerRunId ||
-          current.value.epoch !== parsedAuthority.value.epoch
-        ) {
+        if (current.value.reconciliationRequired) {
           return fail(
             domainError(
-              "RUN_LEASE_LOST",
-              "current run lease is no longer authoritative",
+              "UNRESOLVED_STATE",
+              "reconciliation-required lease cannot be released",
             ),
           );
         }
         database
           .prepare(
-            `DELETE FROM leases WHERE ${SCOPE_WHERE} AND owner_run_id = ? AND epoch = ?`,
+            `DELETE FROM leases WHERE ${AUTHORITY_SCOPE_WHERE} AND owner_run_id = ? AND epoch = ?`,
           )
           .run(
-            ...scopeValues(this.scope),
+            ...authorityScopeValues(this.scope),
             parsedAuthority.value.ownerRunId,
             parsedAuthority.value.epoch,
           );
@@ -1528,7 +1729,7 @@ export class SqliteExecutionStore {
           .get(...scopeValues(this.scope)) as SqliteRow | undefined;
         const reconciliationRevisionRow = database
           .prepare(
-            `SELECT COALESCE(MAX(rr.revision), 0) AS revision
+            `SELECT COUNT(*) AS revision
              FROM reconciliation_results rr
              INNER JOIN execution_lineages l ON l.lineage_id = rr.lineage_id
              WHERE ${SCOPE_WHERE}`,
@@ -1545,6 +1746,45 @@ export class SqliteExecutionStore {
         ) {
           return conflictFailure(
             "HALT clearance evidence is stale for the current journal revisions",
+          );
+        }
+        const accountingConflictRow = database
+          .prepare(
+            `SELECT COUNT(*) AS count
+             FROM accounting_conflicts c
+             WHERE c.exchange = ? AND c.environment = ? AND c.account_id = ? AND c.category = ? AND c.position_mode = ?
+               AND NOT EXISTS (
+                 SELECT 1
+                 FROM accounting_facts original
+                 INNER JOIN accounting_facts correction
+                   ON correction.linked_fact_id = original.fact_id
+                 WHERE original.exchange = ? AND original.environment = ? AND original.account_id = ? AND original.category = ? AND original.position_mode = ?
+                   AND correction.exchange = ? AND correction.environment = ? AND correction.account_id = ? AND correction.category = ? AND correction.position_mode = ?
+                   AND original.fact_kind = c.fact_kind
+                   AND original.event_identity = c.event_identity
+                   AND original.canonical_hash = c.existing_hash
+                   AND correction.fact_kind = c.fact_kind
+                   AND correction.canonical_hash = c.incoming_hash
+               )`,
+          )
+          .get(
+            ...scopeValues(this.scope),
+            ...scopeValues(this.scope),
+            ...scopeValues(this.scope),
+          ) as SqliteRow | undefined;
+        const accountingConflictCount = accountingConflictRow?.count;
+        if (
+          typeof accountingConflictCount !== "number" ||
+          !Number.isSafeInteger(accountingConflictCount)
+        ) {
+          return persistenceFailure("accounting conflict count is invalid");
+        }
+        if (accountingConflictCount > 0) {
+          return fail(
+            domainError(
+              "UNRESOLVED_STATE",
+              "unresolved accounting conflicts block HALT clearance",
+            ),
           );
         }
         const intents = database
@@ -1572,6 +1812,7 @@ export class SqliteExecutionStore {
         }
         const storedArtifact = insertArtifact(
           database,
+          this.scope,
           deterministicId("clearance", clearanceArtifact.value.canonicalHash),
           clearanceArtifact.value,
           undefined,
@@ -1582,9 +1823,13 @@ export class SqliteExecutionStore {
         database
           .prepare(
             `UPDATE halt_state SET active = 0, revision = ?, reason = NULL, raised_at = NULL, reconciliation_required = 0
-             WHERE ${SCOPE_WHERE} AND revision = ? AND active = 1`,
+             WHERE ${AUTHORITY_SCOPE_WHERE} AND revision = ? AND active = 1`,
           )
-          .run(nextRevision, ...scopeValues(this.scope), halt.value.revision);
+          .run(
+            nextRevision,
+            ...authorityScopeValues(this.scope),
+            halt.value.revision,
+          );
         database
           .prepare(
             `INSERT INTO halt_events
@@ -1604,10 +1849,10 @@ export class SqliteExecutionStore {
           );
         database
           .prepare(
-            `UPDATE leases SET reconciliation_required = 0 WHERE ${SCOPE_WHERE} AND owner_run_id = ? AND epoch = ?`,
+            `UPDATE leases SET reconciliation_required = 0 WHERE ${AUTHORITY_SCOPE_WHERE} AND owner_run_id = ? AND epoch = ?`,
           )
           .run(
-            ...scopeValues(this.scope),
+            ...authorityScopeValues(this.scope),
             currentAuthority.value.ownerRunId,
             currentAuthority.value.epoch,
           );

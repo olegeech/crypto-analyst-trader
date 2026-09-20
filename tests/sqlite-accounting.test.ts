@@ -50,13 +50,16 @@ function createStores(): {
   readonly accounting: SqliteAccountingStore;
   readonly database: DatabaseSync;
   readonly scope: PersistenceScope;
+  readonly setNow: (value: string) => void;
 } {
   const root = mkdtempSync(join(tmpdir(), "sqlite-accounting-"));
+  const clockState = { value: time("2026-09-19T10:00:03Z") };
   const connection = unwrap(
     openSqliteConnection({
       environment: "demo",
       databasePath: join(root, "accounting.db"),
       runtime: supportedRuntime,
+      clock: { now: () => clockState.value },
     }),
   );
   const scope: PersistenceScope = {
@@ -70,7 +73,15 @@ function createStores(): {
   const accounting = unwrap(
     createSqliteAccountingStore(connection, scope, execution.scope),
   );
-  return { execution, accounting, database: connection.db, scope };
+  return {
+    execution,
+    accounting,
+    database: connection.db,
+    scope,
+    setNow(value: string): void {
+      clockState.value = time(value);
+    },
+  };
 }
 
 function fillFact(
@@ -188,6 +199,67 @@ test("same event identity with different bytes preserves the fact and raises HAL
   execution.close();
 });
 
+test("linked accounting correction resolves the conflict before HALT clearance", () => {
+  const { execution, accounting, database, scope } = createStores();
+  const authority = unwrap(
+    execution.acquireLease({
+      scope,
+      ownerRunId: "accounting-recovery-run",
+      now: time("2026-09-19T10:00:00Z"),
+      ttlMs: 60_000,
+    }),
+  );
+  const original = fillFact(scope, "trade-resolution:1", "57");
+  const conflicting = fillFact(scope, "trade-resolution:1", "58");
+  assert.equal(unwrap(accounting.ingestFact(original)), "inserted");
+  const originalRow = unwrap(accounting.readFact("fill", "trade-resolution:1"));
+  assert.ok(originalRow?.factId);
+  const conflict = accounting.ingestFact(conflicting);
+  assert.equal(conflict.ok, false);
+
+  const correction = {
+    ...conflicting,
+    eventIdentity: "trade-resolution:2",
+    artifact: {
+      ...conflicting.artifact,
+      artifactId: "fill-trade-resolution-correction",
+    },
+    observationRevision: "2",
+    linkedFactId: originalRow.factId,
+    adjustmentReason: "exchange supplied a corrected immutable observation",
+  };
+  assert.equal(unwrap(accounting.ingestFact(correction)), "inserted");
+  const halted = unwrap(execution.readHalt());
+  assert.equal(halted.active, true);
+
+  const cleared = execution.clearHalt({
+    authority,
+    expectedHaltRevision: halted.revision,
+    evidence: {
+      evidenceVersion: "clearance/v1",
+      actor: "operator",
+      source: "accounting-reconciliation",
+      timestamp: time("2026-09-19T10:00:08Z"),
+      reason: "corrected immutable accounting observation",
+      affectedLineageRevision: 0,
+      affectedReconciliationRevision: 0,
+    },
+  });
+  if (!cleared.ok) {
+    assert.fail(`${cleared.error.code}: ${cleared.error.message}`);
+  }
+  assert.equal(unwrap(execution.readHalt()).active, false);
+  assert.equal(
+    (
+      database
+        .prepare("SELECT COUNT(*) AS count FROM accounting_conflicts")
+        .get() as { readonly count: number }
+    ).count,
+    1,
+  );
+  execution.close();
+});
+
 test("immutable observations and corrections use a new linked fact", () => {
   const { execution, accounting, database, scope } = createStores();
   const original = fillFact(scope, "trade-revision:1", "57");
@@ -252,7 +324,7 @@ test("checkpoint CAS and fact ingestion commit together", () => {
     checkpoint(scope, "cursor-stale", 1, authority),
   );
   assert.equal(stale.ok, false);
-  if (!stale.ok) assert.equal(stale.error.code, "PERSISTENCE_CONFLICT");
+  if (!stale.ok) assert.equal(stale.error.code, "CHECKPOINT_STALE");
   assert.equal(
     unwrap(accounting.readCheckpoint("trade-history"))?.cursor,
     "cursor-2",
@@ -271,8 +343,70 @@ test("checkpoint CAS and fact ingestion commit together", () => {
   execution.close();
 });
 
-test("stale lease authority cannot advance a checkpoint", () => {
+test("checkpoint partial updates preserve durable watermarks", () => {
   const { execution, accounting, scope } = createStores();
+  const authority = unwrap(
+    execution.acquireLease({
+      scope,
+      ownerRunId: "partial-checkpoint-run",
+      now: time("2026-09-19T10:00:00Z"),
+      ttlMs: 60_000,
+    }),
+  );
+  unwrap(
+    accounting.updateCheckpoint(checkpoint(scope, "cursor-1", 0, authority)),
+  );
+
+  const updated = unwrap(
+    accounting.updateCheckpoint({
+      authority,
+      expectedRevision: 1,
+      checkpoint: {
+        stream: "trade-history",
+        scope,
+        cursor: "cursor-2",
+        updatedAt: time("2026-09-19T10:00:04Z"),
+      },
+    }),
+  );
+  assert.equal(updated.cursor, "cursor-2");
+  assert.equal(updated.observedThrough, "2026-09-19T10:00:03.000Z");
+  assert.equal(updated.overlapFrom, "2026-09-19T09:59:03.000Z");
+  assert.equal(unwrap(accounting.readCheckpoint("trade-history"))?.revision, 2);
+  execution.close();
+});
+
+test("accounting reads fail closed for relational or artifact corruption", () => {
+  const { execution, accounting, database, scope } = createStores();
+  const fact = fillFact(scope, "read-corruption");
+  assert.equal(unwrap(accounting.ingestFact(fact)), "inserted");
+  const stored = unwrap(accounting.readFact("fill", "read-corruption"));
+  assert.ok(stored?.factId);
+
+  database
+    .prepare("UPDATE accounting_facts SET fact_kind = 'fee' WHERE fact_id = ?")
+    .run(stored.factId);
+  const kindMismatch = accounting.readFact("fee", "read-corruption");
+  assert.equal(kindMismatch.ok, false);
+  if (!kindMismatch.ok)
+    assert.equal(kindMismatch.error.code, "PERSISTENCE_INTEGRITY");
+
+  database
+    .prepare("UPDATE accounting_facts SET fact_kind = 'fill' WHERE fact_id = ?")
+    .run(stored.factId);
+  database
+    .prepare("DELETE FROM artifacts WHERE artifact_id = ?")
+    .run(fact.artifact.artifactId);
+  const missingArtifact = accounting.readFact("fill", "read-corruption");
+  assert.equal(missingArtifact.ok, false);
+  if (!missingArtifact.ok)
+    assert.equal(missingArtifact.error.code, "PERSISTENCE_INTEGRITY");
+  execution.close();
+});
+
+test("stale lease authority cannot advance a checkpoint", () => {
+  const { execution, accounting, scope, setNow } = createStores();
+  setNow("2026-09-19T10:00:00Z");
   const first = unwrap(
     execution.acquireLease({
       scope,
@@ -281,6 +415,7 @@ test("stale lease authority cannot advance a checkpoint", () => {
       ttlMs: 1_000,
     }),
   );
+  setNow("2026-09-19T10:00:01Z");
   unwrap(
     execution.acquireLease({
       scope,
@@ -289,6 +424,7 @@ test("stale lease authority cannot advance a checkpoint", () => {
       ttlMs: 60_000,
     }),
   );
+  setNow("2026-09-19T10:00:01Z");
   const result = accounting.updateCheckpoint(
     checkpoint(scope, "stale-cursor", 0, first),
   );

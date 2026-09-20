@@ -11,7 +11,13 @@ import { dirname, join, resolve } from "node:path";
 
 import { domainError, type DomainError } from "../../domain/shared/errors.js";
 import { fail, ok, type Result } from "../../domain/shared/result.js";
+import {
+  parseUtcTimestamp,
+  systemClock,
+  type Clock,
+} from "../../domain/shared/time.js";
 import { applyMigrations } from "./migrations.js";
+import { registerTrustedClock, type SqliteRow } from "./sqlite-helpers.js";
 import { runInTransaction, sqliteError } from "./transaction.js";
 
 export const MIN_NODE_VERSION = "22.22.3";
@@ -31,6 +37,7 @@ export interface SqliteConnectionOptions {
   readonly databasePath?: string;
   readonly rootDirectory?: string;
   readonly runtime?: SqliteRuntimeVersions;
+  readonly clock?: Clock;
   readonly busyTimeoutMs?: number;
 }
 
@@ -39,6 +46,7 @@ export interface SqliteConnection {
   readonly path: string;
   readonly environment: (typeof VALID_ENVIRONMENTS)[number];
   readonly runtime: SqliteRuntimeVersions;
+  readonly clock: Clock;
   close(): void;
 }
 
@@ -129,6 +137,27 @@ function validateBusyTimeout(value: number): Result<number> {
     );
   }
   return ok(value);
+}
+
+function validateClock(clock: Clock): Result<Clock> {
+  try {
+    const timestamp = parseUtcTimestamp(clock.now());
+    return timestamp.ok
+      ? ok(clock)
+      : fail(
+          domainError(
+            "PERSISTENCE_RUNTIME",
+            "SQLite trusted clock did not return a valid UTC timestamp",
+          ),
+        );
+  } catch {
+    return fail(
+      domainError(
+        "PERSISTENCE_RUNTIME",
+        "SQLite trusted clock could not produce a UTC timestamp",
+      ),
+    );
+  }
 }
 
 function databasePath(
@@ -267,6 +296,7 @@ function configurePragmas(
 function ensureEnvironmentIdentity(
   database: DatabaseSync,
   environment: (typeof VALID_ENVIRONMENTS)[number],
+  clock: Clock,
 ): Result<void> {
   const rows = database
     .prepare("SELECT environment FROM database_identity WHERE singleton = 1")
@@ -285,10 +315,39 @@ function ensureEnvironmentIdentity(
       .prepare(
         "INSERT INTO database_identity (singleton, environment, created_at) VALUES (1, ?, ?)",
       )
-      .run(environment, new Date().toISOString());
+      .run(environment, clock.now());
     return ok(undefined);
   }
   if (row.environment !== environment) return fail(invalidEnvironment());
+  return ok(undefined);
+}
+
+function validateExistingEnvironmentIdentity(
+  database: DatabaseSync,
+  environment: (typeof VALID_ENVIRONMENTS)[number],
+): Result<void> {
+  const table = database
+    .prepare(
+      "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'database_identity'",
+    )
+    .get() as SqliteRow | undefined;
+  if (table?.name !== "database_identity") return ok(undefined);
+
+  const rows = database
+    .prepare("SELECT environment FROM database_identity WHERE singleton = 1")
+    .all() as IdentityRow[];
+  if (rows.length > 1) {
+    return fail(
+      domainError(
+        "PERSISTENCE_SCHEMA",
+        "SQLite environment identity is not singleton",
+      ),
+    );
+  }
+  const [row] = rows;
+  if (row !== undefined && row.environment !== environment) {
+    return fail(invalidEnvironment());
+  }
   return ok(undefined);
 }
 
@@ -311,6 +370,10 @@ export function openSqliteConnection(
   const supportedRuntime = validateRuntime(runtime);
   if (!supportedRuntime.ok) return supportedRuntime;
 
+  const clock = options.clock ?? systemClock;
+  const supportedClock = validateClock(clock);
+  if (!supportedClock.ok) return supportedClock;
+
   const busyTimeout = validateBusyTimeout(
     options.busyTimeoutMs ?? DEFAULT_BUSY_TIMEOUT_MS,
   );
@@ -328,10 +391,20 @@ export function openSqliteConnection(
   let database: DatabaseSync | undefined;
   try {
     database = new DatabaseSync(path, { allowExtension: false });
+    registerTrustedClock(database, clock);
     const configured = configurePragmas(database, busyTimeout.value);
     if (!configured.ok) {
       closeQuietly(database);
       return configured;
+    }
+
+    const existingIdentity = validateExistingEnvironmentIdentity(
+      database,
+      environment,
+    );
+    if (!existingIdentity.ok) {
+      closeQuietly(database);
+      return existingIdentity;
     }
 
     const migrated = applyMigrations(database);
@@ -343,7 +416,7 @@ export function openSqliteConnection(
     const identity = runInTransaction(
       database,
       (transactionDatabase) =>
-        ensureEnvironmentIdentity(transactionDatabase, environment),
+        ensureEnvironmentIdentity(transactionDatabase, environment, clock),
       "PERSISTENCE_INTEGRITY",
     );
     if (!identity.ok) {
@@ -363,6 +436,7 @@ export function openSqliteConnection(
       path,
       environment,
       runtime,
+      clock,
       close(): void {
         if (closed) return;
         closed = true;

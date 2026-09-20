@@ -1,9 +1,12 @@
 import { createHash } from "node:crypto";
+import type { DatabaseSync } from "node:sqlite";
 
 import { domainError } from "../../domain/shared/errors.js";
 import { fail, ok, type Result } from "../../domain/shared/result.js";
 import {
   parseUtcTimestamp,
+  systemClock,
+  type Clock,
   type UtcTimestamp,
 } from "../../domain/shared/time.js";
 import {
@@ -17,6 +20,11 @@ import type {
 
 export const SCOPE_WHERE =
   "exchange = ? AND environment = ? AND account_id = ? AND category = ? AND position_mode = ?";
+
+export const AUTHORITY_SCOPE_WHERE =
+  "exchange = ? AND environment = ? AND account_id = ?";
+
+const trustedClocks = new WeakMap<DatabaseSync, Clock>();
 
 export type SqliteRow = Record<string, unknown>;
 
@@ -36,6 +44,28 @@ export function scopeValues(scope: PersistenceScope): readonly string[] {
     scope.category,
     scope.positionMode,
   ];
+}
+
+export function authorityScopeValues(
+  scope: PersistenceScope,
+): readonly string[] {
+  return [scope.exchange, scope.environment, scope.accountId];
+}
+
+export function registerTrustedClock(
+  database: DatabaseSync,
+  clock: Clock,
+): void {
+  trustedClocks.set(database, clock);
+}
+
+export function trustedNow(database: DatabaseSync): Result<UtcTimestamp> {
+  const clock = trustedClocks.get(database) ?? systemClock;
+  try {
+    return parseUtcTimestamp(clock.now());
+  } catch {
+    return persistenceFailure("trusted SQLite clock is invalid");
+  }
 }
 
 export function scopesEqual(

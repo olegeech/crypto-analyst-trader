@@ -95,6 +95,69 @@ test("supported older schema migrates forward without losing committed rows", ()
   opened.value.close();
 });
 
+test("non-empty unmarked databases fail before migration or identity adoption", () => {
+  const { path } = temporaryDatabase();
+  const db = openDatabase(path);
+  db.exec("CREATE TABLE unmarked_state (value TEXT NOT NULL)");
+  db.prepare("INSERT INTO unmarked_state (value) VALUES (?)").run("keep");
+  db.close();
+
+  const opened = openSqliteConnection({
+    environment: "demo",
+    databasePath: path,
+    runtime: supportedRuntime,
+  });
+  assert.equal(opened.ok, false);
+  if (!opened.ok) assert.equal(opened.error.code, "PERSISTENCE_SCHEMA");
+
+  const unchanged = openDatabase(path);
+  assert.equal(
+    unchanged
+      .prepare("SELECT name FROM sqlite_master WHERE name = ?")
+      .get("schema_meta"),
+    undefined,
+  );
+  assert.equal(
+    unchanged.prepare("SELECT value FROM unmarked_state").get()?.value,
+    "keep",
+  );
+  unchanged.close();
+});
+
+test("environment mismatch is rejected before pending migrations mutate the database", () => {
+  const { path } = temporaryDatabase();
+  const db = openDatabase(path);
+  assert.equal(applyMigrations(db, MIGRATIONS.slice(0, 1)).ok, true);
+  db.prepare(
+    "INSERT INTO database_identity (singleton, environment, created_at) VALUES (1, ?, ?)",
+  ).run("demo", "2026-09-19T10:00:00.000Z");
+  db.close();
+
+  const opened = openSqliteConnection({
+    environment: "testnet",
+    databasePath: path,
+    runtime: supportedRuntime,
+  });
+  assert.equal(opened.ok, false);
+  if (!opened.ok) assert.equal(opened.error.code, "PERSISTENCE_ENVIRONMENT");
+
+  const unchanged = openDatabase(path);
+  assert.equal(
+    unchanged.prepare("SELECT schema_version FROM schema_meta").get()
+      ?.schema_version,
+    1,
+  );
+  assert.equal(
+    unchanged
+      .prepare(
+        "SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = ?",
+      )
+      .get("execution_lineages")?.count,
+    0,
+  );
+  unchanged.close();
+});
+
 test("newer schema markers fail closed before execution authority", () => {
   const { path } = temporaryDatabase();
   const db = openDatabase(path);
@@ -122,7 +185,7 @@ test("failed pending migration rolls back its DDL and schema marker", () => {
   db.exec("CREATE TABLE preserved_rows (value TEXT NOT NULL)");
   db.prepare("INSERT INTO preserved_rows (value) VALUES (?)").run("kept");
   const failingMigration: SqliteMigration = {
-    version: 4,
+    version: 5,
     name: "synthetic failure",
     apply(database) {
       database.exec("CREATE TABLE should_rollback (value TEXT NOT NULL)");
@@ -226,5 +289,20 @@ test("default filesystem permissions are private and extensions remain disabled"
   assert.throws(() =>
     opened.value.db.loadExtension("/tmp/not-a-real-extension"),
   );
+  opened.value.close();
+});
+
+test("default root paths enforce private directory and database modes", () => {
+  const root = mkdtempSync(join(tmpdir(), "sqlite-default-permissions-"));
+  const privateRoot = join(root, "execution-root");
+  const opened = openSqliteConnection({
+    environment: "demo",
+    rootDirectory: privateRoot,
+    runtime: supportedRuntime,
+  });
+  assert.equal(opened.ok, true);
+  if (!opened.ok) return;
+  assert.equal(statSync(privateRoot).mode & 0o777, 0o700);
+  assert.equal(statSync(join(privateRoot, "demo.db")).mode & 0o777, 0o600);
   opened.value.close();
 });

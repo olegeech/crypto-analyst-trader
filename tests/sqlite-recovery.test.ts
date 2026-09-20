@@ -22,7 +22,10 @@ import {
   persistenceRecoveryMetadata,
   type PersistenceScope,
 } from "../src/ports/persistence.js";
-import { domainError } from "../src/domain/shared/errors.js";
+import {
+  domainError,
+  type DomainErrorCode,
+} from "../src/domain/shared/errors.js";
 import { createPlanFixture } from "./domain-plan-fixture.js";
 
 const supportedRuntime = {
@@ -88,13 +91,15 @@ function fillArtifact() {
 function open(
   databasePath: string,
   environment: PersistenceScope["environment"] = "demo",
+  accountId = "demo:fixture",
 ) {
-  const scope = { ...createScope(), environment };
+  const scope = { ...createScope(), environment, accountId };
   return unwrap(
     openSqlitePersistence({
       environment,
       databasePath,
       runtime: supportedRuntime,
+      clock: { now: () => time("2026-09-19T10:00:03Z") },
       scope,
     }),
   );
@@ -183,7 +188,7 @@ test("public facade reopens the complete local lifecycle and read model", () => 
   unwrap(first.ingestFact(fact));
   const diagnostics = first.diagnostics();
   assert.equal(diagnostics.environment, "demo");
-  assert.equal(diagnostics.schemaVersion, 3);
+  assert.equal(diagnostics.schemaVersion, 4);
   assert.equal("db" in diagnostics, false);
   first.close();
 
@@ -217,6 +222,7 @@ test("facade rejects cross-environment database reuse before exposing state", ()
     environment: "testnet",
     databasePath,
     runtime: supportedRuntime,
+    clock: { now: () => time("2026-09-19T10:00:03Z") },
     scope: { ...createScope(), environment: "testnet" },
   });
   assert.equal(result.ok, false);
@@ -224,26 +230,205 @@ test("facade rejects cross-environment database reuse before exposing state", ()
 });
 
 test("typed persistence failures expose bounded recovery metadata", () => {
-  const leaseLost = persistenceRecoveryMetadata(
-    domainError("RUN_LEASE_LOST", "ignored detail"),
-  );
-  assert.deepEqual(leaseLost, {
-    category: "lease-lost",
-    canRead: true,
-    canWrite: false,
-    canAppendReconciliation: true,
-    retryable: true,
-    nextAction: "reconcile-before-reacquire",
-    requiredEvidence: ["scope", "owner-run-id", "epoch"],
-    redactedDiagnosticFields: ["code", "scope"],
-  });
-  const conflict = persistenceRecoveryMetadata(
-    domainError("PERSISTENCE_CONFLICT", "ignored payload"),
-  );
-  assert.equal(conflict.category, "duplicate-conflict");
-  assert.equal(conflict.canWrite, false);
-  assert.equal(conflict.canAppendReconciliation, true);
-  assert.equal(conflict.nextAction, "preserve-and-reconcile");
+  const cases: readonly (readonly [
+    DomainErrorCode,
+    ReturnType<typeof persistenceRecoveryMetadata>,
+  ])[] = [
+    [
+      "PERSISTENCE_SCHEMA",
+      {
+        category: "schema",
+        canRead: false,
+        canWrite: false,
+        canAppendReconciliation: false,
+        retryable: false,
+        nextAction: "inspect-schema",
+        requiredEvidence: ["schema-version", "migration-result"],
+        redactedDiagnosticFields: ["code"],
+      },
+    ],
+    [
+      "PERSISTENCE_RUNTIME",
+      {
+        category: "runtime",
+        canRead: false,
+        canWrite: false,
+        canAppendReconciliation: false,
+        retryable: false,
+        nextAction: "run-supported-runtime",
+        requiredEvidence: ["node-version", "sqlite-version"],
+        redactedDiagnosticFields: ["code"],
+      },
+    ],
+    [
+      "PERSISTENCE_ENVIRONMENT",
+      {
+        category: "environment",
+        canRead: false,
+        canWrite: false,
+        canAppendReconciliation: false,
+        retryable: false,
+        nextAction: "open-selected-environment",
+        requiredEvidence: ["environment", "database-identity"],
+        redactedDiagnosticFields: ["code"],
+      },
+    ],
+    [
+      "PERSISTENCE_BUSY",
+      {
+        category: "contention",
+        canRead: true,
+        canWrite: false,
+        canAppendReconciliation: false,
+        retryable: true,
+        nextAction: "retry-after-contention",
+        requiredEvidence: ["scope"],
+        redactedDiagnosticFields: ["code", "scope"],
+      },
+    ],
+    [
+      "CHECKPOINT_STALE",
+      {
+        category: "contention",
+        canRead: true,
+        canWrite: false,
+        canAppendReconciliation: false,
+        retryable: true,
+        nextAction: "retry-after-contention",
+        requiredEvidence: ["scope"],
+        redactedDiagnosticFields: ["code", "scope"],
+      },
+    ],
+    [
+      "RUN_LEASE_HELD",
+      {
+        category: "lease-held",
+        canRead: true,
+        canWrite: false,
+        canAppendReconciliation: false,
+        retryable: true,
+        nextAction: "wait-for-lease",
+        requiredEvidence: ["scope", "expires-at"],
+        redactedDiagnosticFields: ["code", "scope", "expiresAt"],
+      },
+    ],
+    [
+      "RUN_LEASE_LOST",
+      {
+        category: "lease-lost",
+        canRead: true,
+        canWrite: false,
+        canAppendReconciliation: true,
+        retryable: true,
+        nextAction: "reconcile-before-reacquire",
+        requiredEvidence: ["scope", "owner-run-id", "epoch"],
+        redactedDiagnosticFields: ["code", "scope"],
+      },
+    ],
+    [
+      "DUPLICATE_LINEAGE",
+      {
+        category: "duplicate-conflict",
+        canRead: true,
+        canWrite: false,
+        canAppendReconciliation: true,
+        retryable: false,
+        nextAction: "preserve-and-reconcile",
+        requiredEvidence: ["scope", "identity", "canonical-hash"],
+        redactedDiagnosticFields: ["code", "scope"],
+      },
+    ],
+    [
+      "PERSISTENCE_CONFLICT",
+      {
+        category: "duplicate-conflict",
+        canRead: true,
+        canWrite: false,
+        canAppendReconciliation: true,
+        retryable: false,
+        nextAction: "preserve-and-reconcile",
+        requiredEvidence: ["scope", "identity", "canonical-hash"],
+        redactedDiagnosticFields: ["code", "scope"],
+      },
+    ],
+    [
+      "HALT_ACTIVE",
+      {
+        category: "halt",
+        canRead: true,
+        canWrite: false,
+        canAppendReconciliation: true,
+        retryable: false,
+        nextAction: "reconcile-and-clear-halt",
+        requiredEvidence: [
+          "halt-revision",
+          "lineage-revision",
+          "reconciliation-revision",
+        ],
+        redactedDiagnosticFields: ["code", "scope"],
+      },
+    ],
+    [
+      "UNRESOLVED_STATE",
+      {
+        category: "unresolved",
+        canRead: true,
+        canWrite: false,
+        canAppendReconciliation: true,
+        retryable: false,
+        nextAction: "reconcile-before-exposure",
+        requiredEvidence: ["owned-intent", "attempt", "reconciliation-result"],
+        redactedDiagnosticFields: ["code", "scope"],
+      },
+    ],
+    [
+      "UNRESOLVED_RECONCILIATION",
+      {
+        category: "unresolved",
+        canRead: true,
+        canWrite: false,
+        canAppendReconciliation: true,
+        retryable: false,
+        nextAction: "reconcile-before-exposure",
+        requiredEvidence: ["owned-intent", "attempt", "reconciliation-result"],
+        redactedDiagnosticFields: ["code", "scope"],
+      },
+    ],
+    [
+      "PERSISTENCE_INTEGRITY",
+      {
+        category: "integrity",
+        canRead: true,
+        canWrite: false,
+        canAppendReconciliation: false,
+        retryable: false,
+        nextAction: "inspect-and-correct-input",
+        requiredEvidence: ["typed-error-code"],
+        redactedDiagnosticFields: ["code"],
+      },
+    ],
+    [
+      "INVALID_ARGUMENT",
+      {
+        category: "input",
+        canRead: false,
+        canWrite: false,
+        canAppendReconciliation: false,
+        retryable: false,
+        nextAction: "inspect-and-correct-input",
+        requiredEvidence: ["typed-error-code"],
+        redactedDiagnosticFields: ["code"],
+      },
+    ],
+  ];
+
+  for (const [code, expected] of cases) {
+    assert.deepEqual(
+      persistenceRecoveryMetadata(domainError(code, "ignored detail")),
+      expected,
+      code,
+    );
+  }
 });
 
 test("process crash keeps committed artifact and rolls back an uncommitted row", () => {
@@ -283,7 +468,7 @@ test("process crash keeps committed artifact and rolls back an uncommitted row",
   );
   assert.equal(child.signal, "SIGKILL");
 
-  const reopened = open(databasePath);
+  const reopened = open(databasePath, "demo", "demo:crash");
   assert.equal(
     unwrap(reopened.readArtifact("crash-fill"))?.artifactKind,
     "fill",

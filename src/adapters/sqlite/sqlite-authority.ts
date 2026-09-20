@@ -15,10 +15,12 @@ import type {
   PersistenceScope,
 } from "../../ports/persistence.js";
 import {
+  AUTHORITY_SCOPE_WHERE,
+  authorityScopeValues,
   deterministicId,
   persistenceFailure,
-  SCOPE_WHERE,
   scopeValues,
+  trustedNow,
   storedBoolean,
   storedIdentifier,
   storedOptionalString,
@@ -41,9 +43,9 @@ export function leaseRow(
   const row = database
     .prepare(
       `SELECT owner_run_id, epoch, acquired_at, expires_at, reconciliation_required
-       FROM leases WHERE ${SCOPE_WHERE}`,
+       FROM leases WHERE ${AUTHORITY_SCOPE_WHERE}`,
     )
-    .get(...scopeValues(scope)) as SqliteRow | undefined;
+    .get(...authorityScopeValues(scope)) as SqliteRow | undefined;
   if (row === undefined) return ok(undefined);
   const ownerRunId = storedIdentifier(row, "owner_run_id");
   const acquiredAt = storedTimestamp(row, "acquired_at");
@@ -80,9 +82,9 @@ export function haltRow(
   const row = database
     .prepare(
       `SELECT active, revision, reason, raised_at, reconciliation_required
-       FROM halt_state WHERE ${SCOPE_WHERE}`,
+       FROM halt_state WHERE ${AUTHORITY_SCOPE_WHERE}`,
     )
-    .get(...scopeValues(scope)) as SqliteRow | undefined;
+    .get(...authorityScopeValues(scope)) as SqliteRow | undefined;
   if (row === undefined) {
     return ok({
       scope,
@@ -135,17 +137,20 @@ export function assertCurrentAuthorityWithinTransaction(
   database: DatabaseSync,
   scope: PersistenceScope,
   authority: LeaseAuthority,
-  now: UtcTimestamp,
+  callerTimestamp: UtcTimestamp,
 ): Result<LeaseRow> {
+  void callerTimestamp;
   const parsedAuthority = validateAuthority(authority);
   if (!parsedAuthority.ok) return parsedAuthority;
   const current = leaseRow(database, scope);
   if (!current.ok) return current;
+  const now = trustedNow(database);
+  if (!now.ok) return now;
   if (
     current.value === undefined ||
     current.value.ownerRunId !== parsedAuthority.value.ownerRunId ||
     current.value.epoch !== parsedAuthority.value.epoch ||
-    Date.parse(now) >= Date.parse(current.value.expiresAt)
+    Date.parse(now.value) >= Date.parse(current.value.expiresAt)
   ) {
     return fail(
       domainError(
@@ -174,15 +179,16 @@ export function raiseHaltWithinTransaction(
   }
   const eventId = deterministicId(
     "halt",
-    `${scopeValues(scope).join("\u0000")}:${revision}:${safeReason.value}`,
+    `${authorityScopeValues(scope).join("\u0000")}:${revision}:${safeReason.value}`,
   );
   database
     .prepare(
       `INSERT INTO halt_state
        (exchange, environment, account_id, category, position_mode, active, revision, reason, raised_at, reconciliation_required)
        VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, 1)
-       ON CONFLICT (exchange, environment, account_id, category, position_mode)
-       DO UPDATE SET active = 1, revision = excluded.revision, reason = excluded.reason,
+       ON CONFLICT (exchange, environment, account_id)
+       DO UPDATE SET category = excluded.category, position_mode = excluded.position_mode,
+         active = 1, revision = excluded.revision, reason = excluded.reason,
          raised_at = excluded.raised_at, reconciliation_required = 1`,
     )
     .run(...scopeValues(scope), revision, safeReason.value, recordedAt);

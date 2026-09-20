@@ -6,6 +6,7 @@ import { runInTransaction, sqliteError } from "./transaction.js";
 import { bootstrapMigration } from "./migrations/001-bootstrap.js";
 import { executionOperationalMigration } from "./migrations/002-execution-operational.js";
 import { accountingCheckpointsMigration } from "./migrations/003-accounting-checkpoints.js";
+import { authorityAccountScopeMigration } from "./migrations/004-authority-account-scope.js";
 
 export interface SqliteMigration {
   readonly version: number;
@@ -17,6 +18,7 @@ export const MIGRATIONS: readonly SqliteMigration[] = [
   bootstrapMigration,
   executionOperationalMigration,
   accountingCheckpointsMigration,
+  authorityAccountScopeMigration,
 ];
 
 export const CURRENT_SCHEMA_VERSION = MIGRATIONS.at(-1)?.version ?? 0;
@@ -31,6 +33,15 @@ function tableExists(database: DatabaseSync, tableName: string): boolean {
     .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?")
     .get(tableName) as { name?: unknown } | undefined;
   return row?.name === tableName;
+}
+
+function hasUnmarkedUserObjects(database: DatabaseSync): boolean {
+  const row = database
+    .prepare(
+      "SELECT 1 AS present FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' LIMIT 1",
+    )
+    .get() as { present?: unknown } | undefined;
+  return row?.present === 1;
 }
 
 function currentSchemaVersion(database: DatabaseSync): Result<number> {
@@ -110,31 +121,31 @@ export function applyMigrations(
 ): Result<void> {
   const validMigrations = validateMigrations(migrations);
   if (!validMigrations.ok) return validMigrations;
-  const current = (() => {
-    try {
-      return currentSchemaVersion(database);
-    } catch (error) {
-      return fail(sqliteError(error, "PERSISTENCE_SCHEMA"));
-    }
-  })();
-  if (!current.ok) return current;
-  const highestSupportedVersion = migrations.at(-1)?.version ?? 0;
-  if (current.value > highestSupportedVersion) {
-    return fail(
-      domainError(
-        "PERSISTENCE_SCHEMA",
-        "SQLite schema is newer than this adapter supports",
-      ),
-    );
-  }
-  const pending = migrations.filter(
-    (migration) => migration.version > current.value,
-  );
-  if (pending.length === 0) return ok(undefined);
-
   return runInTransaction(
     database,
     (transactionDatabase) => {
+      const current = currentSchemaVersion(transactionDatabase);
+      if (!current.ok) return current;
+      if (current.value === 0 && hasUnmarkedUserObjects(transactionDatabase)) {
+        return fail(
+          domainError(
+            "PERSISTENCE_SCHEMA",
+            "SQLite database is non-empty but has no schema marker",
+          ),
+        );
+      }
+      const highestSupportedVersion = migrations.at(-1)?.version ?? 0;
+      if (current.value > highestSupportedVersion) {
+        return fail(
+          domainError(
+            "PERSISTENCE_SCHEMA",
+            "SQLite schema is newer than this adapter supports",
+          ),
+        );
+      }
+      const pending = migrations.filter(
+        (migration) => migration.version > current.value,
+      );
       for (const migration of pending) {
         migration.apply(transactionDatabase);
         const recorded = recordSchemaVersion(

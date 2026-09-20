@@ -21,6 +21,7 @@ import {
 import type { SqliteConnection } from "./connection.js";
 import {
   assertCurrentAuthorityWithinTransaction,
+  haltRow,
   raiseHaltWithinTransaction,
 } from "./sqlite-authority.js";
 import {
@@ -206,15 +207,29 @@ function accountingColumns(
 
 function insertArtifact(
   database: DatabaseSync,
+  scope: PersistenceScope,
   artifact: IngestionFact["artifact"],
   observedAt: UtcTimestamp,
 ): Result<void> {
   const existing = database
     .prepare(
-      "SELECT artifact_kind, schema_version, canonical_json, canonical_hash, material_hash FROM artifacts WHERE artifact_id = ?",
+      `SELECT exchange, environment, account_id, category, position_mode,
+              artifact_kind, schema_version, canonical_json, canonical_hash, material_hash
+       FROM artifacts WHERE artifact_id = ?`,
     )
     .get(artifact.artifactId) as SqliteRow | undefined;
   if (existing !== undefined) {
+    const sameScope =
+      existing.exchange === scope.exchange &&
+      existing.environment === scope.environment &&
+      existing.account_id === scope.accountId &&
+      existing.category === scope.category &&
+      existing.position_mode === scope.positionMode;
+    if (!sameScope) {
+      return persistenceFailure(
+        "accounting artifact identity is bound to a different persistence scope",
+      );
+    }
     const same =
       existing.artifact_kind === artifact.envelope.artifactKind &&
       existing.schema_version === artifact.envelope.schemaVersion &&
@@ -230,11 +245,13 @@ function insertArtifact(
   database
     .prepare(
       `INSERT INTO artifacts
-       (artifact_id, artifact_kind, schema_version, canonical_json, canonical_hash, material_hash, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+       (artifact_id, exchange, environment, account_id, category, position_mode,
+        artifact_kind, schema_version, canonical_json, canonical_hash, material_hash, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       artifact.artifactId,
+      ...scopeValues(scope),
       artifact.envelope.artifactKind,
       artifact.envelope.schemaVersion,
       artifact.envelope.canonicalJson,
@@ -384,11 +401,33 @@ function insertConflict(
   return ok(undefined);
 }
 
+function assertLinkedFactInScope(
+  database: DatabaseSync,
+  scope: PersistenceScope,
+  linkedFactId: string,
+): Result<void> {
+  const linked = database
+    .prepare(
+      `SELECT fact_id FROM accounting_facts
+       WHERE ${SCOPE_WHERE} AND fact_id = ?`,
+    )
+    .get(...scopeValues(scope), linkedFactId) as SqliteRow | undefined;
+  return linked === undefined
+    ? persistenceFailure(
+        "linked accounting fact does not exist in the persistence scope",
+      )
+    : ok(undefined);
+}
+
 function insertFactWithinTransaction(
   database: DatabaseSync,
   scope: PersistenceScope,
   fact: ValidatedFact,
 ): TransactionFactResult {
+  if (fact.linkedFactId !== undefined) {
+    const linked = assertLinkedFactInScope(database, scope, fact.linkedFactId);
+    if (!linked.ok) return linked;
+  }
   const existing = database
     .prepare(
       `SELECT fact_id, canonical_hash FROM accounting_facts
@@ -422,6 +461,7 @@ function insertFactWithinTransaction(
 
   const artifactStored = insertArtifact(
     database,
+    scope,
     fact.fact.artifact,
     fact.observedAt,
   );
@@ -566,19 +606,50 @@ function checkpointFromRow(
   });
 }
 
+function assertCheckpointMutationAllowedWithinTransaction(
+  database: DatabaseSync,
+  scope: PersistenceScope,
+  authority: CheckpointUpdateRequest["authority"],
+  now: UtcTimestamp,
+): Result<void> {
+  const currentAuthority = assertCurrentAuthorityWithinTransaction(
+    database,
+    scope,
+    authority,
+    now,
+  );
+  if (!currentAuthority.ok) return currentAuthority;
+  if (currentAuthority.value.reconciliationRequired) {
+    return fail(
+      domainError(
+        "UNRESOLVED_STATE",
+        "checkpoint mutation requires reconciliation before lease use",
+      ),
+    );
+  }
+  const halt = haltRow(database, scope);
+  if (!halt.ok) return halt;
+  if (halt.value.active) {
+    return fail(
+      domainError("HALT_ACTIVE", "account HALT blocks checkpoint mutation"),
+    );
+  }
+  return ok(undefined);
+}
+
 function updateCheckpointWithinTransaction(
   database: DatabaseSync,
   scope: PersistenceScope,
   request: ValidatedCheckpoint,
   authority: CheckpointUpdateRequest["authority"],
 ): Result<CheckpointState> {
-  const currentAuthority = assertCurrentAuthorityWithinTransaction(
+  const mutationAllowed = assertCheckpointMutationAllowedWithinTransaction(
     database,
     scope,
     authority,
     request.updatedAt,
   );
-  if (!currentAuthority.ok) return currentAuthority;
+  if (!mutationAllowed.ok) return mutationAllowed;
   const existing = database
     .prepare(
       `SELECT stream, cursor, observed_through, overlap_from, updated_at, revision
@@ -586,13 +657,15 @@ function updateCheckpointWithinTransaction(
     )
     .get(...scopeValues(scope), request.stream) as SqliteRow | undefined;
   let currentRevision = 0;
+  let currentCheckpoint: CheckpointState | undefined;
   if (existing !== undefined) {
     const parsed = checkpointFromRow(existing, scope);
     if (!parsed.ok) return parsed;
+    currentCheckpoint = parsed.value;
     currentRevision = parsed.value.revision;
     if (currentRevision !== request.expectedRevision) {
       return fail(
-        domainError("PERSISTENCE_CONFLICT", "checkpoint revision is stale"),
+        domainError("CHECKPOINT_STALE", "checkpoint revision is stale"),
       );
     }
     if (
@@ -611,7 +684,7 @@ function updateCheckpointWithinTransaction(
     ) {
       return fail(
         domainError(
-          "PERSISTENCE_CONFLICT",
+          "CHECKPOINT_STALE",
           "checkpoint observed-through boundary regressed",
         ),
       );
@@ -619,17 +692,21 @@ function updateCheckpointWithinTransaction(
     if (Date.parse(request.updatedAt) < Date.parse(parsed.value.updatedAt)) {
       return fail(
         domainError(
-          "PERSISTENCE_CONFLICT",
+          "CHECKPOINT_STALE",
           "checkpoint update timestamp regressed",
         ),
       );
     }
   } else if (request.expectedRevision !== 0) {
     return fail(
-      domainError("PERSISTENCE_CONFLICT", "checkpoint revision is stale"),
+      domainError("CHECKPOINT_STALE", "checkpoint revision is stale"),
     );
   }
   const revision = currentRevision + 1;
+  const cursor = request.cursor ?? currentCheckpoint?.cursor;
+  const observedThrough =
+    request.observedThrough ?? currentCheckpoint?.observedThrough;
+  const overlapFrom = request.overlapFrom ?? currentCheckpoint?.overlapFrom;
   database
     .prepare(
       `INSERT INTO checkpoints
@@ -642,22 +719,18 @@ function updateCheckpointWithinTransaction(
     .run(
       request.stream,
       ...scopeValues(scope),
-      request.cursor ?? null,
-      request.observedThrough ?? null,
-      request.overlapFrom ?? null,
+      cursor ?? null,
+      observedThrough ?? null,
+      overlapFrom ?? null,
       request.updatedAt,
       revision,
     );
   return ok({
     stream: request.stream,
     scope,
-    ...(request.cursor === undefined ? {} : { cursor: request.cursor }),
-    ...(request.observedThrough === undefined
-      ? {}
-      : { observedThrough: request.observedThrough }),
-    ...(request.overlapFrom === undefined
-      ? {}
-      : { overlapFrom: request.overlapFrom }),
+    ...(cursor === undefined ? {} : { cursor }),
+    ...(observedThrough === undefined ? {} : { observedThrough }),
+    ...(overlapFrom === undefined ? {} : { overlapFrom }),
     updatedAt: request.updatedAt,
     revision,
   });
@@ -666,6 +739,7 @@ function updateCheckpointWithinTransaction(
 function factFromRow(
   row: SqliteRow,
   scope: PersistenceScope,
+  database: DatabaseSync,
 ): Result<IngestionFact> {
   const factKind = storedString(row, "fact_kind");
   const eventIdentity = storedString(row, "event_identity");
@@ -707,6 +781,21 @@ function factFromRow(
       "persisted accounting artifact hash does not match the fact",
     );
   }
+  const expectedKind = expectedArtifactKind(
+    factKind.value as PersistenceFactKind,
+  );
+  if (
+    expectedKind !== undefined &&
+    artifact.value.artifactKind !== expectedKind
+  ) {
+    return persistenceFailure(
+      "persisted accounting fact kind does not match its artifact",
+    );
+  }
+  if (linkedFactId.value !== undefined) {
+    const linked = assertLinkedFactInScope(database, scope, linkedFactId.value);
+    if (!linked.ok) return linked;
+  }
   const rehydrated = rehydrateArtifact(
     artifact.value.artifactKind,
     artifact.value,
@@ -717,6 +806,7 @@ function factFromRow(
     );
   }
   return ok({
+    factId: factId.value,
     factKind: factKind.value as PersistenceFactKind,
     eventIdentity: eventIdentity.value,
     scope,
@@ -777,6 +867,14 @@ export class SqliteAccountingStore {
     return runInTransaction(
       this.database,
       (database) => {
+        const mutationAllowed =
+          assertCheckpointMutationAllowedWithinTransaction(
+            database,
+            this.scope,
+            request.authority,
+            checkpoint.value.updatedAt,
+          );
+        if (!mutationAllowed.ok) return mutationAllowed;
         const inserted = insertFactWithinTransaction(
           database,
           this.scope,
@@ -814,13 +912,20 @@ export class SqliteAccountingStore {
              a.artifact_kind, a.schema_version, a.canonical_json, a.canonical_hash AS artifact_canonical_hash,
              a.material_hash
            FROM accounting_facts f
-           INNER JOIN artifacts a ON a.artifact_id = f.reference_id
-           WHERE ${SCOPE_WHERE} AND f.fact_kind = ? AND f.event_identity = ?`,
+           LEFT JOIN artifacts a ON a.artifact_id = f.reference_id
+             AND a.exchange = f.exchange
+             AND a.environment = f.environment
+             AND a.account_id = f.account_id
+             AND a.category = f.category
+             AND a.position_mode = f.position_mode
+           WHERE f.exchange = ? AND f.environment = ? AND f.account_id = ?
+             AND f.category = ? AND f.position_mode = ?
+             AND f.fact_kind = ? AND f.event_identity = ?`,
         )
         .get(...scopeValues(this.scope), factKind, identity.value) as
         SqliteRow | undefined;
       if (row === undefined) return ok(undefined);
-      return factFromRow(row, this.scope);
+      return factFromRow(row, this.scope, this.database);
     } catch (error) {
       return fail(sqliteError(error, "PERSISTENCE_INTEGRITY"));
     }
@@ -836,14 +941,20 @@ export class SqliteAccountingStore {
              a.artifact_kind, a.schema_version, a.canonical_json, a.canonical_hash AS artifact_canonical_hash,
              a.material_hash
            FROM accounting_facts f
-           INNER JOIN artifacts a ON a.artifact_id = f.reference_id
-           WHERE ${SCOPE_WHERE}
+           LEFT JOIN artifacts a ON a.artifact_id = f.reference_id
+             AND a.exchange = f.exchange
+             AND a.environment = f.environment
+             AND a.account_id = f.account_id
+             AND a.category = f.category
+             AND a.position_mode = f.position_mode
+           WHERE f.exchange = ? AND f.environment = ? AND f.account_id = ?
+             AND f.category = ? AND f.position_mode = ?
            ORDER BY f.observed_at, f.fact_id`,
         )
         .all(...scopeValues(this.scope)) as SqliteRow[];
       const facts: IngestionFact[] = [];
       for (const row of rows) {
-        const fact = factFromRow(row, this.scope);
+        const fact = factFromRow(row, this.scope, this.database);
         if (!fact.ok) return fact;
         facts.push(fact.value);
       }
