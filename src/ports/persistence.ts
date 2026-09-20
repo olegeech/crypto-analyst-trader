@@ -75,6 +75,8 @@ export interface IngestionFact {
   readonly canonicalHash: string;
   readonly artifact: PersistedArtifact;
   readonly observationRevision?: string;
+  readonly linkedFactId?: string;
+  readonly adjustmentReason?: string;
 }
 
 export interface CheckpointState {

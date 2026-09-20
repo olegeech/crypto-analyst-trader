@@ -499,7 +499,7 @@ function validateAuthority(authority: LeaseAuthority): Result<LeaseAuthority> {
   return ok({ ownerRunId: ownerRunId.value, epoch: epoch.value });
 }
 
-function assertCurrentAuthority(
+export function assertCurrentAuthorityWithinTransaction(
   database: DatabaseSync,
   scope: PersistenceScope,
   authority: LeaseAuthority,
@@ -618,7 +618,7 @@ function insertArtifact(
   return ok(undefined);
 }
 
-function addHalt(
+export function raiseHaltWithinTransaction(
   database: DatabaseSync,
   scope: PersistenceScope,
   reason: string,
@@ -693,7 +693,12 @@ function appendConflictAfterHalt<T>(
   recordedAt: UtcTimestamp,
   message: string,
 ) {
-  const halted = addHalt(database, scope, reason, recordedAt);
+  const halted = raiseHaltWithinTransaction(
+    database,
+    scope,
+    reason,
+    recordedAt,
+  );
   if (!halted.ok) return halted;
   return commitTransaction(
     fail<T>(domainError("PERSISTENCE_CONFLICT", message)),
@@ -975,7 +980,7 @@ export class SqliteExecutionStore {
     return runInTransaction(
       this.database,
       (database) => {
-        const authority = assertCurrentAuthority(
+        const authority = assertCurrentAuthorityWithinTransaction(
           database,
           this.scope,
           request.authority,
@@ -1132,7 +1137,7 @@ export class SqliteExecutionStore {
     return runInTransaction(
       this.database,
       (database) => {
-        const authority = assertCurrentAuthority(
+        const authority = assertCurrentAuthorityWithinTransaction(
           database,
           this.scope,
           request.authority,
@@ -1357,7 +1362,7 @@ export class SqliteExecutionStore {
           request.result.status === "PARTIAL" ||
           request.result.status === "UNRESOLVED"
         ) {
-          const raised = addHalt(
+          const raised = raiseHaltWithinTransaction(
             database,
             this.scope,
             `reconciliation status ${request.result.status} requires review`,
@@ -1415,7 +1420,7 @@ export class SqliteExecutionStore {
               values.value.expiresAt,
               ...scopeValues(this.scope),
             );
-          const raised = addHalt(
+          const raised = raiseHaltWithinTransaction(
             database,
             this.scope,
             "lease takeover requires reconciliation",
@@ -1473,7 +1478,7 @@ export class SqliteExecutionStore {
     return runInTransaction(
       this.database,
       (database) => {
-        const current = assertCurrentAuthority(
+        const current = assertCurrentAuthorityWithinTransaction(
           database,
           this.scope,
           authority.value,
@@ -1547,14 +1552,19 @@ export class SqliteExecutionStore {
     return runInTransaction(
       this.database,
       (database) => {
-        const current = assertCurrentAuthority(
+        const current = assertCurrentAuthorityWithinTransaction(
           database,
           this.scope,
           authority,
           timestamp.value,
         );
         if (!current.ok) return current;
-        return addHalt(database, this.scope, reason, timestamp.value);
+        return raiseHaltWithinTransaction(
+          database,
+          this.scope,
+          reason,
+          timestamp.value,
+        );
       },
       "PERSISTENCE_CONFLICT",
     );
@@ -1587,7 +1597,7 @@ export class SqliteExecutionStore {
     return runInTransaction(
       this.database,
       (database) => {
-        const currentAuthority = assertCurrentAuthority(
+        const currentAuthority = assertCurrentAuthorityWithinTransaction(
           database,
           this.scope,
           request.authority,
