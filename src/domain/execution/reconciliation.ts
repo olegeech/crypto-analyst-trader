@@ -5,8 +5,12 @@ import { isProducedExecutionPlan } from "../planning/plan-proof.js";
 import type { PlanHash } from "../identity/canonical-serialization.js";
 import { domainError } from "../shared/errors.js";
 import { fail, ok, type Result } from "../shared/result.js";
-import type { UtcTimestamp } from "../shared/time.js";
-import { requireHash } from "../shared/validation.js";
+import { parseUtcTimestamp, type UtcTimestamp } from "../shared/time.js";
+import {
+  isRecord,
+  requireHash,
+  requireIdentifier,
+} from "../shared/validation.js";
 import { markReconciliationResult } from "./reconciliation-proof.js";
 import { isProducedExecutionAttempt } from "./execution-attempt-proof.js";
 import { isProducedExchangeOrder } from "./exchange-order-proof.js";
@@ -133,6 +137,59 @@ export function reconcileAttempt(
         status,
         observedAt: order.observedAt,
         exchangeOrderId: order.exchangeOrderId,
+      }),
+    ),
+  );
+}
+
+export function rehydrateReconciliationResult(
+  input: unknown,
+): Result<ReconciliationResult> {
+  if (!isRecord(input)) {
+    return fail(
+      domainError("INVALID_VALUE", "reconciliation result must be an object"),
+    );
+  }
+  const attemptId = requireIdentifier(input.attemptId, "attemptId");
+  const intentId = requireIdentifier(input.intentId, "intentId");
+  const planHash = requireHash(input.planHash, "planHash");
+  const clientOrderId = requireIdentifier(input.clientOrderId, "clientOrderId");
+  const observedAt = parseUtcTimestamp(input.observedAt);
+  if (
+    !attemptId.ok ||
+    !intentId.ok ||
+    !planHash.ok ||
+    !clientOrderId.ok ||
+    !observedAt.ok ||
+    (input.status !== "RECONCILED" &&
+      input.status !== "PARTIAL" &&
+      input.status !== "FAILED" &&
+      input.status !== "PENDING" &&
+      input.status !== "UNRESOLVED")
+  ) {
+    return fail(
+      domainError(
+        "INVALID_VALUE",
+        "reconciliation result contains an invalid field",
+      ),
+    );
+  }
+  let exchangeOrderId: string | undefined;
+  if (input.exchangeOrderId !== undefined) {
+    const parsed = requireIdentifier(input.exchangeOrderId, "exchangeOrderId");
+    if (!parsed.ok) return parsed;
+    exchangeOrderId = parsed.value;
+  }
+  return ok(
+    markReconciliationResult(
+      Object.freeze({
+        attemptId: attemptId.value,
+        intentId: intentId.value,
+        planHash: planHash.value as PlanHash,
+        clientOrderId: clientOrderId.value,
+        status: input.status,
+        observedAt: observedAt.value,
+        ...(exchangeOrderId === undefined ? {} : { exchangeOrderId }),
       }),
     ),
   );

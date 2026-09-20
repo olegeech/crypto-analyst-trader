@@ -1,6 +1,7 @@
 import type { Approval } from "./approval.js";
-import { validateApproval } from "./approval.js";
+import { createApproval, validateApproval } from "./approval.js";
 import {
+  parseEvidenceList,
   requireFreshEvidence,
   type EvidenceRef,
 } from "../evidence/evidence-ref.js";
@@ -8,7 +9,11 @@ import type { PlanHash } from "../identity/canonical-serialization.js";
 import { domainError } from "../shared/errors.js";
 import type { Clock } from "../shared/time.js";
 import { fail, ok, type Result } from "../shared/result.js";
-import { requireHash } from "../shared/validation.js";
+import {
+  isRecord,
+  requireHash,
+  requireIdentifier,
+} from "../shared/validation.js";
 import type { ExecutionPlan } from "../planning/execution-plan.js";
 import { isProducedExecutionPlan } from "../planning/plan-proof.js";
 import type { ReconciliationResult } from "./reconciliation.js";
@@ -86,6 +91,61 @@ export function createLifecycleState(
       ),
       evidence: Object.freeze([...evidence]),
     }),
+  );
+}
+
+export function rehydrateLifecycleState(
+  input: unknown,
+): Result<LifecycleState> {
+  if (!isRecord(input)) {
+    return fail(
+      domainError("INVALID_TRANSITION", "lifecycle state must be an object"),
+    );
+  }
+  const planHash = requireHash(input.planHash, "planHash");
+  const evidence = parseEvidenceList(input.evidence);
+  if (
+    !planHash.ok ||
+    !evidence.ok ||
+    !Array.isArray(input.intentIds) ||
+    !input.intentIds.every(
+      (intentId) => requireIdentifier(intentId, "intentId").ok,
+    ) ||
+    (input.state !== "DRAFT" &&
+      input.state !== "VALIDATED" &&
+      input.state !== "BLOCKED" &&
+      input.state !== "READY_FOR_APPROVAL" &&
+      input.state !== "APPROVED" &&
+      input.state !== "EXECUTING" &&
+      input.state !== "PENDING_RECONCILIATION" &&
+      input.state !== "RECONCILED" &&
+      input.state !== "PARTIAL" &&
+      input.state !== "FAILED" &&
+      input.state !== "EXPIRED")
+  ) {
+    return fail(
+      domainError(
+        "INVALID_TRANSITION",
+        "lifecycle state contains an invalid field",
+      ),
+    );
+  }
+  let approval: Approval | undefined;
+  if (input.approval !== undefined) {
+    const parsedApproval = createApproval(input.approval);
+    if (!parsedApproval.ok) return parsedApproval;
+    approval = parsedApproval.value;
+  }
+  return ok(
+    markLifecycleState(
+      Object.freeze({
+        state: input.state,
+        planHash: planHash.value as PlanHash,
+        intentIds: Object.freeze([...input.intentIds] as string[]),
+        evidence: evidence.value,
+        ...(approval === undefined ? {} : { approval }),
+      }),
+    ),
   );
 }
 
