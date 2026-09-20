@@ -4,6 +4,8 @@ import { canonicalSerialize } from "./canonical-serialization.js";
 
 import {
   createCapabilityObservation,
+  parseCapabilityScope,
+  type CapabilityRequirement,
   type CapabilityObservation,
 } from "../capabilities/capability.js";
 import {
@@ -64,7 +66,11 @@ import {
 import { DecimalValue, isDecimalValue } from "../shared/decimal.js";
 import { domainError } from "../shared/errors.js";
 import { fail, ok, type Result } from "../shared/result.js";
-import { isRecord, requireHash } from "../shared/validation.js";
+import {
+  isRecord,
+  requireHash,
+  requireIdentifier,
+} from "../shared/validation.js";
 import type { ClearanceEvidence } from "../execution/clearance-evidence.js";
 import { createClearanceEvidence } from "../execution/clearance-evidence.js";
 
@@ -742,10 +748,33 @@ function rehydrateExecutionPlan(value: unknown): Result<ExecutionPlan> {
   }
   const riskDecision = rehydrateRiskDecision(material.value.riskDecision);
   if (!riskDecision.ok) return riskDecision;
-  const executionScope = material.value.executionScope;
-  const requiredCapabilities = material.value.requiredCapabilities;
-  if (!isRecord(executionScope) || !Array.isArray(requiredCapabilities)) {
+  const executionScope = parseCapabilityScope(material.value.executionScope);
+  const rawRequiredCapabilities = material.value.requiredCapabilities;
+  if (!executionScope.ok || !Array.isArray(rawRequiredCapabilities)) {
     return artifactFailure("execution-plan capability scope is invalid");
+  }
+  const requiredCapabilities: CapabilityRequirement[] = [];
+  for (const item of rawRequiredCapabilities) {
+    if (!isRecord(item)) {
+      return artifactFailure(
+        "execution-plan capability requirement is invalid",
+      );
+    }
+    const capability = requireIdentifier(item.capability, "capability");
+    const scope = parseCapabilityScope(item.scope);
+    if (!capability.ok || !scope.ok) {
+      return artifactFailure(
+        "execution-plan capability requirement is invalid",
+      );
+    }
+    requiredCapabilities.push({
+      capability: capability.value,
+      scope: scope.value,
+    });
+  }
+  const desiredCurrentDiff = material.value.desiredCurrentDiff;
+  if (!isRecord(desiredCurrentDiff)) {
+    return artifactFailure("execution-plan desired diff is invalid");
   }
   const plan = createExecutionPlan({
     identityVersion: record.value.identityVersion,
@@ -754,12 +783,10 @@ function rehydrateExecutionPlan(value: unknown): Result<ExecutionPlan> {
       marketSnapshot: marketSnapshot.value,
       accountSnapshot: accountSnapshot.value,
       evidence: Object.freeze(evidence),
-      desiredCurrentDiff: material.value.desiredCurrentDiff as Readonly<
-        Record<string, unknown>
-      >,
+      desiredCurrentDiff,
       orderIntents: Object.freeze(orderIntents),
-      requiredCapabilities: requiredCapabilities as never,
-      executionScope: executionScope as never,
+      requiredCapabilities: Object.freeze(requiredCapabilities),
+      executionScope: executionScope.value,
       riskDecision: riskDecision.value,
     },
     ...(record.value.presentation === undefined
@@ -790,6 +817,10 @@ export function rehydrateArtifact(
   artifactKind: "execution-plan",
   envelope: unknown,
 ): Result<ExecutionPlan>;
+export function rehydrateArtifact(
+  artifactKind: "approval",
+  envelope: unknown,
+): Result<Approval>;
 export function rehydrateArtifact(
   artifactKind: ArtifactKind,
   envelope: unknown,

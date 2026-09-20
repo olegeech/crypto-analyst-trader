@@ -56,7 +56,7 @@ export function commitTransaction<T>(
   return { commit: true, result };
 }
 
-function isCommittedTransaction<T>(
+export function isCommittedTransaction<T>(
   outcome: Result<T> | CommittedTransaction<T>,
 ): outcome is CommittedTransaction<T> {
   return typeof outcome === "object" && outcome !== null && "commit" in outcome;

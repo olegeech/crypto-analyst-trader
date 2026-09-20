@@ -79,6 +79,42 @@ command above; it never switches the run to Testnet or mainnet. If ownership
 or clean state remains ambiguous, stop and use the exchange UI fallback rather
 than retrying an ambiguous write blindly.
 
+## Durable local journal and recovery boundary (#9)
+
+The daily system uses one SQLite persistence facade per selected environment.
+The default files are `data/private/execution/demo.db`,
+`data/private/execution/testnet.db` and
+`data/private/execution/mainnet.db`. The facade is local-only and stores
+validated canonical artifacts, execution ownership, attempts, reconciliation,
+accounting facts, checkpoints, leases and `HALT` state. It never loads
+credentials or contacts Bybit.
+
+The supported execution runtime is Node `>=22.22.3` with bundled SQLite
+`>=3.51.3`. The journal requires foreign keys, WAL, full synchronous mode and
+a bounded busy timeout. If runtime, schema, database identity or effective
+SQLite settings fail validation, stop before granting execution authority.
+
+Do not copy a live database. Close cleanly and checkpoint before a quiescent
+copy. After a crash preserve the main database and its `-wal` file; `-shm` is a
+reconstructible cache, not authoritative state. Keep all three environment
+paths separate and never use a fallback database when the selected one is
+missing or carries another environment identity.
+
+The persistence port returns machine-readable recovery metadata that the
+operator CLI will render. The safe default for every failure is no new
+exposure:
+
+| Failure category                        | Read                 | Append reconciliation | New writes/checkpoint | Safe next action                                           |
+| --------------------------------------- | -------------------- | --------------------- | --------------------- | ---------------------------------------------------------- |
+| Integrity, schema, runtime, environment | Stop or inspect only | No                    | No                    | Fix the local boundary or recover the database             |
+| Lease held                              | Yes                  | No                    | No                    | Inspect the owner and wait for expiry/handoff              |
+| Lease lost                              | Yes                  | Yes                   | No                    | Reconcile committed work, then reacquire authority         |
+| Duplicate/conflict                      | Yes                  | Yes                   | No                    | Preserve the original and reconcile divergent evidence     |
+| `HALT` or unresolved state              | Yes                  | Yes                   | No                    | Finish reconciliation and clear only with matched evidence |
+
+The facade read model is evidence for recovery, not permission to bypass the
+plan hash, approval, lease, ownership or reconciliation gates.
+
 CLI names in this document describe application use cases. Invoke only commands
 implemented by the current `package.json` and released for the selected
 environment. A missing capability is `CAPABILITY_NOT_RELEASED`; do not replace

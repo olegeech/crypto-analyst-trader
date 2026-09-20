@@ -374,5 +374,3 @@ export function openSqliteConnection(
     return fail(sqliteError(error, "PERSISTENCE_INTEGRITY"));
   }
 }
-
-export const openSqliteJournal = openSqliteConnection;

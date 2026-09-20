@@ -68,7 +68,7 @@ function createStores(): {
   };
   const execution = unwrap(createSqliteExecutionStore(connection, scope));
   const accounting = unwrap(
-    createSqliteAccountingStore(connection, scope, execution),
+    createSqliteAccountingStore(connection, scope, execution.scope),
   );
   return { execution, accounting, database: connection.db, scope };
 }

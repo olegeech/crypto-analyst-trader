@@ -19,7 +19,7 @@ export const MIGRATIONS: readonly SqliteMigration[] = [
   accountingCheckpointsMigration,
 ];
 
-export const CURRENT_SCHEMA_VERSION = 3;
+export const CURRENT_SCHEMA_VERSION = MIGRATIONS.at(-1)?.version ?? 0;
 
 interface SchemaVersionRow {
   readonly singleton?: unknown;

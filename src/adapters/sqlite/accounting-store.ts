@@ -1,8 +1,6 @@
-import { createHash } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 
 import {
-  decodeCanonicalArtifact,
   rehydrateArtifact,
   type ArtifactKind,
   type CanonicalArtifactEnvelope,
@@ -24,10 +22,22 @@ import type { SqliteConnection } from "./connection.js";
 import {
   assertCurrentAuthorityWithinTransaction,
   raiseHaltWithinTransaction,
-  type SqliteExecutionStore,
-} from "./execution-store.js";
+} from "./sqlite-authority.js";
+import {
+  deterministicId,
+  isEnvironment,
+  persistenceFailure,
+  scopesEqual,
+  SCOPE_WHERE,
+  scopeValues,
+  storedOptionalString,
+  storedString,
+  storedTimestamp,
+  type SqliteRow,
+} from "./sqlite-helpers.js";
 import {
   commitTransaction,
+  isCommittedTransaction,
   runInTransaction,
   sqliteError,
   type CommittedTransaction,
@@ -36,14 +46,11 @@ import type {
   CheckpointState,
   CheckpointUpdateRequest,
   IngestionFact,
-  PersistenceEnvironment,
   PersistenceFactKind,
   PersistenceScope,
 } from "../../ports/persistence.js";
 import type { PlanHash } from "../../domain/identity/canonical-serialization.js";
 
-const SCOPE_WHERE =
-  "exchange = ? AND environment = ? AND account_id = ? AND category = ? AND position_mode = ?";
 const FACT_KINDS = new Set<PersistenceFactKind>([
   "fill",
   "fee",
@@ -54,42 +61,9 @@ const FACT_KINDS = new Set<PersistenceFactKind>([
   "audit",
 ]);
 
-type SqliteRow = Record<string, unknown>;
 type FactResult = "inserted" | "duplicate";
 type TransactionFactResult =
   Result<FactResult> | CommittedTransaction<FactResult>;
-
-function persistenceFailure(message: string): Result<never> {
-  return fail(domainError("PERSISTENCE_INTEGRITY", message));
-}
-
-function scopeValues(scope: PersistenceScope): readonly string[] {
-  return [
-    scope.exchange,
-    scope.environment,
-    scope.accountId,
-    scope.category,
-    scope.positionMode,
-  ];
-}
-
-function scopesEqual(left: PersistenceScope, right: PersistenceScope): boolean {
-  return (
-    left.exchange === right.exchange &&
-    left.environment === right.environment &&
-    left.accountId === right.accountId &&
-    left.category === right.category &&
-    left.positionMode === right.positionMode
-  );
-}
-
-function isEnvironment(value: unknown): value is PersistenceEnvironment {
-  return value === "demo" || value === "testnet" || value === "mainnet";
-}
-
-function deterministicId(prefix: string, value: string): string {
-  return `${prefix}-${createHash("sha256").update(value, "utf8").digest("hex").slice(0, 40)}`;
-}
 
 function expectedArtifactKind(
   factKind: PersistenceFactKind,
@@ -115,12 +89,12 @@ function expectedArtifactKind(
 function validateScope(
   scope: PersistenceScope,
   connection: SqliteConnection,
-  execution: SqliteExecutionStore,
+  expectedScope: PersistenceScope,
 ): Result<PersistenceScope> {
   if (
     !isEnvironment(scope.environment) ||
     scope.environment !== connection.environment ||
-    !scopesEqual(scope, execution.scope)
+    !scopesEqual(scope, expectedScope)
   ) {
     return fail(
       domainError(
@@ -145,37 +119,14 @@ function validateScope(
   return ok(scope);
 }
 
-function storedString(row: SqliteRow, field: string): Result<string> {
-  return typeof row[field] === "string"
-    ? ok(row[field] as string)
-    : persistenceFailure(`persisted SQLite field ${field} is invalid`);
-}
-
-function storedTimestamp(row: SqliteRow, field: string): Result<UtcTimestamp> {
-  const value = storedString(row, field);
-  if (!value.ok) return value;
-  const parsed = parseUtcTimestamp(value.value);
-  return parsed.ok
-    ? parsed
-    : persistenceFailure(`persisted SQLite timestamp ${field} is invalid`);
-}
-
-function storedOptionalString(
+function envelopeFromRow(
   row: SqliteRow,
-  field: string,
-): Result<string | undefined> {
-  const value = row[field];
-  if (value === null || value === undefined) return ok(undefined);
-  return typeof value === "string"
-    ? ok(value)
-    : persistenceFailure(`persisted SQLite optional field ${field} is invalid`);
-}
-
-function envelopeFromRow(row: SqliteRow): Result<CanonicalArtifactEnvelope> {
+  canonicalHashField = "canonical_hash",
+): Result<CanonicalArtifactEnvelope> {
   const artifactKind = storedString(row, "artifact_kind");
   const schemaVersion = storedString(row, "schema_version");
   const canonicalJson = storedString(row, "canonical_json");
-  const canonicalHash = storedString(row, "canonical_hash");
+  const canonicalHash = storedString(row, canonicalHashField);
   if (
     !artifactKind.ok ||
     !schemaVersion.ok ||
@@ -366,14 +317,6 @@ function validateFact(
       "accounting fact kind does not match its artifact",
     );
   }
-  const decoded = decodeCanonicalArtifact(
-    fact.artifact.envelope,
-    fact.artifact.artifactKind,
-  );
-  if (!decoded.ok)
-    return persistenceFailure(
-      "accounting artifact failed canonical validation",
-    );
   const rehydrated = rehydrateArtifact(
     fact.artifact.artifactKind,
     fact.artifact.envelope,
@@ -394,7 +337,7 @@ function validateFact(
     ...(adjustmentReason.value === undefined
       ? {}
       : { adjustmentReason: adjustmentReason.value }),
-    decoded: decoded.value,
+    decoded: rehydrated.value,
   });
 }
 
@@ -653,6 +596,14 @@ function updateCheckpointWithinTransaction(
       );
     }
     if (
+      parsed.value.cursor === request.cursor &&
+      parsed.value.observedThrough === request.observedThrough &&
+      parsed.value.overlapFrom === request.overlapFrom &&
+      parsed.value.updatedAt === request.updatedAt
+    ) {
+      return ok(parsed.value);
+    }
+    if (
       parsed.value.observedThrough !== undefined &&
       request.observedThrough !== undefined &&
       Date.parse(request.observedThrough) <
@@ -719,11 +670,10 @@ function factFromRow(
   const factKind = storedString(row, "fact_kind");
   const eventIdentity = storedString(row, "event_identity");
   const observedAt = storedTimestamp(row, "observed_at");
-  const canonicalHash = storedString(row, "canonical_hash");
   const factCanonicalHash = storedString(row, "fact_canonical_hash");
   const factId = storedString(row, "fact_id");
   const referenceId = storedString(row, "reference_id");
-  const artifact = envelopeFromRow(row);
+  const artifact = envelopeFromRow(row, "artifact_canonical_hash");
   const observationRevision = storedOptionalString(row, "observation_revision");
   const linkedFactId = storedOptionalString(row, "linked_fact_id");
   const adjustmentReason = storedOptionalString(row, "adjustment_reason");
@@ -733,7 +683,6 @@ function factFromRow(
     !FACT_KINDS.has(factKind.value as PersistenceFactKind) ||
     !eventIdentity.ok ||
     !observedAt.ok ||
-    !canonicalHash.ok ||
     !factCanonicalHash.ok ||
     !factId.ok ||
     !referenceId.ok ||
@@ -746,18 +695,14 @@ function factFromRow(
     return persistenceFailure("persisted accounting fact is invalid");
   }
   const parsedFactHash = requireHash(factCanonicalHash.value, "canonicalHash");
-  const parsedArtifactHash = requireHash(canonicalHash.value, "canonicalHash");
   const parsedMaterialHash =
     materialHash.value === undefined
       ? ok<PlanHash | undefined>(undefined)
       : requireHash(materialHash.value, "materialHash");
-  if (!parsedFactHash.ok || !parsedArtifactHash.ok || !parsedMaterialHash.ok) {
+  if (!parsedFactHash.ok || !parsedMaterialHash.ok) {
     return persistenceFailure("persisted accounting hash is invalid");
   }
-  if (
-    artifact.value.canonicalHash !== parsedArtifactHash.value ||
-    parsedArtifactHash.value !== parsedFactHash.value
-  ) {
+  if (artifact.value.canonicalHash !== parsedFactHash.value) {
     return persistenceFailure(
       "persisted accounting artifact hash does not match the fact",
     );
@@ -837,7 +782,7 @@ export class SqliteAccountingStore {
           this.scope,
           validated.value,
         );
-        if ("commit" in inserted) return inserted;
+        if (isCommittedTransaction(inserted)) return inserted;
         if (!inserted.ok) return inserted;
         const advanced = updateCheckpointWithinTransaction(
           database,
@@ -875,11 +820,34 @@ export class SqliteAccountingStore {
         .get(...scopeValues(this.scope), factKind, identity.value) as
         SqliteRow | undefined;
       if (row === undefined) return ok(undefined);
-      const normalized = {
-        ...row,
-        canonical_hash: row.artifact_canonical_hash,
-      };
-      return factFromRow(normalized, this.scope);
+      return factFromRow(row, this.scope);
+    } catch (error) {
+      return fail(sqliteError(error, "PERSISTENCE_INTEGRITY"));
+    }
+  }
+
+  public readFacts(): Result<readonly IngestionFact[]> {
+    try {
+      const rows = this.database
+        .prepare(
+          `SELECT f.fact_id, f.fact_kind, f.event_identity, f.observed_at, f.observation_revision,
+             f.reference_id, f.linked_fact_id, f.adjustment_reason,
+             f.canonical_hash AS fact_canonical_hash,
+             a.artifact_kind, a.schema_version, a.canonical_json, a.canonical_hash AS artifact_canonical_hash,
+             a.material_hash
+           FROM accounting_facts f
+           INNER JOIN artifacts a ON a.artifact_id = f.reference_id
+           WHERE ${SCOPE_WHERE}
+           ORDER BY f.observed_at, f.fact_id`,
+        )
+        .all(...scopeValues(this.scope)) as SqliteRow[];
+      const facts: IngestionFact[] = [];
+      for (const row of rows) {
+        const fact = factFromRow(row, this.scope);
+        if (!fact.ok) return fact;
+        facts.push(fact.value);
+      }
+      return ok(facts);
     } catch (error) {
       return fail(sqliteError(error, "PERSISTENCE_INTEGRITY"));
     }
@@ -926,9 +894,9 @@ export class SqliteAccountingStore {
 export function createSqliteAccountingStore(
   connection: SqliteConnection,
   scope: PersistenceScope,
-  execution: SqliteExecutionStore,
+  expectedScope: PersistenceScope,
 ): Result<SqliteAccountingStore> {
-  const validated = validateScope(scope, connection, execution);
+  const validated = validateScope(scope, connection, expectedScope);
   return validated.ok
     ? ok(new SqliteAccountingStore(connection, validated.value))
     : validated;

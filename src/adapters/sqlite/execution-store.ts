@@ -1,14 +1,15 @@
-import { createHash } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 
 import {
   encodeCanonicalArtifact,
   rehydrateArtifact,
+  type ArtifactKind,
   type CanonicalArtifactEnvelope,
 } from "../../domain/identity/canonical-artifact.js";
 import {
   createApproval,
   validateApproval,
+  type Approval,
 } from "../../domain/execution/approval.js";
 import { createClearanceEvidence } from "../../domain/execution/clearance-evidence.js";
 import type { ExecutionAttempt } from "../../domain/execution/execution-attempt.js";
@@ -17,6 +18,7 @@ import type { ReconciliationResult } from "../../domain/execution/reconciliation
 import { isProducedReconciliationResult } from "../../domain/execution/reconciliation-proof.js";
 import { isProducedExecutionPlan } from "../../domain/planning/plan-proof.js";
 import type { ExecutionPlan } from "../../domain/planning/execution-plan.js";
+import type { PlanHash } from "../../domain/identity/canonical-serialization.js";
 import { domainError } from "../../domain/shared/errors.js";
 import { fail, ok, type Result } from "../../domain/shared/result.js";
 import {
@@ -33,6 +35,28 @@ import {
 } from "../../domain/shared/validation.js";
 import type { SqliteConnection } from "./connection.js";
 import {
+  assertCurrentAuthorityWithinTransaction,
+  haltRow,
+  leaseRow,
+  leaseState,
+  raiseHaltWithinTransaction,
+  validateAuthority,
+} from "./sqlite-authority.js";
+import {
+  deterministicId,
+  isEnvironment,
+  persistenceFailure,
+  scopesEqual,
+  SCOPE_WHERE,
+  scopeValues,
+  storedHash,
+  storedIdentifier,
+  storedOptionalString,
+  storedString,
+  storedTimestamp,
+  type SqliteRow,
+} from "./sqlite-helpers.js";
+import {
   commitTransaction,
   runInTransaction,
   sqliteError,
@@ -48,7 +72,7 @@ import type {
   LeaseState,
   LineageRecord,
   OwnedIntentRecord,
-  PersistenceEnvironment,
+  PersistedArtifact,
   PersistenceScope,
   PrepareIntentRequest,
   PrepareLineageRequest,
@@ -56,42 +80,9 @@ import type {
 } from "../../ports/persistence.js";
 
 const MAX_LEASE_TTL_MS = 24 * 60 * 60 * 1_000;
-const SCOPE_WHERE =
-  "exchange = ? AND environment = ? AND account_id = ? AND category = ? AND position_mode = ?";
-
-type SqliteRow = Record<string, unknown>;
-type PersistedTimestamp = UtcTimestamp;
-
-function persistenceFailure(message: string): Result<never> {
-  return fail(domainError("PERSISTENCE_INTEGRITY", message));
-}
 
 function conflictFailure(message: string): Result<never> {
   return fail(domainError("PERSISTENCE_CONFLICT", message));
-}
-
-function isEnvironment(value: unknown): value is PersistenceEnvironment {
-  return value === "demo" || value === "testnet" || value === "mainnet";
-}
-
-function scopeValues(scope: PersistenceScope): readonly string[] {
-  return [
-    scope.exchange,
-    scope.environment,
-    scope.accountId,
-    scope.category,
-    scope.positionMode,
-  ];
-}
-
-function scopesEqual(left: PersistenceScope, right: PersistenceScope): boolean {
-  return (
-    left.exchange === right.exchange &&
-    left.environment === right.environment &&
-    left.accountId === right.accountId &&
-    left.category === right.category &&
-    left.positionMode === right.positionMode
-  );
 }
 
 function validateScope(
@@ -160,67 +151,6 @@ function scopeFromPlan(plan: ExecutionPlan): Result<PersistenceScope> {
     category: executionScope.category,
     positionMode: executionScope.positionMode,
   });
-}
-
-function deterministicId(prefix: string, value: string): string {
-  const digest = createHash("sha256").update(value, "utf8").digest("hex");
-  return `${prefix}-${digest.slice(0, 40)}`;
-}
-
-function storedString(row: SqliteRow, field: string): Result<string> {
-  const value = row[field];
-  return typeof value === "string"
-    ? ok(value)
-    : persistenceFailure(`persisted SQLite field ${field} is invalid`);
-}
-
-function storedIdentifier(row: SqliteRow, field: string): Result<string> {
-  const value = storedString(row, field);
-  if (!value.ok) return value;
-  const parsed = requireIdentifier(value.value, field);
-  return parsed.ok
-    ? parsed
-    : persistenceFailure(`persisted SQLite identifier ${field} is invalid`);
-}
-
-function storedHash(row: SqliteRow, field: string): Result<string> {
-  const value = storedString(row, field);
-  if (!value.ok) return value;
-  const parsed = requireHash(value.value, field);
-  return parsed.ok
-    ? parsed
-    : persistenceFailure(`persisted SQLite hash ${field} is invalid`);
-}
-
-function storedTimestamp(
-  row: SqliteRow,
-  field: string,
-): Result<PersistedTimestamp> {
-  const value = storedString(row, field);
-  if (!value.ok) return value;
-  const parsed = parseUtcTimestamp(value.value);
-  return parsed.ok
-    ? parsed
-    : persistenceFailure(`persisted SQLite timestamp ${field} is invalid`);
-}
-
-function storedOptionalString(
-  row: SqliteRow,
-  field: string,
-): Result<string | undefined> {
-  const value = row[field];
-  if (value === null || value === undefined) return ok(undefined);
-  return typeof value === "string"
-    ? ok(value)
-    : persistenceFailure(`persisted SQLite optional field ${field} is invalid`);
-}
-
-function storedBoolean(row: SqliteRow, field: string): Result<boolean> {
-  const value = row[field];
-  if (value !== 0 && value !== 1) {
-    return persistenceFailure(`persisted SQLite boolean ${field} is invalid`);
-  }
-  return ok(value === 1);
 }
 
 function envelopeFromRow(
@@ -358,6 +288,16 @@ function readPlanFromDatabase(
     : persistenceFailure("persisted execution plan failed domain rehydration");
 }
 
+function approvalFromRow(row: SqliteRow): Result<Approval> {
+  const envelope = envelopeFromRow(row, "approval");
+  if (!envelope.ok) return envelope;
+  const approval = rehydrateArtifact("approval", envelope.value);
+  if (!approval.ok) {
+    return persistenceFailure("persisted approval failed domain rehydration");
+  }
+  return approval;
+}
+
 function attemptFromRow(row: SqliteRow): Result<AttemptRecord> {
   const lineageId = storedIdentifier(row, "lineage_id");
   const dispatchedAt = storedTimestamp(row, "dispatched_at");
@@ -394,135 +334,6 @@ function reconciliationFromRow(row: SqliteRow): Result<ReconciliationRecord> {
     result: hydratedResult,
     recordedAt: recordedAt.value,
   });
-}
-
-interface LeaseRow {
-  readonly ownerRunId: string;
-  readonly epoch: number;
-  readonly acquiredAt: UtcTimestamp;
-  readonly expiresAt: UtcTimestamp;
-  readonly reconciliationRequired: boolean;
-}
-
-function leaseRow(
-  database: DatabaseSync,
-  scope: PersistenceScope,
-): Result<LeaseRow | undefined> {
-  const row = database
-    .prepare(
-      `SELECT owner_run_id, epoch, acquired_at, expires_at, reconciliation_required
-       FROM leases WHERE ${SCOPE_WHERE}`,
-    )
-    .get(...scopeValues(scope)) as SqliteRow | undefined;
-  if (row === undefined) return ok(undefined);
-  const ownerRunId = storedIdentifier(row, "owner_run_id");
-  const acquiredAt = storedTimestamp(row, "acquired_at");
-  const expiresAt = storedTimestamp(row, "expires_at");
-  const reconciliationRequired = storedBoolean(row, "reconciliation_required");
-  if (
-    !ownerRunId.ok ||
-    typeof row.epoch !== "number" ||
-    !Number.isSafeInteger(row.epoch) ||
-    row.epoch < 1 ||
-    !acquiredAt.ok ||
-    !expiresAt.ok ||
-    !reconciliationRequired.ok
-  ) {
-    return persistenceFailure("persisted SQLite lease is invalid");
-  }
-  return ok({
-    ownerRunId: ownerRunId.value,
-    epoch: row.epoch,
-    acquiredAt: acquiredAt.value,
-    expiresAt: expiresAt.value,
-    reconciliationRequired: reconciliationRequired.value,
-  });
-}
-
-function leaseState(scope: PersistenceScope, row: LeaseRow): LeaseState {
-  return { scope, ...row };
-}
-
-function haltRow(
-  database: DatabaseSync,
-  scope: PersistenceScope,
-): Result<HaltState> {
-  const row = database
-    .prepare(
-      `SELECT active, revision, reason, raised_at, reconciliation_required
-       FROM halt_state WHERE ${SCOPE_WHERE}`,
-    )
-    .get(...scopeValues(scope)) as SqliteRow | undefined;
-  if (row === undefined) {
-    return ok({
-      scope,
-      active: false,
-      revision: 0,
-      reconciliationRequired: false,
-    });
-  }
-  const active = storedBoolean(row, "active");
-  const reconciliationRequired = storedBoolean(row, "reconciliation_required");
-  const reason = storedOptionalString(row, "reason");
-  const raisedAtValue = row.raised_at;
-  const raisedAt =
-    raisedAtValue === null || raisedAtValue === undefined
-      ? ok<UtcTimestamp | undefined>(undefined)
-      : storedTimestamp(row, "raised_at");
-  if (
-    !active.ok ||
-    !reconciliationRequired.ok ||
-    !reason.ok ||
-    !raisedAt.ok ||
-    typeof row.revision !== "number" ||
-    !Number.isSafeInteger(row.revision) ||
-    row.revision < 0
-  ) {
-    return persistenceFailure("persisted SQLite HALT state is invalid");
-  }
-  return ok({
-    scope,
-    active: active.value,
-    revision: row.revision,
-    ...(reason.value === undefined ? {} : { reason: reason.value }),
-    ...(raisedAt.value === undefined ? {} : { raisedAt: raisedAt.value }),
-    reconciliationRequired: reconciliationRequired.value,
-  });
-}
-
-function validateAuthority(authority: LeaseAuthority): Result<LeaseAuthority> {
-  const ownerRunId = requireIdentifier(authority.ownerRunId, "ownerRunId");
-  const epoch = requireFiniteInteger(authority.epoch, "epoch", 1);
-  if (!ownerRunId.ok || !epoch.ok) {
-    return fail(domainError("RUN_LEASE_LOST", "lease authority is invalid"));
-  }
-  return ok({ ownerRunId: ownerRunId.value, epoch: epoch.value });
-}
-
-export function assertCurrentAuthorityWithinTransaction(
-  database: DatabaseSync,
-  scope: PersistenceScope,
-  authority: LeaseAuthority,
-  now: UtcTimestamp,
-): Result<LeaseRow> {
-  const parsedAuthority = validateAuthority(authority);
-  if (!parsedAuthority.ok) return parsedAuthority;
-  const current = leaseRow(database, scope);
-  if (!current.ok) return current;
-  if (
-    current.value === undefined ||
-    current.value.ownerRunId !== parsedAuthority.value.ownerRunId ||
-    current.value.epoch !== parsedAuthority.value.epoch ||
-    Date.parse(now) >= Date.parse(current.value.expiresAt)
-  ) {
-    return fail(
-      domainError(
-        "RUN_LEASE_LOST",
-        "current run lease is no longer authoritative",
-      ),
-    );
-  }
-  return ok(current.value);
 }
 
 function validateLeaseRequest(
@@ -618,50 +429,89 @@ function insertArtifact(
   return ok(undefined);
 }
 
-export function raiseHaltWithinTransaction(
-  database: DatabaseSync,
-  scope: PersistenceScope,
-  reason: string,
-  recordedAt: UtcTimestamp,
-  evidenceJson?: string,
-): Result<HaltState> {
-  const safeReason = requireSafeText(reason, "reason");
-  if (!safeReason.ok) return safeReason;
-  const current = haltRow(database, scope);
-  if (!current.ok) return current;
-  const revision = current.value.revision + 1;
-  if (!Number.isSafeInteger(revision)) {
-    return persistenceFailure("HALT revision exceeded the safe integer range");
+function artifactFromRow(
+  row: SqliteRow,
+  artifactId: string,
+): Result<PersistedArtifact> {
+  const artifactKind = storedString(row, "artifact_kind");
+  const schemaVersion = storedString(row, "schema_version");
+  const canonicalJson = storedString(row, "canonical_json");
+  const canonicalHash = storedHash(row, "canonical_hash");
+  const materialHash = storedOptionalString(row, "material_hash");
+  if (
+    !artifactKind.ok ||
+    !schemaVersion.ok ||
+    !canonicalJson.ok ||
+    !canonicalHash.ok ||
+    !materialHash.ok
+  ) {
+    return persistenceFailure("persisted SQLite artifact is invalid");
   }
-  const eventId = deterministicId(
-    "halt",
-    `${scopeValues(scope).join("\u0000")}:${revision}:${safeReason.value}`,
-  );
-  database
-    .prepare(
-      `INSERT INTO halt_state
-       (exchange, environment, account_id, category, position_mode, active, revision, reason, raised_at, reconciliation_required)
-       VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, 1)
-       ON CONFLICT (exchange, environment, account_id, category, position_mode)
-       DO UPDATE SET active = 1, revision = excluded.revision, reason = excluded.reason,
-         raised_at = excluded.raised_at, reconciliation_required = 1`,
-    )
-    .run(...scopeValues(scope), revision, safeReason.value, recordedAt);
-  database
-    .prepare(
-      `INSERT INTO halt_events
-       (event_id, exchange, environment, account_id, category, position_mode, revision, active, reason, recorded_at, evidence_json)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)`,
-    )
-    .run(
-      eventId,
-      ...scopeValues(scope),
-      revision,
-      safeReason.value,
-      recordedAt,
-      evidenceJson ?? null,
+  const envelope: CanonicalArtifactEnvelope = {
+    artifactKind: artifactKind.value as ArtifactKind,
+    schemaVersion: schemaVersion.value as "artifact/v1",
+    canonicalJson: canonicalJson.value,
+    canonicalHash: canonicalHash.value,
+  };
+  const rehydrated = rehydrateArtifact(envelope.artifactKind, envelope);
+  if (!rehydrated.ok) {
+    return persistenceFailure(
+      "persisted SQLite artifact failed domain rehydration",
     );
-  return haltRow(database, scope);
+  }
+  const parsedMaterialHash =
+    materialHash.value === undefined
+      ? ok<string | undefined>(undefined)
+      : requireHash(materialHash.value, "materialHash");
+  if (!parsedMaterialHash.ok) {
+    return persistenceFailure("persisted SQLite material hash is invalid");
+  }
+  if (parsedMaterialHash.value === undefined) {
+    return ok({ artifactId, artifactKind: envelope.artifactKind, envelope });
+  }
+  return ok({
+    artifactId,
+    artifactKind: envelope.artifactKind,
+    envelope,
+    materialHash: parsedMaterialHash.value as PlanHash,
+  });
+}
+
+function validatePersistedArtifact(
+  artifact: PersistedArtifact,
+): Result<PersistedArtifact> {
+  const artifactId = requireIdentifier(artifact.artifactId, "artifactId");
+  const materialHash =
+    artifact.materialHash === undefined
+      ? ok<string | undefined>(undefined)
+      : requireHash(artifact.materialHash, "materialHash");
+  if (
+    !artifactId.ok ||
+    !materialHash.ok ||
+    artifact.artifactKind !== artifact.envelope.artifactKind
+  ) {
+    return persistenceFailure("artifact identity or material hash is invalid");
+  }
+  const rehydrated = rehydrateArtifact(
+    artifact.artifactKind,
+    artifact.envelope,
+  );
+  if (!rehydrated.ok) {
+    return persistenceFailure("artifact failed domain rehydration");
+  }
+  if (materialHash.value === undefined) {
+    return ok({
+      artifactId: artifactId.value,
+      artifactKind: artifact.artifactKind,
+      envelope: artifact.envelope,
+    });
+  }
+  return ok({
+    artifactId: artifactId.value,
+    artifactKind: artifact.artifactKind,
+    envelope: artifact.envelope,
+    materialHash: materialHash.value as PlanHash,
+  });
 }
 
 function authorityLineageRow(
@@ -707,19 +557,56 @@ function appendConflictAfterHalt<T>(
 
 export class SqliteExecutionStore {
   public readonly scope: PersistenceScope;
-  public readonly path: string;
   private readonly database: DatabaseSync;
   private readonly connection: SqliteConnection;
 
   public constructor(connection: SqliteConnection, scope: PersistenceScope) {
     this.connection = connection;
     this.database = connection.db;
-    this.path = connection.path;
     this.scope = scope;
   }
 
   public close(): void {
     this.connection.close();
+  }
+
+  public readArtifact(
+    artifactId: string,
+  ): Result<PersistedArtifact | undefined> {
+    const parsedArtifactId = requireIdentifier(artifactId, "artifactId");
+    if (!parsedArtifactId.ok) return parsedArtifactId;
+    try {
+      const row = this.database
+        .prepare(
+          `SELECT artifact_id, artifact_kind, schema_version, canonical_json, canonical_hash, material_hash
+           FROM artifacts WHERE artifact_id = ?`,
+        )
+        .get(parsedArtifactId.value) as SqliteRow | undefined;
+      return row === undefined
+        ? ok(undefined)
+        : artifactFromRow(row, parsedArtifactId.value);
+    } catch (error) {
+      return fail(sqliteError(error, "PERSISTENCE_INTEGRITY"));
+    }
+  }
+
+  public writeArtifact(artifact: PersistedArtifact): Result<void> {
+    const validated = validatePersistedArtifact(artifact);
+    if (!validated.ok) return validated;
+    const createdAt = timestampFromEpochMs(Date.now());
+    if (!createdAt.ok) return createdAt;
+    return runInTransaction(
+      this.database,
+      (database) =>
+        insertArtifact(
+          database,
+          validated.value.artifactId,
+          validated.value.envelope,
+          validated.value.materialHash,
+          createdAt.value,
+        ),
+      "PERSISTENCE_CONFLICT",
+    );
   }
 
   public readLineage(lineageId: string): Result<LineageRecord | undefined> {
@@ -736,6 +623,26 @@ export class SqliteExecutionStore {
   public readPlan(lineageId: string): Result<ExecutionPlan | undefined> {
     try {
       return readPlanFromDatabase(this.database, this.scope, lineageId);
+    } catch (error) {
+      return fail(sqliteError(error, "PERSISTENCE_INTEGRITY"));
+    }
+  }
+
+  public readApproval(lineageId: string): Result<Approval | undefined> {
+    const parsedLineageId = requireIdentifier(lineageId, "lineageId");
+    if (!parsedLineageId.ok) return parsedLineageId;
+    try {
+      const row = this.database
+        .prepare(
+          `SELECT a.artifact_kind, a.schema_version, a.canonical_json, a.canonical_hash
+           FROM approvals p
+           INNER JOIN execution_lineages l ON l.lineage_id = p.lineage_id
+           INNER JOIN artifacts a ON a.artifact_id = p.approval_id
+           WHERE ${SCOPE_WHERE} AND l.lineage_id = ?`,
+        )
+        .get(...scopeValues(this.scope), parsedLineageId.value) as
+        SqliteRow | undefined;
+      return row === undefined ? ok(undefined) : approvalFromRow(row);
     } catch (error) {
       return fail(sqliteError(error, "PERSISTENCE_INTEGRITY"));
     }
@@ -762,12 +669,13 @@ export class SqliteExecutionStore {
     try {
       const rows = this.database
         .prepare(
-          `SELECT lineage_id, submitted_at AS dispatched_at, 'execution-attempt' AS artifact_kind,
+          `SELECT ea.lineage_id, ea.submitted_at AS dispatched_at, 'execution-attempt' AS artifact_kind,
              'artifact/v1' AS schema_version, canonical_json, canonical_hash
-           FROM execution_attempts
-           WHERE lineage_id = ? ORDER BY attempt_number`,
+           FROM execution_attempts ea
+           INNER JOIN execution_lineages l ON l.lineage_id = ea.lineage_id
+           WHERE ${SCOPE_WHERE} AND ea.lineage_id = ? ORDER BY ea.attempt_number`,
         )
-        .all(lineageId) as SqliteRow[];
+        .all(...scopeValues(this.scope), lineageId) as SqliteRow[];
       const attempts: AttemptRecord[] = [];
       for (const row of rows) {
         const attempt = attemptFromRow(row);
@@ -786,12 +694,13 @@ export class SqliteExecutionStore {
     try {
       const rows = this.database
         .prepare(
-          `SELECT lineage_id, observed_at AS recorded_at, 'reconciliation-result' AS artifact_kind,
+          `SELECT rr.lineage_id, rr.observed_at AS recorded_at, 'reconciliation-result' AS artifact_kind,
              'artifact/v1' AS schema_version, canonical_json, canonical_hash
-           FROM reconciliation_results
-           WHERE lineage_id = ? ORDER BY revision`,
+           FROM reconciliation_results rr
+           INNER JOIN execution_lineages l ON l.lineage_id = rr.lineage_id
+           WHERE ${SCOPE_WHERE} AND rr.lineage_id = ? ORDER BY rr.revision`,
         )
-        .all(lineageId) as SqliteRow[];
+        .all(...scopeValues(this.scope), lineageId) as SqliteRow[];
       const reconciliations: ReconciliationRecord[] = [];
       for (const row of rows) {
         const reconciliation = reconciliationFromRow(row);

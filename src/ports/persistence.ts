@@ -8,6 +8,7 @@ import type { ExecutionAttempt } from "../domain/execution/execution-attempt.js"
 import type { ReconciliationResult } from "../domain/execution/reconciliation.js";
 import type { ExecutionPlan } from "../domain/planning/execution-plan.js";
 import type { PlanHash } from "../domain/identity/canonical-serialization.js";
+import type { DomainError } from "../domain/shared/errors.js";
 import type { Result } from "../domain/shared/result.js";
 import type { UtcTimestamp } from "../domain/shared/time.js";
 
@@ -163,11 +164,224 @@ export interface HaltClearRequest {
   readonly expectedHaltRevision: number;
 }
 
+export interface PersistenceDiagnostics {
+  readonly databasePath: string;
+  readonly environment: PersistenceEnvironment;
+  readonly nodeVersion: string;
+  readonly sqliteVersion: string;
+  readonly schemaVersion: number;
+  readonly scope: PersistenceScope;
+}
+
+export interface PersistenceRunSnapshot {
+  readonly lineage: LineageRecord;
+  readonly plan: ExecutionPlan;
+  readonly approval: Approval;
+  readonly ownedIntents: readonly OwnedIntentRecord[];
+  readonly attempts: readonly AttemptRecord[];
+  readonly reconciliations: readonly ReconciliationRecord[];
+  readonly lease?: LeaseState;
+  readonly halt: HaltState;
+}
+
+export interface PersistenceScopeSnapshot {
+  readonly scope: PersistenceScope;
+  readonly accountingFacts: readonly IngestionFact[];
+  readonly lease?: LeaseState;
+  readonly halt: HaltState;
+}
+
+export type PersistenceRecoveryCategory =
+  | "integrity"
+  | "schema"
+  | "runtime"
+  | "environment"
+  | "contention"
+  | "lease-held"
+  | "lease-lost"
+  | "duplicate-conflict"
+  | "halt"
+  | "unresolved"
+  | "input";
+
+export type PersistenceRecoveryAction =
+  | "inspect-schema"
+  | "run-supported-runtime"
+  | "open-selected-environment"
+  | "retry-after-contention"
+  | "wait-for-lease"
+  | "reconcile-before-reacquire"
+  | "preserve-and-reconcile"
+  | "reconcile-and-clear-halt"
+  | "reconcile-before-exposure"
+  | "inspect-and-correct-input";
+
+export type PersistenceRecoveryEvidence =
+  | "schema-version"
+  | "migration-result"
+  | "node-version"
+  | "sqlite-version"
+  | "environment"
+  | "database-identity"
+  | "scope"
+  | "expires-at"
+  | "owner-run-id"
+  | "epoch"
+  | "identity"
+  | "canonical-hash"
+  | "halt-revision"
+  | "lineage-revision"
+  | "reconciliation-revision"
+  | "owned-intent"
+  | "attempt"
+  | "reconciliation-result"
+  | "typed-error-code";
+
+export type PersistenceDiagnosticField = "code" | "scope" | "expiresAt";
+
+export interface PersistenceRecoveryMetadata {
+  readonly category: PersistenceRecoveryCategory;
+  readonly canRead: boolean;
+  readonly canWrite: boolean;
+  readonly canAppendReconciliation: boolean;
+  readonly retryable: boolean;
+  readonly nextAction: PersistenceRecoveryAction;
+  readonly requiredEvidence: readonly PersistenceRecoveryEvidence[];
+  readonly redactedDiagnosticFields: readonly PersistenceDiagnosticField[];
+}
+
+export function persistenceRecoveryMetadata(
+  error: DomainError,
+): PersistenceRecoveryMetadata {
+  switch (error.code) {
+    case "PERSISTENCE_SCHEMA":
+      return {
+        category: "schema",
+        canRead: false,
+        canWrite: false,
+        canAppendReconciliation: false,
+        retryable: false,
+        nextAction: "inspect-schema",
+        requiredEvidence: ["schema-version", "migration-result"],
+        redactedDiagnosticFields: ["code"],
+      };
+    case "PERSISTENCE_RUNTIME":
+      return {
+        category: "runtime",
+        canRead: false,
+        canWrite: false,
+        canAppendReconciliation: false,
+        retryable: false,
+        nextAction: "run-supported-runtime",
+        requiredEvidence: ["node-version", "sqlite-version"],
+        redactedDiagnosticFields: ["code"],
+      };
+    case "PERSISTENCE_ENVIRONMENT":
+      return {
+        category: "environment",
+        canRead: false,
+        canWrite: false,
+        canAppendReconciliation: false,
+        retryable: false,
+        nextAction: "open-selected-environment",
+        requiredEvidence: ["environment", "database-identity"],
+        redactedDiagnosticFields: ["code"],
+      };
+    case "PERSISTENCE_BUSY":
+      return {
+        category: "contention",
+        canRead: true,
+        canWrite: false,
+        canAppendReconciliation: false,
+        retryable: true,
+        nextAction: "retry-after-contention",
+        requiredEvidence: ["scope"],
+        redactedDiagnosticFields: ["code", "scope"],
+      };
+    case "RUN_LEASE_HELD":
+      return {
+        category: "lease-held",
+        canRead: true,
+        canWrite: false,
+        canAppendReconciliation: false,
+        retryable: true,
+        nextAction: "wait-for-lease",
+        requiredEvidence: ["scope", "expires-at"],
+        redactedDiagnosticFields: ["code", "scope", "expiresAt"],
+      };
+    case "RUN_LEASE_LOST":
+      return {
+        category: "lease-lost",
+        canRead: true,
+        canWrite: false,
+        canAppendReconciliation: true,
+        retryable: true,
+        nextAction: "reconcile-before-reacquire",
+        requiredEvidence: ["scope", "owner-run-id", "epoch"],
+        redactedDiagnosticFields: ["code", "scope"],
+      };
+    case "DUPLICATE_LINEAGE":
+    case "PERSISTENCE_CONFLICT":
+      return {
+        category: "duplicate-conflict",
+        canRead: true,
+        canWrite: false,
+        canAppendReconciliation: true,
+        retryable: false,
+        nextAction: "preserve-and-reconcile",
+        requiredEvidence: ["scope", "identity", "canonical-hash"],
+        redactedDiagnosticFields: ["code", "scope"],
+      };
+    case "HALT_ACTIVE":
+      return {
+        category: "halt",
+        canRead: true,
+        canWrite: false,
+        canAppendReconciliation: true,
+        retryable: false,
+        nextAction: "reconcile-and-clear-halt",
+        requiredEvidence: [
+          "halt-revision",
+          "lineage-revision",
+          "reconciliation-revision",
+        ],
+        redactedDiagnosticFields: ["code", "scope"],
+      };
+    case "UNRESOLVED_STATE":
+    case "UNRESOLVED_RECONCILIATION":
+      return {
+        category: "unresolved",
+        canRead: true,
+        canWrite: false,
+        canAppendReconciliation: true,
+        retryable: false,
+        nextAction: "reconcile-before-exposure",
+        requiredEvidence: ["owned-intent", "attempt", "reconciliation-result"],
+        redactedDiagnosticFields: ["code", "scope"],
+      };
+    default:
+      return {
+        category: error.code.startsWith("PERSISTENCE_") ? "integrity" : "input",
+        canRead: error.code.startsWith("PERSISTENCE_"),
+        canWrite: false,
+        canAppendReconciliation: false,
+        retryable: false,
+        nextAction: "inspect-and-correct-input",
+        requiredEvidence: ["typed-error-code"],
+        redactedDiagnosticFields: ["code"],
+      };
+  }
+}
+
 export interface PersistencePort {
   readonly scope: PersistenceScope;
+  diagnostics(): PersistenceDiagnostics;
   close(): void;
   readArtifact(artifactId: string): Result<PersistedArtifact | undefined>;
   writeArtifact(artifact: PersistedArtifact): Result<void>;
+  readRun(lineageId: string): Result<PersistenceRunSnapshot | undefined>;
+  readScopeSnapshot(): Result<PersistenceScopeSnapshot>;
+  readApproval(lineageId: string): Result<Approval | undefined>;
   prepareLineage(request: PrepareLineageRequest): Result<LineageRecord>;
   prepareOwnedIntent(request: PrepareIntentRequest): Result<OwnedIntentRecord>;
   appendAttempt(request: AppendAttemptRequest): Result<AttemptRecord>;
@@ -175,6 +389,15 @@ export interface PersistencePort {
     request: AppendReconciliationRequest,
   ): Result<ReconciliationRecord>;
   ingestFact(fact: IngestionFact): Result<"inserted" | "duplicate">;
+  ingestFactAndAdvanceCheckpoint(
+    fact: IngestionFact,
+    request: CheckpointUpdateRequest,
+  ): Result<"inserted" | "duplicate">;
+  readFact(
+    factKind: PersistenceFactKind,
+    eventIdentity: string,
+  ): Result<IngestionFact | undefined>;
+  readFacts(): Result<readonly IngestionFact[]>;
   readCheckpoint(stream: string): Result<CheckpointState | undefined>;
   updateCheckpoint(request: CheckpointUpdateRequest): Result<CheckpointState>;
   acquireLease(request: LeaseRequest): Result<LeaseState>;
@@ -182,6 +405,11 @@ export interface PersistencePort {
     request: LeaseRequest & { readonly authority: LeaseAuthority },
   ): Result<LeaseState>;
   releaseLease(authority: LeaseAuthority): Result<void>;
+  raiseHalt(
+    authority: LeaseAuthority,
+    reason: string,
+    recordedAt: UtcTimestamp,
+  ): Result<HaltState>;
   readHalt(): Result<HaltState>;
   clearHalt(request: HaltClearRequest): Result<HaltState>;
 }

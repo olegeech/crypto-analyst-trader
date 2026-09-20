@@ -1,5 +1,6 @@
 import {
   requireCapability,
+  parseCapabilityScope,
   type CapabilityRequirement,
   type CapabilityObservation,
 } from "../capabilities/capability.js";
@@ -20,7 +21,11 @@ import {
   isDecimalValue,
   type DecimalValue,
 } from "../shared/decimal.js";
-import { domainError, type DomainErrorCode } from "../shared/errors.js";
+import {
+  domainError,
+  domainErrorCodes,
+  type DomainErrorCode,
+} from "../shared/errors.js";
 import { parseUtcTimestamp, type Clock } from "../shared/time.js";
 import { fail, ok, type Result } from "../shared/result.js";
 import {
@@ -436,35 +441,6 @@ export function createBlockedRiskDecision(
   return ok(markRiskDecision(decision));
 }
 
-function parseCapabilityScope(
-  input: unknown,
-): Result<CapabilityRequirement["scope"]> {
-  if (!isRecord(input)) {
-    return fail(
-      domainError("INVALID_CAPABILITY", "capability scope must be an object"),
-    );
-  }
-  const exchange = requireIdentifier(input.exchange, "scope.exchange");
-  const environment = requireIdentifier(input.environment, "scope.environment");
-  const category = requireIdentifier(input.category, "scope.category");
-  if (
-    !exchange.ok ||
-    !environment.ok ||
-    !category.ok ||
-    (input.positionMode !== "one-way" && input.positionMode !== "hedge")
-  ) {
-    return fail(
-      domainError("INVALID_CAPABILITY", "capability scope is invalid"),
-    );
-  }
-  return ok({
-    exchange: exchange.value,
-    environment: environment.value,
-    category: category.value,
-    positionMode: input.positionMode,
-  });
-}
-
 export function rehydrateRiskDecision(input: unknown): Result<RiskDecision> {
   if (!isRecord(input)) {
     return fail(
@@ -484,13 +460,24 @@ export function rehydrateRiskDecision(input: unknown): Result<RiskDecision> {
       (intentId) => requireIdentifier(intentId, "intentId").ok,
     ) ||
     !Array.isArray(input.reasonCodes) ||
-    !input.reasonCodes.every((reasonCode) => typeof reasonCode === "string") ||
     !Array.isArray(input.evidence) ||
     !Array.isArray(input.requiredCapabilities)
   ) {
     return fail(
       domainError("INVALID_VALUE", "risk decision contains an invalid field"),
     );
+  }
+  const reasonCodes: DomainErrorCode[] = [];
+  for (const reasonCode of input.reasonCodes) {
+    if (
+      typeof reasonCode !== "string" ||
+      !Object.values(domainErrorCodes).includes(reasonCode as DomainErrorCode)
+    ) {
+      return fail(
+        domainError("INVALID_VALUE", "risk decision reason code is invalid"),
+      );
+    }
+    reasonCodes.push(reasonCode as DomainErrorCode);
   }
   const evidence: EvidenceRef[] = [];
   for (const item of input.evidence) {
@@ -521,7 +508,7 @@ export function rehydrateRiskDecision(input: unknown): Result<RiskDecision> {
         inputHash: inputHash.value as PlanHash,
         intentIds: Object.freeze([...input.intentIds] as string[]),
         status: input.status,
-        reasonCodes: Object.freeze([...input.reasonCodes] as DomainErrorCode[]),
+        reasonCodes: Object.freeze(reasonCodes),
         asOf: asOf.value,
         evidence: Object.freeze(evidence),
         requiredCapabilities: Object.freeze(requiredCapabilities),
