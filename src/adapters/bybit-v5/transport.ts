@@ -1,26 +1,14 @@
-import { createMacOSKeychainProvider } from "../../src/adapters/macos-keychain.js";
-import {
-  buildSignaturePayload,
-  hmacSha256,
-} from "../../src/adapters/bybit-v5/transport.js";
-import {
-  connectCommand,
-  CredentialProviderError,
-  setupCommand,
-  type CredentialProvider,
-  type ExchangeCredentials,
-} from "../../src/ports/credential-provider.js";
-import type { ProbeEnvironment } from "./config.js";
-import { TIME_PATH } from "../testnet-smoke.js";
+import { createHmac } from "node:crypto";
 
-export { buildSignaturePayload, hmacSha256 };
+import type { ExchangeCredentials } from "../../ports/credential-provider.js";
+
+export const BYBIT_DEMO_ORIGIN = "https://api-demo.bybit.com";
+export const BYBIT_DEMO_TIME_PATH = "/v5/market/time";
+export const DEFAULT_RECV_WINDOW = "5000";
+export const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
 
 type JsonObject = Record<string, unknown>;
 type HttpMethod = "GET" | "POST";
-
-export const DEFAULT_RECV_WINDOW = "5000";
-export const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
-export const TESTNET_TIME_PATH = TIME_PATH;
 
 export interface BybitResponse {
   readonly retCode: number;
@@ -29,17 +17,11 @@ export interface BybitResponse {
   readonly time?: number;
 }
 
-export function responseList(
-  response: BybitResponse,
-): readonly JsonObject[] | undefined {
-  const list = response.result.list;
-  if (!Array.isArray(list)) return undefined;
-  const records = list.filter(
-    (value): value is JsonObject =>
-      typeof value === "object" && value !== null && !Array.isArray(value),
-  );
-  return records.length === list.length ? records : undefined;
-}
+export type QueryInput =
+  | string
+  | URLSearchParams
+  | Record<string, string>
+  | readonly (readonly [string, string])[];
 
 export type TransportFailureKind =
   | "clock-skew"
@@ -48,8 +30,13 @@ export type TransportFailureKind =
   | "expired-credentials"
   | "permission-denied"
   | "ip-restriction"
+  | "rate-limited"
+  | "ambiguous-server"
+  | "ownership-conflict"
+  | "validation-failed"
   | "exchange-failure"
   | "transport-failed"
+  | "invalid-request"
   | "invalid-response";
 
 export interface RetCodeClassification {
@@ -59,29 +46,32 @@ export interface RetCodeClassification {
   readonly message: string;
 }
 
-export class BybitProbeTransportError extends Error {
+export class BybitDemoTransportError extends Error {
   readonly kind: TransportFailureKind;
   readonly retCode: number | undefined;
+  readonly httpStatus: number | undefined;
   readonly recommendReconnect: boolean;
 
   constructor(
     kind: TransportFailureKind,
     message: string,
-    options: { retCode?: number; recommendReconnect?: boolean } = {},
+    options: {
+      retCode?: number;
+      httpStatus?: number;
+      recommendReconnect?: boolean;
+    } = {},
   ) {
     super(message);
-    this.name = "BybitProbeTransportError";
+    this.name = "BybitDemoTransportError";
     this.kind = kind;
     this.retCode = options.retCode;
+    this.httpStatus = options.httpStatus;
     this.recommendReconnect = options.recommendReconnect ?? false;
   }
 }
 
-export interface ProbeTransportRequestOptions {
-  readonly environment?: ProbeEnvironment;
-  readonly baseUrl: URL;
-  readonly credentials?: ExchangeCredentials;
-  readonly credentialProvider?: Pick<CredentialProvider, "load">;
+export interface BybitDemoTransportOptions {
+  readonly credentials: ExchangeCredentials;
   readonly request?: typeof fetch;
   readonly clock?: () => number;
   readonly clockOffsetMs?: number;
@@ -89,27 +79,29 @@ export interface ProbeTransportRequestOptions {
   readonly timeoutMs?: number;
 }
 
-export type QueryInput =
-  | string
-  | URLSearchParams
-  | Record<string, string>
-  | readonly (readonly [string, string])[];
+export function buildSignaturePayload(
+  timestamp: string,
+  apiKey: string,
+  recvWindow: string,
+  queryStringOrRawBody: string,
+): string {
+  return `${timestamp}${apiKey}${recvWindow}${queryStringOrRawBody}`;
+}
 
-export function classifyRetCode(
-  retCode: number,
-  environment: ProbeEnvironment = "testnet",
-): RetCodeClassification {
-  const label = environment === "demo" ? "Demo" : "Testnet";
-  const credentialCommand =
-    environment === "demo" ? setupCommand("demo") : connectCommand("testnet");
+export function hmacSha256(payload: string, secret: string): string {
+  return createHmac("sha256", secret).update(payload, "utf8").digest("hex");
+}
+
+export function classifyRetCode(retCode: number): RetCodeClassification {
   switch (retCode) {
     case 10000:
+    case 10016:
       return {
-        kind: "exchange-failure",
+        kind: "ambiguous-server",
         retCode,
         recommendReconnect: false,
         message:
-          "Bybit timed out the request; the outcome is ambiguous, so reconcile order and account state before retrying.",
+          "Bybit returned an ambiguous server outcome; reconcile exchange state before retrying.",
       };
     case 10002:
       return {
@@ -125,59 +117,73 @@ export function classifyRetCode(
         retCode,
         recommendReconnect: false,
         message:
-          "Bybit rejected the signature; inspect the probe signing implementation before reconnecting credentials.",
+          "Bybit rejected the signature; inspect the signing implementation before retrying.",
       };
     case 10003:
       return {
         kind: "invalid-credentials",
         retCode,
         recommendReconnect: true,
-        message: `Bybit rejected the API key or environment. Verify the ${label} credential with ${credentialCommand}.`,
+        message: "Bybit rejected the Demo API credentials.",
       };
     case 33004:
       return {
         kind: "expired-credentials",
         retCode,
         recommendReconnect: true,
-        message: `The Bybit API key is expired. Verify the ${label} credential with ${credentialCommand}.`,
+        message: "The Bybit Demo API key is expired.",
       };
     case 10005:
       return {
         kind: "permission-denied",
         retCode,
         recommendReconnect: true,
-        message: `The ${label} credential lacks the required permission. Verify it with ${credentialCommand}.`,
+        message: "The Bybit Demo credential lacks the required permission.",
       };
     case 10010:
       return {
         kind: "ip-restriction",
         retCode,
         recommendReconnect: false,
-        message:
-          "Bybit rejected the request because the caller IP is not allowed for this key.",
+        message: "Bybit rejected the request because the caller IP is not allowed.",
       };
-    case 10024:
+    case 10006:
       return {
-        kind: "exchange-failure",
+        kind: "rate-limited",
         retCode,
         recommendReconnect: false,
-        message: `Bybit rejected the write because compliance rules were triggered; review the ${label} account eligibility before retrying.`,
+        message: "Bybit rate-limited the request; retry only within the read budget.",
       };
     case 110072:
       return {
-        kind: "exchange-failure",
+        kind: "ownership-conflict",
         retCode,
         recommendReconnect: false,
         message:
-          "Bybit rejected the write because orderLinkId is already in use; use a fresh client order ID.",
+          "Bybit reported that the supplied orderLinkId is already in use; reconcile that exact identity.",
       };
-    case 10016:
+    case 110001:
+    case 110008:
+    case 110010:
       return {
-        kind: "exchange-failure",
+        kind: "ownership-conflict",
         retCode,
         recommendReconnect: false,
-        message:
-          "Bybit reported a server failure; the outcome is ambiguous, so reconcile order and account state before retrying.",
+        message: "Bybit reported an order ownership or lifecycle conflict.",
+      };
+    case 10001:
+    case 110003:
+    case 110007:
+    case 110017:
+    case 110023:
+    case 110094:
+    case 110100:
+    case 181017:
+      return {
+        kind: "validation-failed",
+        retCode,
+        recommendReconnect: false,
+        message: "Bybit rejected the request as invalid or unavailable for this scope.",
       };
     default:
       return {
@@ -212,21 +218,28 @@ export function validateBybitResponse(value: unknown): BybitResponse {
   const retCode = numericCode(object?.retCode);
   const retMsg = object?.retMsg;
   const result = asObject(object?.result);
-  if (
-    (retCode === null && retCode !== 0) ||
-    typeof retMsg !== "string" ||
-    !retMsg ||
-    result === null
-  ) {
-    throw new BybitProbeTransportError(
+  if (retCode === null || typeof retMsg !== "string" || result === null) {
+    throw new BybitDemoTransportError(
       "invalid-response",
-      "invalid Bybit response; no exchange evidence was accepted.",
+      "Bybit returned an invalid response envelope; no exchange evidence was accepted.",
     );
   }
   const time = safeResponseTime(object?.time);
   return time === undefined
     ? { retCode, retMsg, result }
     : { retCode, retMsg, result, time };
+}
+
+export function responseList(
+  response: BybitResponse,
+): readonly JsonObject[] | undefined {
+  const list = response.result.list;
+  if (!Array.isArray(list)) return undefined;
+  const records = list.filter(
+    (value): value is JsonObject =>
+      typeof value === "object" && value !== null && !Array.isArray(value),
+  );
+  return records.length === list.length ? records : undefined;
 }
 
 function queryString(input: QueryInput | undefined): string {
@@ -242,32 +255,22 @@ function queryString(input: QueryInput | undefined): string {
   return params.toString();
 }
 
-function requestUrl(baseUrl: URL, path: string, query: string): string {
+function requestUrl(path: string, query: string): string {
   if (!path.startsWith("/") || path.includes("//") || path.includes("#")) {
-    throw new BybitProbeTransportError(
-      "invalid-response",
-      "The probe endpoint path is invalid.",
+    throw new BybitDemoTransportError(
+      "invalid-request",
+      "The Bybit Demo endpoint path is invalid.",
     );
   }
-  const url = new URL(path, baseUrl);
+  const url = new URL(path, BYBIT_DEMO_ORIGIN);
+  if (url.origin !== BYBIT_DEMO_ORIGIN) {
+    throw new BybitDemoTransportError(
+      "invalid-request",
+      "The Bybit Demo adapter accepts only its canonical origin.",
+    );
+  }
   if (query) url.search = query;
   return url.toString();
-}
-
-function errorForResponse(
-  response: BybitResponse,
-  environment: ProbeEnvironment,
-): BybitProbeTransportError | null {
-  if (response.retCode === 0) return null;
-  const classification = classifyRetCode(response.retCode, environment);
-  return new BybitProbeTransportError(
-    classification.kind,
-    classification.message,
-    {
-      retCode: classification.retCode,
-      recommendReconnect: classification.recommendReconnect,
-    },
-  );
 }
 
 function parseServerTime(response: BybitResponse): number {
@@ -282,7 +285,7 @@ function parseServerTime(response: BybitResponse): number {
     !Number.isFinite(resultTime) ||
     resultTime <= 0
   ) {
-    throw new BybitProbeTransportError(
+    throw new BybitDemoTransportError(
       "invalid-response",
       "Bybit time response did not contain a valid server timestamp.",
     );
@@ -290,24 +293,27 @@ function parseServerTime(response: BybitResponse): number {
   return resultTime;
 }
 
-export class BybitProbeTransport {
-  private readonly environment: ProbeEnvironment;
-  private readonly baseUrl: URL;
-  private readonly credentialProvider: Pick<CredentialProvider, "load">;
-  private readonly injectedCredentials: ExchangeCredentials | undefined;
+function errorForResponse(
+  response: BybitResponse,
+): BybitDemoTransportError | null {
+  if (response.retCode === 0) return null;
+  const classification = classifyRetCode(response.retCode);
+  return new BybitDemoTransportError(classification.kind, classification.message, {
+    retCode: classification.retCode,
+    recommendReconnect: classification.recommendReconnect,
+  });
+}
+
+export class BybitDemoTransport {
+  private readonly credentials: ExchangeCredentials;
   private readonly request: typeof fetch;
   private readonly clock: () => number;
   private readonly recvWindow: string;
   private readonly timeoutMs: number;
   private clockOffset: number | undefined;
-  private credentials: ExchangeCredentials | undefined;
 
-  constructor(options: ProbeTransportRequestOptions) {
-    this.environment = options.environment ?? "testnet";
-    this.baseUrl = new URL(options.baseUrl.toString());
-    this.injectedCredentials = options.credentials;
-    this.credentialProvider =
-      options.credentialProvider ?? createMacOSKeychainProvider();
+  constructor(options: BybitDemoTransportOptions) {
+    this.credentials = options.credentials;
     this.request = options.request ?? fetch;
     this.clock = options.clock ?? Date.now;
     this.clockOffset = options.clockOffsetMs;
@@ -328,26 +334,10 @@ export class BybitProbeTransport {
     return this.ensureClockOffset();
   }
 
-  private async loadCredentials(): Promise<ExchangeCredentials> {
-    if (this.credentials) return this.credentials;
-    try {
-      this.credentials =
-        this.injectedCredentials ??
-        (await this.credentialProvider.load(this.environment));
-      return this.credentials;
-    } catch (error) {
-      if (error instanceof CredentialProviderError) throw error;
-      throw new BybitProbeTransportError(
-        "transport-failed",
-        `The ${this.environment === "demo" ? "Demo" : "Testnet"} credential provider could not be accessed.`,
-      );
-    }
-  }
-
   private async ensureClockOffset(): Promise<number> {
     if (this.clockOffset !== undefined) return this.clockOffset;
     const before = this.clock();
-    const response = await this.sendUnsigned(TESTNET_TIME_PATH);
+    const response = await this.sendUnsigned(BYBIT_DEMO_TIME_PATH);
     const after = this.clock();
     const serverTime = parseServerTime(response);
     this.clockOffset = serverTime - Math.round((before + after) / 2);
@@ -360,38 +350,41 @@ export class BybitProbeTransport {
     query: string,
     body?: string,
   ): Promise<BybitResponse> {
-    const credentials = await this.loadCredentials();
+    const url = requestUrl(path, query);
     const offset = await this.ensureClockOffset();
     const timestamp = String(Math.trunc(this.clock() + offset));
     const signedBytes = body ?? query;
     const signature = hmacSha256(
       buildSignaturePayload(
         timestamp,
-        credentials.apiKey,
+        this.credentials.apiKey,
         this.recvWindow,
         signedBytes,
       ),
-      credentials.apiSecret,
+      this.credentials.apiSecret,
     );
     const headers: Record<string, string> = {
-      "X-BAPI-API-KEY": credentials.apiKey,
+      Accept: "application/json",
+      "X-BAPI-API-KEY": this.credentials.apiKey,
       "X-BAPI-TIMESTAMP": timestamp,
       "X-BAPI-SIGN": signature,
       "X-BAPI-RECV-WINDOW": this.recvWindow,
       "X-BAPI-SIGN-TYPE": "2",
     };
     if (body !== undefined) headers["Content-Type"] = "application/json";
-    return this.fetchValidated(requestUrl(this.baseUrl, path, query), {
+    return this.fetchValidated(url, {
       method,
       headers,
+      redirect: "error",
       ...(body === undefined ? {} : { body }),
     });
   }
 
   private async sendUnsigned(path: string): Promise<BybitResponse> {
-    return this.fetchValidated(requestUrl(this.baseUrl, path, ""), {
+    return this.fetchValidated(requestUrl(path, ""), {
       method: "GET",
       headers: { Accept: "application/json" },
+      redirect: "error",
     });
   }
 
@@ -406,40 +399,48 @@ export class BybitProbeTransport {
         signal: AbortSignal.timeout(this.timeoutMs),
       });
     } catch {
-      throw new BybitProbeTransportError(
+      throw new BybitDemoTransportError(
         "transport-failed",
-        `The Bybit ${this.environment === "demo" ? "Demo" : "Testnet"} request could not be completed.`,
+        "The Bybit Demo request could not be completed.",
+      );
+    }
+    const finalUrl = response.url === "" ? url : response.url;
+    if (new URL(finalUrl).origin !== BYBIT_DEMO_ORIGIN) {
+      throw new BybitDemoTransportError(
+        "invalid-response",
+        "Bybit Demo returned a response from a non-canonical origin.",
       );
     }
     if (!response.ok) {
-      throw new BybitProbeTransportError(
-        "transport-failed",
-        `Bybit ${this.environment === "demo" ? "Demo" : "Testnet"} returned HTTP ${response.status}.`,
+      throw new BybitDemoTransportError(
+        response.status === 429 ? "rate-limited" : "transport-failed",
+        response.status === 429
+          ? "Bybit Demo rate-limited the request."
+          : `Bybit Demo returned HTTP ${response.status}.`,
+        { httpStatus: response.status },
       );
     }
     let payload: unknown;
     try {
       payload = await response.json();
     } catch {
-      throw new BybitProbeTransportError(
+      throw new BybitDemoTransportError(
         "invalid-response",
-        "Bybit returned a non-JSON response; no exchange evidence was accepted.",
+        "Bybit Demo returned a non-JSON response; no exchange evidence was accepted.",
       );
     }
     const validated = validateBybitResponse(payload);
-    const failure = errorForResponse(validated, this.environment);
+    const failure = errorForResponse(validated);
     if (failure) throw failure;
     return validated;
   }
 }
 
-export function createBybitProbeTransport(
-  options: ProbeTransportRequestOptions,
-): BybitProbeTransport {
-  return new BybitProbeTransport(options);
+export function createBybitDemoTransport(
+  options: BybitDemoTransportOptions,
+): BybitDemoTransport {
+  return new BybitDemoTransport(options);
 }
 
-// Explicit aliases make the pure signing seam easy to discover in tests and
-// keep the diagnostic module's API independent from the eventual #8 adapter.
 export const composeSignaturePayload = buildSignaturePayload;
 export const signRequest = hmacSha256;
