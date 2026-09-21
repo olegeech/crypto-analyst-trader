@@ -182,6 +182,38 @@ Audit records are append-only. A unique account/client-order key prevents
 duplicate placement. CSV, JSON and Markdown are exports, not canonical runtime
 state.
 
+### SQLite journal boundary
+
+The consumer-facing persistence boundary is the SQLite facade in
+`src/adapters/sqlite/sqlite-persistence.ts`. It composes the connection,
+execution journal and accounting/checkpoint store behind
+`src/ports/persistence.ts`; callers do not receive SQL statements,
+`DatabaseSync`, credentials or exchange transport objects. The facade can
+reopen a selected environment and expose a read model containing the same
+lineage, plan, approval, owned intents, attempts, reconciliation results and
+accounting facts.
+
+The default files are environment-separated under
+`data/private/execution/<environment>.db`, with a `0700` directory and `0600`
+database file. Opening a journal requires Node `>=22.22.3` and bundled SQLite
+`>=3.51.3`, enables foreign keys, WAL, `synchronous=FULL` and a bounded busy
+timeout, and verifies the effective settings before and after migrations. This
+is best-available local WAL durability under the selected SQLite/VFS
+assumptions, not a universal power-loss guarantee.
+
+A live database is never copied manually. For a quiescent copy, close cleanly
+and checkpoint first. After a crash, preserve the main database and matching
+`-wal`; `-shm` is a transient shared-memory cache and may be reconstructed. No
+database row contains credentials, signatures, signed headers or raw exchange
+authentication responses.
+
+The facade exposes stable recovery metadata for #80. Integrity/schema/runtime
+or environment failures stop access; lease-held/lost, duplicate/conflict,
+`HALT` and unresolved states permit only the read/reconciliation actions
+described by their typed metadata. New exposure, checkpoint advancement and
+HALT clearance remain separately fenced by the current lease epoch and
+revision-matched evidence.
+
 ## Daily execution sequence
 
 1. Acquire an account-scoped run lock.

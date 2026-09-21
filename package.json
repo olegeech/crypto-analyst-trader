@@ -5,7 +5,7 @@
   "type": "module",
   "description": "Risk-gated daily trading system with direct exchange execution",
   "engines": {
-    "node": ">=22"
+    "node": ">=22.22.3"
   },
   "scripts": {
     "typecheck": "tsc --noEmit",

@@ -38,7 +38,7 @@ export interface CapabilityObservation {
   readonly scope: CapabilityScope;
 }
 
-function parseScope(input: unknown): Result<CapabilityScope> {
+export function parseCapabilityScope(input: unknown): Result<CapabilityScope> {
   if (!isRecord(input)) {
     return fail(
       domainError("INVALID_CAPABILITY", "capability scope must be an object"),
@@ -88,7 +88,7 @@ export function createCapabilityObservation(
   const source = requireSafeText(input.source, "source");
   const observedAt = parseUtcTimestamp(input.observedAt);
   const evidence = createEvidenceRef(input.evidence);
-  const scope = parseScope(input.scope);
+  const scope = parseCapabilityScope(input.scope);
   if (
     !capability.ok ||
     !source.ok ||

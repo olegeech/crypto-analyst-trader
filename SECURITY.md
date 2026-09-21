@@ -46,6 +46,34 @@ A suspected execution or accounting incident requires:
 5. preserve protective exits;
 6. use the exchange UI as the documented manual fallback.
 
+## Durable local execution journal
+
+SQLite state is private, environment-separated local state, not a credential
+store. The default directory is `data/private/execution/` with owner-only
+permissions (`0700` directory, `0600` database files). The journal contains
+validated plans, approvals, ownership, attempts, reconciliation, accounting
+facts, checkpoints and redacted halt evidence; it must never contain API keys,
+secrets, signatures, signed headers or raw authentication responses.
+
+The persistence facade refuses unsupported Node/SQLite runtimes, newer or
+inconsistent schemas, wrong environment identity, ineffective WAL or unsafe
+transaction setup before exposing execution authority. The operational floor
+is Node `22.22.3` with bundled SQLite `3.51.3` or newer.
+
+Do not copy a live database. Close cleanly and checkpoint before a quiescent
+copy. For crash recovery preserve the main database and matching `-wal`; the
+`-shm` file is transient shared-memory cache and is not authoritative content.
+SQLite WAL is a same-host mechanism and remains subject to the local
+filesystem/VFS durability assumptions documented in the system design.
+
+Typed persistence failures expose only safe recovery metadata: integrity/schema
+or environment failures stop access; lease loss permits safe reconciliation
+but not new exposure or checkpoint advancement; duplicate/conflicting facts
+preserve the original and raise `HALT`; unresolved state requires
+reconciliation before any new write. The #80 operator surface owns wording,
+while the #9 port owns the stable category, allowed actions, retryability and
+redacted diagnostic field list.
+
 ## Bybit probe manual recovery
 
 When a Testnet or Demo capability probe records `UNRESOLVED`, do not delete its

@@ -28,6 +28,15 @@ export {
   type PlanHash,
 } from "./identity/plan-hash.js";
 export {
+  ARTIFACT_SCHEMA_VERSION,
+  decodeCanonicalArtifact,
+  encodeCanonicalArtifact,
+  rehydrateArtifact,
+  type ArtifactKind,
+  type CanonicalArtifactEnvelope,
+  type RehydratedArtifact,
+} from "./identity/canonical-artifact.js";
+export {
   createEvidenceRef,
   evidenceExpiresAt,
   isEvidenceFresh,
@@ -87,6 +96,7 @@ export {
 export {
   createBlockedRiskDecision,
   evaluateRisk,
+  rehydrateRiskDecision,
   type RiskDecision,
   type RiskDecisionStatus,
   type RiskEvaluationInput,
@@ -97,7 +107,13 @@ export {
   type Approval,
 } from "./execution/approval.js";
 export {
+  CLEARANCE_EVIDENCE_VERSION,
+  createClearanceEvidence,
+  type ClearanceEvidence,
+} from "./execution/clearance-evidence.js";
+export {
   createLifecycleState,
+  rehydrateLifecycleState,
   transitionLifecycle,
   type LifecyclePlan,
   type LifecycleState,
@@ -117,6 +133,7 @@ export {
 } from "./execution/exchange-order.js";
 export {
   reconcileAttempt,
+  rehydrateReconciliationResult,
   type ReconciliationPlan,
   type ReconciliationResult,
   type ReconciliationStatus,

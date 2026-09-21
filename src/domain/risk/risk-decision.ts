@@ -1,10 +1,12 @@
 import {
   requireCapability,
+  parseCapabilityScope,
   type CapabilityRequirement,
   type CapabilityObservation,
 } from "../capabilities/capability.js";
 import { isProducedCapabilityObservation } from "../capabilities/capability-proof.js";
 import {
+  createEvidenceRef,
   isEvidenceFresh,
   requireFreshEvidence,
   type EvidenceRef,
@@ -19,11 +21,19 @@ import {
   isDecimalValue,
   type DecimalValue,
 } from "../shared/decimal.js";
-import type { DomainErrorCode } from "../shared/errors.js";
-import { type Clock } from "../shared/time.js";
-import { ok, type Result } from "../shared/result.js";
-import { requireHash, requireIdentifier } from "../shared/validation.js";
-import { isRecord } from "../shared/validation.js";
+import {
+  domainError,
+  domainErrorCodes,
+  type DomainErrorCode,
+} from "../shared/errors.js";
+import { parseUtcTimestamp, type Clock } from "../shared/time.js";
+import { fail, ok, type Result } from "../shared/result.js";
+import {
+  isRecord,
+  requireHash,
+  requireIdentifier,
+  requireSafeText,
+} from "../shared/validation.js";
 import type { PlanHash } from "../identity/canonical-serialization.js";
 import {
   isProducedAccountSnapshot,
@@ -429,4 +439,80 @@ export function createBlockedRiskDecision(
     requiredCapabilities: Object.freeze([]),
   });
   return ok(markRiskDecision(decision));
+}
+
+export function rehydrateRiskDecision(input: unknown): Result<RiskDecision> {
+  if (!isRecord(input)) {
+    return fail(
+      domainError("INVALID_VALUE", "risk decision must be an object"),
+    );
+  }
+  const decisionId = requireIdentifier(input.decisionId, "decisionId");
+  const inputHash = requireHash(input.inputHash, "inputHash");
+  const asOf = parseUtcTimestamp(input.asOf);
+  if (
+    !decisionId.ok ||
+    !inputHash.ok ||
+    !asOf.ok ||
+    (input.status !== "pass" && input.status !== "blocked") ||
+    !Array.isArray(input.intentIds) ||
+    !input.intentIds.every(
+      (intentId) => requireIdentifier(intentId, "intentId").ok,
+    ) ||
+    !Array.isArray(input.reasonCodes) ||
+    !Array.isArray(input.evidence) ||
+    !Array.isArray(input.requiredCapabilities)
+  ) {
+    return fail(
+      domainError("INVALID_VALUE", "risk decision contains an invalid field"),
+    );
+  }
+  const reasonCodes: DomainErrorCode[] = [];
+  for (const reasonCode of input.reasonCodes) {
+    if (
+      typeof reasonCode !== "string" ||
+      !Object.values(domainErrorCodes).includes(reasonCode as DomainErrorCode)
+    ) {
+      return fail(
+        domainError("INVALID_VALUE", "risk decision reason code is invalid"),
+      );
+    }
+    reasonCodes.push(reasonCode as DomainErrorCode);
+  }
+  const evidence: EvidenceRef[] = [];
+  for (const item of input.evidence) {
+    const parsed = createEvidenceRef(item);
+    if (!parsed.ok) return parsed;
+    evidence.push(parsed.value);
+  }
+  const requiredCapabilities: CapabilityRequirement[] = [];
+  for (const item of input.requiredCapabilities) {
+    if (!isRecord(item)) {
+      return fail(
+        domainError("INVALID_CAPABILITY", "capability requirement is invalid"),
+      );
+    }
+    const capability = requireSafeText(item.capability, "capability");
+    const scope = parseCapabilityScope(item.scope);
+    if (!capability.ok) return capability;
+    if (!scope.ok) return scope;
+    requiredCapabilities.push({
+      capability: capability.value,
+      scope: scope.value,
+    });
+  }
+  return ok(
+    markRiskDecision(
+      Object.freeze({
+        decisionId: decisionId.value,
+        inputHash: inputHash.value as PlanHash,
+        intentIds: Object.freeze([...input.intentIds] as string[]),
+        status: input.status,
+        reasonCodes: Object.freeze(reasonCodes),
+        asOf: asOf.value,
+        evidence: Object.freeze(evidence),
+        requiredCapabilities: Object.freeze(requiredCapabilities),
+      }),
+    ),
+  );
 }

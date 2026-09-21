@@ -3,7 +3,10 @@ import test from "node:test";
 
 import { createExecutionAttempt } from "../src/domain/execution/execution-attempt.js";
 import { createExchangeOrder } from "../src/domain/execution/exchange-order.js";
-import { reconcileAttempt } from "../src/domain/execution/reconciliation.js";
+import {
+  reconcileAttempt,
+  rehydrateReconciliationResult,
+} from "../src/domain/execution/reconciliation.js";
 import { createPlanFixture } from "./domain-plan-fixture.js";
 
 function attemptFixture(
@@ -126,6 +129,37 @@ test("rejected submissions without an exchange observation reconcile as failed",
   const result = reconcileAttempt(attempt.value, undefined, plan);
   assert.equal(result.ok, true);
   if (result.ok) assert.equal(result.value.status, "FAILED");
+});
+
+test("rehydrated exchange-observed statuses require exchange evidence", () => {
+  const plan = createPlanFixture();
+  const base = {
+    attemptId: "rehydrated-attempt",
+    intentId: plan.material.orderIntents[0]?.intentId ?? "fixture-intent",
+    planHash: plan.materialHash,
+    clientOrderId: "rehydrated-client",
+    observedAt: "2026-09-19T10:00:01Z",
+  };
+
+  for (const status of ["RECONCILED", "PARTIAL", "PENDING"] as const) {
+    const result = rehydrateReconciliationResult({ ...base, status });
+    assert.equal(result.ok, false, status);
+  }
+
+  const reconciled = rehydrateReconciliationResult({
+    ...base,
+    status: "RECONCILED",
+    exchangeOrderId: "rehydrated-exchange",
+  });
+  assert.equal(reconciled.ok, true);
+
+  const failed = rehydrateReconciliationResult({ ...base, status: "FAILED" });
+  const unresolved = rehydrateReconciliationResult({
+    ...base,
+    status: "UNRESOLVED",
+  });
+  assert.equal(failed.ok, true);
+  assert.equal(unresolved.ok, true);
 });
 
 test("accepted submissions with a contradictory rejected terminal status stay unresolved", () => {
