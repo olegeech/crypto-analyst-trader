@@ -10,6 +10,10 @@ const packageJson = JSON.parse(await readFile("package.json", "utf8")) as {
   scripts: Record<string, string>;
 };
 const ciWorkflow = await readFile(".github/workflows/ci.yml", "utf8");
+const demoVerificationScript = await readFile(
+  "scripts/bybit-demo-adapter-verification.ts",
+  "utf8",
+);
 const tsconfig = JSON.parse(await readFile("tsconfig.json", "utf8")) as {
   include: string[];
 };
@@ -100,4 +104,21 @@ test("the write probe is absent from release execution", () => {
   assert.doesNotMatch(releaseScript, /probe:bybit:testnet/);
   assert.doesNotMatch(releaseScript, /probe:bybit:demo/);
   assert.doesNotMatch(releaseScript, /scripts\/bybit-capability-probe\.ts/);
+});
+
+test("Demo adapter verification is explicit, Demo-only and excluded from CI/release", () => {
+  assert.match(
+    packageJson.scripts["verify:bybit:demo-adapter"] ?? "",
+    /scripts\/bybit-demo-adapter-verification\.ts/,
+  );
+  assert.doesNotMatch(releaseScript, /verify:bybit:demo-adapter/);
+  assert.doesNotMatch(
+    ciWorkflow,
+    /verify:bybit:demo-adapter|bybit-demo-adapter-verification/,
+  );
+  assert.doesNotMatch(
+    demoVerificationScript,
+    /testnet|mainnet|api-testnet\.bybit\.com|api\.bybit\.com/iu,
+  );
+  assert.doesNotMatch(demoVerificationScript, /confirm-demo/iu);
 });

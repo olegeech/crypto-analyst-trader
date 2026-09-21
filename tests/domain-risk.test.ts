@@ -644,6 +644,130 @@ test("strategy protection and notional limits block risky intents", () => {
   }
 });
 
+test("managed entries accept take-profit without a catastrophic stop", () => {
+  assert.equal(constraints.ok, true);
+  assert.equal(evidence.ok, true);
+  if (!constraints.ok || !evidence.ok) return;
+  const managedStrategy = createStrategyConfig({
+    strategyId: "managed-tp-only",
+    version: "v1",
+    cadence: "daily",
+    maxOrderNotional: "100",
+    requiresProtection: true,
+  });
+  const intent = normalizeOrderIntent(
+    {
+      intentId: "intent-tp-only",
+      instrument: "DOGEUSDT",
+      orderType: "limit",
+      side: "buy",
+      positionEffect: "open",
+      price: "0.0887",
+      quantity: "57",
+      rounding: { price: "floor", quantity: "floor" },
+      protection: { takeProfit: "0.1" },
+    },
+    constraints.value,
+  );
+  const attachedCapability = createCapabilityObservation({
+    capability: "attached-protection",
+    status: "supported",
+    observedAt: "2026-09-19T10:00:00Z",
+    source: "fixture",
+    evidence: evidence.value,
+    scope: demoScope,
+  });
+  const orderCapability = createCapabilityObservation({
+    capability: "order-create",
+    status: "supported",
+    observedAt: "2026-09-19T10:00:00Z",
+    source: "fixture",
+    evidence: evidence.value,
+    scope: demoScope,
+  });
+  const clock = fixedClock("2026-09-19T10:00:01Z");
+  assert.equal(managedStrategy.ok, true);
+  assert.equal(intent.ok, true);
+  assert.equal(attachedCapability.ok, true);
+  assert.equal(orderCapability.ok, true);
+  assert.equal(clock.ok, true);
+  if (
+    !managedStrategy.ok ||
+    !intent.ok ||
+    !attachedCapability.ok ||
+    !orderCapability.ok ||
+    !clock.ok
+  )
+    return;
+  const decision = evaluateRisk({
+    decisionId: "risk-tp-only",
+    candidate: candidateFixture(
+      intent.value,
+      [evidence.value],
+      managedStrategy.value,
+      [protectionRequirement, orderCreateRequirement],
+    ),
+    capabilities: [attachedCapability.value, orderCapability.value],
+    clock: clock.value,
+  });
+  assert.equal(decision.ok, true);
+  if (decision.ok) {
+    assert.equal(decision.value.status, "pass");
+    assert.equal(
+      decision.value.reasonCodes.includes("PROTECTION_REQUIRED"),
+      false,
+    );
+  }
+});
+
+test("managed entries reject stop-only protection", () => {
+  assert.equal(constraints.ok, true);
+  assert.equal(evidence.ok, true);
+  if (!constraints.ok || !evidence.ok) return;
+  const managedStrategy = createStrategyConfig({
+    strategyId: "managed-stop-only",
+    version: "v1",
+    cadence: "daily",
+    maxOrderNotional: "100",
+    requiresProtection: true,
+  });
+  const intent = normalizeOrderIntent(
+    {
+      intentId: "intent-stop-only",
+      instrument: "DOGEUSDT",
+      orderType: "limit",
+      side: "buy",
+      positionEffect: "open",
+      price: "0.0887",
+      quantity: "57",
+      rounding: { price: "floor", quantity: "floor" },
+      protection: { stopLoss: "0.08" },
+    },
+    constraints.value,
+  );
+  const clock = fixedClock("2026-09-19T10:00:01Z");
+  assert.equal(managedStrategy.ok, true);
+  assert.equal(intent.ok, true);
+  assert.equal(clock.ok, true);
+  if (!managedStrategy.ok || !intent.ok || !clock.ok) return;
+  const decision = evaluateRisk({
+    decisionId: "risk-stop-only",
+    candidate: candidateFixture(
+      intent.value,
+      [evidence.value],
+      managedStrategy.value,
+      [orderCreateRequirement],
+    ),
+    capabilities: [],
+    clock: clock.value,
+  });
+  assert.equal(decision.ok, true);
+  if (decision.ok) {
+    assert.equal(decision.value.status, "blocked");
+    assert.ok(decision.value.reasonCodes.includes("PROTECTION_REQUIRED"));
+  }
+});
+
 test("risk rejects wrong-side protection even when protection is optional", () => {
   assert.equal(constraints.ok, true);
   assert.equal(evidence.ok, true);

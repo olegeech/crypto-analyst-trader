@@ -142,8 +142,9 @@ prioritization interview following the discovery recorded in issue #35.
    scenario or cleanup action.
 4. **Owned orders only.** Manual and unrelated exchange orders are never
    changed.
-5. **Protection at entry.** A managed entry is submitted only with
-   exchange-native protective exits.
+5. **Take-profit at entry.** A managed entry is submitted with at least one
+   exchange-native take-profit. A stop-loss is optional and must come from an
+   explicitly approved strategy policy; the generic path never injects one.
 6. **Reconcile before retry.** An ambiguous write outcome is investigated by
    client and exchange order identifiers before any repeat.
 7. **Net economics.** Research and promotion use fees, funding, slippage,

@@ -263,8 +263,7 @@ export function evaluateRisk(input: RiskEvaluationInput): Result<RiskDecision> {
       input.candidate.strategy.requiresProtection &&
       intent.positionEffect === "open" &&
       (intent.protection === undefined ||
-        (intent.protection.stopLoss === undefined &&
-          intent.protection.takeProfit === undefined))
+        intent.protection.takeProfit === undefined)
     ) {
       reasonCodes.push("PROTECTION_REQUIRED");
     }
