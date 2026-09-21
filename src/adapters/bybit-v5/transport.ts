@@ -334,6 +334,10 @@ export class BybitDemoTransport {
     return this.ensureClockOffset();
   }
 
+  async getServerTime(): Promise<number> {
+    return parseServerTime(await this.sendUnsigned(BYBIT_DEMO_TIME_PATH));
+  }
+
   private async ensureClockOffset(): Promise<number> {
     if (this.clockOffset !== undefined) return this.clockOffset;
     const before = this.clock();
