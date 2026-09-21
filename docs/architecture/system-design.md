@@ -221,9 +221,11 @@ revision-matched evidence.
 3. Persist every intended write before submitting it.
 4. Cancel stale owned entry orders; preserve manual and protective orders.
 5. Reconcile cancellation results.
-6. Place desired entries with attached take-profit and catastrophic stop.
+6. Place desired entries with an attached take-profit and any explicitly
+   approved optional stop.
 7. Reconcile create results through bounded REST polling and history fallback.
-8. Verify every managed position has protective coverage.
+8. Verify every managed position has take-profit coverage and any optional
+   strategy-required stop coverage.
 9. Persist final state, accounting checkpoints and operator report.
 
 Partial success stops later exposure-increasing phases. There is no attempt to

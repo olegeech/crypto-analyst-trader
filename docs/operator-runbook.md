@@ -231,9 +231,10 @@ policies.
 1. Classify the market regime and record reason codes and uncertainty.
 2. Select fewer high-quality candidates when evidence or capital is limited.
    `NO_TRADE` is a valid result.
-3. Build a static daily entry grid. Every entry has one exchange-attached
-   take-profit and one catastrophic stop; the collection of entries forms the
-   plan-level exit ladder.
+3. Build a static daily entry grid. Every managed entry has at least one
+   exchange-attached take-profit; an optional stop-loss is included only when
+   the explicitly approved strategy policy requires it. The collection of
+   entries forms the plan-level exit ladder.
 4. Normalize price and quantity only through instrument constraints and the
    authoritative exact-decimal rounding policy. Reject an economically
    infeasible order rather than silently changing strategy risk.
@@ -266,7 +267,7 @@ Present compact Markdown tables, not raw JSON. At minimum review:
 | Candidates     | selected and excluded symbols with reason codes                          |
 | Account        | equity, usable capacity, liabilities, reserve and existing exposure      |
 | Plan           | create/cancel/keep counts and every changed field as `old -> new`        |
-| Orders         | symbol, side, entry, quantity, notional, take-profit and stop            |
+| Orders         | symbol, side, entry, quantity, notional, take-profit and optional stop   |
 | Economics      | fees, funding, slippage, expected edge and return on allocated capital   |
 | Risk           | current -> projected exposure, margin, drawdown and liquidation distance |
 | Ownership      | proof that only owned entries can be changed                             |
@@ -294,7 +295,8 @@ Execution is allowed only in the approved environment.
 3. Cancel only stale owned entry orders.
 4. Reconcile every cancellation before relying on released capacity.
 5. Stop before new exposure if cancellation is partial or ambiguous.
-6. Submit desired entries with their attached protective exits.
+6. Submit desired entries with their attached take-profit and any explicitly
+   approved optional stop.
 7. Treat acknowledgements as pending and reconcile through bounded polling and
    history fallback.
 8. Stop later exposure-increasing phases after any partial result.
@@ -307,7 +309,8 @@ across independent exchange operations.
 Reconcile by durable client and exchange order identifiers. Confirm:
 
 - intended, accepted, open, filled, cancelled and rejected quantities;
-- every managed position has protective coverage;
+- every managed position has provable take-profit coverage and any optional
+  strategy-required stop coverage;
 - account positions and owned orders match the final journal state;
 - fees, funding, fills and transaction checkpoints were persisted once;
 - no unresolved result remains hidden behind a successful process exit.

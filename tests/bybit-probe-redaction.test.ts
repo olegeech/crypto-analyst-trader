@@ -103,12 +103,15 @@ test("sentinel credentials never reach a persisted verdict artifact", async () =
 });
 
 test("documentation records the probe as an operator-only, unverified capability check", async () => {
-  const [adr, runbook] = await Promise.all([
+  const [historicalAdr, currentAdr, runbook] = await Promise.all([
     readFile("docs/adr/0003-daily-only-attached-exits.md", "utf8"),
+    readFile("docs/adr/0006-managed-entry-take-profit.md", "utf8"),
     readFile("docs/operator-runbook.md", "utf8"),
   ]);
-  assert.match(adr, /Testnet capability probe/);
-  assert.match(adr, /unverified/i);
+  assert.match(historicalAdr, /Testnet capability probe/);
+  assert.match(historicalAdr, /unverified/i);
+  assert.match(currentAdr, /TP-only managed entries are valid/);
+  assert.match(currentAdr, /stop-only managed entries block/);
   assert.match(runbook, /npm run probe:bybit:testnet/);
   assert.match(runbook, /npm run probe:bybit:demo/);
   assert.match(

@@ -17,7 +17,7 @@ refresh evidence
   -> review exact desired/current diff
   -> approve the immutable plan hash
   -> cancel stale owned entries
-  -> place desired entries with exchange-attached exits
+  -> place desired entries with exchange-attached take-profit and optional stop
   -> reconcile through bounded REST polling
   -> persist fills, costs and daily PnL
 ```
@@ -28,7 +28,8 @@ MVP scope:
 - one-way position mode;
 - one strategy per account, symbol and side;
 - GTC limit entries on a static daily grid;
-- one attached take-profit and one catastrophic stop per entry;
+- one attached take-profit per managed entry, with an optional strategy-owned
+  catastrophic stop;
 - REST-only execution during a bounded daily run;
 - manual approval of every exact live plan;
 - SQLite as the durable execution and accounting journal.

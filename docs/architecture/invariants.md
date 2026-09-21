@@ -13,8 +13,9 @@ rationale and decision history.
 3. A strategy exclusively owns `account + symbol + side` in the MVP.
 4. Only orders with durable local ownership and matching exchange identity may
    be changed or cancelled.
-5. A managed entry requires an attached take-profit and catastrophic stop in
-   the same exchange request.
+5. A managed entry requires at least one exchange-native take-profit in the
+   same exchange request; a catastrophic stop-loss is optional and is never
+   injected by the generic execution path.
 6. Protective exits are never included in routine entry cancellation.
 7. An asynchronous acknowledgement is pending, not success.
 8. An ambiguous timeout is reconciled before retry.
