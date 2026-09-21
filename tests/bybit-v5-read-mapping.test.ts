@@ -16,7 +16,9 @@ function response(result: Record<string, unknown>): BybitResponse {
   return { retCode: 0, retMsg: "OK", result };
 }
 
-function instrumentResponse(overrides: Record<string, unknown> = {}): BybitResponse {
+function instrumentResponse(
+  overrides: Record<string, unknown> = {},
+): BybitResponse {
   return response({
     list: [
       {
@@ -37,7 +39,9 @@ function instrumentResponse(overrides: Record<string, unknown> = {}): BybitRespo
   });
 }
 
-function order(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+function order(
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
   return {
     symbol: "DOGEUSDT",
     orderId: "exchange-1",
@@ -75,7 +79,9 @@ test("strict read mappers normalize the supported Demo linear one-way scope", ()
   assert.equal(ticker.ask.toString(), "0.0887");
 
   const wallet = mapWalletBalance(
-    response({ list: [{ accountType: "UNIFIED", totalAvailableBalance: "100" }] }),
+    response({
+      list: [{ accountType: "UNIFIED", totalAvailableBalance: "100" }],
+    }),
   );
   assert.equal(wallet.availableBalance.toString(), "100");
 
@@ -89,7 +95,9 @@ test("strict read mappers normalize the supported Demo linear one-way scope", ()
   assert.equal(position.quantity.toString(), "0");
 
   const orders = mapOrderRecords(
-    response({ list: [order({ orderStatus: "PartiallyFilled", cumExecQty: "12" })] }),
+    response({
+      list: [order({ orderStatus: "PartiallyFilled", cumExecQty: "12" })],
+    }),
     "DOGEUSDT",
   );
   assert.equal(orders[0]?.status, "partially-filled");
@@ -115,7 +123,8 @@ test("cancelled order mapping preserves executed quantity", () => {
 
 test("read mappings fail closed on unsupported scope, ignored filters and contradictory state", () => {
   assert.throws(
-    () => mapInstrumentInfo(instrumentResponse({ quoteCoin: "BTC" }), "DOGEUSDT"),
+    () =>
+      mapInstrumentInfo(instrumentResponse({ quoteCoin: "BTC" }), "DOGEUSDT"),
     (error: unknown) =>
       error instanceof BybitReadMappingError && error.kind === "precondition",
   );
@@ -140,7 +149,9 @@ test("read mappings fail closed on unsupported scope, ignored filters and contra
     () =>
       mapPosition(
         response({
-          list: [{ symbol: "DOGEUSDT", positionIdx: 1, side: "Buy", size: "1" }],
+          list: [
+            { symbol: "DOGEUSDT", positionIdx: 1, side: "Buy", size: "1" },
+          ],
         }),
         "DOGEUSDT",
       ),
@@ -148,23 +159,41 @@ test("read mappings fail closed on unsupported scope, ignored filters and contra
       error instanceof BybitReadMappingError && error.kind === "precondition",
   );
   assert.throws(
-    () => mapOrderRecords(response({ list: [order({ symbol: "BTCUSDT" })] }), "DOGEUSDT"),
+    () =>
+      mapOrderRecords(
+        response({ list: [order({ symbol: "BTCUSDT" })] }),
+        "DOGEUSDT",
+      ),
     BybitReadMappingError,
   );
   assert.throws(
-    () => mapOrderRecords(response({ list: [order({ cumExecQty: "58" })] }), "DOGEUSDT"),
+    () =>
+      mapOrderRecords(
+        response({ list: [order({ cumExecQty: "58" })] }),
+        "DOGEUSDT",
+      ),
     BybitReadMappingError,
   );
 });
 
 test("pagination cursors are optional safe strings", () => {
-  assert.equal(nextPageCursor(response({ list: [] }), "order/realtime"), undefined);
   assert.equal(
-    nextPageCursor(response({ list: [], nextPageCursor: "cursor-1" }), "order/realtime"),
+    nextPageCursor(response({ list: [] }), "order/realtime"),
+    undefined,
+  );
+  assert.equal(
+    nextPageCursor(
+      response({ list: [], nextPageCursor: "cursor-1" }),
+      "order/realtime",
+    ),
     "cursor-1",
   );
   assert.throws(
-    () => nextPageCursor(response({ list: [], nextPageCursor: 42 }), "order/realtime"),
+    () =>
+      nextPageCursor(
+        response({ list: [], nextPageCursor: 42 }),
+        "order/realtime",
+      ),
     BybitReadMappingError,
   );
 });

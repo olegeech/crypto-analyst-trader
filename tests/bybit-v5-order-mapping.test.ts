@@ -135,10 +135,14 @@ test("mapping rejects mutated identities, wrong-side exits and protection on cle
   assert.throws(
     () => mapCreateOrderRequest(request("buy", { clientOrderId: "bad:id" })),
     (error: unknown) =>
-      error instanceof BybitOrderMappingError && error.kind === "invalid-request",
+      error instanceof BybitOrderMappingError &&
+      error.kind === "invalid-request",
   );
   assert.throws(
-    () => mapCreateOrderRequest(request("buy", { protection: { takeProfit: "0.08" } })),
+    () =>
+      mapCreateOrderRequest(
+        request("buy", { protection: { takeProfit: "0.08" } }),
+      ),
     BybitOrderMappingError,
   );
   assert.throws(

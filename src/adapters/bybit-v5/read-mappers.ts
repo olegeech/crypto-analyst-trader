@@ -1,10 +1,14 @@
-import type { BybitResponse } from "./transport.js";
+import { responseList, type BybitResponse } from "./transport.js";
 import type { ExchangeOrderStatus } from "../../domain/execution/exchange-order.js";
 import {
   createInstrumentConstraints,
   type InstrumentConstraints,
 } from "../../domain/market/instrument-constraints.js";
 import { DecimalValue } from "../../domain/shared/decimal.js";
+import {
+  timestampFromEpochMs,
+  type UtcTimestamp,
+} from "../../domain/shared/time.js";
 
 type JsonObject = Record<string, unknown>;
 
@@ -63,6 +67,19 @@ export interface BybitOrderRecord {
   readonly averagePrice?: DecimalValue;
 }
 
+export interface BybitExecutionRecord {
+  readonly executionId: string;
+  readonly exchangeOrderId: string;
+  readonly clientOrderId: string;
+  readonly instrument: string;
+  readonly side: "buy" | "sell";
+  readonly quantity: DecimalValue;
+  readonly price: DecimalValue;
+  readonly executedAt: UtcTimestamp;
+  readonly fee?: DecimalValue;
+  readonly feeCurrency?: string;
+}
+
 function invalid(message: string): never {
   throw new BybitReadMappingError("invalid-response", message);
 }
@@ -82,17 +99,11 @@ export function responseRecords(
   response: BybitResponse,
   label: string,
 ): readonly JsonObject[] {
-  const list = response.result.list;
-  if (
-    !Array.isArray(list) ||
-    list.some(
-      (item) =>
-        typeof item !== "object" || item === null || Array.isArray(item),
-    )
-  ) {
+  const list = responseList(response);
+  if (list === undefined) {
     invalid(`Bybit ${label} response did not contain a validated list.`);
   }
-  return list as readonly JsonObject[];
+  return list;
 }
 
 function text(
@@ -117,7 +128,11 @@ function optionalText(
   field: string,
   label: string,
 ): string | undefined {
-  if (!(field in record) || record[field] === undefined || record[field] === "") {
+  if (
+    !(field in record) ||
+    record[field] === undefined ||
+    record[field] === ""
+  ) {
     return undefined;
   }
   return text(record, field, label);
@@ -133,7 +148,10 @@ function decimal(
     invalid(`Bybit ${label} response has an invalid ${field}.`);
   }
   const parsed = DecimalValue.fromString(value);
-  if (!parsed.ok || (positive ? !parsed.value.isPositive() : parsed.value.isNegative())) {
+  if (
+    !parsed.ok ||
+    (positive ? !parsed.value.isPositive() : parsed.value.isNegative())
+  ) {
     invalid(`Bybit ${label} response has an invalid ${field}.`);
   }
   return parsed.value;
@@ -160,10 +178,22 @@ function optionalPositiveDecimal(
   field: string,
   label: string,
 ): DecimalValue | undefined {
-  if (!(field in record) || record[field] === undefined || record[field] === "") {
+  if (
+    !(field in record) ||
+    record[field] === undefined ||
+    record[field] === ""
+  ) {
     return undefined;
   }
-  return positiveDecimal(record, field, label);
+  const value = record[field];
+  if (typeof value !== "string") {
+    invalid(`Bybit ${label} response has an invalid ${field}.`);
+  }
+  const parsed = DecimalValue.fromString(value);
+  if (!parsed.ok || parsed.value.isNegative()) {
+    invalid(`Bybit ${label} response has an invalid ${field}.`);
+  }
+  return parsed.value.isZero() ? undefined : parsed.value;
 }
 
 function positionIndex(record: JsonObject, label: string): 0 {
@@ -182,7 +212,11 @@ function positionIndex(record: JsonObject, label: string): 0 {
   return 0;
 }
 
-function booleanField(record: JsonObject, field: string, label: string): boolean {
+function booleanField(
+  record: JsonObject,
+  field: string,
+  label: string,
+): boolean {
   const value = record[field];
   if (typeof value !== "boolean") {
     invalid(`Bybit ${label} response has an invalid ${field}.`);
@@ -213,7 +247,10 @@ function parseMinNotional(
     .filter((value): value is string => typeof value === "string")
     .map((value) => decimal(value, label, "minimum notional", true));
   const first = values[0];
-  if (first === undefined || values.some((value) => value.compare(first) !== 0)) {
+  if (
+    first === undefined ||
+    values.some((value) => value.compare(first) !== 0)
+  ) {
     invalid(`Bybit ${label} response has an ambiguous minimum notional.`);
   }
   return first;
@@ -233,7 +270,11 @@ export function mapInstrumentInfo(
       `Selected Bybit instrument is ${status}, not Trading; no write is allowed.`,
     );
   }
-  if (contractType !== "LinearPerpetual" || quoteCoin !== "USDT" || settleCoin !== "USDT") {
+  if (
+    contractType !== "LinearPerpetual" ||
+    quoteCoin !== "USDT" ||
+    settleCoin !== "USDT"
+  ) {
     precondition(
       "Selected Bybit instrument is not a linear USDT-settled perpetual.",
     );
@@ -261,7 +302,10 @@ export function mapInstrumentInfo(
   };
 }
 
-export function mapTicker(response: BybitResponse, symbol: string): BybitTicker {
+export function mapTicker(
+  response: BybitResponse,
+  symbol: string,
+): BybitTicker {
   const item = matchingRecord(response, symbol, "tickers");
   const bid = positiveDecimal(item, "bid1Price", "tickers");
   const ask = positiveDecimal(item, "ask1Price", "tickers");
@@ -276,7 +320,9 @@ export function mapWalletBalance(response: BybitResponse): BybitWalletState {
   const records = responseRecords(response, "wallet-balance");
   const matches = records.filter((record) => record.accountType === "UNIFIED");
   if (matches.length !== 1) {
-    invalid("Bybit wallet-balance response did not return one unified account.");
+    invalid(
+      "Bybit wallet-balance response did not return one unified account.",
+    );
   }
   const item = matches[0] as JsonObject;
   const availableBalance =
@@ -294,7 +340,9 @@ export function mapPosition(
   let selected: BybitPositionState | undefined;
   for (const record of records) {
     if (record.symbol !== symbol) {
-      invalid("Bybit position/list response ignored the selected-symbol filter.");
+      invalid(
+        "Bybit position/list response ignored the selected-symbol filter.",
+      );
     }
     positionIndex(record, "position/list");
     const quantity = nonNegativeDecimal(record, "size", "position/list");
@@ -308,14 +356,21 @@ export function mapPosition(
       }
       continue;
     }
-    const mappedSide = side === "Buy" ? "long" : side === "Sell" ? "short" : undefined;
+    const mappedSide =
+      side === "Buy" ? "long" : side === "Sell" ? "short" : undefined;
     if (mappedSide === undefined) {
       invalid("Bybit position/list response has size without a position side.");
     }
     if (selected !== undefined) {
-      precondition("Bybit returned multiple non-flat positions for one-way mode.");
+      precondition(
+        "Bybit returned multiple non-flat positions for one-way mode.",
+      );
     }
-    const entryPrice = optionalPositiveDecimal(record, "avgPrice", "position/list");
+    const entryPrice = optionalPositiveDecimal(
+      record,
+      "avgPrice",
+      "position/list",
+    );
     selected = {
       instrument: symbol,
       side: mappedSide,
@@ -368,7 +423,9 @@ export function mapOrderRecords(
     const requestedQuantity = positiveDecimal(record, "qty", label);
     const filledQuantity = nonNegativeDecimal(record, "cumExecQty", label);
     if (filledQuantity.compare(requestedQuantity) > 0) {
-      invalid(`Bybit ${label} response has more execution than requested quantity.`);
+      invalid(
+        `Bybit ${label} response has more execution than requested quantity.`,
+      );
     }
     const side = text(record, "side", label);
     if (side !== "Buy" && side !== "Sell") {
@@ -390,6 +447,64 @@ export function mapOrderRecords(
       reduceOnly,
       ...(price === undefined ? {} : { price }),
       ...(averagePrice === undefined ? {} : { averagePrice }),
+    };
+  });
+}
+
+function epochMilliseconds(
+  record: JsonObject,
+  field: string,
+  label: string,
+): UtcTimestamp {
+  const value = record[field];
+  const epoch =
+    typeof value === "number" && Number.isSafeInteger(value)
+      ? value
+      : typeof value === "string" && /^\d+$/u.test(value)
+        ? Number(value)
+        : undefined;
+  if (epoch === undefined) {
+    invalid(`Bybit ${label} response has an invalid ${field}.`);
+  }
+  const timestamp = timestampFromEpochMs(epoch);
+  if (!timestamp.ok) {
+    invalid(`Bybit ${label} response has an invalid ${field}.`);
+  }
+  return timestamp.value;
+}
+
+export function mapExecutionRecords(
+  response: BybitResponse,
+  symbol: string,
+  label = "execution/list",
+): readonly BybitExecutionRecord[] {
+  return responseRecords(response, label).map((record) => {
+    if (record.symbol !== symbol) {
+      invalid(`Bybit ${label} response ignored the selected-symbol filter.`);
+    }
+    const executionId = text(record, "execId", label);
+    const exchangeOrderId = text(record, "orderId", label);
+    const clientOrderId = text(record, "orderLinkId", label);
+    const side = text(record, "side", label);
+    if (side !== "Buy" && side !== "Sell") {
+      invalid(`Bybit ${label} response has an invalid execution side.`);
+    }
+    const quantity = positiveDecimal(record, "execQty", label);
+    const price = positiveDecimal(record, "execPrice", label);
+    const executedAt = epochMilliseconds(record, "execTime", label);
+    const fee = optionalPositiveDecimal(record, "execFee", label);
+    const feeCurrency = optionalText(record, "feeCurrency", label);
+    return {
+      executionId,
+      exchangeOrderId,
+      clientOrderId,
+      instrument: symbol,
+      side: side === "Buy" ? "buy" : "sell",
+      quantity,
+      price,
+      executedAt,
+      ...(fee === undefined ? {} : { fee }),
+      ...(feeCurrency === undefined ? {} : { feeCurrency }),
     };
   });
 }

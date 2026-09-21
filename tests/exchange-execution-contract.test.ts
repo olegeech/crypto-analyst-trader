@@ -122,6 +122,9 @@ test("the public port has no adapter, persistence or secret-bearing imports", as
     .split("\n")
     .filter((line) => /^(?:import|\s*\} from)/u.test(line))
     .join("\n");
-  assert.doesNotMatch(imports, /bybit|sqlite|persistence|secret|signature|header/iu);
+  assert.doesNotMatch(
+    imports,
+    /bybit|sqlite|persistence|secret|signature|header/iu,
+  );
   assert.doesNotMatch(imports, /node:/u);
 });

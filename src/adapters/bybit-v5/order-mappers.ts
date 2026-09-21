@@ -3,6 +3,7 @@ import type {
   ExchangeOrderAcknowledgement,
   ExchangeOrderRequest,
 } from "../../ports/exchange-execution.js";
+import { isDecimalValue } from "../../domain/shared/decimal.js";
 import type { UtcTimestamp } from "../../domain/shared/time.js";
 import type { BybitResponse } from "./transport.js";
 
@@ -39,10 +40,7 @@ export interface BybitCancelOrderRequest {
 export class BybitOrderMappingError extends Error {
   readonly kind: "invalid-request" | "invalid-response" | "precondition";
 
-  constructor(
-    kind: BybitOrderMappingError["kind"],
-    message: string,
-  ) {
+  constructor(kind: BybitOrderMappingError["kind"], message: string) {
     super(message);
     this.name = "BybitOrderMappingError";
     this.kind = kind;
@@ -64,7 +62,10 @@ function precondition(message: string): never {
 }
 
 function validateClientOrderId(clientOrderId: string): string {
-  if (!CLIENT_ORDER_ID_PATTERN.test(clientOrderId)) {
+  if (
+    typeof clientOrderId !== "string" ||
+    !CLIENT_ORDER_ID_PATTERN.test(clientOrderId)
+  ) {
     invalidRequest(
       "clientOrderId must be 1-36 ASCII letters, digits, underscore or hyphen.",
     );
@@ -72,9 +73,7 @@ function validateClientOrderId(clientOrderId: string): string {
   return clientOrderId;
 }
 
-function validateTimeInForce(
-  timeInForce: string,
-): BybitOrderTimeInForce {
+function validateTimeInForce(timeInForce: string): BybitOrderTimeInForce {
   if (
     timeInForce !== "GTC" &&
     timeInForce !== "IOC" &&
@@ -96,10 +95,21 @@ function mapProtection(request: ExchangeOrderRequest): {
   if (request.reduceOnly) {
     invalidRequest("reduce-only orders cannot carry attached protection.");
   }
+  if (
+    (protection.takeProfit !== undefined &&
+      !isDecimalValue(protection.takeProfit)) ||
+    (protection.stopLoss !== undefined && !isDecimalValue(protection.stopLoss))
+  ) {
+    invalidRequest(
+      "attached protection values must be validated decimal values.",
+    );
+  }
   const takeProfit = protection.takeProfit?.toString();
   const stopLoss = protection.stopLoss?.toString();
   if (takeProfit === undefined && stopLoss === undefined) {
-    invalidRequest("attached protection must contain a take-profit or stop-loss.");
+    invalidRequest(
+      "attached protection must contain a take-profit or stop-loss.",
+    );
   }
   if (takeProfit !== undefined) {
     const comparison = protection.takeProfit!.compare(request.intent.price);
@@ -129,8 +139,26 @@ function mapProtection(request: ExchangeOrderRequest): {
 export function mapCreateOrderRequest(
   request: ExchangeOrderRequest,
 ): BybitCreateOrderRequest {
+  if (
+    request === null ||
+    typeof request !== "object" ||
+    request.intent === null ||
+    typeof request.intent !== "object"
+  ) {
+    invalidRequest("order request and intent must be objects.");
+  }
   if (request.intent.orderType !== "limit") {
     invalidRequest("only limit orders are supported by the Demo adapter.");
+  }
+  if (
+    !isDecimalValue(request.intent.price) ||
+    !isDecimalValue(request.intent.quantity) ||
+    !request.intent.price.isPositive() ||
+    !request.intent.quantity.isPositive()
+  ) {
+    invalidRequest(
+      "order price and quantity must be positive validated decimals.",
+    );
   }
   if (typeof request.reduceOnly !== "boolean") {
     invalidRequest("reduceOnly must be an explicit boolean.");
@@ -159,6 +187,7 @@ export function mapCancelOrderRequest(
   const orderLinkId = validateClientOrderId(request.clientOrderId);
   if (request.exchangeOrderId !== undefined) {
     if (
+      typeof request.exchangeOrderId !== "string" ||
       request.exchangeOrderId.length === 0 ||
       /[\u0000-\u001f\u007f\r\n]/u.test(request.exchangeOrderId)
     ) {
@@ -181,10 +210,7 @@ function responseText(
 ): string | undefined {
   const value = response.result[field];
   if (value === undefined || value === "") return undefined;
-  if (
-    typeof value !== "string" ||
-    /[\u0000-\u001f\u007f\r\n]/u.test(value)
-  ) {
+  if (typeof value !== "string" || /[\u0000-\u001f\u007f\r\n]/u.test(value)) {
     invalidResponse(`Bybit order response has an invalid ${field}.`);
   }
   return value;
@@ -201,7 +227,9 @@ export function mapOrderAcknowledgement(
     returnedClientOrderId !== undefined &&
     returnedClientOrderId !== clientOrderId
   ) {
-    precondition("Bybit returned an orderLinkId different from the supplied identity.");
+    precondition(
+      "Bybit returned an orderLinkId different from the supplied identity.",
+    );
   }
   const exchangeOrderId = responseText(response, "orderId");
   return Object.freeze({

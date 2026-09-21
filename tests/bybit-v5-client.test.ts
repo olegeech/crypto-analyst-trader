@@ -7,19 +7,23 @@ import {
   ORDER_HISTORY_PATH,
   ORDER_REALTIME_PATH,
   EXECUTION_LIST_PATH,
-  requireCleanExposureBaseline,
 } from "../src/adapters/bybit-v5/client.js";
 import { createOrderIntent } from "../src/domain/planning/order-intent.js";
 import { DecimalValue } from "../src/domain/shared/decimal.js";
 import { fixedClock } from "../src/domain/shared/time.js";
-import type { BybitResponse, QueryInput } from "../src/adapters/bybit-v5/transport.js";
+import type {
+  BybitResponse,
+  QueryInput,
+} from "../src/adapters/bybit-v5/transport.js";
 import { BybitReadMappingError } from "../src/adapters/bybit-v5/read-mappers.js";
 
 function response(result: Record<string, unknown>): BybitResponse {
   return { retCode: 0, retMsg: "OK", result };
 }
 
-function order(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+function order(
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
   return {
     symbol: "DOGEUSDT",
     orderId: "exchange-1",
@@ -56,11 +60,24 @@ function defaultResponse(path: string): BybitResponse {
         ],
       });
     case "/v5/market/tickers":
-      return response({ list: [{ symbol: "DOGEUSDT", bid1Price: "0.0886", ask1Price: "0.0887", lastPrice: "0.08865" }] });
+      return response({
+        list: [
+          {
+            symbol: "DOGEUSDT",
+            bid1Price: "0.0886",
+            ask1Price: "0.0887",
+            lastPrice: "0.08865",
+          },
+        ],
+      });
     case "/v5/position/list":
-      return response({ list: [{ symbol: "DOGEUSDT", positionIdx: 0, side: "", size: "0" }] });
+      return response({
+        list: [{ symbol: "DOGEUSDT", positionIdx: 0, side: "", size: "0" }],
+      });
     case "/v5/account/wallet-balance":
-      return response({ list: [{ accountType: "UNIFIED", totalAvailableBalance: "100" }] });
+      return response({
+        list: [{ accountType: "UNIFIED", totalAvailableBalance: "100" }],
+      });
     case ORDER_REALTIME_PATH:
     case ORDER_HISTORY_PATH:
     case EXECUTION_LIST_PATH:
@@ -71,8 +88,9 @@ function defaultResponse(path: string): BybitResponse {
 }
 
 function makeClient(
-  overrides: (path: string, query: QueryInput | undefined) => BybitResponse = (path) =>
-    defaultResponse(path),
+  overrides: (path: string, query: QueryInput | undefined) => BybitResponse = (
+    path,
+  ) => defaultResponse(path),
 ) {
   const requests: Array<{ path: string; query: QueryInput | undefined }> = [];
   const client = new BybitDemoReadClient({
@@ -93,12 +111,19 @@ test("read client exhausts active-order pagination and preserves exact query fil
   const { client, requests } = makeClient((path, query) => {
     if (path === ORDER_REALTIME_PATH) {
       const cursor =
-        typeof query === "object" && query !== null && !Array.isArray(query) && !(query instanceof URLSearchParams)
+        typeof query === "object" &&
+        query !== null &&
+        !Array.isArray(query) &&
+        !(query instanceof URLSearchParams)
           ? (query as Record<string, string>).cursor
           : undefined;
       return cursor === undefined
         ? response({ list: [order()], nextPageCursor: "next-1" })
-        : response({ list: [order({ orderId: "exchange-2", orderLinkId: "owned-client-2" })] });
+        : response({
+            list: [
+              order({ orderId: "exchange-2", orderLinkId: "owned-client-2" }),
+            ],
+          });
     }
     return defaultResponse(path);
   });
@@ -108,7 +133,9 @@ test("read client exhausts active-order pagination and preserves exact query fil
   assert.equal(requests[0]?.path, ORDER_REALTIME_PATH);
   assert.equal(requests[1]?.path, ORDER_REALTIME_PATH);
   assert.equal(
-    typeof requests[1]?.query === "object" && requests[1]?.query !== null && !Array.isArray(requests[1]?.query)
+    typeof requests[1]?.query === "object" &&
+      requests[1]?.query !== null &&
+      !Array.isArray(requests[1]?.query)
       ? (requests[1]?.query as Record<string, string>).cursor
       : undefined,
     "next-1",
@@ -140,7 +167,7 @@ test("Demo preflight proves ownership-filtered reconciliation reads before expos
   );
 });
 
-test("preflight rejects ignored ownership filters and clean-baseline helper is stage-specific", async () => {
+test("preflight rejects ignored ownership filters", async () => {
   const { client } = makeClient((path) => {
     if (path === ORDER_HISTORY_PATH) {
       return response({ list: [order({ orderLinkId: "foreign-client" })] });
@@ -154,24 +181,13 @@ test("preflight rejects ignored ownership filters and clean-baseline helper is s
       error.kind === "invalid-response" &&
       /ownership filter/u.test(error.message),
   );
-
-  const { client: cleanClient } = makeClient();
-  const clean = await cleanClient.readPreflight("DOGEUSDT", "synthetic-no-match");
-  requireCleanExposureBaseline(clean);
-  assert.throws(() =>
-    requireCleanExposureBaseline({
-      position: {
-        ...clean.position,
-        side: "long",
-        quantity: clean.position.quantity,
-      },
-      openOrders: [],
-    }),
-  );
 });
 
 test("execution client dispatches mapped create and exact cancel requests", async () => {
-  const requests: Array<{ path: string; body: Record<string, unknown> | string }> = [];
+  const requests: Array<{
+    path: string;
+    body: Record<string, unknown> | string;
+  }> = [];
   const price = DecimalValue.fromString("0.0887");
   const quantity = DecimalValue.fromString("57");
   const notional = DecimalValue.fromString("5.0559");
@@ -212,7 +228,12 @@ test("execution client dispatches mapped create and exact cancel requests", asyn
       },
       async post(path, body) {
         requests.push({ path, body });
-        return response({ orderId: path === "/v5/order/create" ? "exchange-1" : "exchange-cleanup", orderLinkId: path === "/v5/order/create" ? "client-create" : "client-cleanup" });
+        return response({
+          orderId:
+            path === "/v5/order/create" ? "exchange-1" : "exchange-cleanup",
+          orderLinkId:
+            path === "/v5/order/create" ? "client-create" : "client-cleanup",
+        });
       },
     },
   });

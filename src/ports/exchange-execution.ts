@@ -7,12 +7,10 @@ import type { UtcTimestamp } from "../domain/shared/time.js";
 import type { OrderIntent } from "../domain/planning/order-intent.js";
 import type { ExchangeOrderObservation } from "../domain/execution/exchange-order.js";
 
+export type { ExchangeOrderObservation } from "../domain/execution/exchange-order.js";
+
 export type ExchangeOperation =
-  | "read"
-  | "create"
-  | "observe"
-  | "fills"
-  | "cancel";
+  "read" | "create" | "observe" | "fills" | "cancel";
 
 export type ExchangeFailureKind =
   | "configuration"
@@ -28,10 +26,7 @@ export type ExchangeFailureKind =
   | "exchange";
 
 export type ExchangeRetryDisposition =
-  | "never"
-  | "read-only"
-  | "reconcile"
-  | "safe";
+  "never" | "read-only" | "reconcile" | "safe";
 
 /**
  * A safe, exchange-neutral description of an adapter failure. It deliberately
@@ -82,6 +77,7 @@ export interface ExchangeReadState {
   readonly serverTime: UtcTimestamp;
   readonly market: MarketSnapshot;
   readonly account: AccountSnapshot;
+  readonly openOrders: readonly ExchangeOrderObservation[];
   readonly accountReadiness: AccountReadiness;
 }
 
@@ -140,7 +136,7 @@ export interface ExchangeFillObservation {
   readonly feeCurrency?: string;
 }
 
-export interface ExchangeCancelOrderRequest extends ExchangeOrderLookup {}
+export type ExchangeCancelOrderRequest = ExchangeOrderLookup;
 
 export interface ExchangeExecutionPort {
   readState(

@@ -145,14 +145,16 @@ export function classifyRetCode(retCode: number): RetCodeClassification {
         kind: "ip-restriction",
         retCode,
         recommendReconnect: false,
-        message: "Bybit rejected the request because the caller IP is not allowed.",
+        message:
+          "Bybit rejected the request because the caller IP is not allowed.",
       };
     case 10006:
       return {
         kind: "rate-limited",
         retCode,
         recommendReconnect: false,
-        message: "Bybit rate-limited the request; retry only within the read budget.",
+        message:
+          "Bybit rate-limited the request; retry only within the read budget.",
       };
     case 110072:
       return {
@@ -183,7 +185,8 @@ export function classifyRetCode(retCode: number): RetCodeClassification {
         kind: "validation-failed",
         retCode,
         recommendReconnect: false,
-        message: "Bybit rejected the request as invalid or unavailable for this scope.",
+        message:
+          "Bybit rejected the request as invalid or unavailable for this scope.",
       };
     default:
       return {
@@ -298,10 +301,14 @@ function errorForResponse(
 ): BybitDemoTransportError | null {
   if (response.retCode === 0) return null;
   const classification = classifyRetCode(response.retCode);
-  return new BybitDemoTransportError(classification.kind, classification.message, {
-    retCode: classification.retCode,
-    recommendReconnect: classification.recommendReconnect,
-  });
+  return new BybitDemoTransportError(
+    classification.kind,
+    classification.message,
+    {
+      retCode: classification.retCode,
+      recommendReconnect: classification.recommendReconnect,
+    },
+  );
 }
 
 export class BybitDemoTransport {

@@ -713,7 +713,10 @@ test("managed entries accept take-profit without a catastrophic stop", () => {
   assert.equal(decision.ok, true);
   if (decision.ok) {
     assert.equal(decision.value.status, "pass");
-    assert.equal(decision.value.reasonCodes.includes("PROTECTION_REQUIRED"), false);
+    assert.equal(
+      decision.value.reasonCodes.includes("PROTECTION_REQUIRED"),
+      false,
+    );
   }
 });
 

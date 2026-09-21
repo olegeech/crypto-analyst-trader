@@ -2,11 +2,11 @@ import type { Clock, UtcTimestamp } from "../../domain/shared/time.js";
 import { systemClock, timestampFromEpochMs } from "../../domain/shared/time.js";
 import type {
   ExchangeCancelOrderRequest,
+  ExchangeOrderLookup,
   ExchangeOrderAcknowledgement,
   ExchangeOrderRequest,
 } from "../../ports/exchange-execution.js";
 import {
-  BYBIT_DEMO_TIME_PATH,
   type BybitResponse,
   type QueryInput,
   type BybitDemoTransport,
@@ -21,6 +21,7 @@ import {
 import {
   BybitReadMappingError,
   mapInstrumentInfo,
+  mapExecutionRecords,
   mapOrderRecords,
   mapPosition,
   mapTicker,
@@ -28,6 +29,7 @@ import {
   nextPageCursor,
   responseRecords,
   type BybitInstrumentInfo,
+  type BybitExecutionRecord,
   type BybitOrderRecord,
   type BybitPositionState,
   type BybitTicker,
@@ -46,8 +48,10 @@ export const EXECUTION_LIST_PATH = "/v5/execution/list";
 const DEFAULT_PAGE_SIZE = "50";
 const DEFAULT_MAX_PAGES = 20;
 
-export interface BybitDemoReadTransport
-  extends Pick<BybitDemoTransport, "get" | "getServerTime"> {}
+export type BybitDemoReadTransport = Pick<
+  BybitDemoTransport,
+  "get" | "getServerTime"
+>;
 
 export interface BybitDemoWriteTransport extends BybitDemoReadTransport {
   post(
@@ -61,8 +65,7 @@ export interface BybitDemoReadClientOptions {
   readonly maxPages?: number;
 }
 
-export interface BybitDemoExecutionClientOptions
-  extends BybitDemoReadClientOptions {
+export interface BybitDemoExecutionClientOptions extends BybitDemoReadClientOptions {
   readonly transport: BybitDemoWriteTransport;
   readonly clock?: Clock;
 }
@@ -97,11 +100,7 @@ export class BybitDemoReadClient {
 
   constructor(options: BybitDemoReadClientOptions) {
     const maxPages = options.maxPages ?? DEFAULT_MAX_PAGES;
-    if (
-      !Number.isSafeInteger(maxPages) ||
-      maxPages < 1 ||
-      maxPages > 100
-    ) {
+    if (!Number.isSafeInteger(maxPages) || maxPages < 1 || maxPages > 100) {
       throw new TypeError("maxPages must be a safe integer between 1 and 100");
     }
     this.transport = options.transport;
@@ -178,7 +177,50 @@ export class BybitDemoReadClient {
       seenCursors.add(next);
       cursor = next;
     }
-    precondition("Bybit order/realtime pagination exceeded the bounded read budget.");
+    precondition(
+      "Bybit order/realtime pagination exceeded the bounded read budget.",
+    );
+  }
+
+  async readRealtimeOrder(
+    request: ExchangeOrderLookup,
+  ): Promise<readonly BybitOrderRecord[]> {
+    return this.readOrderRecords(
+      ORDER_REALTIME_PATH,
+      "order/realtime",
+      request,
+      { openOnly: "0" },
+    );
+  }
+
+  async readOrderHistory(
+    request: ExchangeOrderLookup,
+  ): Promise<readonly BybitOrderRecord[]> {
+    return this.readOrderRecords(ORDER_HISTORY_PATH, "order/history", request);
+  }
+
+  async readExecutions(
+    request: ExchangeOrderLookup,
+  ): Promise<readonly BybitExecutionRecord[]> {
+    const records: BybitExecutionRecord[] = [];
+    let cursor: string | undefined;
+    const seenCursors = new Set<string>();
+    for (let page = 0; page < this.maxPages; page += 1) {
+      const query = this.lookupQuery(request, "50");
+      if (cursor !== undefined) query.cursor = cursor;
+      const response = await this.get(EXECUTION_LIST_PATH, query);
+      records.push(...mapExecutionRecords(response, request.instrument));
+      const next = nextPageCursor(response, "execution/list");
+      if (next === undefined) return records;
+      if (seenCursors.has(next)) {
+        clientError("Bybit execution/list pagination repeated a cursor.");
+      }
+      seenCursors.add(next);
+      cursor = next;
+    }
+    precondition(
+      "Bybit execution/list pagination exceeded the bounded read budget.",
+    );
   }
 
   /**
@@ -195,7 +237,12 @@ export class BybitDemoReadClient {
       [ORDER_HISTORY_PATH, "order/history"],
       [EXECUTION_LIST_PATH, "execution/list"],
     ] as const) {
-      await this.assertEmptyFilteredRead(path, label, symbol, syntheticClientOrderId);
+      await this.assertEmptyFilteredRead(
+        path,
+        label,
+        symbol,
+        syntheticClientOrderId,
+      );
     }
     return { realtime: true, history: true, executions: true };
   }
@@ -258,6 +305,48 @@ export class BybitDemoReadClient {
     precondition(`Bybit ${label} pagination exceeded the bounded read budget.`);
   }
 
+  private async readOrderRecords(
+    path: string,
+    label: string,
+    request: ExchangeOrderLookup,
+    extra: Record<string, string> = {},
+  ): Promise<readonly BybitOrderRecord[]> {
+    const records: BybitOrderRecord[] = [];
+    let cursor: string | undefined;
+    const seenCursors = new Set<string>();
+    for (let page = 0; page < this.maxPages; page += 1) {
+      const query = this.lookupQuery(request, DEFAULT_PAGE_SIZE, extra);
+      if (cursor !== undefined) query.cursor = cursor;
+      const response = await this.get(path, query);
+      records.push(...mapOrderRecords(response, request.instrument, label));
+      const next = nextPageCursor(response, label);
+      if (next === undefined) return records;
+      if (seenCursors.has(next)) {
+        clientError(`Bybit ${label} pagination repeated a cursor.`);
+      }
+      seenCursors.add(next);
+      cursor = next;
+    }
+    precondition(`Bybit ${label} pagination exceeded the bounded read budget.`);
+  }
+
+  private lookupQuery(
+    request: ExchangeOrderLookup,
+    limit: string,
+    extra: Record<string, string> = {},
+  ): Record<string, string> {
+    return {
+      category: BYBIT_LINEAR_CATEGORY,
+      symbol: request.instrument,
+      orderLinkId: request.clientOrderId,
+      limit,
+      ...(request.exchangeOrderId === undefined
+        ? {}
+        : { orderId: request.exchangeOrderId }),
+      ...extra,
+    };
+  }
+
   private get(path: string, query: QueryInput): Promise<BybitResponse> {
     return this.transport.get(path, query);
   }
@@ -294,21 +383,6 @@ export class BybitDemoExecutionClient extends BybitDemoReadClient {
       response,
       request.clientOrderId,
       this.clock.now(),
-    );
-  }
-}
-
-export function requireCleanExposureBaseline(
-  read: Pick<BybitDemoPreflightRead, "position" | "openOrders">,
-): void {
-  if (read.position.side !== "flat" || !read.position.quantity.isZero()) {
-    precondition(
-      "The selected Demo symbol is not flat; no exposure-increasing write is allowed.",
-    );
-  }
-  if (read.openOrders.length !== 0) {
-    precondition(
-      "The selected Demo symbol has pre-existing open orders; no exposure-increasing write is allowed.",
     );
   }
 }
