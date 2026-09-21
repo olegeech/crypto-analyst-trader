@@ -1,11 +1,23 @@
-import type { UtcTimestamp } from "../../domain/shared/time.js";
-import { timestampFromEpochMs } from "../../domain/shared/time.js";
+import type { Clock, UtcTimestamp } from "../../domain/shared/time.js";
+import { systemClock, timestampFromEpochMs } from "../../domain/shared/time.js";
+import type {
+  ExchangeCancelOrderRequest,
+  ExchangeOrderAcknowledgement,
+  ExchangeOrderRequest,
+} from "../../ports/exchange-execution.js";
 import {
   BYBIT_DEMO_TIME_PATH,
   type BybitResponse,
   type QueryInput,
   type BybitDemoTransport,
 } from "./transport.js";
+import {
+  CANCEL_ORDER_PATH,
+  CREATE_ORDER_PATH,
+  mapCancelOrderRequest,
+  mapCreateOrderRequest,
+  mapOrderAcknowledgement,
+} from "./order-mappers.js";
 import {
   BybitReadMappingError,
   mapInstrumentInfo,
@@ -37,9 +49,22 @@ const DEFAULT_MAX_PAGES = 20;
 export interface BybitDemoReadTransport
   extends Pick<BybitDemoTransport, "get" | "getServerTime"> {}
 
+export interface BybitDemoWriteTransport extends BybitDemoReadTransport {
+  post(
+    path: string,
+    body: Record<string, unknown> | string,
+  ): Promise<BybitResponse>;
+}
+
 export interface BybitDemoReadClientOptions {
   readonly transport: BybitDemoReadTransport;
   readonly maxPages?: number;
+}
+
+export interface BybitDemoExecutionClientOptions
+  extends BybitDemoReadClientOptions {
+  readonly transport: BybitDemoWriteTransport;
+  readonly clock?: Clock;
 }
 
 export interface ReconciliationReadCapabilities {
@@ -235,6 +260,41 @@ export class BybitDemoReadClient {
 
   private get(path: string, query: QueryInput): Promise<BybitResponse> {
     return this.transport.get(path, query);
+  }
+}
+
+export class BybitDemoExecutionClient extends BybitDemoReadClient {
+  private readonly writeTransport: BybitDemoWriteTransport;
+  private readonly clock: Clock;
+
+  constructor(options: BybitDemoExecutionClientOptions) {
+    super(options);
+    this.writeTransport = options.transport;
+    this.clock = options.clock ?? systemClock;
+  }
+
+  async createOrder(
+    request: ExchangeOrderRequest,
+  ): Promise<ExchangeOrderAcknowledgement> {
+    const body = mapCreateOrderRequest(request);
+    const response = await this.writeTransport.post(CREATE_ORDER_PATH, body);
+    return mapOrderAcknowledgement(
+      response,
+      request.clientOrderId,
+      this.clock.now(),
+    );
+  }
+
+  async cancelOrder(
+    request: ExchangeCancelOrderRequest,
+  ): Promise<ExchangeOrderAcknowledgement> {
+    const body = mapCancelOrderRequest(request);
+    const response = await this.writeTransport.post(CANCEL_ORDER_PATH, body);
+    return mapOrderAcknowledgement(
+      response,
+      request.clientOrderId,
+      this.clock.now(),
+    );
   }
 }
 

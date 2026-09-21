@@ -3,11 +3,15 @@ import test from "node:test";
 
 import {
   BybitDemoReadClient,
+  BybitDemoExecutionClient,
   ORDER_HISTORY_PATH,
   ORDER_REALTIME_PATH,
   EXECUTION_LIST_PATH,
   requireCleanExposureBaseline,
 } from "../src/adapters/bybit-v5/client.js";
+import { createOrderIntent } from "../src/domain/planning/order-intent.js";
+import { DecimalValue } from "../src/domain/shared/decimal.js";
+import { fixedClock } from "../src/domain/shared/time.js";
 import type { BybitResponse, QueryInput } from "../src/adapters/bybit-v5/transport.js";
 import { BybitReadMappingError } from "../src/adapters/bybit-v5/read-mappers.js";
 
@@ -163,5 +167,80 @@ test("preflight rejects ignored ownership filters and clean-baseline helper is s
       },
       openOrders: [],
     }),
+  );
+});
+
+test("execution client dispatches mapped create and exact cancel requests", async () => {
+  const requests: Array<{ path: string; body: Record<string, unknown> | string }> = [];
+  const price = DecimalValue.fromString("0.0887");
+  const quantity = DecimalValue.fromString("57");
+  const notional = DecimalValue.fromString("5.0559");
+  const takeProfit = DecimalValue.fromString("0.1");
+  assert.equal(price.ok, true);
+  assert.equal(quantity.ok, true);
+  assert.equal(notional.ok, true);
+  assert.equal(takeProfit.ok, true);
+  if (!price.ok || !quantity.ok || !notional.ok || !takeProfit.ok) return;
+  const intent = createOrderIntent({
+    intentId: "intent-client",
+    instrument: "DOGEUSDT",
+    orderType: "limit",
+    side: "buy",
+    positionEffect: "open",
+    price: price.value,
+    quantity: quantity.value,
+    notional: notional.value,
+    normalization: {
+      price: "floor",
+      quantity: "floor",
+      constraintVersion: "bybit-v5:DOGEUSDT:instrument",
+    },
+    protection: { takeProfit: takeProfit.value },
+  });
+  assert.equal(intent.ok, true);
+  const clock = fixedClock("2026-09-21T10:00:00.000Z");
+  assert.equal(clock.ok, true);
+  if (!intent.ok || !clock.ok) return;
+  const client = new BybitDemoExecutionClient({
+    clock: clock.value,
+    transport: {
+      async get(path) {
+        return defaultResponse(path);
+      },
+      async getServerTime() {
+        return Date.parse("2026-09-21T10:00:00.000Z");
+      },
+      async post(path, body) {
+        requests.push({ path, body });
+        return response({ orderId: path === "/v5/order/create" ? "exchange-1" : "exchange-cleanup", orderLinkId: path === "/v5/order/create" ? "client-create" : "client-cleanup" });
+      },
+    },
+  });
+  const created = await client.createOrder({
+    intent: intent.value,
+    clientOrderId: "client-create",
+    timeInForce: "GTC",
+    reduceOnly: false,
+  });
+  const cancelled = await client.cancelOrder({
+    instrument: "DOGEUSDT",
+    clientOrderId: "client-cleanup",
+    exchangeOrderId: "exchange-cleanup",
+  });
+  assert.equal(created.status, "accepted");
+  assert.equal(cancelled.status, "accepted");
+  assert.equal(requests[0]?.path, "/v5/order/create");
+  assert.equal(requests[1]?.path, "/v5/order/cancel");
+  assert.equal(
+    (requests[0]?.body as Record<string, unknown>).orderLinkId,
+    "client-create",
+  );
+  assert.equal(
+    (requests[1]?.body as Record<string, unknown>).orderLinkId,
+    "client-cleanup",
+  );
+  assert.equal(
+    (requests[1]?.body as Record<string, unknown>).orderId,
+    "exchange-cleanup",
   );
 });
