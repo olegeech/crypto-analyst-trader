@@ -50,6 +50,13 @@ export const DEFAULT_DEMO_SYMBOL = "DOGEUSDT";
 export const DEFAULT_EVIDENCE_DIRECTORY = "data/reports/bybit-demo-adapter";
 const MAX_PROBE_NOTIONAL = "10";
 const DEFAULT_RECONCILIATION_ATTEMPTS = 8;
+const CLIENT_ORDER_ID_MAX_LENGTH = 36;
+const VERIFICATION_ORDER_SUFFIXES = [
+  "fill",
+  "fill-cleanup",
+  "passive",
+  "passive-cleanup",
+] as const;
 
 type Output = { write(message: string): void };
 
@@ -113,7 +120,7 @@ function resultValue<T>(result: ExchangeResult<T>): T {
 }
 
 function runIdFor(clock: Clock): string {
-  return `demo-${Date.parse(clock.now())}-${randomBytes(4).toString("hex")}`;
+  return `d${Date.parse(clock.now()).toString(36)}${randomBytes(3).toString("hex")}`;
 }
 
 function clientOrderId(runId: string, suffix: string): string {
@@ -131,6 +138,16 @@ function clientOrderId(runId: string, suffix: string): string {
 function validateRunId(runId: string): void {
   if (!/^[A-Za-z0-9_-]{1,64}$/u.test(runId)) {
     throw new TypeError("runId must contain only safe filename characters.");
+  }
+  const longestClientOrderId = Math.max(
+    ...VERIFICATION_ORDER_SUFFIXES.map(
+      (suffix) => runId.length + 1 + suffix.length,
+    ),
+  );
+  if (longestClientOrderId > CLIENT_ORDER_ID_MAX_LENGTH) {
+    throw new TypeError(
+      "runId leaves insufficient space for a Bybit client-order identity.",
+    );
   }
 }
 
@@ -358,6 +375,7 @@ async function reconcileOwnedOrder(
   attempts: number,
   sleep: (milliseconds: number) => Promise<void>,
   requireFill: boolean,
+  requireTerminal = false,
 ): Promise<ReconciledOwnedOrder> {
   let lastFailure: ExchangeExecutionFailure | undefined;
   for (let attempt = 0; attempt < attempts; attempt += 1) {
@@ -403,6 +421,13 @@ async function reconcileOwnedOrder(
         },
       );
     }
+    if (
+      filledQuantity.compare(observed.value.filledQuantity) < 0 &&
+      observed.value.filledQuantity.isPositive()
+    ) {
+      await sleep(250 * Math.min(attempt + 1, 4));
+      continue;
+    }
     const hasTerminalState =
       observed.value.status === "filled" ||
       observed.value.status === "cancelled" ||
@@ -411,7 +436,12 @@ async function reconcileOwnedOrder(
       observed.value.status === "open" ||
       observed.value.status === "partially-filled";
     if (
-      (!requireFill && (hasTerminalState || hasActiveState)) ||
+      (!requireTerminal &&
+        !requireFill &&
+        (hasTerminalState || hasActiveState)) ||
+      (requireTerminal &&
+        hasTerminalState &&
+        (!requireFill || filledQuantity.isPositive())) ||
       (requireFill &&
         filledQuantity.isPositive() &&
         (hasTerminalState || hasActiveState))
@@ -454,7 +484,7 @@ async function cancelOpenOwnedOrder(
   );
   const acknowledgement = await port.cancelOrder(request);
   if (!acknowledgement.ok) throw new VerificationFailure(acknowledgement.error);
-  return reconcileOwnedOrder(port, request, attempts, sleep, false);
+  return reconcileOwnedOrder(port, request, attempts, sleep, false, true);
 }
 
 async function cleanupOwnedExposure(
@@ -765,6 +795,7 @@ export async function runBybitDemoAdapterVerification(
         attempts,
         sleep,
         false,
+        true,
       );
       if (passiveOrder.observation.status !== "cancelled") {
         throw failure(
@@ -813,7 +844,7 @@ export async function runBybitDemoAdapterVerification(
         },
       );
     }
-    if (passiveOrder.fills.length > 0) {
+    if (passiveOrder.observation.filledQuantity.isPositive()) {
       const beforePassiveCleanup = resultValue(
         await options.port.readState({ instrument: options.symbol }),
       );

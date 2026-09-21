@@ -88,12 +88,23 @@ class FakeVerificationPort implements ExchangeExecutionPort {
   private position: { side: "long" | "short" | "flat"; quantity: DecimalValue };
   private orderSequence = 0;
   private readonly fillPassive: boolean;
+  private readonly partialFirstExecution: boolean;
+  private readonly staleCancelReads: number;
+  private readonly fillListCalls = new Map<string, number>();
+  private readonly staleReads = new Map<string, number>();
 
-  constructor({ dirty = false, fillPassive = false } = {}) {
+  constructor({
+    dirty = false,
+    fillPassive = false,
+    partialFirstExecution = false,
+    staleCancelReads = 0,
+  } = {}) {
     this.position = dirty
       ? { side: "long", quantity: decimal("1") }
       : { side: "flat", quantity: decimal("0") };
     this.fillPassive = fillPassive;
+    this.partialFirstExecution = partialFirstExecution;
+    this.staleCancelReads = staleCancelReads;
   }
 
   async readState() {
@@ -210,13 +221,35 @@ class FakeVerificationPort implements ExchangeExecutionPort {
         },
       };
     }
+    const staleReadsRemaining = this.staleReads.get(request.clientOrderId) ?? 0;
+    if (staleReadsRemaining > 0) {
+      this.staleReads.set(request.clientOrderId, staleReadsRemaining - 1);
+      return {
+        ok: true as const,
+        value: { ...found.observation, status: "open" as const },
+      };
+    }
     return { ok: true as const, value: found.observation };
   }
 
   async listFills(request: ExchangeOrderLookup) {
+    const calls = (this.fillListCalls.get(request.clientOrderId) ?? 0) + 1;
+    this.fillListCalls.set(request.clientOrderId, calls);
+    const fills = this.orders.get(request.clientOrderId)?.fills ?? [];
+    const firstFill = fills[0];
+    if (this.partialFirstExecution && calls === 1 && firstFill !== undefined) {
+      const partialFill: ExchangeFillObservation = {
+        ...firstFill,
+        quantity: decimal("1"),
+      };
+      return {
+        ok: true as const,
+        value: [partialFill],
+      };
+    }
     return {
       ok: true as const,
-      value: this.orders.get(request.clientOrderId)?.fills ?? [],
+      value: fills,
     };
   }
 
@@ -239,6 +272,9 @@ class FakeVerificationPort implements ExchangeExecutionPort {
       ...found,
       observation: { ...found.observation, status: "cancelled" },
     });
+    if (this.staleCancelReads > 0) {
+      this.staleReads.set(request.clientOrderId, this.staleCancelReads);
+    }
     return {
       ok: true as const,
       value: {
@@ -276,6 +312,37 @@ test("verification harness proves fill, exact cleanup, passive open and exact ca
   assert.equal(result.evidence.stages.at(-1)?.name, "final-clean-state");
 });
 
+test("default run IDs reserve room for every cleanup suffix", async () => {
+  const port = new FakeVerificationPort({ fillPassive: true });
+  const result = await runBybitDemoAdapterVerification({
+    port,
+    accountId: "fixture-account",
+    symbol: "DOGEUSDT",
+    clock: clock.value,
+    sleep: async () => {},
+    writeEvidence: false,
+  });
+  assert.equal(result.verdict, "CONFIRMED_CLEAN");
+  assert.ok(port.creates.every((id) => id.length <= 36));
+  assert.ok(port.creates.some((id) => id.endsWith("-passive-cleanup")));
+});
+
+test("run IDs reject cleanup suffix overflow before exchange access", async () => {
+  const port = new FakeVerificationPort();
+  await assert.rejects(
+    runBybitDemoAdapterVerification({
+      port,
+      accountId: "fixture-account",
+      symbol: "DOGEUSDT",
+      runId: "a".repeat(21),
+      clock: clock.value,
+      writeEvidence: false,
+    }),
+    /runId leaves insufficient space/u,
+  );
+  assert.deepEqual(port.creates, []);
+});
+
 test("dirty selected-symbol baseline blocks before the first write", async () => {
   const port = new FakeVerificationPort({ dirty: true });
   const result = await runBybitDemoAdapterVerification({
@@ -306,6 +373,35 @@ test("passive fill race is cleaned only through the owned reduce-only path", asy
   assert.equal(result.verdict, "CONFIRMED_CLEAN");
   assert.ok(port.creates.includes("run-race-passive-cleanup"));
   assert.deepEqual(port.cancels, []);
+});
+
+test("execution evidence lag is reconciled before cleanup sizing", async () => {
+  const port = new FakeVerificationPort({ partialFirstExecution: true });
+  const result = await runBybitDemoAdapterVerification({
+    port,
+    accountId: "fixture-account",
+    symbol: "DOGEUSDT",
+    runId: "run-lag",
+    clock: clock.value,
+    sleep: async () => {},
+    writeEvidence: false,
+  });
+  assert.equal(result.verdict, "CONFIRMED_CLEAN");
+});
+
+test("post-cancel stale open state is reconciled to cancelled", async () => {
+  const port = new FakeVerificationPort({ staleCancelReads: 1 });
+  const result = await runBybitDemoAdapterVerification({
+    port,
+    accountId: "fixture-account",
+    symbol: "DOGEUSDT",
+    runId: "run-stale-cancel",
+    clock: clock.value,
+    sleep: async () => {},
+    writeEvidence: false,
+  });
+  assert.equal(result.verdict, "CONFIRMED_CLEAN");
+  assert.deepEqual(port.cancels, ["run-stale-cancel-passive"]);
 });
 
 test("unsafe run IDs are rejected before exchange access", async () => {
