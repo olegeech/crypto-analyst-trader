@@ -7,6 +7,10 @@ import {
   MARKET_EVIDENCE_SYMBOLS,
   MARKET_EVIDENCE_UNIVERSE_VERSION,
 } from "../src/domain/market/market-evidence-bundle.js";
+import {
+  encodeCanonicalArtifact,
+  rehydrateArtifact,
+} from "../src/domain/identity/canonical-artifact.js";
 
 const evidence = {
   kind: "market-snapshot",
@@ -223,4 +227,44 @@ test("market evidence rejects a ticker or historical observation after the commo
     }),
   );
   assert.equal(result.ok, false);
+});
+
+test("market evidence participates in deterministic canonical identity and rehydration", () => {
+  const first = createMarketEvidenceBundle(bundle());
+  const reordered = createMarketEvidenceBundle(
+    bundle({
+      symbols: [...MARKET_EVIDENCE_SYMBOLS]
+        .reverse()
+        .map((symbol) => symbolEvidence(symbol)),
+    }),
+  );
+  assert.equal(first.ok, true);
+  assert.equal(reordered.ok, true);
+  if (!first.ok || !reordered.ok) return;
+
+  const firstEnvelope = encodeCanonicalArtifact(
+    "market-evidence-bundle",
+    first.value,
+  );
+  const reorderedEnvelope = encodeCanonicalArtifact(
+    "market-evidence-bundle",
+    reordered.value,
+  );
+  assert.equal(firstEnvelope.ok, true);
+  assert.equal(reorderedEnvelope.ok, true);
+  if (!firstEnvelope.ok || !reorderedEnvelope.ok) return;
+  assert.equal(
+    firstEnvelope.value.canonicalHash,
+    reorderedEnvelope.value.canonicalHash,
+  );
+
+  const rehydrated = rehydrateArtifact(
+    "market-evidence-bundle",
+    firstEnvelope.value,
+  );
+  assert.equal(rehydrated.ok, true);
+  if (rehydrated.ok) {
+    assert.equal(rehydrated.value.bundleCutoff, first.value.bundleCutoff);
+    assert.equal(rehydrated.value.symbols[0]?.ticker?.bid.toString(), "100");
+  }
 });

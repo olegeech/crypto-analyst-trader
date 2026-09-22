@@ -73,6 +73,36 @@ export {
   type InstrumentConstraints,
 } from "./market/instrument-constraints.js";
 export {
+  MARKET_EVIDENCE_PRODUCER,
+  MARKET_EVIDENCE_SCHEMA_VERSION,
+  MARKET_EVIDENCE_SYMBOLS,
+  MARKET_EVIDENCE_UNIVERSE_VERSION,
+  createMarketEvidenceBundle,
+  isCompleteMarketEvidenceBundle,
+  type FundingObservation,
+  type MarketEvidenceBundle,
+  type MarketEvidenceDiagnostic,
+  type MarketEvidenceSource,
+  type MarketEvidenceStatus,
+  type MarketEvidenceSymbol,
+  type MarketInstrumentEvidence,
+  type MarketInstrumentStatus,
+  type MarketSeriesInterval,
+  type MarketSymbolEvidence,
+  type MarketTickerEvidence,
+  type OhlcvObservation,
+  type OhlcvSeries,
+  type OpenInterestInterval,
+  type OpenInterestObservation,
+  type OpenInterestSeries,
+} from "./market/market-evidence-bundle.js";
+export {
+  createMarketEvidenceDiagnostic,
+  parseMarketEvidenceDiagnostics,
+  type MarketEvidenceBudgetState,
+  type MarketEvidenceDiagnosticCode,
+} from "./market/market-evidence-diagnostics.js";
+export {
   createStrategyConfig,
   type StrategyConfig,
 } from "./market/strategy-config.js";

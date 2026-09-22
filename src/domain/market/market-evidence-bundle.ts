@@ -22,6 +22,8 @@ import {
   type MarketEvidenceDiagnostic,
 } from "./market-evidence-diagnostics.js";
 
+export type { MarketEvidenceDiagnostic } from "./market-evidence-diagnostics.js";
+
 export const MARKET_EVIDENCE_SCHEMA_VERSION = "market-evidence/v1" as const;
 export const MARKET_EVIDENCE_UNIVERSE_VERSION = "m1-universe/v1" as const;
 export const MARKET_EVIDENCE_PRODUCER =
@@ -692,8 +694,11 @@ export function createMarketEvidenceBundle(
   }
   if (MARKET_EVIDENCE_SYMBOLS.some((symbol) => !symbols.has(symbol)))
     return invalid("bundle is missing a configured symbol");
+  const orderedSymbols = MARKET_EVIDENCE_SYMBOLS.map((symbol) =>
+    parsedSymbols.find((item) => item.symbol === symbol)!,
+  );
   if (input.status === "complete") {
-    for (const symbol of parsedSymbols) {
+    for (const symbol of orderedSymbols) {
       if (symbol.instrument === undefined || symbol.ticker === undefined)
         return invalid("complete bundle is missing required symbol evidence");
     }
@@ -709,7 +714,7 @@ export function createMarketEvidenceBundle(
     bundleCutoff: bundleCutoff.value,
     source: source.value,
     status: input.status as MarketEvidenceStatus,
-    symbols: Object.freeze(parsedSymbols),
+    symbols: Object.freeze(orderedSymbols),
     diagnostics: diagnostics.value,
     evidence: Object.freeze(evidence),
   };

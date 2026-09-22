@@ -43,6 +43,10 @@ import {
   type MarketSnapshot,
 } from "../market/snapshots.js";
 import {
+  createMarketEvidenceBundle,
+  type MarketEvidenceBundle,
+} from "../market/market-evidence-bundle.js";
+import {
   createInstrumentConstraints,
   type InstrumentConstraints,
 } from "../market/instrument-constraints.js";
@@ -82,6 +86,7 @@ export type ArtifactKind =
   | "strategy-config"
   | "capability-observation"
   | "market-snapshot"
+  | "market-evidence-bundle"
   | "account-snapshot"
   | "order-intent"
   | "risk-decision"
@@ -110,6 +115,7 @@ export type RehydratedArtifact =
   | StrategyConfig
   | CapabilityObservation
   | MarketSnapshot
+  | MarketEvidenceBundle
   | AccountSnapshot
   | OrderIntent
   | RiskDecision
@@ -221,6 +227,147 @@ const marketSnapshotSchema = object(
   {
     scope: scopeSchema,
     constraints: constraintsSchema,
+    evidence: array(evidenceSchema),
+  },
+);
+
+const marketEvidenceBudgetSchema = object([
+  "pages",
+  "maxPages",
+  "rows",
+  "maxRows",
+  "retries",
+  "maxRetries",
+]);
+
+const marketEvidenceDiagnosticSchema = object(
+  [
+    "code",
+    "operation",
+    "endpoint",
+    "symbol",
+    "series",
+    "sourceTimestamp",
+    "budget",
+  ],
+  { budget: marketEvidenceBudgetSchema },
+  ["code", "operation", "endpoint"],
+);
+
+const marketEvidenceSourceSchema = object([
+  "exchange",
+  "environment",
+  "origin",
+  "category",
+]);
+
+const marketEvidenceInstrumentSchema = object(
+  [
+    "symbol",
+    "status",
+    "contractType",
+    "baseCoin",
+    "quoteCoin",
+    "settleCoin",
+    "constraints",
+    "fundingInterval",
+    "sourceTimestamp",
+  ],
+  { constraints: constraintsSchema },
+  [
+    "symbol",
+    "status",
+    "contractType",
+    "baseCoin",
+    "quoteCoin",
+    "settleCoin",
+    "constraints",
+    "fundingInterval",
+  ],
+);
+
+const marketEvidenceTickerSchema = object(
+  [
+    "observedAt",
+    "bid",
+    "ask",
+    "last",
+    "markPrice",
+    "indexPrice",
+    "fundingRate",
+    "openInterest",
+    "volume24h",
+    "turnover24h",
+  ],
+  {},
+  ["observedAt", "bid", "ask", "last"],
+);
+
+const ohlcvObservationSchema = object([
+  "timestamp",
+  "open",
+  "high",
+  "low",
+  "close",
+  "volume",
+  "turnover",
+  "closed",
+]);
+
+const ohlcvSeriesSchema = object(["interval", "observations"], {
+  observations: array(ohlcvObservationSchema),
+});
+
+const fundingObservationSchema = object(["timestamp", "rate"]);
+
+const openInterestObservationSchema = object(["timestamp", "openInterest"]);
+
+const openInterestSeriesSchema = object(["interval", "observations"], {
+  observations: array(openInterestObservationSchema),
+});
+
+const marketEvidenceSymbolSchema = object(
+  [
+    "symbol",
+    "instrument",
+    "ticker",
+    "ohlcv",
+    "funding",
+    "openInterest",
+    "diagnostics",
+  ],
+  {
+    instrument: marketEvidenceInstrumentSchema,
+    ticker: marketEvidenceTickerSchema,
+    ohlcv: array(ohlcvSeriesSchema),
+    funding: array(fundingObservationSchema),
+    openInterest: array(openInterestSeriesSchema),
+    diagnostics: array(marketEvidenceDiagnosticSchema),
+  },
+  ["symbol", "ohlcv", "funding", "openInterest", "diagnostics"],
+);
+
+const marketEvidenceBundleSchema = object(
+  [
+    "runId",
+    "schemaVersion",
+    "producer",
+    "universeVersion",
+    "universe",
+    "collectionStartedAt",
+    "collectionEndedAt",
+    "bundleCutoff",
+    "source",
+    "status",
+    "symbols",
+    "diagnostics",
+    "evidence",
+  ],
+  {
+    source: marketEvidenceSourceSchema,
+    universe: array(),
+    symbols: array(marketEvidenceSymbolSchema),
+    diagnostics: array(marketEvidenceDiagnosticSchema),
     evidence: array(evidenceSchema),
   },
 );
@@ -473,6 +620,7 @@ const schemas: ReadonlyMap<ArtifactKind, Schema> = new Map([
   ["strategy-config", strategySchema],
   ["capability-observation", capabilitySchema],
   ["market-snapshot", marketSnapshotSchema],
+  ["market-evidence-bundle", marketEvidenceBundleSchema],
   ["account-snapshot", accountSnapshotSchema],
   ["order-intent", orderIntentSchema],
   ["risk-decision", riskDecisionSchema],
@@ -820,6 +968,10 @@ export function rehydrateArtifact(
   envelope: unknown,
 ): Result<ExecutionPlan>;
 export function rehydrateArtifact(
+  artifactKind: "market-evidence-bundle",
+  envelope: unknown,
+): Result<MarketEvidenceBundle>;
+export function rehydrateArtifact(
   artifactKind: "approval",
   envelope: unknown,
 ): Result<Approval>;
@@ -848,6 +1000,8 @@ export function rehydrateArtifact(
       return createCapabilityObservation(toConstructorInput(decoded.value));
     case "market-snapshot":
       return createMarketSnapshot(toConstructorInput(decoded.value));
+    case "market-evidence-bundle":
+      return createMarketEvidenceBundle(toConstructorInput(decoded.value));
     case "account-snapshot":
       return createAccountSnapshot(toConstructorInput(decoded.value));
     case "order-intent":
