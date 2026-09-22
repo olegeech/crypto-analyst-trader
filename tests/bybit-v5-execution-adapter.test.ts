@@ -146,6 +146,7 @@ test("execution adapter exposes normalized snapshots and owned lifecycle evidenc
   assert.equal(state.value.account.evidence[0]?.kind, "account-snapshot");
   assert.equal(state.value.leverage.effective.toString(), "1");
   assert.equal(state.value.accountMetadata.accountId, "demo-account");
+  assert.equal(state.value.account.accountScope, "demo-account");
   assert.deepEqual(
     state.value.capabilities.map((item) => item.capability),
     [

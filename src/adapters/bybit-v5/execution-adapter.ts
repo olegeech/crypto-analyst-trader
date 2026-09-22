@@ -213,7 +213,7 @@ function snapshots(
   });
   const account = createAccountSnapshot({
     snapshotId: `demo-account-${accountHash}`,
-    accountScope: `demo:${accountId}`,
+    accountScope: accountId,
     scope: scopeObject(),
     asOf: input.serverTime,
     availableBalance: input.wallet.availableBalance.toString(),
