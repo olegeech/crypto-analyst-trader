@@ -22,6 +22,7 @@ export interface ExchangeOrderObservation {
   readonly status: ExchangeOrderStatus;
   readonly observedAt: UtcTimestamp;
   readonly source: string;
+  readonly parentOrderLinkId?: string;
   readonly averagePrice?: DecimalValue;
 }
 
@@ -52,6 +53,10 @@ export function createExchangeOrder(
   const instrument = requireIdentifier(input.instrument, "instrument");
   const source = requireSafeText(input.source, "source");
   const observedAt = parseUtcTimestamp(input.observedAt);
+  const parentOrderLinkId =
+    input.parentOrderLinkId === undefined
+      ? { ok: true as const, value: undefined }
+      : requireIdentifier(input.parentOrderLinkId, "parentOrderLinkId");
   const requestedQuantity = DecimalValue.fromString(input.requestedQuantity);
   const filledQuantity = parseDecimal(input.filledQuantity, "filledQuantity");
   if (
@@ -60,6 +65,7 @@ export function createExchangeOrder(
     !instrument.ok ||
     !source.ok ||
     !observedAt.ok ||
+    !parentOrderLinkId.ok ||
     !requestedQuantity.ok ||
     !filledQuantity.ok ||
     !requestedQuantity.value.isPositive() ||
@@ -100,6 +106,7 @@ export function createExchangeOrder(
     status: ExchangeOrderStatus;
     observedAt: UtcTimestamp;
     source: string;
+    parentOrderLinkId?: string;
     averagePrice?: DecimalValue;
   } = {
     exchangeOrderId: exchangeOrderId.value,
@@ -111,6 +118,9 @@ export function createExchangeOrder(
     status: input.status,
     observedAt: observedAt.value,
     source: source.value,
+    ...(parentOrderLinkId.value === undefined
+      ? {}
+      : { parentOrderLinkId: parentOrderLinkId.value }),
   };
   if (averagePrice !== undefined) order.averagePrice = averagePrice;
   return ok(markExchangeOrder(Object.freeze(order)));

@@ -607,3 +607,254 @@ test("HALT clearance requires terminal reconciliation and revision-matched evide
   assert.equal(cleared.reconciliationRequired, false);
   store.close();
 });
+
+test("scope run enumeration rehydrates plan-only and owned lineages deterministically", () => {
+  const { store, scope } = createStore();
+  const plan = createPlanFixture();
+  const lineage = unwrap(
+    store.prepareLineage({
+      scope,
+      runId: "enumeration-run",
+      plan,
+      approval: approvalFor(plan),
+      preparedAt: time("2026-09-19T10:00:01Z"),
+    }),
+  );
+
+  const runs = unwrap(store.readRuns());
+  assert.equal(runs.length, 1);
+  assert.equal(runs[0]?.lineage.lineageId, lineage.lineageId);
+  assert.equal(runs[0]?.plan.materialHash, plan.materialHash);
+  assert.equal(runs[0]?.ownedIntents.length, 0);
+  assert.deepEqual(runs[0]?.identityBindings, []);
+  store.close();
+});
+
+test("one unique candidate can late-bind an exchange identity without mutating the attempt", () => {
+  const { store, scope } = createStore();
+  const prepared = prepareIntent(store, scope, "late-binding-client");
+  const attempt = unwrap(
+    createExecutionAttempt({
+      attemptId: "late-binding-attempt",
+      planHash: prepared.plan.materialHash,
+      intentId: prepared.intentId,
+      clientOrderId: prepared.clientOrderId,
+      submittedAt: time("2026-09-19T10:00:04Z"),
+      acknowledgement: "accepted",
+      terminalStatus: "unverified",
+    }),
+  );
+  unwrap(
+    store.appendAttempt({
+      authority: prepared.lease,
+      lineageId: prepared.lineage.lineageId,
+      attempt,
+      dispatchedAt: time("2026-09-19T10:00:04Z"),
+    }),
+  );
+
+  const first = unwrap(
+    store.appendIdentityBinding({
+      authority: prepared.lease,
+      lineageId: prepared.lineage.lineageId,
+      attemptId: attempt.attemptId,
+      boundAt: time("2026-09-19T10:00:05Z"),
+      candidates: [
+        {
+          exchangeOrderId: "late-bound-order",
+          clientOrderId: prepared.clientOrderId,
+          instrument: "DOGEUSDT",
+          side: "buy",
+          requestedQuantity: "57",
+          ownershipContext: scope,
+        },
+      ],
+    }),
+  );
+  assert.equal(first.status, "BOUND");
+  assert.equal(first.idempotent, false);
+  assert.equal(first.binding.exchangeOrderId, "late-bound-order");
+
+  const replay = unwrap(
+    store.appendIdentityBinding({
+      authority: prepared.lease,
+      lineageId: prepared.lineage.lineageId,
+      attemptId: attempt.attemptId,
+      boundAt: time("2026-09-19T10:00:06Z"),
+      candidates: [
+        {
+          exchangeOrderId: "late-bound-order",
+          clientOrderId: prepared.clientOrderId,
+          instrument: "DOGEUSDT",
+          side: "buy",
+          requestedQuantity: "57.000",
+          ownershipContext: scope,
+        },
+      ],
+    }),
+  );
+  assert.equal(replay.status, "BOUND");
+  assert.equal(replay.idempotent, true);
+  assert.equal(
+    unwrap(store.readAttempts(prepared.lineage.lineageId))[0]?.attempt
+      .exchangeOrderId,
+    undefined,
+  );
+  assert.equal(
+    unwrap(store.readIdentityBindings(prepared.lineage.lineageId))[0]
+      ?.exchangeOrderId,
+    "late-bound-order",
+  );
+  const conflictingReplay = store.appendIdentityBinding({
+    authority: prepared.lease,
+    lineageId: prepared.lineage.lineageId,
+    attemptId: attempt.attemptId,
+    boundAt: time("2026-09-19T10:00:07Z"),
+    candidates: [
+      {
+        exchangeOrderId: "different-late-bound-order",
+        clientOrderId: prepared.clientOrderId,
+        instrument: "DOGEUSDT",
+        side: "buy",
+        requestedQuantity: "57",
+        ownershipContext: scope,
+      },
+    ],
+  });
+  assert.equal(conflictingReplay.ok, false);
+  if (!conflictingReplay.ok) {
+    assert.equal(conflictingReplay.error.code, "PERSISTENCE_CONFLICT");
+  }
+  assert.equal(unwrap(store.readHalt()).active, true);
+  store.close();
+});
+
+test("late binding rejects zero or multiple candidates and keeps conflict halted", () => {
+  const { store, scope } = createStore();
+  const prepared = prepareIntent(store, scope, "ambiguous-binding-client");
+  const attempt = unwrap(
+    createExecutionAttempt({
+      attemptId: "ambiguous-binding-attempt",
+      planHash: prepared.plan.materialHash,
+      intentId: prepared.intentId,
+      clientOrderId: prepared.clientOrderId,
+      submittedAt: time("2026-09-19T10:00:04Z"),
+      acknowledgement: "pending",
+      terminalStatus: "unverified",
+    }),
+  );
+  unwrap(
+    store.appendAttempt({
+      authority: prepared.lease,
+      lineageId: prepared.lineage.lineageId,
+      attempt,
+      dispatchedAt: time("2026-09-19T10:00:04Z"),
+    }),
+  );
+
+  const unresolved = unwrap(
+    store.appendIdentityBinding({
+      authority: prepared.lease,
+      lineageId: prepared.lineage.lineageId,
+      attemptId: attempt.attemptId,
+      boundAt: time("2026-09-19T10:00:05Z"),
+      candidates: [],
+    }),
+  );
+  assert.equal(unresolved.status, "UNRESOLVED");
+  assert.equal(
+    unwrap(store.readIdentityBindings(prepared.lineage.lineageId)).length,
+    0,
+  );
+
+  const conflict = store.appendIdentityBinding({
+    authority: prepared.lease,
+    lineageId: prepared.lineage.lineageId,
+    attemptId: attempt.attemptId,
+    boundAt: time("2026-09-19T10:00:06Z"),
+    candidates: [
+      {
+        exchangeOrderId: "ambiguous-order-a",
+        clientOrderId: prepared.clientOrderId,
+        instrument: "DOGEUSDT",
+        side: "buy",
+        requestedQuantity: "57",
+        ownershipContext: scope,
+      },
+      {
+        exchangeOrderId: "ambiguous-order-b",
+        clientOrderId: prepared.clientOrderId,
+        instrument: "DOGEUSDT",
+        side: "buy",
+        requestedQuantity: "57",
+        ownershipContext: scope,
+      },
+    ],
+  });
+  assert.equal(conflict.ok, false);
+  if (!conflict.ok) assert.equal(conflict.error.code, "PERSISTENCE_CONFLICT");
+  assert.equal(unwrap(store.readHalt()).active, true);
+  assert.equal(
+    unwrap(store.readIdentityBindings(prepared.lineage.lineageId)).length,
+    0,
+  );
+  store.close();
+});
+
+test("historically authorized attempts remain recordable after approval expiry", () => {
+  const { store, scope, setNow } = createStore();
+  const prepared = prepareIntent(store, scope, "expired-history-client");
+  const renewedLease = unwrap(
+    store.renewLease({
+      scope,
+      ownerRunId: prepared.lease.ownerRunId,
+      now: time("2026-09-19T10:00:03Z"),
+      ttlMs: 60 * 60 * 1_000,
+      authority: prepared.lease,
+    }),
+  );
+  setNow("2026-09-19T10:06:00Z");
+  const attempt = unwrap(
+    createExecutionAttempt({
+      attemptId: "expired-history-attempt",
+      planHash: prepared.plan.materialHash,
+      intentId: prepared.intentId,
+      clientOrderId: prepared.clientOrderId,
+      submittedAt: time("2026-09-19T10:00:04Z"),
+      acknowledgement: "pending",
+      terminalStatus: "unverified",
+    }),
+  );
+  assert.equal(
+    unwrap(
+      store.appendAttempt({
+        authority: renewedLease,
+        lineageId: prepared.lineage.lineageId,
+        attempt,
+        dispatchedAt: time("2026-09-19T10:06:01Z"),
+      }),
+    ).attempt.attemptId,
+    attempt.attemptId,
+  );
+  const unauthorized = createExecutionAttempt({
+    attemptId: "expired-history-unauthorized",
+    planHash: prepared.plan.materialHash,
+    intentId: prepared.intentId,
+    clientOrderId: prepared.clientOrderId,
+    submittedAt: time("2026-09-19T10:06:00Z"),
+    acknowledgement: "pending",
+    terminalStatus: "unverified",
+  });
+  assert.equal(unauthorized.ok, true);
+  if (unauthorized.ok) {
+    const blocked = store.appendAttempt({
+      authority: renewedLease,
+      lineageId: prepared.lineage.lineageId,
+      attempt: unauthorized.value,
+      dispatchedAt: time("2026-09-19T10:06:02Z"),
+    });
+    assert.equal(blocked.ok, false);
+    if (!blocked.ok) assert.equal(blocked.error.code, "PLAN_EXPIRED");
+  }
+  store.close();
+});

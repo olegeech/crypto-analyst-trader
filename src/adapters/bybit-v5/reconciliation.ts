@@ -69,6 +69,9 @@ function orderObservation(
     status: record.status,
     observedAt,
     source,
+    ...(record.parentOrderLinkId === undefined
+      ? {}
+      : { parentOrderLinkId: record.parentOrderLinkId }),
     ...(record.averagePrice === undefined
       ? {}
       : { averagePrice: record.averagePrice }),

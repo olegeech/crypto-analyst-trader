@@ -6,11 +6,12 @@ import type { DecimalValue } from "../domain/shared/decimal.js";
 import type { UtcTimestamp } from "../domain/shared/time.js";
 import type { OrderIntent } from "../domain/planning/order-intent.js";
 import type { ExchangeOrderObservation } from "../domain/execution/exchange-order.js";
+import type { CapabilityObservation } from "../domain/capabilities/capability.js";
 
 export type { ExchangeOrderObservation } from "../domain/execution/exchange-order.js";
 
 export type ExchangeOperation =
-  "read" | "create" | "observe" | "fills" | "cancel";
+  "read" | "create" | "observe" | "fills" | "cancel" | "set-leverage";
 
 export type ExchangeFailureKind =
   | "configuration"
@@ -68,6 +69,35 @@ export interface AccountReadiness {
   readonly reason?: string;
 }
 
+export interface ExchangeLeverage {
+  readonly buy: DecimalValue;
+  readonly sell: DecimalValue;
+  readonly effective: DecimalValue;
+}
+
+export interface ExchangeApiKeyMetadata {
+  readonly readOnly: boolean;
+  readonly contractTrade: {
+    readonly order: boolean;
+    readonly position: boolean;
+  };
+  readonly wallet: {
+    readonly withdraw: boolean;
+    readonly transfer: boolean;
+  };
+  readonly ips: readonly string[];
+  readonly ipBinding: "bound" | "unbound";
+  readonly warningCodes: readonly "API_KEY_IP_UNBOUND"[];
+  readonly expiresAt?: UtcTimestamp;
+}
+
+export interface ExchangeAccountMetadata {
+  /** The authenticated identity returned by the exchange, not operator input. */
+  readonly accountId: string;
+  readonly userId: string;
+  readonly apiKey: ExchangeApiKeyMetadata;
+}
+
 /**
  * The complete bounded read used by preflight and reconciliation. The
  * snapshots carry the selected-symbol position and owned active orders; the
@@ -79,6 +109,9 @@ export interface ExchangeReadState {
   readonly account: AccountSnapshot;
   readonly openOrders: readonly ExchangeOrderObservation[];
   readonly accountReadiness: AccountReadiness;
+  readonly leverage: ExchangeLeverage;
+  readonly accountMetadata: ExchangeAccountMetadata;
+  readonly capabilities: readonly CapabilityObservation[];
 }
 
 export type ExchangeTimeInForce = "GTC" | "IOC" | "FOK" | "PostOnly";
@@ -112,6 +145,23 @@ export interface ExchangeOrderLookup {
   readonly instrument: string;
   readonly clientOrderId: string;
   readonly exchangeOrderId?: string;
+}
+
+export interface ExchangeAttachedProtectionLookup {
+  readonly instrument: string;
+  readonly parentClientOrderId: string;
+}
+
+export interface ExchangeSetLeverageRequest {
+  readonly instrument: string;
+  readonly target: DecimalValue;
+}
+
+export interface ExchangeSetLeverageResult {
+  readonly instrument: string;
+  readonly target: DecimalValue;
+  readonly effective: ExchangeLeverage;
+  readonly verifiedAt: UtcTimestamp;
 }
 
 export type ExchangeOrderObservationRequest = ExchangeOrderLookup;
@@ -148,9 +198,15 @@ export interface ExchangeExecutionPort {
   observeOrder(
     request: ExchangeOrderObservationRequest,
   ): Promise<ExchangeResult<ExchangeOrderObservation>>;
+  listAttachedProtection(
+    request: ExchangeAttachedProtectionLookup,
+  ): Promise<ExchangeResult<readonly ExchangeOrderObservation[]>>;
   listFills(
     request: ExchangeFillLookupRequest,
   ): Promise<ExchangeResult<readonly ExchangeFillObservation[]>>;
+  setLeverage(
+    request: ExchangeSetLeverageRequest,
+  ): Promise<ExchangeResult<ExchangeSetLeverageResult>>;
   cancelOrder(
     request: ExchangeCancelOrderRequest,
   ): Promise<ExchangeResult<ExchangeOrderAcknowledgement>>;

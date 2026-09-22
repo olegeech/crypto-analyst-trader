@@ -8,6 +8,7 @@ import { pathToFileURL } from "node:url";
 import test from "node:test";
 
 import { openSqlitePersistence } from "../src/adapters/sqlite/sqlite-persistence.js";
+import { CURRENT_SCHEMA_VERSION } from "../src/adapters/sqlite/migrations.js";
 import { encodeCanonicalArtifact } from "../src/domain/identity/canonical-artifact.js";
 import { createApproval } from "../src/domain/execution/approval.js";
 import { createExecutionAttempt } from "../src/domain/execution/execution-attempt.js";
@@ -188,7 +189,7 @@ test("public facade reopens the complete local lifecycle and read model", () => 
   unwrap(first.ingestFact(fact));
   const diagnostics = first.diagnostics();
   assert.equal(diagnostics.environment, "demo");
-  assert.equal(diagnostics.schemaVersion, 4);
+  assert.equal(diagnostics.schemaVersion, CURRENT_SCHEMA_VERSION);
   assert.equal("db" in diagnostics, false);
   first.close();
 
@@ -198,6 +199,8 @@ test("public facade reopens the complete local lifecycle and read model", () => 
   assert.equal(run.lineage.lineageId, lineage.lineageId);
   assert.equal(run.plan.materialHash, plan.materialHash);
   assert.equal(run.approval.planHash, plan.materialHash);
+  assert.equal(unwrap(reopened.readRuns()).length, 1);
+  assert.deepEqual(run.identityBindings, []);
   assert.equal(run.ownedIntents[0]?.clientOrderId, "recovery-client");
   assert.equal(run.attempts[0]?.attempt.attemptId, "recovery-attempt");
   assert.equal(run.reconciliations[0]?.result.status, "FAILED");

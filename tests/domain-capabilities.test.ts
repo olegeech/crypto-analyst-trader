@@ -3,8 +3,10 @@ import test from "node:test";
 
 import {
   capabilityStatus,
+  createAdapterCapabilityObservation,
   createCapabilityObservation,
   requireCapability,
+  requireTrustedCapability,
 } from "../src/domain/capabilities/capability.js";
 import { createEvidenceRef } from "../src/domain/evidence/evidence-ref.js";
 
@@ -137,4 +139,29 @@ test("non-probe evidence cannot be promoted to capability evidence", () => {
   assert.equal(observation.ok, false);
   if (!observation.ok)
     assert.equal(observation.error.code, "INVALID_CAPABILITY");
+});
+
+test("only adapter-produced capability evidence satisfies the trusted gate", () => {
+  assert.equal(evidence.ok, true);
+  if (!evidence.ok) return;
+
+  const adapterObservation = createAdapterCapabilityObservation({
+    capability: "attached-protection",
+    status: "supported",
+    observedAt: "2026-09-19T10:00:00Z",
+    source: "bybit-demo-adapter",
+    evidence: evidence.value,
+    scope: demoScope,
+  });
+  assert.equal(adapterObservation.ok, true);
+  if (!adapterObservation.ok) return;
+  assert.equal(
+    requireTrustedCapability(adapterObservation.value, demoRequirement).ok,
+    true,
+  );
+
+  const copied = { ...adapterObservation.value };
+  const copiedGate = requireTrustedCapability(copied, demoRequirement);
+  assert.equal(copiedGate.ok, false);
+  if (!copiedGate.ok) assert.equal(copiedGate.error.code, "CAPABILITY_UNKNOWN");
 });

@@ -49,8 +49,10 @@ export {
 } from "./evidence/evidence-ref.js";
 export {
   capabilityStatus,
+  createAdapterCapabilityObservation,
   createCapabilityObservation,
   requireCapability,
+  requireTrustedCapability,
   type CapabilityObservation,
   type CapabilityRequirement,
   type CapabilityScope,
@@ -126,6 +128,18 @@ export {
   type AttemptTerminalStatus,
   type ExecutionAttempt,
 } from "./execution/execution-attempt.js";
+export {
+  createIdentityBinding,
+  createIdentityBindingCandidate,
+  identityBindingCandidateFromBinding,
+  identityBindingCandidateKey,
+  identityBindingCandidatesEqual,
+  isProducedIdentityBinding,
+  type IdentityBinding,
+  type IdentityBindingCandidate,
+  type IdentityBindingCandidateInput,
+  type IdentityBindingOwnershipContext,
+} from "./execution/identity-binding.js";
 export {
   createExchangeOrder,
   type ExchangeOrderObservation,

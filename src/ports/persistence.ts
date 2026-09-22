@@ -5,6 +5,10 @@ import type {
 import type { Approval } from "../domain/execution/approval.js";
 import type { ClearanceEvidence } from "../domain/execution/clearance-evidence.js";
 import type { ExecutionAttempt } from "../domain/execution/execution-attempt.js";
+import type {
+  IdentityBinding,
+  IdentityBindingCandidateInput,
+} from "../domain/execution/identity-binding.js";
 import type { ReconciliationResult } from "../domain/execution/reconciliation.js";
 import type { ExecutionPlan } from "../domain/planning/execution-plan.js";
 import type { PlanHash } from "../domain/identity/canonical-serialization.js";
@@ -166,6 +170,32 @@ export interface HaltClearRequest {
   readonly expectedHaltRevision: number;
 }
 
+export type IdentityBindingRecord = IdentityBinding;
+
+export interface AppendIdentityBindingRequest {
+  readonly authority: LeaseAuthority;
+  readonly lineageId: string;
+  readonly attemptId: string;
+  readonly planHash?: PlanHash;
+  readonly intentId?: string;
+  readonly clientOrderId?: string;
+  readonly candidates?: readonly IdentityBindingCandidateInput[];
+  readonly candidate?: IdentityBindingCandidateInput;
+  readonly boundAt: UtcTimestamp;
+}
+
+export type IdentityBindingOutcome =
+  | {
+      readonly status: "BOUND";
+      readonly binding: IdentityBindingRecord;
+      readonly idempotent: boolean;
+    }
+  | {
+      readonly status: "UNRESOLVED";
+      readonly binding?: never;
+      readonly idempotent: false;
+    };
+
 export interface PersistenceDiagnostics {
   readonly databasePath: string;
   readonly environment: PersistenceEnvironment;
@@ -181,6 +211,7 @@ export interface PersistenceRunSnapshot {
   readonly approval: Approval;
   readonly ownedIntents: readonly OwnedIntentRecord[];
   readonly attempts: readonly AttemptRecord[];
+  readonly identityBindings: readonly IdentityBindingRecord[];
   readonly reconciliations: readonly ReconciliationRecord[];
   readonly lease?: LeaseState;
   readonly halt: HaltState;
@@ -383,11 +414,22 @@ export interface PersistencePort {
   readArtifact(artifactId: string): Result<PersistedArtifact | undefined>;
   writeArtifact(artifact: PersistedArtifact): Result<void>;
   readRun(lineageId: string): Result<PersistenceRunSnapshot | undefined>;
+  readRuns(): Result<readonly PersistenceRunSnapshot[]>;
   readScopeSnapshot(): Result<PersistenceScopeSnapshot>;
   readApproval(lineageId: string): Result<Approval | undefined>;
   prepareLineage(request: PrepareLineageRequest): Result<LineageRecord>;
   prepareOwnedIntent(request: PrepareIntentRequest): Result<OwnedIntentRecord>;
   appendAttempt(request: AppendAttemptRequest): Result<AttemptRecord>;
+  appendIdentityBinding(
+    request: AppendIdentityBindingRequest,
+  ): Result<IdentityBindingOutcome>;
+  readIdentityBinding(
+    lineageId: string,
+    attemptId: string,
+  ): Result<IdentityBindingRecord | undefined>;
+  readIdentityBindings(
+    lineageId: string,
+  ): Result<readonly IdentityBindingRecord[]>;
   appendReconciliation(
     request: AppendReconciliationRequest,
   ): Result<ReconciliationRecord>;

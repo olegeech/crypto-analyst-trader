@@ -14,6 +14,15 @@ import {
 import { createClearanceEvidence } from "../../domain/execution/clearance-evidence.js";
 import type { ExecutionAttempt } from "../../domain/execution/execution-attempt.js";
 import { isProducedExecutionAttempt } from "../../domain/execution/execution-attempt-proof.js";
+import {
+  createIdentityBinding,
+  createIdentityBindingCandidate,
+  identityBindingCandidateFromBinding,
+  identityBindingCandidateKey,
+  identityBindingCandidatesEqual,
+  isProducedIdentityBinding,
+  type IdentityBindingCandidate,
+} from "../../domain/execution/identity-binding.js";
 import type { ReconciliationResult } from "../../domain/execution/reconciliation.js";
 import { isProducedReconciliationResult } from "../../domain/execution/reconciliation-proof.js";
 import { isProducedExecutionPlan } from "../../domain/planning/plan-proof.js";
@@ -67,9 +76,12 @@ import {
 import type {
   AppendAttemptRequest,
   AppendReconciliationRequest,
+  AppendIdentityBindingRequest,
   AttemptRecord,
   HaltClearRequest,
   HaltState,
+  IdentityBindingOutcome,
+  IdentityBindingRecord,
   LeaseAuthority,
   LeaseRequest,
   LeaseState,
@@ -77,6 +89,7 @@ import type {
   OwnedIntentRecord,
   PersistedArtifact,
   PersistenceScope,
+  PersistenceRunSnapshot,
   PrepareIntentRequest,
   PrepareLineageRequest,
   ReconciliationRecord,
@@ -372,6 +385,119 @@ function reconciliationFromRow(row: SqliteRow): Result<ReconciliationRecord> {
     result: hydratedResult,
     recordedAt: recordedAt.value,
   });
+}
+
+function identityBindingFromRow(row: SqliteRow): Result<IdentityBindingRecord> {
+  const bindingId = storedIdentifier(row, "binding_id");
+  const lineageId = storedIdentifier(row, "lineage_id");
+  const attemptId = storedIdentifier(row, "attempt_id");
+  const intentId = storedIdentifier(row, "intent_id");
+  const planHash = storedHash(row, "plan_hash");
+  const clientOrderId = storedIdentifier(row, "client_order_id");
+  const instrument = storedIdentifier(row, "instrument");
+  const exchangeOrderId = storedIdentifier(row, "exchange_order_id");
+  const exchange = storedIdentifier(row, "exchange");
+  const environment = storedString(row, "environment");
+  const accountId = storedString(row, "account_id");
+  const category = storedIdentifier(row, "category");
+  const boundAt = storedTimestamp(row, "bound_at");
+  const requestedQuantity = storedString(row, "requested_quantity");
+  if (
+    !bindingId.ok ||
+    !lineageId.ok ||
+    !attemptId.ok ||
+    !intentId.ok ||
+    !planHash.ok ||
+    !clientOrderId.ok ||
+    !instrument.ok ||
+    !exchangeOrderId.ok ||
+    !exchange.ok ||
+    !environment.ok ||
+    !accountId.ok ||
+    !category.ok ||
+    !boundAt.ok ||
+    !requestedQuantity.ok
+  ) {
+    return persistenceFailure("persisted identity binding is invalid");
+  }
+  const binding = createIdentityBinding({
+    bindingId: bindingId.value,
+    lineageId: lineageId.value,
+    attemptId: attemptId.value,
+    intentId: intentId.value,
+    planHash: planHash.value,
+    boundAt: boundAt.value,
+    exchangeOrderId: exchangeOrderId.value,
+    clientOrderId: clientOrderId.value,
+    instrument: instrument.value,
+    side: row.side,
+    requestedQuantity: requestedQuantity.value,
+    ownershipContext: {
+      exchange: exchange.value,
+      environment: environment.value,
+      accountId: accountId.value,
+      category: category.value,
+      positionMode: row.position_mode,
+    },
+  });
+  if (!binding.ok || !isProducedIdentityBinding(binding.value)) {
+    return persistenceFailure("persisted identity binding failed rehydration");
+  }
+  return binding;
+}
+
+function identityBindingRow(
+  database: DatabaseSync,
+  scope: PersistenceScope,
+  lineageId: string,
+  attemptId: string,
+): SqliteRow | undefined {
+  return database
+    .prepare(
+      `SELECT binding_id, lineage_id, attempt_id, intent_id, plan_hash,
+              client_order_id, instrument, side, requested_quantity,
+              exchange_order_id, exchange, environment, account_id, category,
+              position_mode, bound_at
+       FROM execution_identity_bindings
+       WHERE ${SCOPE_WHERE} AND lineage_id = ? AND attempt_id = ?`,
+    )
+    .get(...scopeValues(scope), lineageId, attemptId) as SqliteRow | undefined;
+}
+
+function identityBindingRows(
+  database: DatabaseSync,
+  scope: PersistenceScope,
+  lineageId: string,
+): SqliteRow[] {
+  return database
+    .prepare(
+      `SELECT binding_id, lineage_id, attempt_id, intent_id, plan_hash,
+              client_order_id, instrument, side, requested_quantity,
+              exchange_order_id, exchange, environment, account_id, category,
+              position_mode, bound_at
+       FROM execution_identity_bindings
+       WHERE ${SCOPE_WHERE} AND lineage_id = ?
+       ORDER BY bound_at, binding_id`,
+    )
+    .all(...scopeValues(scope), lineageId) as SqliteRow[];
+}
+
+function ownedIntentRows(
+  database: DatabaseSync,
+  scope: PersistenceScope,
+  lineageId: string,
+): SqliteRow[] {
+  return database
+    .prepare(
+      `SELECT oi.intent_record_id, oi.lineage_id, oi.intent_id, oi.plan_hash,
+              oi.client_order_id, oi.prepared_at
+       FROM owned_intents oi
+       INNER JOIN execution_lineages l ON l.lineage_id = oi.lineage_id
+       WHERE l.exchange = ? AND l.environment = ? AND l.account_id = ?
+         AND l.category = ? AND l.position_mode = ? AND oi.lineage_id = ?
+       ORDER BY oi.prepared_at, oi.intent_id`,
+    )
+    .all(...scopeValues(scope), lineageId) as SqliteRow[];
 }
 
 function validateLeaseRequest(
@@ -760,6 +886,188 @@ export class SqliteExecutionStore {
         reconciliations.push(reconciliation.value);
       }
       return ok(reconciliations);
+    } catch (error) {
+      return fail(sqliteError(error, "PERSISTENCE_INTEGRITY"));
+    }
+  }
+
+  public readIdentityBinding(
+    lineageId: string,
+    attemptId: string,
+  ): Result<IdentityBindingRecord | undefined> {
+    const parsedLineageId = requireIdentifier(lineageId, "lineageId");
+    const parsedAttemptId = requireIdentifier(attemptId, "attemptId");
+    if (!parsedLineageId.ok || !parsedAttemptId.ok) {
+      return fail(
+        domainError(
+          "PERSISTENCE_INTEGRITY",
+          "identity binding identity is invalid",
+        ),
+      );
+    }
+    try {
+      const row = identityBindingRow(
+        this.database,
+        this.scope,
+        parsedLineageId.value,
+        parsedAttemptId.value,
+      );
+      return row === undefined ? ok(undefined) : identityBindingFromRow(row);
+    } catch (error) {
+      return fail(sqliteError(error, "PERSISTENCE_INTEGRITY"));
+    }
+  }
+
+  public readIdentityBindings(
+    lineageId: string,
+  ): Result<readonly IdentityBindingRecord[]> {
+    const parsedLineageId = requireIdentifier(lineageId, "lineageId");
+    if (!parsedLineageId.ok) return parsedLineageId;
+    try {
+      const bindings: IdentityBindingRecord[] = [];
+      for (const row of identityBindingRows(
+        this.database,
+        this.scope,
+        parsedLineageId.value,
+      )) {
+        const binding = identityBindingFromRow(row);
+        if (!binding.ok) return binding;
+        bindings.push(binding.value);
+      }
+      return ok(bindings);
+    } catch (error) {
+      return fail(sqliteError(error, "PERSISTENCE_INTEGRITY"));
+    }
+  }
+
+  public readRun(
+    lineageId: string,
+  ): Result<PersistenceRunSnapshot | undefined> {
+    const parsedLineageId = requireIdentifier(lineageId, "lineageId");
+    if (!parsedLineageId.ok) return parsedLineageId;
+    try {
+      const lineage = this.readLineage(parsedLineageId.value);
+      if (!lineage.ok) return lineage;
+      if (lineage.value === undefined) return ok(undefined);
+
+      const plan = readPlanFromDatabase(
+        this.database,
+        this.scope,
+        parsedLineageId.value,
+      );
+      if (!plan.ok) return plan;
+      if (plan.value === undefined) {
+        return fail(
+          domainError(
+            "PERSISTENCE_INTEGRITY",
+            "committed lineage has no rehydratable execution plan",
+          ),
+        );
+      }
+      const approval = readApprovalFromDatabase(
+        this.database,
+        this.scope,
+        parsedLineageId.value,
+      );
+      if (!approval.ok) return approval;
+      if (approval.value === undefined) {
+        return fail(
+          domainError(
+            "PERSISTENCE_INTEGRITY",
+            "committed lineage has no rehydratable approval",
+          ),
+        );
+      }
+
+      const ownedIntents: OwnedIntentRecord[] = [];
+      for (const row of ownedIntentRows(
+        this.database,
+        this.scope,
+        parsedLineageId.value,
+      )) {
+        const owned = ownedIntentFromRow(row);
+        if (!owned.ok) return owned;
+        if (
+          owned.value.planHash !== plan.value.materialHash ||
+          !plan.value.material.orderIntents.some(
+            (intent) => intent.intentId === owned.value.intentId,
+          )
+        ) {
+          return persistenceFailure(
+            "persisted owned intent is not bound to the committed plan",
+          );
+        }
+        ownedIntents.push(owned.value);
+      }
+
+      const attempts = this.readAttempts(parsedLineageId.value);
+      if (!attempts.ok) return attempts;
+      const identityBindings = this.readIdentityBindings(parsedLineageId.value);
+      if (!identityBindings.ok) return identityBindings;
+      for (const binding of identityBindings.value) {
+        if (
+          binding.planHash !== plan.value.materialHash ||
+          binding.lineageId !== parsedLineageId.value ||
+          !ownedIntents.some(
+            (intent) =>
+              intent.intentId === binding.intentId &&
+              intent.clientOrderId === binding.clientOrderId,
+          ) ||
+          !attempts.value.some(
+            (attempt) =>
+              attempt.attempt.attemptId === binding.attemptId &&
+              attempt.attempt.intentId === binding.intentId &&
+              attempt.attempt.clientOrderId === binding.clientOrderId,
+          )
+        ) {
+          return persistenceFailure(
+            "persisted identity binding is not owned by the committed run",
+          );
+        }
+      }
+      const reconciliations = this.readReconciliations(parsedLineageId.value);
+      if (!reconciliations.ok) return reconciliations;
+      const lease = this.readLease();
+      if (!lease.ok) return lease;
+      const halt = this.readHalt();
+      if (!halt.ok) return halt;
+      return ok({
+        lineage: lineage.value,
+        plan: plan.value,
+        approval: approval.value,
+        ownedIntents,
+        attempts: attempts.value,
+        identityBindings: identityBindings.value,
+        reconciliations: reconciliations.value,
+        ...(lease.value === undefined ? {} : { lease: lease.value }),
+        halt: halt.value,
+      });
+    } catch (error) {
+      return fail(sqliteError(error, "PERSISTENCE_INTEGRITY"));
+    }
+  }
+
+  public readRuns(): Result<readonly PersistenceRunSnapshot[]> {
+    try {
+      const rows = this.database
+        .prepare(
+          `SELECT lineage_id
+           FROM execution_lineages
+           WHERE ${SCOPE_WHERE}
+           ORDER BY created_at, lineage_id`,
+        )
+        .all(...scopeValues(this.scope)) as SqliteRow[];
+      const runs: PersistenceRunSnapshot[] = [];
+      for (const row of rows) {
+        const lineageId = storedIdentifier(row, "lineage_id");
+        if (!lineageId.ok) {
+          return persistenceFailure("persisted lineage identity is invalid");
+        }
+        const run = this.readRun(lineageId.value);
+        if (!run.ok) return run;
+        if (run.value !== undefined) runs.push(run.value);
+      }
+      return ok(runs);
     } catch (error) {
       return fail(sqliteError(error, "PERSISTENCE_INTEGRITY"));
     }
@@ -1160,25 +1468,6 @@ export class SqliteExecutionStore {
           );
         }
 
-        const halt = haltRow(database, this.scope);
-        if (!halt.ok) return halt;
-        if (halt.value.active) {
-          return fail(
-            domainError(
-              "HALT_ACTIVE",
-              "account HALT blocks a new execution attempt",
-            ),
-          );
-        }
-        if (authority.value.reconciliationRequired) {
-          return fail(
-            domainError(
-              "UNRESOLVED_STATE",
-              "lease takeover requires reconciliation before a new execution attempt",
-            ),
-          );
-        }
-
         const intent = database
           .prepare(
             `SELECT intent_record_id FROM owned_intents
@@ -1217,14 +1506,19 @@ export class SqliteExecutionStore {
             "committed lineage has no rehydratable approval",
           );
         }
-        const currentTime = trustedNow(database);
-        if (!currentTime.ok) return currentTime;
-        const validatedApproval = validateApproval(
-          approval.value,
-          plan.value.materialHash,
-          { now: () => currentTime.value },
-        );
-        if (!validatedApproval.ok) return validatedApproval;
+        if (
+          Date.parse(request.attempt.submittedAt) <
+            Date.parse(approval.value.approvedAt) ||
+          Date.parse(request.attempt.submittedAt) >=
+            Date.parse(approval.value.expiresAt)
+        ) {
+          return fail(
+            domainError(
+              "PLAN_EXPIRED",
+              "execution attempt is not attached to a historically authorized dispatch",
+            ),
+          );
+        }
 
         const storedArtifact = insertArtifact(
           database,
@@ -1273,6 +1567,338 @@ export class SqliteExecutionStore {
           lineageId: request.lineageId,
           attempt: request.attempt,
           dispatchedAt: dispatchedAt.value,
+        });
+      },
+      "PERSISTENCE_CONFLICT",
+    );
+  }
+
+  public appendIdentityBinding(
+    request: AppendIdentityBindingRequest,
+  ): Result<IdentityBindingOutcome> {
+    const lineageId = requireIdentifier(request.lineageId, "lineageId");
+    const attemptId = requireIdentifier(request.attemptId, "attemptId");
+    const boundAt = validateTimestamp(request.boundAt, "boundAt");
+    if (!lineageId.ok || !attemptId.ok || !boundAt.ok) {
+      return fail(
+        domainError(
+          "PERSISTENCE_INTEGRITY",
+          "identity binding request identity is invalid",
+        ),
+      );
+    }
+    const candidateInputs =
+      request.candidates ??
+      (request.candidate === undefined ? [] : [request.candidate]);
+    const candidates: IdentityBindingCandidate[] = [];
+    for (const candidateInput of candidateInputs) {
+      const candidate = createIdentityBindingCandidate(candidateInput);
+      if (!candidate.ok) {
+        return fail(
+          domainError(
+            "OWNERSHIP_MISMATCH",
+            "identity binding candidate is invalid",
+          ),
+        );
+      }
+      candidates.push(candidate.value);
+    }
+    return runInTransaction(
+      this.database,
+      (database) => {
+        const authority = assertCurrentAuthorityWithinTransaction(
+          database,
+          this.scope,
+          request.authority,
+          boundAt.value,
+        );
+        if (!authority.ok) return authority;
+        const lineage = authorityLineageRow(
+          database,
+          this.scope,
+          lineageId.value,
+          request.authority,
+        );
+        if (!lineage.ok) return lineage;
+        const attempt = database
+          .prepare(
+            `SELECT ea.attempt_id, ea.lineage_id, ea.plan_hash, ea.intent_id,
+                    ea.client_order_id, ea.exchange_order_id, ea.submitted_at
+             FROM execution_attempts ea
+             INNER JOIN execution_lineages l ON l.lineage_id = ea.lineage_id
+             WHERE ${SCOPE_WHERE} AND ea.lineage_id = ? AND ea.attempt_id = ?`,
+          )
+          .get(...scopeValues(this.scope), lineageId.value, attemptId.value) as
+          SqliteRow | undefined;
+        if (attempt === undefined) {
+          return conflictFailure(
+            "identity binding has no committed execution attempt",
+          );
+        }
+        const attemptLineage = storedIdentifier(attempt, "lineage_id");
+        const persistedAttemptId = storedIdentifier(attempt, "attempt_id");
+        const attemptPlanHash = storedHash(attempt, "plan_hash");
+        const attemptIntentId = storedIdentifier(attempt, "intent_id");
+        const attemptClientOrderId = storedIdentifier(
+          attempt,
+          "client_order_id",
+        );
+        const persistedExchangeOrderId = storedOptionalString(
+          attempt,
+          "exchange_order_id",
+        );
+        const submittedAt = storedTimestamp(attempt, "submitted_at");
+        if (
+          !attemptLineage.ok ||
+          !persistedAttemptId.ok ||
+          !attemptPlanHash.ok ||
+          !attemptIntentId.ok ||
+          !attemptClientOrderId.ok ||
+          !persistedExchangeOrderId.ok ||
+          !submittedAt.ok
+        ) {
+          return persistenceFailure("persisted attempt identity is invalid");
+        }
+        if (
+          attemptLineage.value !== lineageId.value ||
+          persistedAttemptId.value !== attemptId.value ||
+          (request.planHash !== undefined &&
+            request.planHash !== attemptPlanHash.value) ||
+          (request.intentId !== undefined &&
+            request.intentId !== attemptIntentId.value) ||
+          (request.clientOrderId !== undefined &&
+            request.clientOrderId !== attemptClientOrderId.value)
+        ) {
+          return conflictFailure("identity binding attempt scope is invalid");
+        }
+        const plan = readPlanFromDatabase(
+          database,
+          this.scope,
+          lineageId.value,
+        );
+        if (!plan.ok) return plan;
+        if (plan.value === undefined) {
+          return persistenceFailure(
+            "identity binding lineage has no rehydratable plan",
+          );
+        }
+        const intent = plan.value.material.orderIntents.find(
+          (candidate) => candidate.intentId === attemptIntentId.value,
+        );
+        if (intent === undefined) {
+          return conflictFailure(
+            "identity binding attempt intent is not in the committed plan",
+          );
+        }
+        if (attemptPlanHash.value !== plan.value.materialHash) {
+          return conflictFailure(
+            "identity binding attempt is not bound to the committed plan",
+          );
+        }
+        const approval = readApprovalFromDatabase(
+          database,
+          this.scope,
+          lineageId.value,
+        );
+        if (!approval.ok) return approval;
+        if (approval.value === undefined) {
+          return persistenceFailure(
+            "identity binding lineage has no rehydratable approval",
+          );
+        }
+        if (
+          Date.parse(submittedAt.value) <
+            Date.parse(approval.value.approvedAt) ||
+          Date.parse(submittedAt.value) >= Date.parse(approval.value.expiresAt)
+        ) {
+          return fail(
+            domainError(
+              "PLAN_EXPIRED",
+              "identity binding is not attached to a historically authorized dispatch",
+            ),
+          );
+        }
+
+        const existingRow = identityBindingRow(
+          database,
+          this.scope,
+          lineageId.value,
+          attemptId.value,
+        );
+        if (existingRow !== undefined) {
+          const existing = identityBindingFromRow(existingRow);
+          if (!existing.ok) return existing;
+          const existingCandidate = identityBindingCandidateFromBinding(
+            existing.value,
+          );
+          const distinctCandidates = new Map<
+            string,
+            IdentityBindingCandidate
+          >();
+          for (const candidate of candidates) {
+            distinctCandidates.set(
+              identityBindingCandidateKey(candidate),
+              candidate,
+            );
+          }
+          if (
+            distinctCandidates.size === 0 ||
+            (distinctCandidates.size === 1 &&
+              identityBindingCandidatesEqual(
+                [...distinctCandidates.values()][0]!,
+                existingCandidate,
+              ))
+          ) {
+            return ok<IdentityBindingOutcome>({
+              status: "BOUND",
+              binding: existing.value,
+              idempotent: true,
+            });
+          }
+          return appendConflictAfterHalt(
+            database,
+            this.scope,
+            "conflicting late exchange identity",
+            boundAt.value,
+            "attempt identity is already bound to different exchange evidence",
+          );
+        }
+
+        const distinctCandidates = new Map<string, IdentityBindingCandidate>();
+        for (const candidate of candidates) {
+          distinctCandidates.set(
+            identityBindingCandidateKey(candidate),
+            candidate,
+          );
+        }
+        if (distinctCandidates.size === 0) {
+          return ok<IdentityBindingOutcome>({
+            status: "UNRESOLVED",
+            idempotent: false,
+          });
+        }
+
+        if (distinctCandidates.size > 1) {
+          return appendConflictAfterHalt(
+            database,
+            this.scope,
+            "ambiguous late exchange identity",
+            boundAt.value,
+            "more than one internally consistent exchange identity candidate exists",
+          );
+        }
+        const [candidate] = [...distinctCandidates.values()];
+        if (candidate === undefined) {
+          return persistenceFailure("identity binding candidate is missing");
+        }
+        const context = candidate.ownershipContext;
+        const ownershipMatches =
+          context.exchange === this.scope.exchange &&
+          context.environment === this.scope.environment &&
+          context.accountId === this.scope.accountId &&
+          context.category === this.scope.category &&
+          context.positionMode === this.scope.positionMode &&
+          (context.lineageId === undefined ||
+            context.lineageId === lineageId.value) &&
+          (context.intentId === undefined ||
+            context.intentId === attemptIntentId.value) &&
+          (context.attemptId === undefined ||
+            context.attemptId === attemptId.value);
+        if (
+          !ownershipMatches ||
+          candidate.clientOrderId !== attemptClientOrderId.value ||
+          candidate.clientOrderId !==
+            (
+              database
+                .prepare(
+                  `SELECT client_order_id FROM owned_intents
+                 WHERE ${SCOPE_WHERE} AND lineage_id = ? AND intent_id = ?`,
+                )
+                .get(
+                  ...scopeValues(this.scope),
+                  lineageId.value,
+                  attemptIntentId.value,
+                ) as SqliteRow | undefined
+            )?.client_order_id ||
+          candidate.instrument !== intent.instrument ||
+          candidate.side !== intent.side ||
+          candidate.requestedQuantity.compare(intent.quantity) !== 0 ||
+          (persistedExchangeOrderId.value !== undefined &&
+            persistedExchangeOrderId.value !== candidate.exchangeOrderId)
+        ) {
+          return fail(
+            domainError(
+              "OWNERSHIP_MISMATCH",
+              "late exchange identity candidate does not match the committed owner",
+            ),
+          );
+        }
+
+        const existingOrder = database
+          .prepare(
+            `SELECT binding_id, lineage_id, attempt_id, intent_id, plan_hash,
+                    client_order_id, instrument, side, requested_quantity,
+                    exchange_order_id, exchange, environment, account_id, category,
+                    position_mode, bound_at
+             FROM execution_identity_bindings
+             WHERE ${SCOPE_WHERE} AND exchange_order_id = ?`,
+          )
+          .get(...scopeValues(this.scope), candidate.exchangeOrderId) as
+          SqliteRow | undefined;
+        if (existingOrder !== undefined) {
+          return appendConflictAfterHalt(
+            database,
+            this.scope,
+            "exchange identity is already owned",
+            boundAt.value,
+            "exchange order identity is already bound to another attempt",
+          );
+        }
+        const bindingId = deterministicId(
+          "identity-binding",
+          `${lineageId.value}:${attemptId.value}:${candidate.exchangeOrderId}`,
+        );
+        const binding = createIdentityBinding({
+          bindingId,
+          lineageId: lineageId.value,
+          attemptId: attemptId.value,
+          intentId: attemptIntentId.value,
+          planHash: attemptPlanHash.value,
+          boundAt: boundAt.value,
+          ...candidate,
+        });
+        if (!binding.ok || !isProducedIdentityBinding(binding.value)) {
+          return persistenceFailure(
+            "identity binding failed domain validation",
+          );
+        }
+        database
+          .prepare(
+            `INSERT INTO execution_identity_bindings
+             (binding_id, lineage_id, attempt_id, intent_id, plan_hash,
+              client_order_id, instrument, side, requested_quantity,
+              exchange_order_id, exchange, environment, account_id, category,
+              position_mode, bound_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          )
+          .run(
+            binding.value.bindingId,
+            binding.value.lineageId,
+            binding.value.attemptId,
+            binding.value.intentId,
+            binding.value.planHash,
+            binding.value.clientOrderId,
+            binding.value.instrument,
+            binding.value.side,
+            binding.value.requestedQuantity.toString(),
+            binding.value.exchangeOrderId,
+            ...scopeValues(this.scope),
+            binding.value.boundAt,
+          );
+        return ok<IdentityBindingOutcome>({
+          status: "BOUND",
+          binding: binding.value,
+          idempotent: false,
         });
       },
       "PERSISTENCE_CONFLICT",
@@ -1367,10 +1993,36 @@ export class SqliteExecutionStore {
             "reconciliation does not match the committed attempt owner",
           );
         }
+        const bindingRow = identityBindingRow(
+          database,
+          this.scope,
+          request.lineageId,
+          request.result.attemptId,
+        );
+        let boundExchangeOrderId: string | undefined;
+        if (bindingRow !== undefined) {
+          const binding = identityBindingFromRow(bindingRow);
+          if (!binding.ok) return binding;
+          if (
+            binding.value.planHash !== request.result.planHash ||
+            binding.value.intentId !== request.result.intentId ||
+            binding.value.clientOrderId !== request.result.clientOrderId
+          ) {
+            return appendConflictAfterHalt(
+              database,
+              this.scope,
+              "conflicting reconciliation binding",
+              recordedAt.value,
+              "reconciliation does not match the committed late identity binding",
+            );
+          }
+          boundExchangeOrderId = binding.value.exchangeOrderId;
+        }
+        const effectiveExchangeOrderId =
+          parsedPersistedExchangeOrderId.value ?? boundExchangeOrderId;
         if (
           request.result.exchangeOrderId !== undefined &&
-          request.result.exchangeOrderId !==
-            parsedPersistedExchangeOrderId.value
+          request.result.exchangeOrderId !== effectiveExchangeOrderId
         ) {
           return appendConflictAfterHalt(
             database,
@@ -1383,7 +2035,7 @@ export class SqliteExecutionStore {
         if (
           request.result.status === "RECONCILED" &&
           (request.result.exchangeOrderId === undefined ||
-            parsedPersistedExchangeOrderId.value === undefined)
+            effectiveExchangeOrderId === undefined)
         ) {
           return appendConflictAfterHalt(
             database,

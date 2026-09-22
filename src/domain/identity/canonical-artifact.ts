@@ -379,6 +379,7 @@ const exchangeOrderSchema = object(
     "status",
     "observedAt",
     "source",
+    "parentOrderLinkId",
     "averagePrice",
   ],
   {},
@@ -821,6 +822,10 @@ export function rehydrateArtifact(
   artifactKind: "approval",
   envelope: unknown,
 ): Result<Approval>;
+export function rehydrateArtifact(
+  artifactKind: "exchange-order",
+  envelope: unknown,
+): Result<ExchangeOrderObservation>;
 export function rehydrateArtifact(
   artifactKind: ArtifactKind,
   envelope: unknown,
