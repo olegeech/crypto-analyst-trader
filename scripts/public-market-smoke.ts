@@ -93,11 +93,7 @@ export async function runPublicMarketSmoke({
       `public market smoke could not establish a coherent bundle (${result.error.code}: ${result.error.message})`,
     );
   }
-  const summary = summaryFor(result.value);
-  if (summary.status !== "complete") {
-    throw new Error("public market smoke returned an incomplete bundle");
-  }
-  return summary;
+  return summaryFor(result.value);
 }
 
 const invokedPath = process.argv[1];
@@ -119,6 +115,7 @@ if (invokedPath && import.meta.url === pathToFileURL(invokedPath).href) {
         2,
       ),
     );
+    if (summary.status !== "complete") process.exitCode = 1;
   } catch (error) {
     console.error(
       `Public market smoke failed: ${error instanceof Error ? error.message : "unknown error"}`,

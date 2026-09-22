@@ -116,6 +116,8 @@ function diagnosticCode(
       return "transport-failed";
     case "invalid-response":
       return "invalid-response";
+    case "missing-data":
+      return "missing-required-data";
     case "wrong-identity":
       return "wrong-identity";
     case "repeated-cursor":
@@ -181,6 +183,21 @@ function hasDiagnosticForSeries(facts: SymbolFacts, series: string): boolean {
   return facts.diagnostics.some((diagnostic) => diagnostic.series === series);
 }
 
+function hasUsableEvidence(facts: readonly SymbolFacts[]): boolean {
+  return facts.some(
+    (factsForSymbol) =>
+      factsForSymbol.instrument !== undefined ||
+      factsForSymbol.ticker !== undefined ||
+      (factsForSymbol.funding?.length ?? 0) > 0 ||
+      Object.values(factsForSymbol.ohlcv).some(
+        (observations) => (observations?.length ?? 0) > 0,
+      ) ||
+      Object.values(factsForSymbol.openInterest).some(
+        (observations) => (observations?.length ?? 0) > 0,
+      ),
+  );
+}
+
 function evidenceForBundle(
   runId: string,
   cutoff: UtcTimestamp,
@@ -215,6 +232,14 @@ function buildBundle(
   cutoff: UtcTimestamp,
   facts: readonly SymbolFacts[],
 ): Result<MarketEvidenceBundle> {
+  if (!hasUsableEvidence(facts)) {
+    return fail(
+      domainError(
+        "UNRESOLVED_STATE",
+        "Bybit public market collection produced no usable evidence.",
+      ),
+    );
+  }
   let complete = true;
   const symbols: Array<{
     symbol: MarketEvidenceSymbol;

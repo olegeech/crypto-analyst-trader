@@ -36,6 +36,7 @@ function readerFor(
   exchangeTimes: readonly UtcTimestamp[],
   options: {
     readonly fundingInterval?: number;
+    readonly failMarketReads?: boolean;
     readonly tickerObservedAt?: UtcTimestamp;
   } = {},
 ): MarketEvidenceCollectionReader & {
@@ -59,6 +60,7 @@ function readerFor(
     },
     async readInstrument(symbol) {
       calls.push(`instrument:${symbol}`);
+      if (options.failMarketReads) throw new Error("fixture market failure");
       return {
         symbol,
         status: "trading",
@@ -78,6 +80,7 @@ function readerFor(
     },
     async readTicker(symbol) {
       calls.push(`ticker:${symbol}`);
+      if (options.failMarketReads) throw new Error("fixture market failure");
       return {
         observedAt: options.tickerObservedAt ?? exchangeTimes[0]!,
         bid: decimal("100") as never,
@@ -87,6 +90,7 @@ function readerFor(
     },
     async readOhlcv(symbol, interval, count, exchangeTime) {
       calls.push(`ohlcv:${symbol}:${interval}`);
+      if (options.failMarketReads) throw new Error("fixture market failure");
       const step = intervalMs[interval];
       const end = Date.parse(exchangeTime) - step;
       return Array.from({ length: count }, (_, index) => ({
@@ -102,6 +106,7 @@ function readerFor(
     },
     async readFunding(symbol, count) {
       calls.push(`funding:${symbol}`);
+      if (options.failMarketReads) throw new Error("fixture market failure");
       const end = Date.parse(exchangeTimes[0]!) - 8 * 60 * 60 * 1_000;
       return Array.from({ length: count }, (_, index) => ({
         timestamp: timestamp(end - (count - 1 - index) * 8 * 60 * 60 * 1_000),
@@ -110,6 +115,7 @@ function readerFor(
     },
     async readOpenInterest(symbol, interval, count) {
       calls.push(`oi:${symbol}:${interval}`);
+      if (options.failMarketReads) throw new Error("fixture market failure");
       const step = intervalMs[interval];
       const end = Date.parse(exchangeTimes[0]!) - step;
       return Array.from({ length: count }, (_, index) => ({
@@ -215,4 +221,22 @@ test("a ticker newer than the selected cutoff remains incomplete evidence", asyn
     ),
     true,
   );
+});
+
+test("a collection with no usable market evidence returns a failed result", async () => {
+  const initial = "2026-09-22T10:00:01.000Z" as UtcTimestamp;
+  const candidate = "2026-09-22T10:00:02.000Z" as UtcTimestamp;
+  const clock = fixedClock("2026-09-22T10:00:00.000Z");
+  assert.equal(clock.ok, true);
+  if (!clock.ok) return;
+  const result = await collectMarketEvidence(
+    { runId: "run-no-evidence" },
+    {
+      reader: readerFor([initial, candidate], { failMarketReads: true }),
+      clock: clock.value,
+    },
+  );
+  assert.equal(result.ok, false);
+  if (result.ok) return;
+  assert.equal(result.error.code, "UNRESOLVED_STATE");
 });
