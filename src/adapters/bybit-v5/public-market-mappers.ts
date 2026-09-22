@@ -11,6 +11,7 @@ import {
   type OpenInterestObservation,
 } from "../../domain/market/market-evidence-bundle.js";
 import { createInstrumentConstraints } from "../../domain/market/instrument-constraints.js";
+import { marketIntervalMilliseconds } from "../../domain/market/market-evidence-windows.js";
 import { DecimalValue } from "../../domain/shared/decimal.js";
 import {
   timestampFromEpochMs,
@@ -20,7 +21,12 @@ import {
 type JsonObject = Record<string, unknown>;
 
 export type PublicMarketMappingFailureKind =
-  "invalid-response" | "precondition" | "missing-data" | "pagination";
+  | "invalid-response"
+  | "precondition"
+  | "missing-data"
+  | "duplicate-observation"
+  | "page-budget-exhausted"
+  | "row-budget-exhausted";
 
 export class BybitPublicMarketMappingError extends Error {
   readonly kind: PublicMarketMappingFailureKind;
@@ -303,26 +309,21 @@ export function mapTicker(
   });
 }
 
-function intervalMs(interval: MarketSeriesInterval): number {
-  switch (interval) {
-    case "1h":
-      return 60 * 60 * 1_000;
-    case "4h":
-      return 4 * 60 * 60 * 1_000;
-    case "1d":
-      return 24 * 60 * 60 * 1_000;
-    case "1w":
-      return 7 * 24 * 60 * 60 * 1_000;
-  }
-}
-
 export function mapKline(
   response: BybitPublicResponse,
   expectedSymbol: string,
   interval: MarketSeriesInterval,
   exchangeTime: UtcTimestamp,
 ): readonly OhlcvObservation[] {
-  configuredSymbol(expectedSymbol);
+  const symbol = configuredSymbol(expectedSymbol);
+  if (text(response.result, "symbol", "kline") !== symbol) {
+    precondition(
+      `Bybit kline response returned the wrong symbol for ${symbol}.`,
+    );
+  }
+  if (text(response.result, "category", "kline") !== "linear") {
+    precondition("Bybit kline response returned the wrong category.");
+  }
   const list = response.result.list;
   if (!Array.isArray(list))
     invalid("Bybit kline response did not contain a list.");
@@ -338,7 +339,9 @@ export function mapKline(
       close: decimal(raw[4], "close", "kline", "positive"),
       volume: decimal(raw[5], "volume", "kline", "non-negative"),
       turnover: decimal(raw[6], "turnover", "kline", "non-negative"),
-      closed: start + intervalMs(interval) <= Date.parse(exchangeTime),
+      closed:
+        start + marketIntervalMilliseconds(interval) <=
+        Date.parse(exchangeTime),
     };
     if (
       value.high.compare(value.low) < 0 ||

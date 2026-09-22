@@ -8,44 +8,53 @@ import type {
   OpenInterestSeries,
 } from "./market-evidence-bundle.js";
 import { type UtcTimestamp } from "../shared/time.js";
+import {
+  fundingIntervalMilliseconds,
+  MARKET_FUNDING_WINDOW,
+  MARKET_OHLCV_WINDOWS,
+  MARKET_OPEN_INTEREST_WINDOWS,
+  marketIntervalMilliseconds,
+} from "./market-evidence-windows.js";
 
-export const MARKET_OHLCV_WINDOWS: Readonly<
-  Record<MarketSeriesInterval, number>
-> = Object.freeze({
-  "1h": 250,
-  "4h": 250,
-  "1d": 250,
-  "1w": 104,
-});
-
-export const MARKET_FUNDING_WINDOW = 30;
-
-export const MARKET_OPEN_INTEREST_WINDOWS: Readonly<
-  Record<OpenInterestInterval, number>
-> = Object.freeze({
-  "1h": 168,
-  "4h": 180,
-  "1d": 90,
-});
+export {
+  MARKET_FUNDING_WINDOW,
+  MARKET_OHLCV_WINDOWS,
+  MARKET_OPEN_INTEREST_WINDOWS,
+} from "./market-evidence-windows.js";
 
 export interface NormalizationResult<T> {
   readonly value: T;
   readonly complete: boolean;
-  readonly reason?: "underfilled" | "duplicate" | "future" | "unfinished";
+  readonly reason?:
+    "underfilled" | "duplicate" | "gap" | "future" | "unfinished";
   readonly latestTimestamp?: UtcTimestamp;
 }
 
-function intervalMilliseconds(interval: MarketSeriesInterval): number {
-  switch (interval) {
-    case "1h":
-      return 60 * 60 * 1_000;
-    case "4h":
-      return 4 * 60 * 60 * 1_000;
-    case "1d":
-      return 24 * 60 * 60 * 1_000;
-    case "1w":
-      return 7 * 24 * 60 * 60 * 1_000;
-  }
+function hasExpectedCadence(
+  observations: readonly { readonly timestamp: UtcTimestamp }[],
+  stepMs: number,
+): boolean {
+  return observations.every((observation, index) => {
+    const previous = observations[index - 1];
+    return (
+      previous === undefined ||
+      Date.parse(observation.timestamp) - Date.parse(previous.timestamp) ===
+        stepMs
+    );
+  });
+}
+
+const BYBIT_WEEK_START_MS = Date.parse("1970-01-05T00:00:00.000Z");
+
+function intervalBucket(
+  value: UtcTimestamp,
+  interval: MarketSeriesInterval,
+): number {
+  const timestamp = Date.parse(value);
+  const size = marketIntervalMilliseconds(interval);
+  return interval === "1w"
+    ? Math.floor((timestamp - BYBIT_WEEK_START_MS) / size)
+    : Math.floor(timestamp / size);
 }
 
 function sortedUnique<T extends { timestamp: UtcTimestamp }>(
@@ -58,7 +67,10 @@ function sortedUnique<T extends { timestamp: UtcTimestamp }>(
   let duplicate = false;
   for (const observation of sorted) {
     const previous = values.at(-1);
-    if (previous?.timestamp === observation.timestamp) {
+    if (
+      previous !== undefined &&
+      Date.parse(previous.timestamp) === Date.parse(observation.timestamp)
+    ) {
       duplicate = true;
       continue;
     }
@@ -72,11 +84,7 @@ export function intervalBoundaryCrossed(
   second: UtcTimestamp,
   interval: MarketSeriesInterval,
 ): boolean {
-  const size = intervalMilliseconds(interval);
-  return (
-    Math.floor(Date.parse(first) / size) !==
-    Math.floor(Date.parse(second) / size)
-  );
+  return intervalBucket(first, interval) !== intervalBucket(second, interval);
 }
 
 export function fundingBoundaryCrossed(
@@ -90,7 +98,7 @@ export function fundingBoundaryCrossed(
   ) {
     return true;
   }
-  const size = fundingIntervalMinutes * 60 * 1_000;
+  const size = fundingIntervalMilliseconds(fundingIntervalMinutes);
   return (
     Math.floor(Date.parse(first) / size) !==
     Math.floor(Date.parse(second) / size)
@@ -109,7 +117,7 @@ export function normalizeOhlcvSeries(
     return (
       start <= cutoffMs &&
       observation.closed &&
-      start + intervalMilliseconds(interval) <= cutoffMs
+      start + marketIntervalMilliseconds(interval) <= cutoffMs
     );
   });
   const unique = sortedUnique(filtered);
@@ -117,21 +125,27 @@ export function normalizeOhlcvSeries(
   const latestTimestamp = selected.at(-1)?.timestamp;
   const reason = unique.duplicate
     ? "duplicate"
-    : selected.length < requestedCount
-      ? filtered.some((item) => !item.closed) ||
-        observations.some(
-          (item) => !item.closed && Date.parse(item.timestamp) <= cutoffMs,
-        ) ||
-        observations.some((item) => Date.parse(item.timestamp) > cutoffMs)
-        ? "unfinished"
-        : "underfilled"
-      : undefined;
+    : selected.length === requestedCount &&
+        !hasExpectedCadence(selected, marketIntervalMilliseconds(interval))
+      ? "gap"
+      : selected.length < requestedCount
+        ? filtered.some((item) => !item.closed) ||
+          observations.some(
+            (item) => !item.closed && Date.parse(item.timestamp) <= cutoffMs,
+          ) ||
+          observations.some((item) => Date.parse(item.timestamp) > cutoffMs)
+          ? "unfinished"
+          : "underfilled"
+        : undefined;
   return {
     value: Object.freeze({
       interval,
       observations: Object.freeze(selected),
     }),
-    complete: !unique.duplicate && selected.length === requestedCount,
+    complete:
+      !unique.duplicate &&
+      selected.length === requestedCount &&
+      hasExpectedCadence(selected, marketIntervalMilliseconds(interval)),
     ...(reason === undefined ? {} : { reason }),
     ...(latestTimestamp === undefined ? {} : { latestTimestamp }),
   };
@@ -141,6 +155,7 @@ export function normalizeFundingObservations(
   observations: readonly FundingObservation[],
   cutoff: UtcTimestamp,
   requestedCount = MARKET_FUNDING_WINDOW,
+  fundingIntervalMinutes?: number,
 ): NormalizationResult<readonly FundingObservation[]> {
   const cutoffMs = Date.parse(cutoff);
   const filtered = observations.filter(
@@ -151,12 +166,26 @@ export function normalizeFundingObservations(
   const latestTimestamp = selected.at(-1)?.timestamp;
   const reason = unique.duplicate
     ? "duplicate"
-    : selected.length < requestedCount
-      ? "underfilled"
-      : undefined;
+    : selected.length === requestedCount &&
+        fundingIntervalMinutes !== undefined &&
+        !hasExpectedCadence(
+          selected,
+          fundingIntervalMilliseconds(fundingIntervalMinutes),
+        )
+      ? "gap"
+      : selected.length < requestedCount
+        ? "underfilled"
+        : undefined;
   return {
     value: selected,
-    complete: !unique.duplicate && selected.length === requestedCount,
+    complete:
+      !unique.duplicate &&
+      selected.length === requestedCount &&
+      (fundingIntervalMinutes === undefined ||
+        hasExpectedCadence(
+          selected,
+          fundingIntervalMilliseconds(fundingIntervalMinutes),
+        )),
     ...(reason === undefined ? {} : { reason }),
     ...(latestTimestamp === undefined ? {} : { latestTimestamp }),
   };
@@ -177,15 +206,21 @@ export function normalizeOpenInterestSeries(
   const latestTimestamp = selected.at(-1)?.timestamp;
   const reason = unique.duplicate
     ? "duplicate"
-    : selected.length < requestedCount
-      ? "underfilled"
-      : undefined;
+    : selected.length === requestedCount &&
+        !hasExpectedCadence(selected, marketIntervalMilliseconds(interval))
+      ? "gap"
+      : selected.length < requestedCount
+        ? "underfilled"
+        : undefined;
   return {
     value: Object.freeze({
       interval,
       observations: Object.freeze(selected),
     }),
-    complete: !unique.duplicate && selected.length === requestedCount,
+    complete:
+      !unique.duplicate &&
+      selected.length === requestedCount &&
+      hasExpectedCadence(selected, marketIntervalMilliseconds(interval)),
     ...(reason === undefined ? {} : { reason }),
     ...(latestTimestamp === undefined ? {} : { latestTimestamp }),
   };

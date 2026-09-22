@@ -7,8 +7,6 @@ export {
   isCompleteMarketEvidenceBundle,
   type FundingObservation,
   type MarketEvidenceBundle,
-  type MarketEvidenceCollectionRequest,
-  type MarketEvidencePort,
   type MarketEvidenceSource,
   type MarketEvidenceStatus,
   type MarketEvidenceSymbol,
@@ -23,6 +21,18 @@ export {
   type OpenInterestObservation,
   type OpenInterestSeries,
 } from "../domain/market/market-evidence-bundle.js";
+import type { MarketEvidenceBundle } from "../domain/market/market-evidence-bundle.js";
+import type { Result } from "../domain/shared/result.js";
+
+export interface MarketEvidenceCollectionRequest {
+  readonly runId: string;
+}
+
+export interface MarketEvidencePort {
+  collect(
+    request: MarketEvidenceCollectionRequest,
+  ): Promise<Result<MarketEvidenceBundle>>;
+}
 export {
   createMarketEvidenceDiagnostic,
   parseMarketEvidenceDiagnostics,

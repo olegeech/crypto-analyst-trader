@@ -30,7 +30,9 @@ test("public market smoke fake transport uses only bounded GETs and emits a sani
     const parsed = new URL(String(url));
     const path = parsed.pathname;
     const symbol = parsed.searchParams.get("symbol") ?? "BTCUSDT";
-    const interval = parsed.searchParams.get("intervalTime");
+    const interval =
+      parsed.searchParams.get("interval") ??
+      parsed.searchParams.get("intervalTime");
     const time = 1_800_000_000_000;
     if (path === "/v5/market/time") {
       return new Response(
@@ -110,7 +112,12 @@ test("public market smoke fake transport uses only bounded GETs and emits a sani
         "1000",
       ]);
       return new Response(
-        JSON.stringify({ retCode: 0, retMsg: "OK", result: { list }, time }),
+        JSON.stringify({
+          retCode: 0,
+          retMsg: "OK",
+          result: { symbol, category: "linear", list },
+          time,
+        }),
       );
     }
     if (path === "/v5/market/funding/history") {
@@ -154,12 +161,61 @@ test("public market smoke fake transport uses only bounded GETs and emits a sani
     request,
   });
   assert.equal(summary.environment, "public-mainnet");
-  assert.equal(summary.status, "complete");
+  assert.equal(summary.status, "complete", JSON.stringify(summary));
   assert.equal(summary.symbols, 4);
   assert.match(summary.canonicalHash, /^sha256:[0-9a-f]{64}$/u);
-  assert.ok(methods.length > 0);
+  const paths = urls.map((url) => new URL(url).pathname);
+  assert.deepEqual(
+    Object.fromEntries(
+      [
+        "/v5/market/time",
+        "/v5/market/instruments-info",
+        "/v5/market/tickers",
+        "/v5/market/kline",
+        "/v5/market/funding/history",
+        "/v5/market/open-interest",
+      ].map((path) => [path, paths.filter((item) => item === path).length]),
+    ),
+    {
+      "/v5/market/time": 2,
+      "/v5/market/instruments-info": 4,
+      "/v5/market/tickers": 4,
+      "/v5/market/kline": 16,
+      "/v5/market/funding/history": 4,
+      "/v5/market/open-interest": 12,
+    },
+  );
+  assert.equal(methods.length, 42);
   assert.equal(
     methods.every((method) => method === "GET"),
+    true,
+  );
+  assert.equal(
+    urls
+      .filter((url) => new URL(url).pathname === "/v5/market/kline")
+      .every((url) => {
+        const parsed = new URL(url);
+        return (
+          parsed.searchParams.get("category") === "linear" &&
+          Number(parsed.searchParams.get("limit")) >= 105 &&
+          Number(parsed.searchParams.get("limit")) <= 251 &&
+          parsed.searchParams.has("interval") &&
+          !parsed.searchParams.has("cursor")
+        );
+      }),
+    true,
+  );
+  assert.equal(
+    urls
+      .filter((url) => new URL(url).pathname === "/v5/market/open-interest")
+      .every((url) => {
+        const parsed = new URL(url);
+        return (
+          parsed.searchParams.get("category") === "linear" &&
+          parsed.searchParams.has("intervalTime") &&
+          Number(parsed.searchParams.get("limit")) <= 200
+        );
+      }),
     true,
   );
   assert.equal(

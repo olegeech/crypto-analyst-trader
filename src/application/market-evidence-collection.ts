@@ -9,16 +9,19 @@ import {
   MARKET_EVIDENCE_SYMBOLS,
   type FundingObservation,
   type MarketEvidenceBundle,
-  type MarketEvidenceCollectionRequest,
-  type MarketEvidencePort,
   type MarketEvidenceSymbol,
   type MarketInstrumentEvidence,
   type MarketSeriesInterval,
+  type MarketSymbolEvidence,
   type MarketTickerEvidence,
   type OhlcvObservation,
   type OpenInterestInterval,
   type OpenInterestObservation,
 } from "../domain/market/market-evidence-bundle.js";
+import type {
+  MarketEvidenceCollectionRequest,
+  MarketEvidencePort,
+} from "../ports/market-evidence.js";
 import {
   fundingBoundaryCrossed,
   intervalBoundaryCrossed,
@@ -116,18 +119,22 @@ function diagnosticCode(
       return "transport-failed";
     case "invalid-response":
       return "invalid-response";
+    case "invalid-cursor":
+      return "invalid-response";
+    case "precondition":
+      return "wrong-identity";
     case "missing-data":
       return "missing-required-data";
     case "wrong-identity":
       return "wrong-identity";
-    case "repeated-cursor":
-      return "repeated-cursor";
+    case "duplicate-observation":
+      return "duplicate-observation";
     case "page-budget-exhausted":
       return "page-budget-exhausted";
     case "row-budget-exhausted":
       return "row-budget-exhausted";
-    case "pagination":
-      return "page-budget-exhausted";
+    case "repeated-cursor":
+      return "repeated-cursor";
     default:
       return fallback;
   }
@@ -199,24 +206,29 @@ function hasUsableEvidence(facts: readonly SymbolFacts[]): boolean {
 }
 
 function evidenceForBundle(
-  runId: string,
-  cutoff: UtcTimestamp,
-  status: "complete" | "incomplete",
-  facts: readonly SymbolFacts[],
+  bundle: MarketEvidenceBundle,
 ): Result<readonly EvidenceRef[]> {
   const identity = hashCanonical({
-    runId,
-    cutoff,
-    status,
-    symbols: facts,
+    runId: bundle.runId,
+    schemaVersion: bundle.schemaVersion,
+    producer: bundle.producer,
+    universeVersion: bundle.universeVersion,
+    universe: bundle.universe,
+    collectionStartedAt: bundle.collectionStartedAt,
+    collectionEndedAt: bundle.collectionEndedAt,
+    bundleCutoff: bundle.bundleCutoff,
+    source: bundle.source,
+    status: bundle.status,
+    symbols: bundle.symbols,
+    diagnostics: bundle.diagnostics,
   });
   if (!identity.ok) return identity;
   const evidence = createEvidenceRef({
     kind: "market-evidence-bundle",
     schemaVersion: "market-evidence/v1",
     producer: MARKET_EVIDENCE_PRODUCER,
-    sourceId: `bybit-public:${runId}`,
-    asOf: cutoff,
+    sourceId: `bybit-public:${bundle.runId}`,
+    asOf: bundle.bundleCutoff,
     validForMs: 86_400_000,
     contentHash: identity.value,
   });
@@ -241,15 +253,7 @@ function buildBundle(
     );
   }
   let complete = true;
-  const symbols: Array<{
-    symbol: MarketEvidenceSymbol;
-    instrument?: MarketInstrumentEvidence;
-    ticker?: MarketTickerEvidence;
-    ohlcv: ReturnType<typeof normalizeOhlcvSeries>["value"][];
-    funding: readonly FundingObservation[];
-    openInterest: ReturnType<typeof normalizeOpenInterestSeries>["value"][];
-    diagnostics: MarketEvidenceDiagnostic[];
-  }> = [];
+  const symbols: MarketSymbolEvidence[] = [];
   for (const factsForSymbol of facts) {
     const diagnostics = [...factsForSymbol.diagnostics];
     const tickerIsAtOrBeforeCutoff =
@@ -295,6 +299,8 @@ function buildBundle(
     const funding = normalizeFundingObservations(
       factsForSymbol.funding ?? [],
       cutoff,
+      undefined,
+      factsForSymbol.instrument?.fundingInterval,
     );
     if (!funding.complete) {
       complete = false;
@@ -344,9 +350,7 @@ function buildBundle(
     });
   }
   const status = complete ? "complete" : "incomplete";
-  const evidence = evidenceForBundle(runId, cutoff, status, facts);
-  if (!evidence.ok) return evidence;
-  return createMarketEvidenceBundle({
+  const bundleInput = {
     runId,
     schemaVersion: "market-evidence/v1",
     producer,
@@ -364,6 +368,26 @@ function buildBundle(
     status,
     symbols,
     diagnostics: [],
+  };
+  const provisional = createMarketEvidenceBundle({
+    ...bundleInput,
+    evidence: [
+      {
+        kind: "market-evidence-bundle",
+        schemaVersion: "market-evidence/v1",
+        producer: MARKET_EVIDENCE_PRODUCER,
+        sourceId: `bybit-public:${runId}`,
+        asOf: cutoff,
+        validForMs: 86_400_000,
+        contentHash: `sha256:${"0".repeat(64)}`,
+      },
+    ],
+  });
+  if (!provisional.ok) return provisional;
+  const evidence = evidenceForBundle(provisional.value);
+  if (!evidence.ok) return evidence;
+  return createMarketEvidenceBundle({
+    ...bundleInput,
     evidence: evidence.value,
   });
 }
@@ -538,8 +562,9 @@ export async function collectMarketEvidence(
         candidateTime,
       );
       if (
-        intervalBoundaryCrossed(initialTime, candidateTime, interval) ||
-        !normalized.complete
+        !hasDiagnosticForSeries(factsForSymbol, `ohlcv-${interval}`) &&
+        (intervalBoundaryCrossed(initialTime, candidateTime, interval) ||
+          !normalized.complete)
       ) {
         reread.push({ facts: factsForSymbol, kind: "ohlcv", interval });
       }
@@ -548,9 +573,12 @@ export async function collectMarketEvidence(
     const normalizedFunding = normalizeFundingObservations(
       factsForSymbol.funding ?? [],
       candidateTime,
+      MARKET_FUNDING_WINDOW,
+      fundingInterval,
     );
     if (
       fundingInterval !== undefined &&
+      !hasDiagnosticForSeries(factsForSymbol, "funding") &&
       (fundingBoundaryCrossed(initialTime, candidateTime, fundingInterval) ||
         !normalizedFunding.complete)
     ) {

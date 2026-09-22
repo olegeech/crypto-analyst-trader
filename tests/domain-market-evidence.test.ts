@@ -11,18 +11,91 @@ import {
   encodeCanonicalArtifact,
   rehydrateArtifact,
 } from "../src/domain/identity/canonical-artifact.js";
+import {
+  MARKET_FUNDING_WINDOW,
+  MARKET_OHLCV_WINDOWS,
+  MARKET_OPEN_INTEREST_WINDOWS,
+} from "../src/domain/market/market-series-normalization.js";
 
 const evidence = {
   kind: "market-snapshot",
   schemaVersion: "market-snapshot/v1",
   producer: "fixture",
   sourceId: "run-1",
-  asOf: "2026-09-22T10:00:00Z",
+  asOf: "2026-09-22T09:59:00Z",
   validForMs: 60_000,
   contentHash: `sha256:${"a".repeat(64)}`,
 };
 
+function series<T>(
+  count: number,
+  end: string,
+  stepMs: number,
+  build: (timestamp: string) => T,
+): T[] {
+  const endMs = Date.parse(end);
+  return Array.from({ length: count }, (_, index) => {
+    const timestamp = new Date(
+      endMs - (count - 1 - index) * stepMs,
+    ).toISOString();
+    return build(timestamp);
+  });
+}
+
 function symbolEvidence(symbol: string, status = "trading") {
+  const ohlcv = (
+    Object.keys(MARKET_OHLCV_WINDOWS) as Array<"1h" | "4h" | "1d" | "1w">
+  ).map((interval) => ({
+    interval,
+    observations: series(
+      MARKET_OHLCV_WINDOWS[interval],
+      interval === "1h"
+        ? "2026-09-22T08:00:00.000Z"
+        : interval === "4h"
+          ? "2026-09-22T04:00:00.000Z"
+          : interval === "1d"
+            ? "2026-09-22T00:00:00.000Z"
+            : "2026-09-13T00:00:00.000Z",
+      interval === "1h"
+        ? 3_600_000
+        : interval === "4h"
+          ? 14_400_000
+          : interval === "1d"
+            ? 86_400_000
+            : 604_800_000,
+      (timestamp) => ({
+        timestamp,
+        open: "99",
+        high: "102",
+        low: "98",
+        close: "100",
+        volume: "10",
+        turnover: "1000",
+        closed: true,
+      }),
+    ),
+  }));
+  const funding = series(
+    MARKET_FUNDING_WINDOW,
+    "2026-09-22T08:00:00.000Z",
+    8 * 60 * 60 * 1_000,
+    (timestamp) => ({ timestamp, rate: "0.0001" }),
+  );
+  const openInterest = (
+    Object.keys(MARKET_OPEN_INTEREST_WINDOWS) as Array<"1h" | "4h" | "1d">
+  ).map((interval) => ({
+    interval,
+    observations: series(
+      MARKET_OPEN_INTEREST_WINDOWS[interval],
+      "2026-09-22T08:00:00.000Z",
+      interval === "1h"
+        ? 3_600_000
+        : interval === "4h"
+          ? 14_400_000
+          : 86_400_000,
+      (timestamp) => ({ timestamp, openInterest: "1000" }),
+    ),
+  }));
   return {
     symbol,
     instrument: {
@@ -55,32 +128,9 @@ function symbolEvidence(symbol: string, status = "trading") {
       volume24h: "2000",
       turnover24h: "200000",
     },
-    ohlcv: [
-      {
-        interval: "1h",
-        observations: [
-          {
-            timestamp: "2026-09-22T08:00:00Z",
-            open: "99",
-            high: "102",
-            low: "98",
-            close: "100",
-            volume: "10",
-            turnover: "1000",
-            closed: true,
-          },
-        ],
-      },
-    ],
-    funding: [{ timestamp: "2026-09-22T08:00:00Z", rate: "0.0001" }],
-    openInterest: [
-      {
-        interval: "1h",
-        observations: [
-          { timestamp: "2026-09-22T08:00:00Z", openInterest: "1000" },
-        ],
-      },
-    ],
+    ohlcv,
+    funding,
+    openInterest,
     diagnostics: [],
   };
 }
@@ -227,6 +277,42 @@ test("market evidence rejects a ticker or historical observation after the commo
     }),
   );
   assert.equal(result.ok, false);
+});
+
+test("complete rehydration rejects underfilled, gapped or future metadata", () => {
+  const underfilled = createMarketEvidenceBundle(
+    bundle({
+      symbols: MARKET_EVIDENCE_SYMBOLS.map((symbol) => ({
+        ...symbolEvidence(symbol),
+        ohlcv: [],
+        funding: [],
+        openInterest: [],
+      })),
+    }),
+  );
+  assert.equal(underfilled.ok, false);
+
+  const futureInstrument = createMarketEvidenceBundle(
+    bundle({
+      symbols: MARKET_EVIDENCE_SYMBOLS.map((symbol, index) =>
+        index === 0
+          ? {
+              ...symbolEvidence(symbol),
+              instrument: {
+                ...symbolEvidence(symbol).instrument,
+                sourceTimestamp: "2026-09-22T10:00:00Z",
+              },
+            }
+          : symbolEvidence(symbol),
+      ),
+    }),
+  );
+  assert.equal(futureInstrument.ok, false);
+
+  const futureEvidence = createMarketEvidenceBundle(
+    bundle({ evidence: [{ ...evidence, asOf: "2026-09-22T10:00:00Z" }] }),
+  );
+  assert.equal(futureEvidence.ok, false);
 });
 
 test("market evidence participates in deterministic canonical identity and rehydration", () => {

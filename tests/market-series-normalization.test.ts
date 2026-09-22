@@ -92,6 +92,39 @@ test("funding and OI normalization accept delayed latest observations at a commo
   assert.equal(oiResult.latestTimestamp, "2026-09-22T09:00:00.000Z");
 });
 
+test("normalization rejects cadence gaps even when the row count is full", () => {
+  const candles = [
+    candle("2026-09-22T06:00:00.000Z"),
+    candle("2026-09-22T08:00:00.000Z"),
+  ];
+  const result = normalizeOhlcvSeries(
+    "1h",
+    candles,
+    "2026-09-22T10:00:00.000Z" as UtcTimestamp,
+    2,
+  );
+  assert.equal(result.complete, false);
+  assert.equal(result.reason, "gap");
+
+  const fundingResult = normalizeFundingObservations(
+    [
+      {
+        timestamp: "2026-09-22T00:00:00.000Z" as UtcTimestamp,
+        rate: decimal("0.001"),
+      },
+      {
+        timestamp: "2026-09-22T16:00:00.000Z" as UtcTimestamp,
+        rate: decimal("0.002"),
+      },
+    ],
+    "2026-09-22T20:00:00.000Z" as UtcTimestamp,
+    2,
+    480,
+  );
+  assert.equal(fundingResult.complete, false);
+  assert.equal(fundingResult.reason, "gap");
+});
+
 test("boundary detection is cadence-specific and deterministic", () => {
   assert.equal(
     intervalBoundaryCrossed(
@@ -108,6 +141,14 @@ test("boundary detection is cadence-specific and deterministic", () => {
       "1h",
     ),
     false,
+  );
+  assert.equal(
+    intervalBoundaryCrossed(
+      "2026-09-20T23:59:59.000Z" as UtcTimestamp,
+      "2026-09-21T00:00:01.000Z" as UtcTimestamp,
+      "1w",
+    ),
+    true,
   );
   assert.equal(
     fundingBoundaryCrossed(

@@ -77,9 +77,12 @@ test("public mappings normalize reverse kline ordering and exclude only after cu
   const cutoff = "2024-08-01T19:30:00.000Z";
   const mapped = mapKline(
     response({
+      symbol: "DOGEUSDT",
+      category: "linear",
       list: [
         ["1722535200000", "101", "102", "100", "101.5", "20", "2030"],
         ["1722531600000", "99", "101", "98", "100", "10", "1000"],
+        ["1722538800000", "100", "103", "99", "102", "15", "1500"],
       ],
     }),
     "DOGEUSDT",
@@ -88,13 +91,45 @@ test("public mappings normalize reverse kline ordering and exclude only after cu
   );
   assert.deepEqual(
     mapped.map((row) => row.timestamp),
-    ["2024-08-01T17:00:00.000Z", "2024-08-01T18:00:00.000Z"],
+    [
+      "2024-08-01T17:00:00.000Z",
+      "2024-08-01T18:00:00.000Z",
+      "2024-08-01T19:00:00.000Z",
+    ],
   );
-  assert.equal(
-    mapped.every((row) => row.closed),
-    true,
+  assert.deepEqual(
+    mapped.map((row) => row.closed),
+    [true, true, false],
   );
   assert.equal(mapped[0]?.close.toString(), "100");
+});
+
+test("kline mapping rejects a response for another symbol or category", () => {
+  const row = ["1722535200000", "101", "102", "100", "101.5", "20", "2030"];
+  assert.throws(
+    () =>
+      mapKline(
+        response({ symbol: "BTCUSDT", category: "linear", list: [row] }),
+        "DOGEUSDT",
+        "1h",
+        "2024-08-01T19:30:00.000Z" as UtcTimestamp,
+      ),
+    (error: unknown) =>
+      error instanceof BybitPublicMarketMappingError &&
+      error.kind === "precondition",
+  );
+  assert.throws(
+    () =>
+      mapKline(
+        response({ symbol: "DOGEUSDT", category: "spot", list: [row] }),
+        "DOGEUSDT",
+        "1h",
+        "2024-08-01T19:30:00.000Z" as UtcTimestamp,
+      ),
+    (error: unknown) =>
+      error instanceof BybitPublicMarketMappingError &&
+      error.kind === "precondition",
+  );
 });
 
 test("funding and open-interest mappings reject wrong identity, duplicates and malformed fields", () => {

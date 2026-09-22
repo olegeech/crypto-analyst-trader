@@ -20,6 +20,13 @@ import {
   parseMarketEvidenceDiagnostics,
   type MarketEvidenceDiagnostic,
 } from "./market-evidence-diagnostics.js";
+import {
+  fundingIntervalMilliseconds,
+  MARKET_OHLCV_WINDOWS,
+  MARKET_FUNDING_WINDOW,
+  MARKET_OPEN_INTEREST_WINDOWS,
+  marketIntervalMilliseconds,
+} from "./market-evidence-windows.js";
 
 export type { MarketEvidenceDiagnostic } from "./market-evidence-diagnostics.js";
 
@@ -129,16 +136,6 @@ export interface MarketEvidenceBundle {
   readonly evidence: readonly EvidenceRef[];
 }
 
-export interface MarketEvidenceCollectionRequest {
-  readonly runId: string;
-}
-
-export interface MarketEvidencePort {
-  collect(
-    request: MarketEvidenceCollectionRequest,
-  ): Promise<Result<MarketEvidenceBundle>>;
-}
-
 const OHLCTV_INTERVALS = new Set<MarketSeriesInterval>([
   "1h",
   "4h",
@@ -146,6 +143,20 @@ const OHLCTV_INTERVALS = new Set<MarketSeriesInterval>([
   "1w",
 ]);
 const OI_INTERVALS = new Set<OpenInterestInterval>(["1h", "4h", "1d"]);
+
+function hasExpectedCadence(
+  observations: readonly { readonly timestamp: UtcTimestamp }[],
+  stepMs: number,
+): boolean {
+  return observations.every((observation, index) => {
+    const previous = observations[index - 1];
+    return (
+      previous === undefined ||
+      Date.parse(observation.timestamp) - Date.parse(previous.timestamp) ===
+        stepMs
+    );
+  });
+}
 
 function invalid(message: string, field?: string): Result<never> {
   return fail(
@@ -678,8 +689,8 @@ export function createMarketEvidenceBundle(
     Date.parse(collectionEndedAt.value) < Date.parse(collectionStartedAt.value)
   )
     return invalid("collection end precedes collection start");
-  if (Date.parse(bundleCutoff.value) < Date.parse(collectionStartedAt.value))
-    return invalid("bundle cutoff precedes collection start");
+  // bundleCutoff is exchange time while collectionStartedAt is local metadata;
+  // local and exchange clocks are allowed to differ.
   if (
     input.universe.length !== MARKET_EVIDENCE_SYMBOLS.length ||
     input.universe.some(
@@ -694,6 +705,13 @@ export function createMarketEvidenceBundle(
   for (const item of input.symbols) {
     const parsed = parseSymbolEvidence(item, bundleCutoff.value);
     if (!parsed.ok) return parsed;
+    if (
+      parsed.value.instrument?.sourceTimestamp !== undefined &&
+      Date.parse(parsed.value.instrument.sourceTimestamp) >
+        Date.parse(bundleCutoff.value)
+    ) {
+      return invalid("instrument evidence is newer than the bundle cutoff");
+    }
     if (symbols.has(parsed.value.symbol))
       return invalid("bundle contains a duplicate configured symbol");
     symbols.add(parsed.value.symbol);
@@ -701,14 +719,75 @@ export function createMarketEvidenceBundle(
   }
   if (MARKET_EVIDENCE_SYMBOLS.some((symbol) => !symbols.has(symbol)))
     return invalid("bundle is missing a configured symbol");
+  if (
+    evidence.some(
+      (item) => Date.parse(item.asOf) > Date.parse(bundleCutoff.value),
+    )
+  ) {
+    return invalid("evidence reference is newer than the bundle cutoff");
+  }
   const orderedSymbols = MARKET_EVIDENCE_SYMBOLS.map((symbol) =>
     parsedSymbols.find((item) => item.symbol === symbol)!,
   );
   if (input.status === "complete") {
     for (const symbol of orderedSymbols) {
-      if (symbol.instrument === undefined || symbol.ticker === undefined)
+      if (
+        symbol.instrument === undefined ||
+        symbol.ticker === undefined ||
+        symbol.diagnostics.length > 0 ||
+        symbol.ohlcv.length !== Object.keys(MARKET_OHLCV_WINDOWS).length ||
+        symbol.funding.length !== MARKET_FUNDING_WINDOW ||
+        symbol.openInterest.length !==
+          Object.keys(MARKET_OPEN_INTEREST_WINDOWS).length
+      )
         return invalid("complete bundle is missing required symbol evidence");
+      for (const interval of Object.keys(
+        MARKET_OHLCV_WINDOWS,
+      ) as MarketSeriesInterval[]) {
+        const series = symbol.ohlcv.find((item) => item.interval === interval);
+        if (
+          series === undefined ||
+          series.observations.length !== MARKET_OHLCV_WINDOWS[interval] ||
+          !series.observations.every((item) => item.closed) ||
+          !hasExpectedCadence(
+            series.observations,
+            marketIntervalMilliseconds(interval),
+          )
+        ) {
+          return invalid("complete bundle has incomplete OHLCV evidence");
+        }
+      }
+      if (
+        !hasExpectedCadence(
+          symbol.funding,
+          fundingIntervalMilliseconds(symbol.instrument.fundingInterval),
+        )
+      ) {
+        return invalid("complete bundle has gapped funding evidence");
+      }
+      for (const interval of Object.keys(
+        MARKET_OPEN_INTEREST_WINDOWS,
+      ) as OpenInterestInterval[]) {
+        const series = symbol.openInterest.find(
+          (item) => item.interval === interval,
+        );
+        if (
+          series === undefined ||
+          series.observations.length !==
+            MARKET_OPEN_INTEREST_WINDOWS[interval] ||
+          !hasExpectedCadence(
+            series.observations,
+            marketIntervalMilliseconds(interval),
+          )
+        ) {
+          return invalid(
+            "complete bundle has incomplete open-interest evidence",
+          );
+        }
+      }
     }
+    if (diagnostics.value.length > 0)
+      return invalid("complete bundle has global diagnostics");
   }
   const bundle = {
     runId: runId.value,

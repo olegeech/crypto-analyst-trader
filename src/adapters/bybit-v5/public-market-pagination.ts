@@ -1,7 +1,10 @@
 import type { BybitPublicResponse } from "./public-response.js";
 
 export type PublicPaginationFailureKind =
-  "repeated-cursor" | "page-budget-exhausted" | "row-budget-exhausted";
+  | "invalid-cursor"
+  | "repeated-cursor"
+  | "page-budget-exhausted"
+  | "row-budget-exhausted";
 
 export class BybitPublicPaginationError extends Error {
   readonly kind: PublicPaginationFailureKind;
@@ -54,7 +57,7 @@ export function nextCursorFromResponse(
   if (value === undefined || value === "") return undefined;
   if (typeof value !== "string" || /[\u0000-\u001f\u007f\r\n]/u.test(value)) {
     throw new BybitPublicPaginationError(
-      "repeated-cursor",
+      "invalid-cursor",
       `Bybit ${label} response has an invalid page cursor.`,
     );
   }

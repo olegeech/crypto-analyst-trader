@@ -197,7 +197,7 @@ export class BybitPublicMarketClient {
       for (const row of mapped) {
         if (seenTimestamps.has(row.timestamp)) {
           throw new BybitPublicMarketMappingError(
-            "pagination",
+            "duplicate-observation",
             `Bybit ${label} pagination returned a duplicate timestamp.`,
           );
         }
@@ -206,7 +206,7 @@ export class BybitPublicMarketClient {
       }
       if (rows.length > this.pagination.maxRows) {
         throw new BybitPublicMarketMappingError(
-          "pagination",
+          "row-budget-exhausted",
           `Bybit ${label} row budget was exhausted.`,
         );
       }
@@ -224,7 +224,7 @@ export class BybitPublicMarketClient {
       }
     }
     throw new BybitPublicMarketMappingError(
-      "pagination",
+      "page-budget-exhausted",
       `Bybit ${label} page budget was exhausted.`,
     );
   }
