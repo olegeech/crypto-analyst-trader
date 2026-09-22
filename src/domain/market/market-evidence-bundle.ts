@@ -17,7 +17,6 @@ import {
   type InstrumentConstraints,
 } from "./instrument-constraints.js";
 import {
-  createMarketEvidenceDiagnostic,
   parseMarketEvidenceDiagnostics,
   type MarketEvidenceDiagnostic,
 } from "./market-evidence-diagnostics.js";
@@ -668,11 +667,8 @@ export function createMarketEvidenceBundle(
     Date.parse(collectionEndedAt.value) < Date.parse(collectionStartedAt.value)
   )
     return invalid("collection end precedes collection start");
-  if (
-    Date.parse(bundleCutoff.value) < Date.parse(collectionStartedAt.value) ||
-    Date.parse(bundleCutoff.value) > Date.parse(collectionEndedAt.value)
-  )
-    return invalid("bundle cutoff is outside the collection window");
+  if (Date.parse(bundleCutoff.value) < Date.parse(collectionStartedAt.value))
+    return invalid("bundle cutoff precedes collection start");
   if (
     input.universe.length !== MARKET_EVIDENCE_SYMBOLS.length ||
     input.universe.some(

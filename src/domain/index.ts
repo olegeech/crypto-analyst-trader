@@ -103,6 +103,17 @@ export {
   type MarketEvidenceDiagnosticCode,
 } from "./market/market-evidence-diagnostics.js";
 export {
+  fundingBoundaryCrossed,
+  intervalBoundaryCrossed,
+  MARKET_FUNDING_WINDOW,
+  MARKET_OHLCV_WINDOWS,
+  MARKET_OPEN_INTEREST_WINDOWS,
+  normalizeFundingObservations,
+  normalizeOhlcvSeries,
+  normalizeOpenInterestSeries,
+  type NormalizationResult,
+} from "./market/market-series-normalization.js";
+export {
   createStrategyConfig,
   type StrategyConfig,
 } from "./market/strategy-config.js";
