@@ -14,6 +14,7 @@ const demoVerificationScript = await readFile(
   "scripts/bybit-demo-adapter-verification.ts",
   "utf8",
 );
+const traderDemoCli = await readFile("src/cli/trader-demo.ts", "utf8");
 const tsconfig = JSON.parse(await readFile("tsconfig.json", "utf8")) as {
   include: string[];
 };
@@ -121,4 +122,23 @@ test("Demo adapter verification is explicit, Demo-only and excluded from CI/rele
     /testnet|mainnet|api-testnet\.bybit\.com|api\.bybit\.com/iu,
   );
   assert.doesNotMatch(demoVerificationScript, /confirm-demo/iu);
+});
+
+test("the managed Demo trader CLI is fixed-origin and excluded from CI/release", () => {
+  assert.match(
+    packageJson.scripts["trader:demo"] ?? "",
+    /node --import tsx src\/cli\/trader-demo\.ts/,
+  );
+  assert.doesNotMatch(releaseScript, /trader:demo|src\/cli\/trader-demo\.ts/);
+  assert.doesNotMatch(ciWorkflow, /trader:demo|src\/cli\/trader-demo\.ts/);
+  assert.match(traderDemoCli, /load\("demo"\)/);
+  assert.match(traderDemoCli, /timeInForce.*GTC|TIME_IN_FORCE=\$\{/u);
+  assert.doesNotMatch(
+    traderDemoCli,
+    /testnet|mainnet|api-testnet\.bybit\.com|api\.bybit\.com/iu,
+  );
+  assert.doesNotMatch(
+    traderDemoCli,
+    /--environment|--time-in-force|--confirm-demo|--report/iu,
+  );
 });

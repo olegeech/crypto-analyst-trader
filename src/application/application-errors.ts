@@ -27,13 +27,22 @@ export interface DemoEntryFailure {
   readonly domainCode?: DomainErrorCode;
 }
 
+function safeDomainMessage(code: DomainErrorCode): string {
+  return `Demo application stopped at the ${code} safety gate.`;
+}
+
+function safeExchangeMessage(error: ExchangeExecutionFailure): string {
+  const operation = error.operation ?? "exchange";
+  return `Bybit Demo ${operation} returned a classified ${error.kind} result.`;
+}
+
 export function failureFromDomain(
   error: DomainError,
   nextAction = "inspect the exact Demo state and retry when safe",
 ): DemoEntryFailure {
   return Object.freeze({
     reasonCode: error.code,
-    message: error.message,
+    message: safeDomainMessage(error.code),
     nextAction,
     domainCode: error.code,
   });
@@ -50,7 +59,7 @@ export function failureFromExchange(
         : "inspect the sanitized Demo failure and correct the precondition";
   return Object.freeze({
     reasonCode: `EXCHANGE_${error.kind.toUpperCase()}`,
-    message: error.message,
+    message: safeExchangeMessage(error),
     nextAction,
   });
 }
@@ -62,6 +71,7 @@ export function exitCodeForFailure(failure: DemoEntryFailure): number {
     case "INVALID_IDENTIFIER":
       return DEMO_ENTRY_EXIT_CODES.INVALID_INPUT;
     case "RUN_LEASE_HELD":
+    case "RUN_LEASE_LOST":
     case "HALT_ACTIVE":
     case "UNRESOLVED_STATE":
     case "UNRESOLVED_RECONCILIATION":
@@ -77,6 +87,9 @@ export function exitCodeForFailure(failure: DemoEntryFailure): number {
     case "CAPABILITY_UNSUPPORTED":
     case "STALE_EVIDENCE":
     case "INCOMPATIBLE_EVIDENCE":
+    case "PERSISTENCE_ENVIRONMENT":
+    case "PERSISTENCE_RUNTIME":
+    case "PERSISTENCE_SCHEMA":
     case "NOT_READY":
       return DEMO_ENTRY_EXIT_CODES.NOT_READY;
     default:

@@ -399,7 +399,12 @@ export class DemoEntryUseCase {
       instrument: parsed.value.symbol,
     });
     if (!state.ok)
-      return fail(domainError("UNRESOLVED_STATE", state.error.message));
+      return fail(
+        domainError(
+          "UNRESOLVED_STATE",
+          failureFromExchange(state.error).message,
+        ),
+      );
     const plan = buildDemoEntryPlan(parsed.value, state.value, this.clock);
     if (!plan.ok) {
       const released = this.persistence.releaseLease(authority);
@@ -506,7 +511,7 @@ export class DemoEntryUseCase {
       if (!set.ok) {
         const raised = this.persistence.raiseHalt(
           authority,
-          set.error.message,
+          failureFromExchange(set.error).message,
           this.clock.now(),
         );
         if (!raised.ok) return raised;
@@ -535,7 +540,12 @@ export class DemoEntryUseCase {
         instrument: review.input.symbol,
       });
       if (!reread.ok)
-        return fail(domainError("UNRESOLVED_STATE", reread.error.message));
+        return fail(
+          domainError(
+            "UNRESOLVED_STATE",
+            failureFromExchange(reread.error).message,
+          ),
+        );
       const rereadValidation = sameApprovedAuthority(
         review.state,
         reread.value,
