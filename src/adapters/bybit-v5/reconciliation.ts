@@ -5,6 +5,7 @@ import type {
   ExchangeOrderObservation,
   ExchangeResult,
 } from "../../ports/exchange-execution.js";
+import { createExchangeOrder } from "../../domain/execution/exchange-order.js";
 import {
   exchangeFailure,
   exchangeSuccess,
@@ -59,13 +60,13 @@ function orderObservation(
   observedAt: UtcTimestamp,
   source: string,
 ): ExchangeOrderObservation {
-  return Object.freeze({
+  const observation = createExchangeOrder({
     exchangeOrderId: record.exchangeOrderId,
     clientOrderId: record.clientOrderId,
     instrument: record.instrument,
     side: record.side,
-    requestedQuantity: record.requestedQuantity,
-    filledQuantity: record.filledQuantity,
+    requestedQuantity: record.requestedQuantity.toString(),
+    filledQuantity: record.filledQuantity.toString(),
     status: record.status,
     observedAt,
     source,
@@ -74,11 +75,15 @@ function orderObservation(
       : { parentOrderLinkId: record.parentOrderLinkId }),
     ...(record.averagePrice === undefined
       ? {}
-      : { averagePrice: record.averagePrice }),
+      : { averagePrice: record.averagePrice.toString() }),
     ...(record.protectionType === undefined
       ? {}
       : { protectionType: record.protectionType }),
   });
+  if (!observation.ok) {
+    throw new Error("normalized Bybit order observation is invalid");
+  }
+  return observation.value;
 }
 
 function fillObservation(

@@ -581,6 +581,7 @@ export function mapPosition(
 function orderStatus(value: string, label: string): ExchangeOrderStatus {
   switch (value) {
     case "New":
+    case "Untriggered":
       return "open";
     case "PartiallyFilled":
       return "partially-filled";
@@ -607,7 +608,6 @@ export function mapOrderRecords(
       invalid(`Bybit ${label} response ignored the selected-symbol filter.`);
     }
     const exchangeOrderId = text(record, "orderId", label);
-    const clientOrderId = text(record, "orderLinkId", label);
     const positionIdx = positionIndex(record, label);
     const requestedQuantity = positiveDecimal(record, "qty", label);
     const filledQuantity = nonNegativeDecimal(record, "cumExecQty", label);
@@ -626,6 +626,12 @@ export function mapOrderRecords(
     const price = optionalPositiveDecimal(record, "price", label);
     const averagePrice = optionalPositiveDecimal(record, "avgPrice", label);
     const protectionType = optionalProtectionType(record, label);
+    const clientOrderId =
+      record.orderLinkId === "" &&
+      parentOrderLinkId !== undefined &&
+      protectionType !== undefined
+        ? parentOrderLinkId
+        : text(record, "orderLinkId", label);
     return {
       exchangeOrderId,
       clientOrderId,

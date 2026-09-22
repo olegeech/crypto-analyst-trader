@@ -164,6 +164,24 @@ function observationFact(
   });
 }
 
+function sameStableObservation(
+  left: ExchangeOrderObservation,
+  right: ExchangeOrderObservation,
+): boolean {
+  return (
+    left.exchangeOrderId === right.exchangeOrderId &&
+    left.clientOrderId === right.clientOrderId &&
+    left.instrument === right.instrument &&
+    left.side === right.side &&
+    left.requestedQuantity.toString() === right.requestedQuantity.toString() &&
+    left.filledQuantity.toString() === right.filledQuantity.toString() &&
+    left.status === right.status &&
+    left.parentOrderLinkId === right.parentOrderLinkId &&
+    left.averagePrice?.toString() === right.averagePrice?.toString() &&
+    left.protectionType === right.protectionType
+  );
+}
+
 function appendObservationFact(
   persistence: PersistencePort,
   lineageId: string,
@@ -172,6 +190,21 @@ function appendObservationFact(
 ): Result<void> {
   const fact = observationFact(persistence, lineageId, role, observation);
   if (!fact.ok) return fact;
+  const existing = persistence.readFact(
+    fact.value.factKind,
+    fact.value.eventIdentity,
+  );
+  if (!existing.ok) return existing;
+  if (existing.value !== undefined) {
+    const stored = rehydrateArtifact(
+      "exchange-order",
+      existing.value.artifact.envelope,
+    );
+    if (!stored.ok) return stored;
+    // observedAt is the local observation time, not exchange identity. A
+    // retry of the same stable exchange evidence must remain idempotent.
+    if (sameStableObservation(stored.value, observation)) return ok(undefined);
+  }
   const stored = persistence.ingestFact(fact.value);
   return stored.ok ? ok(undefined) : stored;
 }
@@ -502,6 +535,18 @@ async function reconcileRun(
 
   const storedAttempt = attemptRecord.attempt;
   const binding = bindingFor(run, storedAttempt.attemptId);
+  if (
+    storedAttempt.exchangeOrderId !== undefined &&
+    binding?.exchangeOrderId !== undefined &&
+    storedAttempt.exchangeOrderId !== binding.exchangeOrderId
+  ) {
+    return fail(
+      domainError(
+        "OWNERSHIP_MISMATCH",
+        "durable attempt and identity binding disagree on the exchange order",
+      ),
+    );
+  }
   let attempt = storedAttempt;
   let exchangeOrderId =
     storedAttempt.exchangeOrderId ?? binding?.exchangeOrderId;
@@ -604,6 +649,14 @@ async function reconcileRun(
     return fail(
       domainError("UNRESOLVED_STATE", "order observation is missing"),
     );
+  }
+  if (attempt.exchangeOrderId === undefined && exchangeOrderId !== undefined) {
+    const enrichedAttempt = createExecutionAttempt({
+      ...attempt,
+      exchangeOrderId,
+    });
+    if (!enrichedAttempt.ok) return enrichedAttempt;
+    attempt = enrichedAttempt.value;
   }
   const validOrder = validateCandidate(order, run.plan, attempt);
   if (!validOrder.ok) {

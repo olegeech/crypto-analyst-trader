@@ -291,15 +291,30 @@ test("order mapping preserves an exact attached-protection parent link", () => {
     response({
       list: [
         order({
+          orderLinkId: "",
           parentOrderLinkId: "entry-client",
           stopOrderType: "TakeProfit",
+          orderStatus: "Untriggered",
         }),
       ],
     }),
     "DOGEUSDT",
   );
+  assert.equal(mapped?.clientOrderId, "entry-client");
   assert.equal(mapped?.parentOrderLinkId, "entry-client");
   assert.equal(mapped?.protectionType, "take-profit");
+  assert.equal(mapped?.status, "open");
+});
+
+test("ordinary orders with an empty client identity still fail closed", () => {
+  assert.throws(
+    () =>
+      mapOrderRecords(
+        response({ list: [order({ orderLinkId: "" })] }),
+        "DOGEUSDT",
+      ),
+    BybitReadMappingError,
+  );
 });
 
 test("position leverage is mandatory and one-way rows are unambiguous", () => {

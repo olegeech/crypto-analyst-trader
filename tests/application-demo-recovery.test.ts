@@ -355,3 +355,73 @@ test("restart recovery rejects a mismatched late candidate without binding", asy
   assert.equal(unwrap(store.readHalt()).active, true);
   store.close();
 });
+
+test("recovery retries the same exchange evidence across observation times", async () => {
+  const root = mkdtempSync(join(tmpdir(), "demo-recovery-retry-"));
+  const databasePath = join(root, "execution.db");
+  const runId = "retry-observation";
+  const lineageId = seedUnboundAttempt(databasePath, runId);
+  const clock = unwrap(fixedClock("2026-09-19T10:00:01Z"));
+  const store = openStoreAt(clock, databasePath);
+  const authority = unwrap(
+    store.acquireLease({
+      scope: store.scope,
+      ownerRunId: "retry-recovery",
+      now: clock.now(),
+      ttlMs: 60_000,
+    }),
+  );
+  const orderAtFirstRead = unwrap(
+    createExchangeOrder({
+      exchangeOrderId: "retry-bound-order",
+      clientOrderId: `${runId}-client`,
+      instrument: "DOGEUSDT",
+      side: "buy",
+      requestedQuantity: "57",
+      filledQuantity: "0",
+      status: "open",
+      observedAt: "2026-09-19T10:00:05.000Z",
+      source: "fixture/retry-recovery",
+    }),
+  );
+  const orderAtSecondRead = unwrap(
+    createExchangeOrder({
+      exchangeOrderId: orderAtFirstRead.exchangeOrderId,
+      clientOrderId: orderAtFirstRead.clientOrderId,
+      instrument: orderAtFirstRead.instrument,
+      side: orderAtFirstRead.side,
+      requestedQuantity: orderAtFirstRead.requestedQuantity.toString(),
+      filledQuantity: orderAtFirstRead.filledQuantity.toString(),
+      status: orderAtFirstRead.status,
+      observedAt: "2026-09-19T10:00:06.000Z",
+      source: "fixture/retry-recovery-history",
+    }),
+  );
+
+  const first = await recoverPriorDemoRuns({
+    exchange: exchangeThatObserves(orderAtFirstRead),
+    persistence: store,
+    authority,
+    clock,
+  });
+  const second = await recoverPriorDemoRuns({
+    exchange: exchangeThatObserves(orderAtSecondRead),
+    persistence: store,
+    authority,
+    clock,
+  });
+
+  assert.equal(first.ok, true);
+  assert.equal(
+    second.ok,
+    true,
+    second.ok ? undefined : `${second.error.code}: ${second.error.message}`,
+  );
+  if (second.ok) {
+    assert.equal(second.value.blockedLineages, 1);
+    assert.deepEqual(second.value.unresolvedLineages, [lineageId]);
+  }
+  assert.equal(unwrap(store.readRun(lineageId))?.reconciliations.length, 2);
+  assert.equal(unwrap(store.readHalt()).active, true);
+  store.close();
+});

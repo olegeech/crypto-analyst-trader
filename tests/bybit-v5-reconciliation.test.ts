@@ -6,6 +6,7 @@ import {
   listOwnedFills,
   reconcileOrder,
 } from "../src/adapters/bybit-v5/reconciliation.js";
+import { isProducedExchangeOrder } from "../src/domain/execution/exchange-order-proof.js";
 import type { BybitResponse } from "../src/adapters/bybit-v5/transport.js";
 
 const observedAt = "2026-09-21T10:00:00.000Z" as never;
@@ -85,6 +86,7 @@ test("reconciliation prefers realtime and normalizes terminal order state", asyn
   const result = await reconcileOrder(client, lookup, observedAt);
   assert.equal(result.ok, true);
   if (result.ok) {
+    assert.equal(isProducedExchangeOrder(result.value), true);
     assert.equal(result.value.status, "filled");
     assert.equal(result.value.filledQuantity.toString(), "57");
     assert.equal(result.value.source, "bybit-demo/realtime");
