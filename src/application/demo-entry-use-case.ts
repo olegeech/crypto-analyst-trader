@@ -208,17 +208,59 @@ function scopeEqual(
   );
 }
 
+function validateExecutionAuthority(
+  state: ExchangeReadState,
+  scope: PersistencePort["scope"],
+): Result<void> {
+  if (
+    !scopeEqual(state.account.scope, scope) ||
+    state.accountMetadata.accountId !== scope.accountId ||
+    state.accountMetadata.userId !== scope.accountId
+  ) {
+    return fail(
+      domainError(
+        "PERSISTENCE_ENVIRONMENT",
+        "authenticated Demo identity or scope does not match the journal",
+      ),
+    );
+  }
+  const apiKey = state.accountMetadata.apiKey;
+  if (apiKey.readOnly) {
+    return fail(
+      domainError("CAPABILITY_UNSUPPORTED", "Demo API key is read-only"),
+    );
+  }
+  if (!apiKey.contractTrade.order || !apiKey.contractTrade.position) {
+    return fail(
+      domainError(
+        "CAPABILITY_UNSUPPORTED",
+        "Demo API key lacks ContractTrade Order and Position permissions",
+      ),
+    );
+  }
+  if (apiKey.wallet.withdraw || apiKey.wallet.transfer) {
+    return fail(
+      domainError(
+        "CAPABILITY_UNSUPPORTED",
+        "Demo API key has a prohibited wallet permission",
+      ),
+    );
+  }
+  return ok(undefined);
+}
+
 function capabilitiesValid(
   state: ExchangeReadState,
   plan: DemoEntryPlan,
+  clock: Clock,
 ): Result<void> {
   for (const requirement of plan.plan.material.requiredCapabilities) {
-    const observation = state.capabilities.find(
+    const observations = state.capabilities.filter(
       (candidate) =>
         candidate.capability === requirement.capability &&
         scopeEqual(candidate.scope, requirement.scope),
     );
-    if (observation === undefined) {
+    if (observations.length === 0) {
       return fail(
         domainError(
           "CAPABILITY_UNKNOWN",
@@ -226,7 +268,16 @@ function capabilitiesValid(
         ),
       );
     }
-    const trusted = requireTrustedCapability(observation, requirement);
+    if (observations.length !== 1) {
+      return fail(
+        domainError(
+          "INCOMPATIBLE_EVIDENCE",
+          `conflicting fresh capability evidence exists for ${requirement.capability}`,
+        ),
+      );
+    }
+    const observation = observations[0]!;
+    const trusted = requireTrustedCapability(observation, requirement, clock);
     if (!trusted.ok) return trusted;
   }
   return ok(undefined);
@@ -236,6 +287,7 @@ function sameApprovedAuthority(
   initial: ExchangeReadState,
   current: ExchangeReadState,
   plan: DemoEntryPlan,
+  clock: Clock,
   allowLeverageChange = false,
 ): Result<void> {
   if (
@@ -256,7 +308,7 @@ function sameApprovedAuthority(
       ),
     );
   }
-  return capabilitiesValid(current, plan);
+  return capabilitiesValid(current, plan, clock);
 }
 
 function attemptIdFor(
@@ -377,11 +429,76 @@ export class DemoEntryUseCase {
     return ok({ authority, state: undefined });
   }
 
+  private fenceForWrite(
+    authority: LeaseAuthority,
+    review: DemoEntryReview,
+  ): Result<UtcTimestamp> {
+    const now = this.clock.now();
+    if (Date.parse(now) >= Date.parse(review.approvalExpiresAt)) {
+      return fail(
+        domainError(
+          "PLAN_EXPIRED",
+          "approved Demo plan expired before the exchange write",
+        ),
+      );
+    }
+    const halt = this.persistence.readHalt();
+    if (!halt.ok) return halt;
+    if (halt.value.active || halt.value.reconciliationRequired) {
+      return fail(
+        domainError(
+          "HALT_ACTIVE",
+          "HALT or reconciliation-required state blocks the exchange write",
+        ),
+      );
+    }
+    const renewed = this.persistence.renewLease({
+      scope: this.persistence.scope,
+      ownerRunId: authority.ownerRunId,
+      authority,
+      now,
+      ttlMs: this.leaseTtlMs,
+    });
+    if (!renewed.ok) return renewed;
+    if (renewed.value.reconciliationRequired) {
+      return fail(
+        domainError(
+          "UNRESOLVED_STATE",
+          "current lease still requires reconciliation",
+        ),
+      );
+    }
+    return ok(now);
+  }
+
+  private releasePreparationLease(authority: LeaseAuthority): Result<void> {
+    const released = this.persistence.releaseLease(authority);
+    if (!released.ok && released.error.code === "RUN_LEASE_LOST") {
+      return ok(undefined);
+    }
+    return released;
+  }
+
   public async prepare(input: unknown): Promise<Result<DemoEntryReview>> {
     const parsed = createDemoEntryInput(input);
     if (!parsed.ok) return parsed;
     const runId = runIdForInput(parsed.value);
     if (!runId.ok) return runId;
+    const preflight = await this.exchange.readState({
+      instrument: parsed.value.symbol,
+    });
+    if (!preflight.ok)
+      return fail(
+        domainError(
+          "UNRESOLVED_STATE",
+          failureFromExchange(preflight.error).message,
+        ),
+      );
+    const preflightAuthority = validateExecutionAuthority(
+      preflight.value,
+      this.persistence.scope,
+    );
+    if (!preflightAuthority.ok) return preflightAuthority;
     const acquired = await this.acquireAndRecover(runId.value);
     if (!acquired.ok) return acquired;
     const authority = acquired.value.authority;
@@ -398,13 +515,25 @@ export class DemoEntryUseCase {
     const state = await this.exchange.readState({
       instrument: parsed.value.symbol,
     });
-    if (!state.ok)
+    if (!state.ok) {
+      const released = this.releasePreparationLease(authority);
+      if (!released.ok) return released;
       return fail(
         domainError(
           "UNRESOLVED_STATE",
           failureFromExchange(state.error).message,
         ),
       );
+    }
+    const stateAuthority = validateExecutionAuthority(
+      state.value,
+      this.persistence.scope,
+    );
+    if (!stateAuthority.ok) {
+      const released = this.releasePreparationLease(authority);
+      if (!released.ok) return released;
+      return stateAuthority;
+    }
     const plan = buildDemoEntryPlan(parsed.value, state.value, this.clock);
     if (!plan.ok) {
       const released = this.persistence.releaseLease(authority);
@@ -413,8 +542,12 @@ export class DemoEntryUseCase {
       return plan;
     }
     const expires = addMilliseconds(this.clock.now(), this.approvalTtlMs);
-    if (!expires.ok) return expires;
-    const released = this.persistence.releaseLease(authority);
+    if (!expires.ok) {
+      const released = this.releasePreparationLease(authority);
+      if (!released.ok) return released;
+      return expires;
+    }
+    const released = this.releasePreparationLease(authority);
     if (!released.ok) return released;
     return ok(
       Object.freeze({
@@ -440,6 +573,27 @@ export class DemoEntryUseCase {
         nextAction: "no exchange write was attempted",
       });
     }
+    const preflight = await this.exchange.readState({
+      instrument: review.input.symbol,
+    });
+    if (!preflight.ok) {
+      return outcome(review, identityState, {
+        verdict: "HALTED",
+        reasonCode: `EXCHANGE_${preflight.error.kind.toUpperCase()}`,
+        nextAction: failureFromExchange(preflight.error).nextAction,
+      });
+    }
+    const preflightAuthority = validateExecutionAuthority(
+      preflight.value,
+      this.persistence.scope,
+    );
+    if (!preflightAuthority.ok) {
+      return outcome(review, preflight.value, {
+        verdict: "NOT_READY",
+        reasonCode: preflightAuthority.error.code,
+        nextAction: "stop and correct the authenticated Demo account scope",
+      });
+    }
     const acquired = await this.acquireAndRecover(review.runId);
     if (!acquired.ok) return acquired;
     const authority = acquired.value.authority;
@@ -447,16 +601,40 @@ export class DemoEntryUseCase {
       instrument: review.input.symbol,
     });
     if (!beforeWrite.ok) {
+      const halt = this.persistence.raiseHalt(
+        authority,
+        failureFromExchange(beforeWrite.error).message,
+        this.clock.now(),
+      );
+      if (!halt.ok) return halt;
       return outcome(review, identityState, {
         verdict: "HALTED",
         reasonCode: `EXCHANGE_${beforeWrite.error.kind.toUpperCase()}`,
         nextAction: failureFromExchange(beforeWrite.error).nextAction,
       });
     }
+    const beforeWriteAuthority = validateExecutionAuthority(
+      beforeWrite.value,
+      this.persistence.scope,
+    );
+    if (!beforeWriteAuthority.ok) {
+      const halt = this.persistence.raiseHalt(
+        authority,
+        beforeWriteAuthority.error.message,
+        this.clock.now(),
+      );
+      if (!halt.ok) return halt;
+      return outcome(review, beforeWrite.value, {
+        verdict: "NOT_READY",
+        reasonCode: beforeWriteAuthority.error.code,
+        nextAction: "stop and correct the authenticated Demo account scope",
+      });
+    }
     const validated = sameApprovedAuthority(
       review.state,
       beforeWrite.value,
       review.plan,
+      this.clock,
     );
     if (!validated.ok) {
       const halt = this.persistence.raiseHalt(
@@ -504,6 +682,18 @@ export class DemoEntryUseCase {
 
     let current = beforeWrite.value;
     if (!isOne(current.leverage.effective)) {
+      const fenced = this.fenceForWrite(authority, review);
+      if (!fenced.ok) {
+        return outcome(review, current, {
+          verdict: fenced.error.code === "PLAN_EXPIRED" ? "DECLINED" : "HALTED",
+          reasonCode: fenced.error.code,
+          nextAction:
+            fenced.error.code === "PLAN_EXPIRED"
+              ? "prepare a fresh review and approve it before expiry"
+              : "reconcile the current lease and Demo state before retrying",
+          lineageId: lineage.value.lineageId,
+        });
+      }
       const set = await this.exchange.setLeverage({
         instrument: review.input.symbol,
         target: review.plan.leverage.target,
@@ -550,6 +740,7 @@ export class DemoEntryUseCase {
         review.state,
         reread.value,
         review.plan,
+        this.clock,
         true,
       );
       if (!rereadValidation.ok || !isOne(reread.value.leverage.effective)) {
@@ -584,6 +775,19 @@ export class DemoEntryUseCase {
       preparedAt: this.clock.now(),
     });
     if (!ownedIntent.ok) return ownedIntent;
+    const dispatchAt = this.fenceForWrite(authority, review);
+    if (!dispatchAt.ok) {
+      return outcome(review, current, {
+        verdict:
+          dispatchAt.error.code === "PLAN_EXPIRED" ? "DECLINED" : "HALTED",
+        reasonCode: dispatchAt.error.code,
+        nextAction:
+          dispatchAt.error.code === "PLAN_EXPIRED"
+            ? "prepare a fresh review and approve it before expiry"
+            : "reconcile the current lease and Demo state before retrying",
+        lineageId: lineage.value.lineageId,
+      });
+    }
     const acknowledgement = await this.exchange.createOrder({
       intent: review.plan.intent,
       clientOrderId: review.plan.clientOrderId,
@@ -605,7 +809,7 @@ export class DemoEntryUseCase {
       planHash: review.plan.plan.materialHash,
       intentId: review.plan.intent.intentId,
       clientOrderId: review.plan.clientOrderId,
-      submittedAt: this.clock.now(),
+      submittedAt: dispatchAt.value,
       acknowledgement: acknowledgement.ok
         ? acknowledgement.value.status
         : knownRejected

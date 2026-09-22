@@ -272,11 +272,17 @@ test("account-key mapping fails closed for identity, read-only and dangerous per
 test("order mapping preserves an exact attached-protection parent link", () => {
   const [mapped] = mapOrderRecords(
     response({
-      list: [order({ parentOrderLinkId: "entry-client" })],
+      list: [
+        order({
+          parentOrderLinkId: "entry-client",
+          stopOrderType: "TakeProfit",
+        }),
+      ],
     }),
     "DOGEUSDT",
   );
   assert.equal(mapped?.parentOrderLinkId, "entry-client");
+  assert.equal(mapped?.protectionType, "take-profit");
 });
 
 test("position leverage is mandatory and one-way rows are unambiguous", () => {
@@ -289,7 +295,8 @@ test("position leverage is mandatory and one-way rows are unambiguous", () => {
         "DOGEUSDT",
       ),
     (error: unknown) =>
-      error instanceof BybitReadMappingError && error.kind === "invalid-response",
+      error instanceof BybitReadMappingError &&
+      error.kind === "invalid-response",
   );
   assert.throws(
     () =>

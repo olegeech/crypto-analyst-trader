@@ -7,6 +7,8 @@ import test from "node:test";
 import { openSqlitePersistence } from "../src/adapters/sqlite/sqlite-persistence.js";
 import { recoverPriorDemoRuns } from "../src/application/demo-recovery.js";
 import { createApproval } from "../src/domain/execution/approval.js";
+import { createExecutionAttempt } from "../src/domain/execution/execution-attempt.js";
+import { createExchangeOrder } from "../src/domain/execution/exchange-order.js";
 import {
   addMilliseconds,
   fixedClock,
@@ -15,6 +17,7 @@ import {
 import type { Result } from "../src/domain/shared/result.js";
 import type {
   ExchangeExecutionPort,
+  ExchangeOrderObservation,
   ExchangeResult,
 } from "../src/ports/exchange-execution.js";
 import type {
@@ -43,10 +46,14 @@ function createScope(): PersistenceScope {
 
 function openStore(clock: Clock): PersistencePort {
   const root = mkdtempSync(join(tmpdir(), "demo-recovery-"));
+  return openStoreAt(clock, join(root, "execution.db"));
+}
+
+function openStoreAt(clock: Clock, databasePath: string): PersistencePort {
   return unwrap(
     openSqlitePersistence({
       environment: "demo",
-      databasePath: join(root, "execution.db"),
+      databasePath,
       runtime,
       clock,
       scope: createScope(),
@@ -77,6 +84,84 @@ function exchangeThatCannotWrite(
     setLeverage: async () => unavailable(),
     cancelOrder: async () => unavailable(),
   };
+}
+
+function exchangeThatObserves(
+  observation: ExchangeOrderObservation,
+): ExchangeExecutionPort {
+  return {
+    readState: async () => unavailable(),
+    createOrder: async () => unavailable(),
+    observeOrder: async () => ({ ok: true, value: observation }),
+    listAttachedProtection: async () => ({ ok: true, value: [] }),
+    listFills: async () => ({ ok: true, value: [] }),
+    setLeverage: async () => unavailable(),
+    cancelOrder: async () => unavailable(),
+  };
+}
+
+function seedUnboundAttempt(databasePath: string, runId: string): string {
+  const clock = unwrap(fixedClock("2026-09-19T10:00:00Z"));
+  const store = openStoreAt(clock, databasePath);
+  const plan = createPlanFixture();
+  const lineage = unwrap(
+    store.prepareLineage({
+      scope: store.scope,
+      runId,
+      plan,
+      approval: unwrap(
+        createApproval({
+          approvalId: `${runId}-approval`,
+          planHash: plan.materialHash,
+          actor: "operator",
+          approvedAt: clock.now(),
+          expiresAt: unwrap(addMilliseconds(clock.now(), 300_000)),
+        }),
+      ),
+      preparedAt: clock.now(),
+    }),
+  );
+  const authority = unwrap(
+    store.acquireLease({
+      scope: store.scope,
+      ownerRunId: runId,
+      now: clock.now(),
+      ttlMs: 1,
+    }),
+  );
+  const intent = unwrap(
+    store.prepareOwnedIntent({
+      authority,
+      lineageId: lineage.lineageId,
+      intentId: plan.material.orderIntents[0]!.intentId,
+      planHash: plan.materialHash,
+      clientOrderId: `${runId}-client`,
+      now: clock.now(),
+      preparedAt: clock.now(),
+    }),
+  );
+  const attempt = unwrap(
+    createExecutionAttempt({
+      attemptId: `${runId}-attempt`,
+      planHash: plan.materialHash,
+      intentId: intent.intentId,
+      clientOrderId: intent.clientOrderId,
+      submittedAt: clock.now(),
+      acknowledgement: "accepted",
+      terminalStatus: "unverified",
+    }),
+  );
+  unwrap(
+    store.appendAttempt({
+      authority,
+      lineageId: lineage.lineageId,
+      attempt,
+      dispatchedAt: clock.now(),
+    }),
+  );
+  unwrap(store.raiseHalt(authority, "fixture restart recovery", clock.now()));
+  store.close();
+  return lineage.lineageId;
 }
 
 test("recovery clears a stale HALT when the exact Demo scope has no runs", async () => {
@@ -167,5 +252,106 @@ test("recovery blocks a plan-only lineage when fresh exchange state is unavailab
   assert.equal(reads, 2);
   assert.equal(unwrap(store.readHalt()).active, true);
   assert.equal(unwrap(store.readRuns()).length, 1);
+  store.close();
+});
+
+test("restart recovery late-binds one exact exchange identity and retains HALT", async () => {
+  const root = mkdtempSync(join(tmpdir(), "demo-recovery-restart-"));
+  const databasePath = join(root, "execution.db");
+  const runId = "restart-binding";
+  const lineageId = seedUnboundAttempt(databasePath, runId);
+  const clock = unwrap(fixedClock("2026-09-19T10:00:01Z"));
+  const store = openStoreAt(clock, databasePath);
+  const authority = unwrap(
+    store.acquireLease({
+      scope: store.scope,
+      ownerRunId: "restart-recovery",
+      now: clock.now(),
+      ttlMs: 60_000,
+    }),
+  );
+  const observedAt = unwrap(fixedClock("2026-09-19T10:00:05Z")).now();
+  const order = unwrap(
+    createExchangeOrder({
+      exchangeOrderId: "restart-bound-order",
+      clientOrderId: `${runId}-client`,
+      instrument: "DOGEUSDT",
+      side: "buy",
+      requestedQuantity: "57",
+      filledQuantity: "0",
+      status: "open",
+      observedAt,
+      source: "fixture/restart-recovery",
+    }),
+  );
+
+  const result = await recoverPriorDemoRuns({
+    exchange: exchangeThatObserves(order),
+    persistence: store,
+    authority,
+    clock,
+  });
+
+  assert.equal(result.ok, true);
+  if (result.ok) {
+    assert.equal(result.value.safeToProceed, false);
+    assert.equal(result.value.blockedLineages, 1);
+    assert.deepEqual(result.value.unresolvedLineages, [lineageId]);
+  }
+  const run = unwrap(store.readRun(lineageId));
+  assert.ok(run);
+  assert.equal(run.identityBindings[0]?.exchangeOrderId, "restart-bound-order");
+  assert.equal(run.reconciliations.at(-1)?.result.status, "PENDING");
+  assert.equal(unwrap(store.readHalt()).active, true);
+  store.close();
+});
+
+test("restart recovery rejects a mismatched late candidate without binding", async () => {
+  const root = mkdtempSync(join(tmpdir(), "demo-recovery-mismatch-"));
+  const databasePath = join(root, "execution.db");
+  const runId = "restart-mismatch";
+  const lineageId = seedUnboundAttempt(databasePath, runId);
+  const clock = unwrap(fixedClock("2026-09-19T10:00:01Z"));
+  const store = openStoreAt(clock, databasePath);
+  const authority = unwrap(
+    store.acquireLease({
+      scope: store.scope,
+      ownerRunId: "restart-mismatch-recovery",
+      now: clock.now(),
+      ttlMs: 60_000,
+    }),
+  );
+  const observedAt = unwrap(fixedClock("2026-09-19T10:00:05Z")).now();
+  const mismatchedOrder = unwrap(
+    createExchangeOrder({
+      exchangeOrderId: "mismatched-order",
+      clientOrderId: `${runId}-client`,
+      instrument: "DOGEUSDT",
+      side: "buy",
+      requestedQuantity: "58",
+      filledQuantity: "0",
+      status: "open",
+      observedAt,
+      source: "fixture/restart-recovery",
+    }),
+  );
+
+  const result = await recoverPriorDemoRuns({
+    exchange: exchangeThatObserves(mismatchedOrder),
+    persistence: store,
+    authority,
+    clock,
+  });
+
+  assert.equal(result.ok, true);
+  if (result.ok) {
+    assert.equal(result.value.safeToProceed, false);
+    assert.deepEqual(result.value.unresolvedLineages, [lineageId]);
+  }
+  const run = unwrap(store.readRun(lineageId));
+  assert.ok(run);
+  assert.deepEqual(run.identityBindings, []);
+  assert.equal(run.reconciliations.at(-1)?.result.status, "UNRESOLVED");
+  assert.equal(unwrap(store.readHalt()).active, true);
   store.close();
 });

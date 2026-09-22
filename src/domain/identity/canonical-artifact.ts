@@ -381,6 +381,7 @@ const exchangeOrderSchema = object(
     "source",
     "parentOrderLinkId",
     "averagePrice",
+    "protectionType",
   ],
   {},
   [

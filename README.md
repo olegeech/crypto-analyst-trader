@@ -90,6 +90,7 @@ read from a repository `.env` file by the authenticated path.
 Repository-native skills:
 
 - `$daily-rebalance`: run the released daily operator path;
+- `npm run trader:demo -- --symbol <SYMBOL> --side <buy|sell> --notional <DECIMAL> (--take-profit-percent <DECIMAL> | --take-profit-price <DECIMAL>)`: run one explicitly approved, Demo-only managed entry;
 - `$test-current-feature-pr`: validate an exact pull request without mainnet
   writes;
 - `$develop-next-roadmap-story`: select and deliver the next ready roadmap

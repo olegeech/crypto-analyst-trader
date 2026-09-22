@@ -79,6 +79,8 @@ export function exitCodeForFailure(failure: DemoEntryFailure): number {
     case "EXCHANGE_AMBIGUOUS":
     case "EXCHANGE_OWNERSHIP":
       return DEMO_ENTRY_EXIT_CODES.HALTED;
+    case "EXCHANGE_PRECONDITION":
+      return DEMO_ENTRY_EXIT_CODES.NOT_READY;
     case "PLAN_EXPIRED":
     case "INVALID_APPROVAL":
       return DEMO_ENTRY_EXIT_CODES.DECLINED;

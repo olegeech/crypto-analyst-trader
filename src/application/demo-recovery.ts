@@ -138,6 +138,9 @@ function observationFact(
     ...(observation.parentOrderLinkId === undefined
       ? {}
       : { parentOrderLinkId: observation.parentOrderLinkId }),
+    ...(observation.protectionType === undefined
+      ? {}
+      : { protectionType: observation.protectionType }),
   });
   if (!digest.ok) return digest;
   const factIdentity = `exchange-${role}-${lineageId}-${digest.value.slice(7, 23)}`;
@@ -260,47 +263,146 @@ function expectedAccounting(
   facts: readonly IngestionFact[],
   run: PersistenceRunSnapshot,
 ): boolean {
+  const ownedIntent = run.ownedIntents[0];
+  const intent =
+    ownedIntent === undefined
+      ? undefined
+      : run.plan.material.orderIntents.find(
+          (candidate) => candidate.intentId === ownedIntent.intentId,
+        );
+  const exchangeOrderId = latestReconciliation(run)?.exchangeOrderId;
+  if (
+    ownedIntent === undefined ||
+    intent === undefined ||
+    exchangeOrderId === undefined
+  ) {
+    return false;
+  }
+  const parentCandidates: ExchangeOrderObservation[] = [];
+  for (const fact of facts) {
+    if (
+      fact.factKind !== "exchange-observation" ||
+      !fact.eventIdentity.startsWith(
+        `exchange-parent-${run.lineage.lineageId}-`,
+      )
+    ) {
+      continue;
+    }
+    const parent = rehydrateArtifact("exchange-order", fact.artifact.envelope);
+    if (
+      parent.ok &&
+      parent.value.exchangeOrderId === exchangeOrderId &&
+      parent.value.clientOrderId === ownedIntent.clientOrderId &&
+      parent.value.instrument === intent.instrument &&
+      parent.value.side === intent.side &&
+      parent.value.requestedQuantity.compare(intent.quantity) === 0
+    ) {
+      parentCandidates.push(parent.value);
+    }
+  }
+  const parent = parentCandidates.at(-1);
+  if (
+    parent === undefined ||
+    parent.status !== "filled" ||
+    !parent.filledQuantity.isPositive()
+  ) {
+    return false;
+  }
+
   const attemptIds = new Set(
-    run.attempts.map((attempt) => attempt.attempt.attemptId),
+    run.attempts
+      .filter((attempt) => attempt.attempt.intentId === ownedIntent.intentId)
+      .map((attempt) => attempt.attempt.attemptId),
   );
   const fillIds = new Set<string>();
+  let total = parent.filledQuantity.subtract(parent.filledQuantity);
   for (const fact of facts) {
     if (fact.factKind !== "fill") continue;
     const fill = rehydrateArtifact("fill", fact.artifact.envelope);
     if (
-      fill.ok &&
-      "attemptId" in fill.value &&
-      "fillId" in fill.value &&
-      typeof fill.value.attemptId === "string" &&
-      typeof fill.value.fillId === "string" &&
-      attemptIds.has(fill.value.attemptId)
-    )
-      fillIds.add(fill.value.fillId);
+      !fill.ok ||
+      !("attemptId" in fill.value) ||
+      !("exchangeOrderId" in fill.value) ||
+      !("instrument" in fill.value) ||
+      !("side" in fill.value) ||
+      !("fillId" in fill.value) ||
+      !("quantity" in fill.value) ||
+      !attemptIds.has(fill.value.attemptId) ||
+      fill.value.exchangeOrderId !== parent.exchangeOrderId ||
+      fill.value.instrument !== parent.instrument ||
+      fill.value.side !== parent.side ||
+      fillIds.has(fill.value.fillId)
+    ) {
+      continue;
+    }
+    fillIds.add(fill.value.fillId);
+    total = total.add(fill.value.quantity);
   }
-  if (fillIds.size === 0) return false;
-  return facts.some((fact) => {
-    if (fact.factKind !== "ledger-entry") return false;
+  if (fillIds.size === 0 || total.compare(parent.filledQuantity) !== 0) {
+    return false;
+  }
+  const ledgerReferences = new Set<string>();
+  for (const fact of facts) {
+    if (fact.factKind !== "ledger-entry") continue;
     const ledger = rehydrateArtifact("ledger-entry", fact.artifact.envelope);
-    return (
+    if (
       ledger.ok &&
       "kind" in ledger.value &&
       "referenceId" in ledger.value &&
       ledger.value.kind === "fill" &&
-      typeof ledger.value.referenceId === "string" &&
       fillIds.has(ledger.value.referenceId)
-    );
-  });
+    ) {
+      ledgerReferences.add(ledger.value.referenceId);
+    }
+  }
+  return [...fillIds].every((fillId) => ledgerReferences.has(fillId));
 }
 
 function expectedProtection(
   facts: readonly IngestionFact[],
-  lineageId: string,
+  run: PersistenceRunSnapshot,
 ): boolean {
-  return facts.some(
-    (fact) =>
-      fact.factKind === "exchange-observation" &&
-      fact.eventIdentity.includes(lineageId) &&
-      fact.eventIdentity.includes("protection"),
+  const ownedIntent = run.ownedIntents[0];
+  if (ownedIntent === undefined) return false;
+  const intent = run.plan.material.orderIntents.find(
+    (candidate) => candidate.intentId === ownedIntent.intentId,
+  );
+  if (intent === undefined) return false;
+  const expectedSide = intent.side === "buy" ? "sell" : "buy";
+  const eventPrefix = `exchange-protection-${run.lineage.lineageId}-`;
+  return facts.some((fact) => {
+    if (
+      fact.factKind !== "exchange-observation" ||
+      !fact.eventIdentity.startsWith(eventPrefix)
+    ) {
+      return false;
+    }
+    const child = rehydrateArtifact("exchange-order", fact.artifact.envelope);
+    return (
+      child.ok &&
+      child.value.parentOrderLinkId === ownedIntent.clientOrderId &&
+      child.value.instrument === intent.instrument &&
+      child.value.side === expectedSide &&
+      child.value.requestedQuantity.compare(intent.quantity) === 0 &&
+      child.value.protectionType === "take-profit" &&
+      child.value.status === "open" &&
+      child.value.filledQuantity.isZero()
+    );
+  });
+}
+
+function protectionMatchesEntry(
+  entry: ExchangeOrderObservation,
+  child: ExchangeOrderObservation,
+): boolean {
+  return (
+    child.parentOrderLinkId === entry.clientOrderId &&
+    child.instrument === entry.instrument &&
+    child.side === (entry.side === "buy" ? "sell" : "buy") &&
+    child.requestedQuantity.compare(entry.requestedQuantity) === 0 &&
+    child.protectionType === "take-profit" &&
+    child.status === "open" &&
+    child.filledQuantity.isZero()
   );
 }
 
@@ -544,7 +646,9 @@ async function reconcileRun(
       accountingOkay = false;
       protectionOkay = false;
     } else {
-      protectionOkay = protection.value.length > 0;
+      protectionOkay =
+        protection.value.length > 0 &&
+        protection.value.every((child) => protectionMatchesEntry(order, child));
       for (const child of protection.value) {
         const fact = appendObservationFact(
           dependencies.persistence,
@@ -650,8 +754,7 @@ async function allLineagesSafe(
     }
     if (
       result.status !== "FAILED" &&
-      (!expectedAccounting(facts, run) ||
-        !expectedProtection(facts, run.lineage.lineageId))
+      (!expectedAccounting(facts, run) || !expectedProtection(facts, run))
     ) {
       return false;
     }

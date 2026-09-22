@@ -93,11 +93,11 @@ test("reconciliation prefers realtime and normalizes terminal order state", asyn
 
 test("history is terminal fallback and cancelled-with-fill remains executable evidence", async () => {
   const client = makeClient((path) =>
-    path === "/v5/order/realtime"
-      ? response({ list: [] })
-      : response({
+    path === "/v5/order/history"
+      ? response({
           list: [order({ orderStatus: "Cancelled", cumExecQty: "12" })],
-        }),
+        })
+      : response({ list: [] }),
   );
   const result = await reconcileOrder(client, lookup, observedAt);
   assert.equal(result.ok, true);
@@ -161,11 +161,50 @@ test("realtime ambiguity does not fall through to history", async () => {
             }),
           ],
         })
-      : response({
-          list: [order({ orderStatus: "Filled", cumExecQty: "57" })],
-        }),
+      : response({ list: [] }),
   );
   const result = await reconcileOrder(client, lookup, observedAt);
   assert.equal(result.ok, false);
   if (!result.ok) assert.equal(result.error.kind, "ambiguous");
+});
+
+test("realtime, history and execution evidence must identify one consistent order", async () => {
+  const contradictory = await reconcileOrder(
+    makeClient((path) => {
+      if (path === "/v5/order/realtime") {
+        return response({
+          list: [order({ orderStatus: "New", cumExecQty: "0" })],
+        });
+      }
+      if (path === "/v5/order/history") {
+        return response({
+          list: [order({ orderStatus: "Filled", cumExecQty: "57" })],
+        });
+      }
+      return response({ list: [] });
+    }),
+    lookup,
+    observedAt,
+  );
+  assert.equal(contradictory.ok, false);
+  if (!contradictory.ok) assert.equal(contradictory.error.kind, "ambiguous");
+
+  const mismatchedExecution = await reconcileOrder(
+    makeClient((path) => {
+      if (path === "/v5/order/realtime") {
+        return response({ list: [order()] });
+      }
+      if (path === "/v5/execution/list") {
+        return response({
+          list: [execution({ orderId: "different-exchange-order" })],
+        });
+      }
+      return response({ list: [] });
+    }),
+    lookup,
+    observedAt,
+  );
+  assert.equal(mismatchedExecution.ok, false);
+  if (!mismatchedExecution.ok)
+    assert.equal(mismatchedExecution.error.kind, "ambiguous");
 });

@@ -164,15 +164,17 @@ function printExchangeFailure(
   const exitCode =
     error.kind === "ambiguous" || error.kind === "ownership"
       ? 5
-      : error.kind === "authentication" ||
-          error.kind === "permission" ||
-          error.kind === "configuration" ||
-          error.kind === "invalid-response" ||
-          error.kind === "transport" ||
-          error.kind === "rate-limited" ||
-          error.kind === "clock-skew"
+      : error.kind === "precondition"
         ? 4
-        : 1;
+        : error.kind === "authentication" ||
+            error.kind === "permission" ||
+            error.kind === "configuration" ||
+            error.kind === "invalid-response" ||
+            error.kind === "transport" ||
+            error.kind === "rate-limited" ||
+            error.kind === "clock-skew"
+          ? 4
+          : 1;
   return printFailure(
     output,
     failure(

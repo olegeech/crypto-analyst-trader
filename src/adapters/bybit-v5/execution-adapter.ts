@@ -203,6 +203,9 @@ function snapshots(
       ...(order.averagePrice === undefined
         ? {}
         : { averagePrice: order.averagePrice.toString() }),
+      ...(order.protectionType === undefined
+        ? {}
+        : { protectionType: order.protectionType }),
     });
     if (!observation.ok)
       throw new Error("normalized Demo open order is invalid");
@@ -371,6 +374,9 @@ export class BybitDemoExecutionAdapter implements ExchangeExecutionPort {
           ...(record.averagePrice === undefined
             ? {}
             : { averagePrice: record.averagePrice.toString() }),
+          ...(record.protectionType === undefined
+            ? {}
+            : { protectionType: record.protectionType }),
         });
         if (!observation.ok) {
           throw new Error("normalized Demo protection observation is invalid");

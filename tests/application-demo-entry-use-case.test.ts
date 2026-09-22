@@ -169,8 +169,8 @@ function state(clock: { now: () => UtcTimestamp }): ExchangeReadState {
       effective: decimal("1"),
     },
     accountMetadata: {
-      accountId: "account",
-      userId: "account",
+      accountId: "demo:account",
+      userId: "demo:account",
       apiKey: {
         readOnly: false,
         contractTrade: { order: true, position: true },
@@ -242,6 +242,9 @@ class FakeExchange implements ExchangeExecutionPort {
           ...(source.parentOrderLinkId === undefined
             ? {}
             : { parentOrderLinkId: source.parentOrderLinkId }),
+          ...(source.protectionType === undefined
+            ? {}
+            : { protectionType: source.protectionType }),
         }),
       ),
     };
@@ -265,6 +268,9 @@ class FakeExchange implements ExchangeExecutionPort {
             status: source.status,
             observedAt: source.observedAt,
             source: source.source,
+            ...(source.protectionType === undefined
+              ? {}
+              : { protectionType: source.protectionType }),
           }),
         ),
       ),
@@ -428,6 +434,7 @@ test("filled Demo entry requires exact protection and durable accounting before 
           status: "open",
           observedAt: clock.now(),
           source: "fixture/protection",
+          protectionType: "take-profit",
         }),
       ),
     ],

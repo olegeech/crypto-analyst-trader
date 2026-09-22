@@ -364,6 +364,47 @@ test("preflight failure is redacted and happens before SQLite opens", async () =
   assert.doesNotMatch(stream.text, /\u001b/);
 });
 
+test("classified exchange preconditions use the stable NOT_READY exit", async () => {
+  const stream = output();
+  const root = mkdtempSync(join(tmpdir(), "trader-demo-cli-precondition-"));
+  const result = await runTraderDemoCli(
+    [
+      "--symbol",
+      "DOGEUSDT",
+      "--side",
+      "buy",
+      "--notional",
+      "10",
+      "--take-profit-percent",
+      "3",
+    ],
+    {
+      output: stream,
+      input: tty(true),
+      credentialProvider: {
+        async load() {
+          return credentials();
+        },
+      },
+      createExchange: () =>
+        ({
+          readState: async () => ({
+            ok: false,
+            error: {
+              kind: "precondition",
+              message: "private exchange detail",
+              retry: "never",
+            },
+          }),
+        }) as unknown as ExchangeExecutionPort,
+      openPersistence: persistenceFactory(root, []),
+    },
+  );
+  assert.equal(result, 4);
+  assert.match(stream.text, /VERDICT=NOT_READY/);
+  assert.match(stream.text, /REASON_CODE=EXCHANGE_PRECONDITION/);
+});
+
 test("approved CLI flow is fixed to Demo Limit+GTC and leaves an owned open order", async () => {
   const clock = unwrap(fixedClock("2026-09-19T10:00:01.000Z"));
   const state = validState(clock);

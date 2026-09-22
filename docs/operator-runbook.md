@@ -52,6 +52,69 @@ read-only evidence while preserving the original `UNRESOLVED` result as
 unverified. Owned state is routed through the normal exact-plan recovery path;
 ambiguous state stops and requires the documented exchange-UI fallback.
 
+## Managed Demo entry (issue #80)
+
+The persistent managed-entry command is separate from both the adapter
+verification and the historical capability probe:
+
+```text
+npm run trader:demo -- --symbol <SYMBOL> --side <buy|sell> --notional <DECIMAL> \
+  --take-profit-percent <DECIMAL>
+```
+
+Use exactly one of `--take-profit-percent` or `--take-profit-price`; there is
+no implicit take-profit. The command is fixed to the Bybit Demo origin and
+dedicated Demo Keychain credentials. It rejects environment/origin selectors,
+alternate credential namespaces, automatic cleanup flags and
+`--time-in-force`. The managed entry is always `orderType=Limit` and
+`timeInForce=GTC`, and those values appear in the review before the one
+approval prompt.
+
+Before account-scoped lease or execution authority is opened, the command
+authenticates the key through `GET /v5/user/query-api`, proves the returned
+Demo `userID` against the configured account identity, requires write-capable
+`ContractTrade: Order` and `ContractTrade: Position` permissions, and rejects
+Withdraw or wallet-transfer permissions. An empty IP-binding list is shown as
+the warning `API_KEY_IP_UNBOUND`; it does not block Demo. Rotate or revoke a
+Demo key through the Keychain setup/removal procedure when needed.
+
+The selected symbol must be flat with no active selected-symbol order, and the
+operator must use an exclusive writer for the account. The review shows the
+normalized price, quantity, notional, take-profit, leverage diff, `Limit + GTC`,
+plan hash and derived client identity. After approval those values are
+immutable: authority, baseline, leverage, capability freshness, constraints
+and approval expiry are reread before the first write, but ticker movement
+alone never reprices or replans the approved limit.
+
+The stable terminal verdicts are `CONFIRMED_FILLED`, `CONFIRMED_OPEN`,
+`NOT_READY`, `DECLINED`, `HALTED` and `UNRESOLVED`. Shell exits are `0` for a
+confirmed result, `1` for an unexpected/internal failure, `2` for invalid
+input, `3` for decline or approval timeout, `4` for `NOT_READY`, and `5` for
+`HALTED` or `UNRESOLVED`; the detailed stable reason code is separate.
+
+An unexpired lease is never taken over: it returns `RUN_LEASE_HELD`. A valid
+expired/stale takeover reconciles every prior lineage in the exact scope before
+new planning. Pending, open or partial owned state keeps `HALT` active. A
+filled entry clears `HALT` only when exact ownership, durable accounting and
+exchange-proven TP attachment/protection establish `RECONCILED`; the expected
+open position is then normal managed state, not unexplained residual exposure.
+Missing, contradictory or ambiguous ownership/protection/accounting remains
+`UNRESOLVED` and keeps `HALT` active. Never blind-retry an ambiguous create,
+cancel an owned protection, flatten the position, or adopt a similar order.
+
+Late exchange-order binding is one-time and exact. Recovery gathers bounded
+realtime/history/execution evidence and binds only one internally consistent
+candidate matching the original client ID, symbol, side, requested quantity
+and ownership context. Zero candidates remain unresolved; multiple or
+contradictory candidates raise conflict/HALT. Current capability authority is
+fresh adapter evidence after restart; SQLite persists the plan and historical
+evidence but never rehydrates execution authority.
+
+The normal command prints sanitized terminal output and stores durable facts in
+the private SQLite journal. It does not create a report file by default. Any
+future explicit report mode must redact before writing and use restrictive file
+permissions.
+
 ## Bybit Demo capability probe (issue #75)
 
 The Demo probe is an explicit, operator-only capability check against the
@@ -99,6 +162,16 @@ copy. After a crash preserve the main database and its `-wal` file; `-shm` is a
 reconstructible cache, not authoritative state. Keep all three environment
 paths separate and never use a fallback database when the selected one is
 missing or carries another environment identity.
+
+Migration 005 is additive, but it advances the journal to schema version 5 for
+late exchange-order identity bindings. Do not roll back the adapter binary and
+point a schema-v5 journal at a v4 adapter: the older adapter must fail closed
+when it sees a newer schema, and lowering the schema marker or deleting the
+binding table manually is unsafe. For an incident, either forward-fix with a
+v5-aware adapter while preserving the database and its `-wal`, or restore a
+verified pre-migration backup before deploying the v4 adapter. On a copied
+backup, verify the schema marker and that existing execution attempts remain
+present before returning the journal to service.
 
 The persistence port returns machine-readable recovery metadata that the
 operator CLI will render. The safe default for every failure is no new

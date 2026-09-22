@@ -23,6 +23,7 @@ import {
   isProducedIdentityBinding,
   type IdentityBindingCandidate,
 } from "../../domain/execution/identity-binding.js";
+import type { ExchangeOrderObservation } from "../../domain/execution/exchange-order.js";
 import type { ReconciliationResult } from "../../domain/execution/reconciliation.js";
 import { isProducedReconciliationResult } from "../../domain/execution/reconciliation-proof.js";
 import { isProducedExecutionPlan } from "../../domain/planning/plan-proof.js";
@@ -438,6 +439,9 @@ function identityBindingFromRow(row: SqliteRow): Result<IdentityBindingRecord> {
       accountId: accountId.value,
       category: category.value,
       positionMode: row.position_mode,
+      lineageId: lineageId.value,
+      intentId: intentId.value,
+      attemptId: attemptId.value,
     },
   });
   if (!binding.ok || !isProducedIdentityBinding(binding.value)) {
@@ -658,6 +662,167 @@ function artifactFromRow(
   });
 }
 
+interface DurableFactArtifact {
+  readonly factKind: string;
+  readonly eventIdentity: string;
+  readonly artifact: PersistedArtifact;
+}
+
+function readDurableFactArtifacts(
+  database: DatabaseSync,
+  scope: PersistenceScope,
+): Result<readonly DurableFactArtifact[]> {
+  try {
+    const rows = database
+      .prepare(
+        `SELECT f.fact_kind, f.event_identity,
+                a.artifact_id, a.artifact_kind, a.schema_version,
+                a.canonical_json, a.canonical_hash, a.material_hash
+         FROM accounting_facts f
+         INNER JOIN artifacts a
+           ON a.artifact_id = f.reference_id
+          AND a.exchange = f.exchange
+          AND a.environment = f.environment
+          AND a.account_id = f.account_id
+          AND a.category = f.category
+          AND a.position_mode = f.position_mode
+         WHERE f.exchange = ? AND f.environment = ? AND f.account_id = ?
+           AND f.category = ? AND f.position_mode = ?`,
+      )
+      .all(...scopeValues(scope)) as SqliteRow[];
+    const facts: DurableFactArtifact[] = [];
+    for (const row of rows) {
+      const factKind = storedString(row, "fact_kind");
+      const eventIdentity = storedString(row, "event_identity");
+      const artifactId = storedIdentifier(row, "artifact_id");
+      if (!factKind.ok || !eventIdentity.ok || !artifactId.ok) {
+        return persistenceFailure(
+          "persisted accounting fact identity is invalid",
+        );
+      }
+      const artifact = artifactFromRow(row, artifactId.value);
+      if (!artifact.ok) return artifact;
+      facts.push({
+        factKind: factKind.value,
+        eventIdentity: eventIdentity.value,
+        artifact: artifact.value,
+      });
+    }
+    return ok(facts);
+  } catch (error) {
+    return fail(sqliteError(error, "PERSISTENCE_INTEGRITY"));
+  }
+}
+
+function hasDurableAccountingEvidence(
+  facts: readonly DurableFactArtifact[],
+  lineageId: string,
+  exchangeOrderId: string,
+  clientOrderId: string,
+  intent: ExecutionPlan["material"]["orderIntents"][number],
+  attemptIds: ReadonlySet<string>,
+): boolean {
+  const parentCandidates: ExchangeOrderObservation[] = [];
+  for (const fact of facts) {
+    if (
+      fact.factKind !== "exchange-observation" ||
+      !fact.eventIdentity.startsWith(`exchange-parent-${lineageId}-`)
+    ) {
+      continue;
+    }
+    const parent = rehydrateArtifact("exchange-order", fact.artifact.envelope);
+    if (
+      parent.ok &&
+      parent.value.exchangeOrderId === exchangeOrderId &&
+      parent.value.clientOrderId === clientOrderId &&
+      parent.value.instrument === intent.instrument &&
+      parent.value.side === intent.side &&
+      parent.value.requestedQuantity.compare(intent.quantity) === 0
+    ) {
+      parentCandidates.push(parent.value);
+    }
+  }
+  const parent = parentCandidates.at(-1);
+  if (
+    parent === undefined ||
+    parent.status !== "filled" ||
+    !parent.filledQuantity.isPositive()
+  ) {
+    return false;
+  }
+
+  const fillIds = new Set<string>();
+  let total = parent.filledQuantity.subtract(parent.filledQuantity);
+  for (const fact of facts) {
+    if (fact.factKind !== "fill") continue;
+    const fill = rehydrateArtifact("fill", fact.artifact.envelope);
+    if (
+      fill.ok &&
+      "attemptId" in fill.value &&
+      "exchangeOrderId" in fill.value &&
+      "instrument" in fill.value &&
+      "side" in fill.value &&
+      "fillId" in fill.value &&
+      "quantity" in fill.value &&
+      attemptIds.has(fill.value.attemptId) &&
+      fill.value.exchangeOrderId === parent.exchangeOrderId &&
+      fill.value.instrument === parent.instrument &&
+      fill.value.side === parent.side &&
+      !fillIds.has(fill.value.fillId)
+    ) {
+      fillIds.add(fill.value.fillId);
+      total = total.add(fill.value.quantity);
+    }
+  }
+  if (fillIds.size === 0 || total.compare(parent.filledQuantity) !== 0) {
+    return false;
+  }
+  const ledgerReferences = new Set<string>();
+  for (const fact of facts) {
+    if (fact.factKind !== "ledger-entry") continue;
+    const ledger = rehydrateArtifact("ledger-entry", fact.artifact.envelope);
+    if (
+      ledger.ok &&
+      "kind" in ledger.value &&
+      "referenceId" in ledger.value &&
+      ledger.value.kind === "fill" &&
+      fillIds.has(ledger.value.referenceId)
+    ) {
+      ledgerReferences.add(ledger.value.referenceId);
+    }
+  }
+  return [...fillIds].every((fillId) => ledgerReferences.has(fillId));
+}
+
+function hasDurableProtectionEvidence(
+  facts: readonly DurableFactArtifact[],
+  lineageId: string,
+  clientOrderId: string,
+  intent: ExecutionPlan["material"]["orderIntents"][number],
+): boolean {
+  const eventPrefix = `exchange-protection-${lineageId}-`;
+  const expectedSide = intent.side === "buy" ? "sell" : "buy";
+  return facts.some((fact) => {
+    if (
+      fact.factKind !== "exchange-observation" ||
+      !fact.eventIdentity.startsWith(eventPrefix)
+    ) {
+      return false;
+    }
+    const child = rehydrateArtifact("exchange-order", fact.artifact.envelope);
+    return (
+      child.ok &&
+      child.value.parentOrderLinkId === clientOrderId &&
+      child.value.instrument === intent.instrument &&
+      child.value.side === expectedSide &&
+      child.value.requestedQuantity.compare(intent.quantity) === 0 &&
+      child.value.protectionType === "take-profit" &&
+      child.value.status === "open" &&
+      child.value.filledQuantity.isZero()
+    );
+  });
+}
+
 function validatePersistedArtifact(
   artifact: PersistedArtifact,
 ): Result<PersistedArtifact> {
@@ -695,25 +860,18 @@ function validatePersistedArtifact(
   });
 }
 
-function authorityLineageRow(
+function scopedLineageRow(
   database: DatabaseSync,
   scope: PersistenceScope,
   lineageId: string,
-  authority: LeaseAuthority,
 ): Result<SqliteRow> {
-  const parsedAuthority = validateAuthority(authority);
-  if (!parsedAuthority.ok) return parsedAuthority;
   const row = lineageRow(database, scope, lineageId);
   if (row === undefined) {
     return conflictFailure("execution lineage does not exist in this scope");
   }
-  const runId = storedIdentifier(row, "run_id");
-  if (!runId.ok) return runId;
-  if (runId.value !== parsedAuthority.value.ownerRunId) {
-    return fail(
-      domainError("RUN_LEASE_LOST", "lineage is owned by another run"),
-    );
-  }
+  // The current lease fences the write above. A takeover intentionally changes
+  // the lease owner while the durable lineage keeps its original run_id, so
+  // recovery facts must remain appendable to that prior lineage.
   return ok(row);
 }
 
@@ -1434,11 +1592,10 @@ export class SqliteExecutionStore {
           dispatchedAt.value,
         );
         if (!authority.ok) return authority;
-        const lineage = authorityLineageRow(
+        const lineage = scopedLineageRow(
           database,
           this.scope,
           request.lineageId,
-          request.authority,
         );
         if (!lineage.ok) return lineage;
         const existing = database
@@ -1613,12 +1770,7 @@ export class SqliteExecutionStore {
           boundAt.value,
         );
         if (!authority.ok) return authority;
-        const lineage = authorityLineageRow(
-          database,
-          this.scope,
-          lineageId.value,
-          request.authority,
-        );
+        const lineage = scopedLineageRow(database, this.scope, lineageId.value);
         if (!lineage.ok) return lineage;
         const attempt = database
           .prepare(
@@ -1798,12 +1950,9 @@ export class SqliteExecutionStore {
           context.accountId === this.scope.accountId &&
           context.category === this.scope.category &&
           context.positionMode === this.scope.positionMode &&
-          (context.lineageId === undefined ||
-            context.lineageId === lineageId.value) &&
-          (context.intentId === undefined ||
-            context.intentId === attemptIntentId.value) &&
-          (context.attemptId === undefined ||
-            context.attemptId === attemptId.value);
+          context.lineageId === lineageId.value &&
+          context.intentId === attemptIntentId.value &&
+          context.attemptId === attemptId.value;
         if (
           !ownershipMatches ||
           candidate.clientOrderId !== attemptClientOrderId.value ||
@@ -2439,12 +2588,17 @@ export class SqliteExecutionStore {
             ),
           );
         }
+        const durableFacts = readDurableFactArtifacts(database, this.scope);
+        if (!durableFacts.ok) return durableFacts;
         const intents = database
           .prepare(
-            `SELECT oi.lineage_id, oi.intent_id,
+            `SELECT oi.lineage_id, oi.intent_id, oi.client_order_id,
              (SELECT rr.status FROM reconciliation_results rr
               WHERE rr.lineage_id = oi.lineage_id AND rr.intent_id = oi.intent_id
-              ORDER BY rr.revision DESC LIMIT 1) AS latest_status
+              ORDER BY rr.revision DESC LIMIT 1) AS latest_status,
+             (SELECT rr.exchange_order_id FROM reconciliation_results rr
+              WHERE rr.lineage_id = oi.lineage_id AND rr.intent_id = oi.intent_id
+              ORDER BY rr.revision DESC LIMIT 1) AS latest_exchange_order_id
              FROM owned_intents oi
              WHERE ${SCOPE_WHERE}`,
           )
@@ -2460,6 +2614,95 @@ export class SqliteExecutionStore {
                 "every owned intent must have terminal reconciliation before HALT clearance",
               ),
             );
+          }
+          if (intent.latest_status === "RECONCILED") {
+            const lineageId = storedIdentifier(intent, "lineage_id");
+            const intentId = storedIdentifier(intent, "intent_id");
+            const clientOrderId = storedIdentifier(intent, "client_order_id");
+            const exchangeOrderId = storedOptionalString(
+              intent,
+              "latest_exchange_order_id",
+            );
+            if (
+              !lineageId.ok ||
+              !intentId.ok ||
+              !clientOrderId.ok ||
+              !exchangeOrderId.ok ||
+              exchangeOrderId.value === undefined
+            ) {
+              return persistenceFailure(
+                "persisted owned intent identity is invalid",
+              );
+            }
+            const plan = readPlanFromDatabase(
+              database,
+              this.scope,
+              lineageId.value,
+            );
+            if (!plan.ok) return plan;
+            if (plan.value === undefined) {
+              return fail(
+                domainError(
+                  "UNRESOLVED_STATE",
+                  "reconciled owned intent has no durable execution plan",
+                ),
+              );
+            }
+            const orderIntent = plan.value.material.orderIntents.find(
+              (candidate) => candidate.intentId === intentId.value,
+            );
+            if (orderIntent === undefined) {
+              return fail(
+                domainError(
+                  "UNRESOLVED_STATE",
+                  "reconciled owned intent is absent from its durable plan",
+                ),
+              );
+            }
+            const attemptRows = database
+              .prepare(
+                `SELECT ea.attempt_id
+                 FROM execution_attempts ea
+                 INNER JOIN execution_lineages l ON l.lineage_id = ea.lineage_id
+                 WHERE l.exchange = ? AND l.environment = ? AND l.account_id = ?
+                   AND l.category = ? AND l.position_mode = ?
+                   AND ea.lineage_id = ? AND ea.intent_id = ?`,
+              )
+              .all(
+                ...scopeValues(this.scope),
+                lineageId.value,
+                intentId.value,
+              ) as SqliteRow[];
+            const attemptIds = new Set<string>();
+            for (const attemptRow of attemptRows) {
+              const attemptId = storedIdentifier(attemptRow, "attempt_id");
+              if (!attemptId.ok) return attemptId;
+              attemptIds.add(attemptId.value);
+            }
+            if (
+              !hasDurableAccountingEvidence(
+                durableFacts.value,
+                lineageId.value,
+                exchangeOrderId.value,
+                clientOrderId.value,
+                orderIntent,
+                attemptIds,
+              ) ||
+              (plan.value.material.strategy.requiresProtection &&
+                !hasDurableProtectionEvidence(
+                  durableFacts.value,
+                  lineageId.value,
+                  clientOrderId.value,
+                  orderIntent,
+                ))
+            ) {
+              return fail(
+                domainError(
+                  "UNRESOLVED_STATE",
+                  "reconciled owned intent lacks durable accounting or protection evidence",
+                ),
+              );
+            }
           }
         }
         const storedArtifact = insertArtifact(

@@ -18,6 +18,7 @@ import {
   reconcileAttempt,
   rehydrateReconciliationResult,
 } from "../src/domain/execution/reconciliation.js";
+import { createExchangeOrder } from "../src/domain/execution/exchange-order.js";
 import { encodeCanonicalArtifact } from "../src/domain/identity/canonical-artifact.js";
 import {
   parseUtcTimestamp,
@@ -608,6 +609,78 @@ test("HALT clearance requires terminal reconciliation and revision-matched evide
   store.close();
 });
 
+test("HALT clearance rejects a reconciled intent without durable accounting", () => {
+  const { store, scope } = createStore();
+  const prepared = prepareIntent(store, scope, "reconciled-without-facts");
+  const attempt = unwrap(
+    createExecutionAttempt({
+      attemptId: "reconciled-attempt",
+      planHash: prepared.plan.materialHash,
+      intentId: prepared.intentId,
+      clientOrderId: prepared.clientOrderId,
+      submittedAt: time("2026-09-19T10:00:04Z"),
+      acknowledgement: "accepted",
+      terminalStatus: "filled",
+      exchangeOrderId: "reconciled-order",
+    }),
+  );
+  unwrap(
+    store.appendAttempt({
+      authority: prepared.lease,
+      lineageId: prepared.lineage.lineageId,
+      attempt,
+      dispatchedAt: time("2026-09-19T10:00:04Z"),
+    }),
+  );
+  const order = unwrap(
+    createExchangeOrder({
+      exchangeOrderId: "reconciled-order",
+      clientOrderId: prepared.clientOrderId,
+      instrument: "DOGEUSDT",
+      side: "buy",
+      requestedQuantity: "57",
+      filledQuantity: "57",
+      status: "filled",
+      observedAt: time("2026-09-19T10:00:05Z"),
+      source: "fixture/order",
+    }),
+  );
+  const reconciled = unwrap(reconcileAttempt(attempt, order, prepared.plan));
+  assert.equal(reconciled.status, "RECONCILED");
+  unwrap(
+    store.appendReconciliation({
+      authority: prepared.lease,
+      lineageId: prepared.lineage.lineageId,
+      result: reconciled,
+      recordedAt: time("2026-09-19T10:00:05Z"),
+    }),
+  );
+  const halted = unwrap(
+    store.raiseHalt(
+      prepared.lease,
+      "fixture requires reconciliation",
+      time("2026-09-19T10:00:06Z"),
+    ),
+  );
+  const clearance = store.clearHalt({
+    authority: prepared.lease,
+    expectedHaltRevision: halted.revision,
+    evidence: {
+      evidenceVersion: "clearance/v1",
+      actor: "operator",
+      source: "manual-reconciliation",
+      timestamp: time("2026-09-19T10:00:07Z"),
+      reason: "attempted clearance without facts",
+      affectedLineageRevision: 1,
+      affectedReconciliationRevision: 1,
+    },
+  });
+  assert.equal(clearance.ok, false);
+  if (!clearance.ok) assert.equal(clearance.error.code, "UNRESOLVED_STATE");
+  assert.equal(unwrap(store.readHalt()).active, true);
+  store.close();
+});
+
 test("scope run enumeration rehydrates plan-only and owned lineages deterministically", () => {
   const { store, scope } = createStore();
   const plan = createPlanFixture();
@@ -653,6 +726,27 @@ test("one unique candidate can late-bind an exchange identity without mutating t
     }),
   );
 
+  const missingContext = store.appendIdentityBinding({
+    authority: prepared.lease,
+    lineageId: prepared.lineage.lineageId,
+    attemptId: attempt.attemptId,
+    boundAt: time("2026-09-19T10:00:05Z"),
+    candidates: [
+      {
+        exchangeOrderId: "missing-context-order",
+        clientOrderId: prepared.clientOrderId,
+        instrument: "DOGEUSDT",
+        side: "buy",
+        requestedQuantity: "57",
+        ownershipContext: scope,
+      },
+    ],
+  });
+  assert.equal(missingContext.ok, false);
+  if (!missingContext.ok) {
+    assert.equal(missingContext.error.code, "OWNERSHIP_MISMATCH");
+  }
+
   const first = unwrap(
     store.appendIdentityBinding({
       authority: prepared.lease,
@@ -666,7 +760,12 @@ test("one unique candidate can late-bind an exchange identity without mutating t
           instrument: "DOGEUSDT",
           side: "buy",
           requestedQuantity: "57",
-          ownershipContext: scope,
+          ownershipContext: {
+            ...scope,
+            lineageId: prepared.lineage.lineageId,
+            intentId: prepared.intentId,
+            attemptId: attempt.attemptId,
+          },
         },
       ],
     }),
@@ -688,7 +787,12 @@ test("one unique candidate can late-bind an exchange identity without mutating t
           instrument: "DOGEUSDT",
           side: "buy",
           requestedQuantity: "57.000",
-          ownershipContext: scope,
+          ownershipContext: {
+            ...scope,
+            lineageId: prepared.lineage.lineageId,
+            intentId: prepared.intentId,
+            attemptId: attempt.attemptId,
+          },
         },
       ],
     }),
@@ -717,7 +821,12 @@ test("one unique candidate can late-bind an exchange identity without mutating t
         instrument: "DOGEUSDT",
         side: "buy",
         requestedQuantity: "57",
-        ownershipContext: scope,
+        ownershipContext: {
+          ...scope,
+          lineageId: prepared.lineage.lineageId,
+          intentId: prepared.intentId,
+          attemptId: attempt.attemptId,
+        },
       },
     ],
   });
@@ -779,7 +888,12 @@ test("late binding rejects zero or multiple candidates and keeps conflict halted
         instrument: "DOGEUSDT",
         side: "buy",
         requestedQuantity: "57",
-        ownershipContext: scope,
+        ownershipContext: {
+          ...scope,
+          lineageId: prepared.lineage.lineageId,
+          intentId: prepared.intentId,
+          attemptId: attempt.attemptId,
+        },
       },
       {
         exchangeOrderId: "ambiguous-order-b",
@@ -787,7 +901,12 @@ test("late binding rejects zero or multiple candidates and keeps conflict halted
         instrument: "DOGEUSDT",
         side: "buy",
         requestedQuantity: "57",
-        ownershipContext: scope,
+        ownershipContext: {
+          ...scope,
+          lineageId: prepared.lineage.lineageId,
+          intentId: prepared.intentId,
+          attemptId: attempt.attemptId,
+        },
       },
     ],
   });

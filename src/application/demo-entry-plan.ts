@@ -111,6 +111,7 @@ function tpPrice(
 
 function capabilityRequirements(
   state: ExchangeReadState,
+  clock: Clock,
 ): Result<readonly CapabilityRequirement[]> {
   const capabilities = [
     "order-create",
@@ -138,7 +139,7 @@ function capabilityRequirements(
         ),
       );
     }
-    const trusted = requireTrustedCapability(observation, requirement);
+    const trusted = requireTrustedCapability(observation, requirement, clock);
     if (!trusted.ok) return trusted;
     requirements.push(requirement);
   }
@@ -220,7 +221,7 @@ export function buildDemoEntryPlan(
   ) {
     return invalid("take-profit must remain strictly on the profit side");
   }
-  const capabilities = capabilityRequirements(state);
+  const capabilities = capabilityRequirements(state, clock);
   if (!capabilities.ok) return capabilities;
   const configuredStrategy = strategy(input.notional);
   if (!configuredStrategy.ok) return configuredStrategy;

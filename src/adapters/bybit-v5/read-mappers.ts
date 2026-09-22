@@ -1,5 +1,8 @@
 import { responseList, type BybitResponse } from "./transport.js";
-import type { ExchangeOrderStatus } from "../../domain/execution/exchange-order.js";
+import type {
+  ExchangeOrderStatus,
+  ExchangeProtectionType,
+} from "../../domain/execution/exchange-order.js";
 import {
   createInstrumentConstraints,
   type InstrumentConstraints,
@@ -83,6 +86,7 @@ export interface BybitOrderRecord {
   readonly parentOrderLinkId?: string;
   readonly price?: DecimalValue;
   readonly averagePrice?: DecimalValue;
+  readonly protectionType?: ExchangeProtectionType;
 }
 
 export interface BybitExecutionRecord {
@@ -277,6 +281,27 @@ function optionalPositiveDecimal(
     invalid(`Bybit ${label} response has an invalid ${field}.`);
   }
   return parsed.value.isZero() ? undefined : parsed.value;
+}
+
+function optionalProtectionType(
+  record: JsonObject,
+  label: string,
+): ExchangeProtectionType | undefined {
+  const value = record.stopOrderType;
+  if (value === undefined || value === "") return undefined;
+  if (typeof value !== "string") {
+    invalid(`Bybit ${label} response has an invalid stopOrderType.`);
+  }
+  switch (value) {
+    case "TakeProfit":
+      return "take-profit";
+    case "StopLoss":
+      return "stop-loss";
+    case "TrailingStop":
+      return "trailing-stop";
+    default:
+      return "other";
+  }
 }
 
 function positionIndex(record: JsonObject, label: string): 0 {
@@ -588,6 +613,7 @@ export function mapOrderRecords(
     const status = orderStatus(text(record, "orderStatus", label), label);
     const price = optionalPositiveDecimal(record, "price", label);
     const averagePrice = optionalPositiveDecimal(record, "avgPrice", label);
+    const protectionType = optionalProtectionType(record, label);
     return {
       exchangeOrderId,
       clientOrderId,
@@ -601,6 +627,7 @@ export function mapOrderRecords(
       ...(parentOrderLinkId === undefined ? {} : { parentOrderLinkId }),
       ...(price === undefined ? {} : { price }),
       ...(averagePrice === undefined ? {} : { averagePrice }),
+      ...(protectionType === undefined ? {} : { protectionType }),
     };
   });
 }
