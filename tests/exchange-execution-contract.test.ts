@@ -73,8 +73,19 @@ test("exchange port represents acknowledgement, observation and fill evidence se
     async observeOrder() {
       return exchangeSuccess(observation);
     },
+    async listAttachedProtection() {
+      return exchangeSuccess([]);
+    },
     async listFills() {
       return exchangeSuccess([fill]);
+    },
+    async setLeverage() {
+      return exchangeFailure({
+        kind: "precondition",
+        message: "fixture does not implement leverage writes",
+        retry: "never",
+        operation: "set-leverage",
+      });
     },
     async cancelOrder() {
       return exchangeSuccess({

@@ -1,5 +1,8 @@
 import { responseList, type BybitResponse } from "./transport.js";
-import type { ExchangeOrderStatus } from "../../domain/execution/exchange-order.js";
+import type {
+  ExchangeOrderStatus,
+  ExchangeProtectionType,
+} from "../../domain/execution/exchange-order.js";
 import {
   createInstrumentConstraints,
   type InstrumentConstraints,
@@ -45,11 +48,28 @@ export interface BybitWalletState {
   readonly availableBalance: DecimalValue;
 }
 
+export interface BybitAccountKeyMetadata {
+  readonly userId: string;
+  readonly readOnly: boolean;
+  readonly contractTrade: {
+    readonly order: boolean;
+    readonly position: boolean;
+  };
+  readonly wallet: {
+    readonly withdraw: boolean;
+    readonly transfer: boolean;
+  };
+  readonly ips: readonly string[];
+  readonly warningCodes: readonly "API_KEY_IP_UNBOUND"[];
+  readonly expiresAt?: UtcTimestamp;
+}
+
 export interface BybitPositionState {
   readonly instrument: string;
   readonly side: "long" | "short" | "flat";
   readonly quantity: DecimalValue;
   readonly positionIdx: 0;
+  readonly leverage: DecimalValue;
   readonly entryPrice?: DecimalValue;
 }
 
@@ -63,8 +83,10 @@ export interface BybitOrderRecord {
   readonly status: ExchangeOrderStatus;
   readonly positionIdx: 0;
   readonly reduceOnly: boolean;
+  readonly parentOrderLinkId?: string;
   readonly price?: DecimalValue;
   readonly averagePrice?: DecimalValue;
+  readonly protectionType?: ExchangeProtectionType;
 }
 
 export interface BybitExecutionRecord {
@@ -123,6 +145,18 @@ function text(
   return value;
 }
 
+function identifierText(
+  record: JsonObject,
+  field: string,
+  label: string,
+): string {
+  const value = record[field];
+  if (typeof value === "number" && Number.isSafeInteger(value) && value >= 0) {
+    return String(value);
+  }
+  return text(record, field, label);
+}
+
 function optionalText(
   record: JsonObject,
   field: string,
@@ -136,6 +170,71 @@ function optionalText(
     return undefined;
   }
   return text(record, field, label);
+}
+
+function stringList(
+  record: JsonObject,
+  field: string,
+  label: string,
+): readonly string[] {
+  const value = record[field];
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) {
+    invalid(`Bybit ${label} response has an invalid ${field}.`);
+  }
+  return value.map((item) => {
+    if (
+      typeof item !== "string" ||
+      item.length === 0 ||
+      /[\u0000-\u001f\u007f\r\n]/u.test(item)
+    ) {
+      invalid(`Bybit ${label} response has an invalid ${field} entry.`);
+    }
+    return item;
+  });
+}
+
+function readOnlyFlag(record: JsonObject, label: string): boolean {
+  const value = record.readOnly;
+  if (value === 0 || value === "0") return false;
+  if (value === 1 || value === "1") return true;
+  invalid(`Bybit ${label} response has an invalid readOnly flag.`);
+}
+
+function optionalExpiry(
+  record: JsonObject,
+  label: string,
+): UtcTimestamp | undefined {
+  const raw = [
+    record.expiresAt,
+    record.expiredAt,
+    record.expireAt,
+    record.expireTime,
+  ].find((value) => value !== undefined && value !== "");
+  if (raw === undefined || raw === 0 || raw === "0") return undefined;
+  if (typeof raw === "string" && !/^\d+$/u.test(raw)) {
+    const parsed = timestampFromEpochMs(Date.parse(raw));
+    if (!parsed.ok) invalid(`Bybit ${label} response has an invalid expiry.`);
+    return parsed.value;
+  }
+  const numberValue =
+    typeof raw === "number"
+      ? raw
+      : typeof raw === "string"
+        ? Number(raw)
+        : undefined;
+  if (
+    numberValue === undefined ||
+    !Number.isSafeInteger(numberValue) ||
+    numberValue <= 0
+  ) {
+    invalid(`Bybit ${label} response has an invalid expiry.`);
+  }
+  const epochMs =
+    numberValue < 1_000_000_000_000 ? numberValue * 1_000 : numberValue;
+  const parsed = timestampFromEpochMs(epochMs);
+  if (!parsed.ok) invalid(`Bybit ${label} response has an invalid expiry.`);
+  return parsed.value;
 }
 
 function decimal(
@@ -196,6 +295,27 @@ function optionalPositiveDecimal(
   return parsed.value.isZero() ? undefined : parsed.value;
 }
 
+function optionalProtectionType(
+  record: JsonObject,
+  label: string,
+): ExchangeProtectionType | undefined {
+  const value = record.stopOrderType;
+  if (value === undefined || value === "") return undefined;
+  if (typeof value !== "string") {
+    invalid(`Bybit ${label} response has an invalid stopOrderType.`);
+  }
+  switch (value) {
+    case "TakeProfit":
+      return "take-profit";
+    case "StopLoss":
+      return "stop-loss";
+    case "TrailingStop":
+      return "trailing-stop";
+    default:
+      return "other";
+  }
+}
+
 function positionIndex(record: JsonObject, label: string): 0 {
   const value = record.positionIdx;
   const parsed =
@@ -254,6 +374,65 @@ function parseMinNotional(
     invalid(`Bybit ${label} response has an ambiguous minimum notional.`);
   }
   return first;
+}
+
+export function mapAccountKeyMetadata(
+  response: BybitResponse,
+  expectedAccountId: string,
+): BybitAccountKeyMetadata {
+  const item = object(response.result, "user/query-api");
+  const userId = identifierText(item, "userID", "user/query-api");
+  if (userId !== expectedAccountId) {
+    precondition(
+      "Bybit Demo authenticated userID does not match the configured account identity.",
+    );
+  }
+  const readOnly = readOnlyFlag(item, "user/query-api");
+  if (readOnly) {
+    precondition("Bybit Demo API key is read-only; no write is allowed.");
+  }
+  const permissions = object(item.permissions, "user/query-api");
+  const contractTrade = stringList(
+    permissions,
+    "ContractTrade",
+    "user/query-api permissions",
+  );
+  const wallet = stringList(
+    permissions,
+    "Wallet",
+    "user/query-api permissions",
+  );
+  const hasOrder = contractTrade.includes("Order");
+  const hasPosition = contractTrade.includes("Position");
+  if (!hasOrder || !hasPosition) {
+    precondition(
+      "Bybit Demo API key lacks ContractTrade Order and Position permissions.",
+    );
+  }
+  const hasWithdraw = wallet.includes("Withdraw");
+  const hasTransfer = wallet.some((permission) =>
+    ["AccountTransfer", "SubMemberTransfer", "SubMemberTransferList"].includes(
+      permission,
+    ),
+  );
+  if (hasWithdraw || hasTransfer) {
+    precondition(
+      "Bybit Demo API key has a prohibited withdrawal or wallet-transfer permission.",
+    );
+  }
+  const ips = stringList(item, "ips", "user/query-api");
+  const expiresAt = optionalExpiry(item, "user/query-api");
+  return Object.freeze({
+    userId,
+    readOnly: false,
+    contractTrade: Object.freeze({ order: hasOrder, position: hasPosition }),
+    wallet: Object.freeze({ withdraw: hasWithdraw, transfer: hasTransfer }),
+    ips: Object.freeze([...ips]),
+    warningCodes: Object.freeze(
+      ips.length === 0 ? (["API_KEY_IP_UNBOUND"] as const) : [],
+    ),
+    ...(expiresAt === undefined ? {} : { expiresAt }),
+  });
 }
 
 export function mapInstrumentInfo(
@@ -337,7 +516,13 @@ export function mapPosition(
   symbol: string,
 ): BybitPositionState {
   const records = responseRecords(response, "position/list");
+  if (records.length !== 1) {
+    precondition(
+      "Bybit position/list response did not return exactly one one-way selected-symbol record.",
+    );
+  }
   let selected: BybitPositionState | undefined;
+  let flatLeverage: DecimalValue | undefined;
   for (const record of records) {
     if (record.symbol !== symbol) {
       invalid(
@@ -346,6 +531,7 @@ export function mapPosition(
     }
     positionIndex(record, "position/list");
     const quantity = nonNegativeDecimal(record, "size", "position/list");
+    const leverage = positiveDecimal(record, "leverage", "position/list");
     const side = record.side;
     if (side !== "" && side !== "None" && side !== "Buy" && side !== "Sell") {
       invalid("Bybit position/list response has an invalid side.");
@@ -354,6 +540,7 @@ export function mapPosition(
       if (side === "Buy" || side === "Sell") {
         invalid("Bybit position/list response contradicts a flat position.");
       }
+      flatLeverage = leverage;
       continue;
     }
     const mappedSide =
@@ -376,6 +563,7 @@ export function mapPosition(
       side: mappedSide,
       quantity,
       positionIdx: 0,
+      leverage,
       ...(entryPrice === undefined ? {} : { entryPrice }),
     };
   }
@@ -385,6 +573,7 @@ export function mapPosition(
       side: "flat",
       quantity: decimal("0", "position/list", "size", false),
       positionIdx: 0,
+      leverage: flatLeverage!,
     }
   );
 }
@@ -392,6 +581,7 @@ export function mapPosition(
 function orderStatus(value: string, label: string): ExchangeOrderStatus {
   switch (value) {
     case "New":
+    case "Untriggered":
       return "open";
     case "PartiallyFilled":
       return "partially-filled";
@@ -418,7 +608,6 @@ export function mapOrderRecords(
       invalid(`Bybit ${label} response ignored the selected-symbol filter.`);
     }
     const exchangeOrderId = text(record, "orderId", label);
-    const clientOrderId = text(record, "orderLinkId", label);
     const positionIdx = positionIndex(record, label);
     const requestedQuantity = positiveDecimal(record, "qty", label);
     const filledQuantity = nonNegativeDecimal(record, "cumExecQty", label);
@@ -432,9 +621,17 @@ export function mapOrderRecords(
       invalid(`Bybit ${label} response has an invalid order side.`);
     }
     const reduceOnly = booleanField(record, "reduceOnly", label);
+    const parentOrderLinkId = optionalText(record, "parentOrderLinkId", label);
     const status = orderStatus(text(record, "orderStatus", label), label);
     const price = optionalPositiveDecimal(record, "price", label);
     const averagePrice = optionalPositiveDecimal(record, "avgPrice", label);
+    const protectionType = optionalProtectionType(record, label);
+    const clientOrderId =
+      record.orderLinkId === "" &&
+      parentOrderLinkId !== undefined &&
+      protectionType !== undefined
+        ? parentOrderLinkId
+        : text(record, "orderLinkId", label);
     return {
       exchangeOrderId,
       clientOrderId,
@@ -445,8 +642,10 @@ export function mapOrderRecords(
       status,
       positionIdx,
       reduceOnly,
+      ...(parentOrderLinkId === undefined ? {} : { parentOrderLinkId }),
       ...(price === undefined ? {} : { price }),
       ...(averagePrice === undefined ? {} : { averagePrice }),
+      ...(protectionType === undefined ? {} : { protectionType }),
     };
   });
 }

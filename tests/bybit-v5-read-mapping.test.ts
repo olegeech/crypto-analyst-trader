@@ -4,6 +4,7 @@ import test from "node:test";
 import type { BybitResponse } from "../src/adapters/bybit-v5/transport.js";
 import {
   BybitReadMappingError,
+  mapAccountKeyMetadata,
   mapInstrumentInfo,
   mapOrderRecords,
   mapPosition,
@@ -87,12 +88,21 @@ test("strict read mappers normalize the supported Demo linear one-way scope", ()
 
   const position = mapPosition(
     response({
-      list: [{ symbol: "DOGEUSDT", positionIdx: "0", side: "", size: "0" }],
+      list: [
+        {
+          symbol: "DOGEUSDT",
+          positionIdx: "0",
+          side: "",
+          size: "0",
+          leverage: "1",
+        },
+      ],
     }),
     "DOGEUSDT",
   );
   assert.equal(position.side, "flat");
   assert.equal(position.quantity.toString(), "0");
+  assert.equal(position.leverage.toString(), "1");
 
   const orders = mapOrderRecords(
     response({
@@ -195,5 +205,155 @@ test("pagination cursors are optional safe strings", () => {
         "order/realtime",
       ),
     BybitReadMappingError,
+  );
+});
+
+test("account-key mapping proves Demo identity and normalizes permissions", () => {
+  const mapped = mapAccountKeyMetadata(
+    response({
+      userID: "demo-account",
+      readOnly: 0,
+      permissions: {
+        ContractTrade: ["Order", "Position"],
+        Wallet: [],
+      },
+      ips: [],
+      expiredAt: "2026-10-01T00:00:00Z",
+    }),
+    "demo-account",
+  );
+  assert.equal(mapped.userId, "demo-account");
+  assert.equal(mapped.readOnly, false);
+  assert.deepEqual(mapped.contractTrade, { order: true, position: true });
+  assert.deepEqual(mapped.wallet, { withdraw: false, transfer: false });
+  assert.equal(mapped.warningCodes[0], "API_KEY_IP_UNBOUND");
+  assert.equal(mapped.expiresAt, "2026-10-01T00:00:00.000Z");
+});
+
+test("account-key mapping canonicalizes Bybit numeric user IDs", () => {
+  const mapped = mapAccountKeyMetadata(
+    response({
+      userID: 123456789,
+      readOnly: 0,
+      permissions: {
+        ContractTrade: ["Order", "Position"],
+        Wallet: [],
+      },
+      ips: ["127.0.0.1"],
+    }),
+    "123456789",
+  );
+  assert.equal(mapped.userId, "123456789");
+  assert.equal(mapped.readOnly, false);
+});
+
+test("account-key mapping fails closed for identity, read-only and dangerous permissions", () => {
+  const base = {
+    userID: "demo-account",
+    readOnly: 0,
+    permissions: { ContractTrade: ["Order", "Position"], Wallet: [] },
+    ips: ["127.0.0.1"],
+  };
+  assert.throws(
+    () =>
+      mapAccountKeyMetadata(
+        response({ ...base, userID: "other" }),
+        "demo-account",
+      ),
+    (error: unknown) =>
+      error instanceof BybitReadMappingError && error.kind === "precondition",
+  );
+  assert.throws(
+    () =>
+      mapAccountKeyMetadata(response({ ...base, readOnly: 1 }), "demo-account"),
+    (error: unknown) =>
+      error instanceof BybitReadMappingError && error.kind === "precondition",
+  );
+  assert.throws(
+    () =>
+      mapAccountKeyMetadata(
+        response({
+          ...base,
+          permissions: {
+            ContractTrade: ["Order", "Position"],
+            Wallet: ["Withdraw"],
+          },
+        }),
+        "demo-account",
+      ),
+    (error: unknown) =>
+      error instanceof BybitReadMappingError && error.kind === "precondition",
+  );
+});
+
+test("order mapping preserves an exact attached-protection parent link", () => {
+  const [mapped] = mapOrderRecords(
+    response({
+      list: [
+        order({
+          orderLinkId: "",
+          parentOrderLinkId: "entry-client",
+          stopOrderType: "TakeProfit",
+          orderStatus: "Untriggered",
+        }),
+      ],
+    }),
+    "DOGEUSDT",
+  );
+  assert.equal(mapped?.clientOrderId, "entry-client");
+  assert.equal(mapped?.parentOrderLinkId, "entry-client");
+  assert.equal(mapped?.protectionType, "take-profit");
+  assert.equal(mapped?.status, "open");
+});
+
+test("ordinary orders with an empty client identity still fail closed", () => {
+  assert.throws(
+    () =>
+      mapOrderRecords(
+        response({ list: [order({ orderLinkId: "" })] }),
+        "DOGEUSDT",
+      ),
+    BybitReadMappingError,
+  );
+});
+
+test("position leverage is mandatory and one-way rows are unambiguous", () => {
+  assert.throws(
+    () =>
+      mapPosition(
+        response({
+          list: [{ symbol: "DOGEUSDT", positionIdx: 0, side: "", size: "0" }],
+        }),
+        "DOGEUSDT",
+      ),
+    (error: unknown) =>
+      error instanceof BybitReadMappingError &&
+      error.kind === "invalid-response",
+  );
+  assert.throws(
+    () =>
+      mapPosition(
+        response({
+          list: [
+            {
+              symbol: "DOGEUSDT",
+              positionIdx: 0,
+              side: "",
+              size: "0",
+              leverage: "1",
+            },
+            {
+              symbol: "DOGEUSDT",
+              positionIdx: 0,
+              side: "",
+              size: "0",
+              leverage: "2",
+            },
+          ],
+        }),
+        "DOGEUSDT",
+      ),
+    (error: unknown) =>
+      error instanceof BybitReadMappingError && error.kind === "precondition",
   );
 });

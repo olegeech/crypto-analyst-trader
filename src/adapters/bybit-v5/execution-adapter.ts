@@ -4,6 +4,10 @@ import type {
 } from "../../domain/market/snapshots.js";
 import { createExchangeOrder } from "../../domain/execution/exchange-order.js";
 import {
+  createAdapterCapabilityObservation,
+  type CapabilityObservation,
+} from "../../domain/capabilities/capability.js";
+import {
   createAccountSnapshot,
   createMarketSnapshot,
 } from "../../domain/market/snapshots.js";
@@ -16,6 +20,10 @@ import type { Clock, UtcTimestamp } from "../../domain/shared/time.js";
 import { systemClock } from "../../domain/shared/time.js";
 import type {
   ExchangeCancelOrderRequest,
+  ExchangeAccountMetadata,
+  ExchangeAttachedProtectionLookup,
+  ExchangeSetLeverageRequest,
+  ExchangeSetLeverageResult,
   ExchangeExecutionPort,
   ExchangeFillLookupRequest,
   ExchangeFillObservation,
@@ -41,6 +49,10 @@ import {
   type BybitFailureContext,
 } from "./error-mapping.js";
 import { listOwnedFills, reconcileOrder } from "./reconciliation.js";
+import {
+  BYBIT_DEMO_CAPABILITY_PROFILE,
+  bybitDemoCapabilityScope,
+} from "./capability-profile.js";
 
 const DEMO_SCOPE = {
   exchange: "bybit",
@@ -185,9 +197,15 @@ function snapshots(
       status: order.status,
       observedAt: input.serverTime,
       source: "bybit-demo/order-realtime",
+      ...(order.parentOrderLinkId === undefined
+        ? {}
+        : { parentOrderLinkId: order.parentOrderLinkId }),
       ...(order.averagePrice === undefined
         ? {}
         : { averagePrice: order.averagePrice.toString() }),
+      ...(order.protectionType === undefined
+        ? {}
+        : { protectionType: order.protectionType }),
     });
     if (!observation.ok)
       throw new Error("normalized Demo open order is invalid");
@@ -195,7 +213,7 @@ function snapshots(
   });
   const account = createAccountSnapshot({
     snapshotId: `demo-account-${accountHash}`,
-    accountScope: `demo:${accountId}`,
+    accountScope: accountId,
     scope: scopeObject(),
     asOf: input.serverTime,
     availableBalance: input.wallet.availableBalance.toString(),
@@ -208,13 +226,74 @@ function snapshots(
   return { market: market.value, account: account.value, openOrders };
 }
 
+function accountMetadata(
+  input: Awaited<ReturnType<BybitDemoExecutionClient["readPreflight"]>>,
+): ExchangeAccountMetadata {
+  return Object.freeze({
+    accountId: input.accountKey.userId,
+    userId: input.accountKey.userId,
+    apiKey: Object.freeze({
+      readOnly: input.accountKey.readOnly,
+      contractTrade: input.accountKey.contractTrade,
+      wallet: input.accountKey.wallet,
+      ips: input.accountKey.ips,
+      ipBinding: input.accountKey.ips.length === 0 ? "unbound" : "bound",
+      warningCodes: input.accountKey.warningCodes,
+      ...(input.accountKey.expiresAt === undefined
+        ? {}
+        : { expiresAt: input.accountKey.expiresAt }),
+    }),
+  });
+}
+
+function capabilities(
+  input: Awaited<ReturnType<BybitDemoExecutionClient["readPreflight"]>>,
+): readonly CapabilityObservation[] {
+  const material = {
+    accountId: input.accountKey.userId,
+    instrument: input.instrument.symbol,
+    leverage: input.position.leverage,
+    reconciliationReads: input.reconciliationReads,
+  };
+  return BYBIT_DEMO_CAPABILITY_PROFILE.capabilities.map((capability) => {
+    const contentHash = hashMaterial({ capability, ...material });
+    const evidenceResult = createEvidenceRef({
+      kind: "capability-probe",
+      schemaVersion: BYBIT_DEMO_CAPABILITY_PROFILE.version,
+      producer: BYBIT_DEMO_CAPABILITY_PROFILE.adapter,
+      sourceId: `demo-capability-${capability}-${contentHash.slice(-12)}`,
+      asOf: input.serverTime,
+      validForMs: EVIDENCE_VALID_FOR_MS,
+      contentHash,
+    });
+    if (!evidenceResult.ok) {
+      throw new Error("adapter capability evidence metadata is invalid");
+    }
+    const observation = createAdapterCapabilityObservation({
+      capability,
+      status: "supported",
+      observedAt: input.serverTime,
+      source: BYBIT_DEMO_CAPABILITY_PROFILE.adapter,
+      evidence: evidenceResult.value,
+      scope: bybitDemoCapabilityScope(),
+    });
+    if (!observation.ok) {
+      throw new Error("adapter capability observation is invalid");
+    }
+    return observation.value;
+  });
+}
+
 export class BybitDemoExecutionAdapter implements ExchangeExecutionPort {
   private readonly client: BybitDemoExecutionClient;
   private readonly accountId: string;
   private readonly clock: Clock;
 
   constructor(options: BybitDemoExecutionAdapterOptions) {
-    this.client = new BybitDemoExecutionClient(options);
+    this.client = new BybitDemoExecutionClient({
+      ...options,
+      expectedAccountId: options.accountId,
+    });
     this.accountId = options.accountId;
     this.clock = options.clock ?? systemClock;
   }
@@ -234,6 +313,13 @@ export class BybitDemoExecutionAdapter implements ExchangeExecutionPort {
         account: normalized.account,
         openOrders: normalized.openOrders,
         accountReadiness: { status: "ready" },
+        leverage: {
+          buy: read.position.leverage,
+          sell: read.position.leverage,
+          effective: read.position.leverage,
+        },
+        accountMetadata: accountMetadata(read),
+        capabilities: capabilities(read),
       });
     } catch (error) {
       return exchangeFailure(normalizeBybitFailure(error, context("read")));
@@ -264,10 +350,69 @@ export class BybitDemoExecutionAdapter implements ExchangeExecutionPort {
     return reconcileOrder(this.client, request, this.clock.now());
   }
 
+  async listAttachedProtection(
+    request: ExchangeAttachedProtectionLookup,
+  ): Promise<ExchangeResult<readonly ExchangeOrderObservation[]>> {
+    try {
+      const records = await this.client.readAttachedProtectionOrders(
+        request.instrument,
+        request.parentClientOrderId,
+      );
+      const observedAt = this.clock.now();
+      const observations = records.map((record) => {
+        const observation = createExchangeOrder({
+          exchangeOrderId: record.exchangeOrderId,
+          clientOrderId: record.clientOrderId,
+          instrument: record.instrument,
+          side: record.side,
+          requestedQuantity: record.requestedQuantity.toString(),
+          filledQuantity: record.filledQuantity.toString(),
+          status: record.status,
+          observedAt,
+          source: "bybit-demo/protection",
+          parentOrderLinkId: record.parentOrderLinkId,
+          ...(record.averagePrice === undefined
+            ? {}
+            : { averagePrice: record.averagePrice.toString() }),
+          ...(record.protectionType === undefined
+            ? {}
+            : { protectionType: record.protectionType }),
+        });
+        if (!observation.ok) {
+          throw new Error("normalized Demo protection observation is invalid");
+        }
+        return observation.value;
+      });
+      return exchangeSuccess(Object.freeze(observations));
+    } catch (error) {
+      return exchangeFailure(
+        normalizeBybitFailure(
+          error,
+          context("observe", {
+            instrument: request.instrument,
+            clientOrderId: request.parentClientOrderId,
+          }),
+        ),
+      );
+    }
+  }
+
   async listFills(
     request: ExchangeFillLookupRequest,
   ): Promise<ExchangeResult<readonly ExchangeFillObservation[]>> {
     return listOwnedFills(this.client, request);
+  }
+
+  async setLeverage(
+    request: ExchangeSetLeverageRequest,
+  ): Promise<ExchangeResult<ExchangeSetLeverageResult>> {
+    try {
+      return exchangeSuccess(await this.client.setLeverage(request));
+    } catch (error) {
+      return exchangeFailure(
+        normalizeBybitFailure(error, context("set-leverage")),
+      );
+    }
   }
 
   async cancelOrder(

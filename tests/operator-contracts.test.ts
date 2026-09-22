@@ -37,6 +37,42 @@ test("publishes the canonical operator runbook and skill links", async () => {
   );
 });
 
+test("documents the fixed Demo managed-entry lifecycle and safe stop states", async () => {
+  const [readme, runbook] = await Promise.all([
+    read("README.md"),
+    read("docs/operator-runbook.md"),
+  ]);
+
+  assert.match(readme, /npm run trader:demo/);
+  assert.match(runbook, /npm run trader:demo/);
+  assert.match(
+    runbook,
+    /exactly one of `--take-profit-percent` or `--take-profit-price`/i,
+  );
+  assert.match(runbook, /`Limit \+ GTC`/);
+  assert.match(runbook, /one\s+approval prompt/i);
+  for (const verdict of [
+    "CONFIRMED_OPEN",
+    "CONFIRMED_FILLED",
+    "NOT_READY",
+    "DECLINED",
+    "HALTED",
+    "UNRESOLVED",
+  ]) {
+    assert.match(runbook, new RegExp(`\\b${verdict}\\b`));
+  }
+  assert.match(runbook, /API_KEY_IP_UNBOUND/);
+  assert.match(runbook, /does not create a report file by default/i);
+  assert.match(runbook, /never blind-retry an ambiguous create/i);
+  assert.match(runbook, /schema-v5 journal/i);
+  assert.match(runbook, /v5-aware adapter/i);
+  assert.match(runbook, /verified pre-migration backup/i);
+  assert.match(
+    runbook,
+    /expected\s+open position is then normal managed state/i,
+  );
+});
+
 test("keeps execution modes and exact approval fail closed", async () => {
   const [runbook, invariants, skill] = await Promise.all([
     read("docs/operator-runbook.md"),

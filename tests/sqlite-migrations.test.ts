@@ -73,6 +73,34 @@ test("fresh and reopened journals configure verified SQLite durability state", (
   assert.equal(statSync(root).isDirectory(), true);
 });
 
+test("identity-binding migration is additive and starts without fabricated bindings", () => {
+  const { path } = temporaryDatabase();
+  const db = openDatabase(path);
+  assert.equal(applyMigrations(db, MIGRATIONS.slice(0, 4)).ok, true);
+  db.close();
+
+  const opened = openSqliteConnection({
+    environment: "demo",
+    databasePath: path,
+    runtime: supportedRuntime,
+  });
+  assert.equal(opened.ok, true);
+  if (!opened.ok) return;
+  assert.equal(
+    opened.value.db
+      .prepare("SELECT COUNT(*) AS count FROM execution_identity_bindings")
+      .get()?.count,
+    0,
+  );
+  assert.equal(
+    opened.value.db
+      .prepare("SELECT schema_version FROM schema_meta WHERE singleton = 1")
+      .get()?.schema_version,
+    CURRENT_SCHEMA_VERSION,
+  );
+  opened.value.close();
+});
+
 test("supported older schema migrates forward without losing committed rows", () => {
   const { path } = temporaryDatabase();
   const db = openDatabase(path);

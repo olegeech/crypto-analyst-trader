@@ -140,8 +140,30 @@ class FakeVerificationPort implements ExchangeExecutionPort {
         },
         openOrders,
         accountReadiness: { status: "ready" as const },
+        leverage: {
+          buy: decimal("1"),
+          sell: decimal("1"),
+          effective: decimal("1"),
+        },
+        accountMetadata: {
+          accountId: "fixture-account",
+          userId: "fixture-account",
+          apiKey: {
+            readOnly: false,
+            contractTrade: { order: true, position: true },
+            wallet: { withdraw: false, transfer: false },
+            ips: ["127.0.0.1"],
+            ipBinding: "bound" as const,
+            warningCodes: [],
+          },
+        },
+        capabilities: [],
       },
     };
+  }
+
+  async listAttachedProtection() {
+    return { ok: true as const, value: [] as const };
   }
 
   async createOrder(request: ExchangeOrderRequest): Promise<{
@@ -250,6 +272,23 @@ class FakeVerificationPort implements ExchangeExecutionPort {
     return {
       ok: true as const,
       value: fills,
+    };
+  }
+
+  async setLeverage() {
+    return {
+      ok: true as const,
+      value: {
+        instrument: "DOGEUSDT",
+        target: decimal("1"),
+        effective: {
+          buy: decimal("1"),
+          sell: decimal("1"),
+          effective: decimal("1"),
+        },
+        verifiedAt:
+          "2026-09-21T10:00:00.000Z" as ExchangeReadState["serverTime"],
+      },
     };
   }
 

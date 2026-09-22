@@ -44,7 +44,25 @@ function baseResponse(path: string): BybitResponse {
       });
     case "/v5/position/list":
       return response({
-        list: [{ symbol: "DOGEUSDT", positionIdx: 0, side: "", size: "0" }],
+        list: [
+          {
+            symbol: "DOGEUSDT",
+            positionIdx: 0,
+            side: "",
+            size: "0",
+            leverage: "1",
+          },
+        ],
+      });
+    case "/v5/user/query-api":
+      return response({
+        userID: "demo-account",
+        readOnly: 0,
+        permissions: {
+          ContractTrade: ["Order", "Position"],
+          Wallet: [],
+        },
+        ips: ["127.0.0.1"],
       });
     case "/v5/account/wallet-balance":
       return response({
@@ -126,6 +144,18 @@ test("execution adapter exposes normalized snapshots and owned lifecycle evidenc
   assert.equal(state.value.market.scope.environment, "demo");
   assert.equal(state.value.account.positions[0]?.side, "flat");
   assert.equal(state.value.account.evidence[0]?.kind, "account-snapshot");
+  assert.equal(state.value.leverage.effective.toString(), "1");
+  assert.equal(state.value.accountMetadata.accountId, "demo-account");
+  assert.equal(state.value.account.accountScope, "demo-account");
+  assert.deepEqual(
+    state.value.capabilities.map((item) => item.capability),
+    [
+      "order-create",
+      "attached-protection",
+      "reconciliation-reads",
+      "set-leverage",
+    ],
+  );
 
   const created = await adapter.createOrder(orderRequest());
   assert.equal(created.ok, true);

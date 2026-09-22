@@ -12,12 +12,12 @@ import {
   createSqliteExecutionStore,
   type SqliteExecutionStore,
 } from "./execution-store.js";
-import { fail, ok, type Result } from "../../domain/shared/result.js";
-import { domainError } from "../../domain/shared/errors.js";
+import { ok, type Result } from "../../domain/shared/result.js";
 import type { Approval } from "../../domain/execution/approval.js";
 import type { UtcTimestamp } from "../../domain/shared/time.js";
 import type {
   AppendAttemptRequest,
+  AppendIdentityBindingRequest,
   AppendReconciliationRequest,
   AttemptRecord,
   CheckpointState,
@@ -25,6 +25,8 @@ import type {
   HaltClearRequest,
   HaltState,
   IngestionFact,
+  IdentityBindingOutcome,
+  IdentityBindingRecord,
   LeaseAuthority,
   LeaseRequest,
   LeaseState,
@@ -98,53 +100,11 @@ export class SqlitePersistence implements PersistencePort {
   public readRun(
     lineageId: string,
   ): Result<PersistenceRunSnapshot | undefined> {
-    const lineage = this.execution.readLineage(lineageId);
-    if (!lineage.ok) return lineage;
-    if (lineage.value === undefined) return ok(undefined);
-    const plan = this.execution.readPlan(lineageId);
-    if (!plan.ok) return plan;
-    if (plan.value === undefined) {
-      return fail(
-        domainError(
-          "PERSISTENCE_INTEGRITY",
-          "committed lineage has no rehydratable execution plan",
-        ),
-      );
-    }
-    const approval = this.execution.readApproval(lineageId);
-    if (!approval.ok) return approval;
-    if (approval.value === undefined) {
-      return fail(
-        domainError(
-          "PERSISTENCE_INTEGRITY",
-          "committed lineage has no rehydratable approval",
-        ),
-      );
-    }
-    const ownedIntents: OwnedIntentRecord[] = [];
-    for (const intent of plan.value.material.orderIntents) {
-      const owned = this.execution.readOwnedIntent(lineageId, intent.intentId);
-      if (!owned.ok) return owned;
-      if (owned.value !== undefined) ownedIntents.push(owned.value);
-    }
-    const attempts = this.execution.readAttempts(lineageId);
-    if (!attempts.ok) return attempts;
-    const reconciliations = this.execution.readReconciliations(lineageId);
-    if (!reconciliations.ok) return reconciliations;
-    const lease = this.execution.readLease();
-    if (!lease.ok) return lease;
-    const halt = this.execution.readHalt();
-    if (!halt.ok) return halt;
-    return ok({
-      lineage: lineage.value,
-      plan: plan.value,
-      approval: approval.value,
-      ownedIntents,
-      attempts: attempts.value,
-      reconciliations: reconciliations.value,
-      ...(lease.value === undefined ? {} : { lease: lease.value }),
-      halt: halt.value,
-    });
+    return this.execution.readRun(lineageId);
+  }
+
+  public readRuns(): Result<readonly PersistenceRunSnapshot[]> {
+    return this.execution.readRuns();
   }
 
   public readScopeSnapshot(): Result<PersistenceScopeSnapshot> {
@@ -174,6 +134,25 @@ export class SqlitePersistence implements PersistencePort {
 
   public appendAttempt(request: AppendAttemptRequest): Result<AttemptRecord> {
     return this.execution.appendAttempt(request);
+  }
+
+  public appendIdentityBinding(
+    request: AppendIdentityBindingRequest,
+  ): Result<IdentityBindingOutcome> {
+    return this.execution.appendIdentityBinding(request);
+  }
+
+  public readIdentityBinding(
+    lineageId: string,
+    attemptId: string,
+  ): Result<IdentityBindingRecord | undefined> {
+    return this.execution.readIdentityBinding(lineageId, attemptId);
+  }
+
+  public readIdentityBindings(
+    lineageId: string,
+  ): Result<readonly IdentityBindingRecord[]> {
+    return this.execution.readIdentityBindings(lineageId);
   }
 
   public appendReconciliation(

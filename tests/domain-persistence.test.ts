@@ -130,6 +130,7 @@ test("rehydrates the execution and accounting artifact graph through domain cons
     status: "filled",
     observedAt: "2026-09-19T10:00:01Z",
     source: "fixture",
+    parentOrderLinkId: "persistence-client",
   });
   assert.equal(approval.ok, true);
   assert.equal(lifecycle.ok, true);
@@ -225,5 +226,30 @@ test("rehydrates the execution and accounting artifact graph through domain cons
     if (!encoded.ok) continue;
     const rehydrated = rehydrateArtifact(kind, encoded.value);
     assert.equal(rehydrated.ok, true, kind);
+  }
+});
+
+test("exchange-order artifacts retain an exact protective parent identity", () => {
+  const order = createExchangeOrder({
+    exchangeOrderId: "child-exchange",
+    clientOrderId: "child-client",
+    parentOrderLinkId: "entry-client",
+    instrument: "DOGEUSDT",
+    side: "sell",
+    requestedQuantity: "57",
+    filledQuantity: "0",
+    status: "open",
+    observedAt: "2026-09-19T10:00:01Z",
+    source: "fixture",
+  });
+  assert.equal(order.ok, true);
+  if (!order.ok) return;
+  const encoded = encodeCanonicalArtifact("exchange-order", order.value);
+  assert.equal(encoded.ok, true);
+  if (!encoded.ok) return;
+  const rehydrated = rehydrateArtifact("exchange-order", encoded.value);
+  assert.equal(rehydrated.ok, true);
+  if (rehydrated.ok) {
+    assert.equal(rehydrated.value.parentOrderLinkId, "entry-client");
   }
 });

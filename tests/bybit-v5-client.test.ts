@@ -7,6 +7,8 @@ import {
   ORDER_HISTORY_PATH,
   ORDER_REALTIME_PATH,
   EXECUTION_LIST_PATH,
+  SET_LEVERAGE_PATH,
+  USER_QUERY_API_PATH,
 } from "../src/adapters/bybit-v5/client.js";
 import { createOrderIntent } from "../src/domain/planning/order-intent.js";
 import { DecimalValue } from "../src/domain/shared/decimal.js";
@@ -72,7 +74,25 @@ function defaultResponse(path: string): BybitResponse {
       });
     case "/v5/position/list":
       return response({
-        list: [{ symbol: "DOGEUSDT", positionIdx: 0, side: "", size: "0" }],
+        list: [
+          {
+            symbol: "DOGEUSDT",
+            positionIdx: 0,
+            side: "",
+            size: "0",
+            leverage: "1",
+          },
+        ],
+      });
+    case USER_QUERY_API_PATH:
+      return response({
+        userID: "demo-account",
+        readOnly: 0,
+        permissions: {
+          ContractTrade: ["Order", "Position"],
+          Wallet: [],
+        },
+        ips: ["127.0.0.1"],
       });
     case "/v5/account/wallet-balance":
       return response({
@@ -94,6 +114,7 @@ function makeClient(
 ) {
   const requests: Array<{ path: string; query: QueryInput | undefined }> = [];
   const client = new BybitDemoReadClient({
+    expectedAccountId: "demo-account",
     transport: {
       async get(path, query) {
         requests.push({ path, query });
@@ -146,6 +167,8 @@ test("Demo preflight proves ownership-filtered reconciliation reads before expos
   const { client, requests } = makeClient();
   const result = await client.readPreflight("DOGEUSDT", "synthetic-no-match");
   assert.equal(result.position.side, "flat");
+  assert.equal(result.position.leverage.toString(), "1");
+  assert.equal(result.accountKey.userId, "demo-account");
   assert.equal(result.openOrders.length, 0);
   assert.deepEqual(result.reconciliationReads, {
     realtime: true,
@@ -155,6 +178,7 @@ test("Demo preflight proves ownership-filtered reconciliation reads before expos
   assert.deepEqual(
     requests.map((request) => request.path),
     [
+      USER_QUERY_API_PATH,
       "/v5/market/instruments-info",
       "/v5/market/tickers",
       "/v5/position/list",
@@ -218,6 +242,7 @@ test("execution client dispatches mapped create and exact cancel requests", asyn
   assert.equal(clock.ok, true);
   if (!intent.ok || !clock.ok) return;
   const client = new BybitDemoExecutionClient({
+    expectedAccountId: "demo-account",
     clock: clock.value,
     transport: {
       async get(path) {
@@ -265,3 +290,50 @@ test("execution client dispatches mapped create and exact cancel requests", asyn
     "exchange-cleanup",
   );
 });
+
+test("execution client posts equal Demo leverage values and proves the fresh readback", async () => {
+  const requests: Array<{
+    path: string;
+    body: Record<string, unknown> | string;
+  }> = [];
+  const clock = fixedClock("2026-09-21T10:00:00.000Z");
+  assert.equal(clock.ok, true);
+  if (!clock.ok) return;
+  const client = new BybitDemoExecutionClient({
+    expectedAccountId: "demo-account",
+    clock: clock.value,
+    transport: {
+      async get(path) {
+        return defaultResponse(path);
+      },
+      async getServerTime() {
+        return Date.parse("2026-09-21T10:00:00.000Z");
+      },
+      async post(path, body) {
+        requests.push({ path, body });
+        return response({});
+      },
+    },
+  });
+
+  const result = await client.setLeverage({
+    instrument: "DOGEUSDT",
+    target: decimalValue("1"),
+  });
+  assert.equal(result.effective.buy.toString(), "1");
+  assert.equal(result.effective.sell.toString(), "1");
+  assert.equal(requests[0]?.path, SET_LEVERAGE_PATH);
+  assert.deepEqual(requests[0]?.body, {
+    category: "linear",
+    symbol: "DOGEUSDT",
+    buyLeverage: "1",
+    sellLeverage: "1",
+  });
+});
+
+function decimalValue(value: string): DecimalValue {
+  const result = DecimalValue.fromString(value);
+  assert.equal(result.ok, true);
+  if (!result.ok) throw new Error("decimal fixture");
+  return result.value;
+}

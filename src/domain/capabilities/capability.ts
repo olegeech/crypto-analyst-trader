@@ -1,9 +1,14 @@
 import {
   createEvidenceRef,
+  isEvidenceFresh,
   type EvidenceRef,
 } from "../evidence/evidence-ref.js";
 import { domainError } from "../shared/errors.js";
-import { parseUtcTimestamp, type UtcTimestamp } from "../shared/time.js";
+import {
+  parseUtcTimestamp,
+  type Clock,
+  type UtcTimestamp,
+} from "../shared/time.js";
 import { fail, ok, type Result } from "../shared/result.js";
 import {
   isRecord,
@@ -11,7 +16,9 @@ import {
   requireSafeText,
 } from "../shared/validation.js";
 import {
+  isAdapterProducedCapabilityObservation,
   isProducedCapabilityObservation,
+  markAdapterCapabilityObservation,
   markCapabilityObservation,
 } from "./capability-proof.js";
 
@@ -118,6 +125,19 @@ export function createCapabilityObservation(
   );
 }
 
+/**
+ * Creates an observation at the adapter boundary. The returned object keeps
+ * the normal domain proof and receives a second process-local marker that is
+ * deliberately lost when the observation is copied or rehydrated.
+ */
+export function createAdapterCapabilityObservation(
+  input: unknown,
+): Result<CapabilityObservation> {
+  const observation = createCapabilityObservation(input);
+  if (!observation.ok) return observation;
+  return ok(markAdapterCapabilityObservation(observation.value));
+}
+
 export function requireCapability(
   observation: CapabilityObservation,
   requirement: CapabilityRequirement,
@@ -166,6 +186,35 @@ export function requireCapability(
   return ok(observation);
 }
 
+export function requireTrustedCapability(
+  observation: CapabilityObservation,
+  requirement: CapabilityRequirement,
+  clock?: Clock,
+): Result<CapabilityObservation> {
+  const gate = requireCapability(observation, requirement);
+  if (!gate.ok) return gate;
+  if (
+    gate.value.status === "supported" &&
+    !isAdapterProducedCapabilityObservation(gate.value)
+  ) {
+    return fail(
+      domainError(
+        "CAPABILITY_UNKNOWN",
+        "supported capability evidence must be produced by the adapter",
+        { capability: requirement.capability },
+      ),
+    );
+  }
+  if (clock !== undefined && !isEvidenceFresh(gate.value.evidence, clock)) {
+    return fail(
+      domainError("STALE_EVIDENCE", "capability evidence is stale", {
+        capability: requirement.capability,
+      }),
+    );
+  }
+  return gate;
+}
+
 export function capabilityStatus(
   observations: readonly CapabilityObservation[],
   requirement: CapabilityRequirement,
@@ -181,5 +230,11 @@ export function capabilityStatus(
   if (matching.some((item) => item.status === "unknown")) {
     return "unknown";
   }
-  return matching.length > 0 ? "supported" : "unknown";
+  return matching.some(
+    (item) =>
+      item.status === "supported" &&
+      isAdapterProducedCapabilityObservation(item),
+  )
+    ? "supported"
+    : "unknown";
 }
