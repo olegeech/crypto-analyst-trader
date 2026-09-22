@@ -10,10 +10,7 @@ import {
   type OpenInterestInterval,
   type OpenInterestObservation,
 } from "../../domain/market/market-evidence-bundle.js";
-import {
-  createInstrumentConstraints,
-  type InstrumentConstraints,
-} from "../../domain/market/instrument-constraints.js";
+import { createInstrumentConstraints } from "../../domain/market/instrument-constraints.js";
 import { DecimalValue } from "../../domain/shared/decimal.js";
 import {
   timestampFromEpochMs,
@@ -54,36 +51,16 @@ function object(value: unknown, label: string): JsonObject {
   return value as JsonObject;
 }
 
-function text(
-  record: JsonObject,
-  field: string,
-  label: string,
-  allowEmpty = false,
-): string {
+function text(record: JsonObject, field: string, label: string): string {
   const value = record[field];
   if (
     typeof value !== "string" ||
-    (!allowEmpty && value.length === 0) ||
+    value.length === 0 ||
     /[\u0000-\u001f\u007f\r\n]/u.test(value)
   ) {
     invalid(`Bybit ${label} response has an invalid ${field}.`);
   }
   return value;
-}
-
-function optionalText(
-  record: JsonObject,
-  field: string,
-  label: string,
-): string | undefined {
-  if (
-    !(field in record) ||
-    record[field] === undefined ||
-    record[field] === ""
-  ) {
-    return undefined;
-  }
-  return text(record, field, label);
 }
 
 function decimal(
@@ -402,26 +379,36 @@ export function mapFundingHistory(
 export function mapOpenInterest(
   response: BybitPublicResponse,
   expectedSymbol: string,
-  _interval: OpenInterestInterval,
+  interval: OpenInterestInterval,
 ): readonly OpenInterestObservation[] {
+  const label = `open-interest-${interval}`;
   const symbol = configuredSymbol(expectedSymbol);
-  const mapped = records(response, "open-interest").map((record) => {
-    if (text(record, "symbol", "open-interest") !== symbol) {
+  const responseSymbol = text(response.result, "symbol", label);
+  if (responseSymbol !== symbol) {
+    precondition(
+      `Bybit open-interest response returned the wrong symbol for ${symbol}.`,
+    );
+  }
+  const mapped = records(response, label).map((record) => {
+    if (
+      record.symbol !== undefined &&
+      text(record, "symbol", label) !== symbol
+    ) {
       precondition(
         `Bybit open-interest response returned the wrong symbol for ${symbol}.`,
       );
     }
     return Object.freeze({
-      timestamp: timestamp(record.timestamp, "timestamp", "open-interest"),
+      timestamp: timestamp(record.timestamp, "timestamp", label),
       openInterest: decimal(
         record.openInterest,
         "openInterest",
-        "open-interest",
+        label,
         "non-negative",
       ),
     });
   });
-  return sortChronological(mapped, "open-interest");
+  return sortChronological(mapped, label);
 }
 
 export function sortChronological<T extends { timestamp: UtcTimestamp }>(
@@ -440,42 +427,4 @@ export function sortChronological<T extends { timestamp: UtcTimestamp }>(
     }
   }
   return Object.freeze(sorted);
-}
-
-export function nextPageCursor(
-  response: BybitPublicResponse,
-  label: string,
-): string | undefined {
-  const raw = response.result.nextPageCursor;
-  if (raw === undefined || raw === "") return undefined;
-  if (typeof raw !== "string" || /[\u0000-\u001f\u007f\r\n]/u.test(raw)) {
-    invalid(`Bybit ${label} response has an invalid nextPageCursor.`);
-  }
-  return raw;
-}
-
-export function optionalNextPageCursor(
-  response: BybitPublicResponse,
-  label: string,
-): string | undefined {
-  return nextPageCursor(response, label);
-}
-
-export function mapInstrumentUnavailable(expectedSymbol: string): {
-  symbol: MarketEvidenceSymbol;
-  status: "unavailable";
-} {
-  return Object.freeze({
-    symbol: configuredSymbol(expectedSymbol),
-    status: "unavailable",
-  });
-}
-
-export function assertInstrumentConstraints(
-  constraints: InstrumentConstraints,
-  symbol: string,
-): void {
-  if (constraints.instrument !== configuredSymbol(symbol)) {
-    precondition("instrument constraints do not match the requested symbol.");
-  }
 }

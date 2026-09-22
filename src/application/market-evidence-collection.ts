@@ -227,6 +227,21 @@ function buildBundle(
   }> = [];
   for (const factsForSymbol of facts) {
     const diagnostics = [...factsForSymbol.diagnostics];
+    const tickerIsAtOrBeforeCutoff =
+      factsForSymbol.ticker === undefined ||
+      Date.parse(factsForSymbol.ticker.observedAt) <= Date.parse(cutoff);
+    if (!tickerIsAtOrBeforeCutoff) {
+      diagnostics.push(
+        makeDiagnostic(
+          {
+            facts: factsForSymbol,
+            operation: "normalize-ticker",
+            endpoint: "/v5/market/tickers",
+          },
+          "future-observation",
+        ),
+      );
+    }
     const ohlcv = [] as ReturnType<typeof normalizeOhlcvSeries>["value"][];
     const openInterest = [] as ReturnType<
       typeof normalizeOpenInterestSeries
@@ -288,13 +303,13 @@ function buildBundle(
         }
       }
     }
-    if (diagnostics.length > 0) complete = false;
+    if (diagnostics.length > 0 || !tickerIsAtOrBeforeCutoff) complete = false;
     symbols.push({
       symbol: factsForSymbol.symbol,
       ...(factsForSymbol.instrument === undefined
         ? {}
         : { instrument: factsForSymbol.instrument }),
-      ...(factsForSymbol.ticker === undefined
+      ...(factsForSymbol.ticker === undefined || !tickerIsAtOrBeforeCutoff
         ? {}
         : { ticker: factsForSymbol.ticker }),
       ohlcv,

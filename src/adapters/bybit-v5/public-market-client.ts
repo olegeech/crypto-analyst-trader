@@ -1,7 +1,4 @@
-import {
-  BYBIT_PUBLIC_TIME_PATH,
-  type BybitPublicTransport,
-} from "./public-transport.js";
+import { type BybitPublicTransport } from "./public-transport.js";
 import type { BybitPublicResponse } from "./public-response.js";
 import {
   BybitPublicMarketMappingError,
@@ -10,11 +7,12 @@ import {
   mapKline,
   mapOpenInterest,
   mapTicker,
-  nextPageCursor,
   sortChronological,
 } from "./public-market-mappers.js";
 import {
   DEFAULT_PUBLIC_PAGE_BUDGET,
+  assertPublicPaginationBudget,
+  nextCursorFromResponse,
   readCursorPages,
   type PublicPaginationBudget,
 } from "./public-market-pagination.js";
@@ -47,10 +45,10 @@ const BYBIT_INTERVAL: Readonly<Record<MarketSeriesInterval, string>> = {
   "1w": "W",
 };
 
-export interface BybitPublicMarketTransport extends Pick<
+export type BybitPublicMarketTransport = Pick<
   BybitPublicTransport,
   "get" | "getExchangeTime"
-> {}
+>;
 
 export interface BybitPublicMarketClientOptions {
   readonly transport: BybitPublicMarketTransport;
@@ -63,7 +61,9 @@ export class BybitPublicMarketClient {
 
   constructor(options: BybitPublicMarketClientOptions) {
     this.transport = options.transport;
-    this.pagination = options.pagination ?? DEFAULT_PUBLIC_PAGE_BUDGET;
+    this.pagination = assertPublicPaginationBudget(
+      options.pagination ?? DEFAULT_PUBLIC_PAGE_BUDGET,
+    );
   }
 
   async readExchangeTime(): Promise<UtcTimestamp> {
@@ -108,7 +108,6 @@ export class BybitPublicMarketClient {
     const limit = Math.min(target + 1, 1_000);
     return this.readTimePaged({
       label: `kline-${interval}`,
-      path: PUBLIC_KLINE_PATH,
       target,
       limit,
       request: (endTime) =>
@@ -131,7 +130,6 @@ export class BybitPublicMarketClient {
     const limit = Math.min(target + 1, 200);
     return this.readTimePaged({
       label: "funding-rate",
-      path: PUBLIC_FUNDING_HISTORY_PATH,
       target,
       limit,
       request: (endTime) =>
@@ -155,15 +153,19 @@ export class BybitPublicMarketClient {
     const rows = await readCursorPages<OpenInterestObservation>({
       label: `open-interest-${interval}`,
       budget: this.pagination,
+      minRows: target,
       read: async (cursor) => {
         const response = await this.transport.get(PUBLIC_OPEN_INTEREST_PATH, {
           category: BYBIT_LINEAR_CATEGORY,
           symbol,
-          interval,
+          intervalTime: interval,
           limit: String(limit),
           ...(cursor === undefined ? {} : { cursor }),
         });
-        const next = nextPageCursor(response, `open-interest-${interval}`);
+        const next = nextCursorFromResponse(
+          response,
+          `open-interest-${interval}`,
+        );
         return {
           rows: mapOpenInterest(response, symbol, interval),
           ...(next === undefined ? {} : { nextCursor: next }),
@@ -175,14 +177,12 @@ export class BybitPublicMarketClient {
 
   private async readTimePaged<T extends { timestamp: UtcTimestamp }>({
     label,
-    path: _path,
     target,
     limit,
     request,
     map,
   }: {
     readonly label: string;
-    readonly path: string;
     readonly target: number;
     readonly limit: number;
     readonly request: (endTime?: number) => Promise<BybitPublicResponse>;
@@ -204,15 +204,15 @@ export class BybitPublicMarketClient {
         seenTimestamps.add(row.timestamp);
         rows.push(row);
       }
-      const sorted = sortChronological(rows, label);
-      if (sorted.length >= target || mapped.length < limit) {
-        return Object.freeze([...sorted]);
-      }
-      if (sorted.length > this.pagination.maxRows) {
+      if (rows.length > this.pagination.maxRows) {
         throw new BybitPublicMarketMappingError(
           "pagination",
           `Bybit ${label} row budget was exhausted.`,
         );
+      }
+      const sorted = sortChronological(rows, label);
+      if (sorted.length >= target || mapped.length < limit) {
+        return Object.freeze([...sorted]);
       }
       const oldest = sorted[0];
       if (oldest === undefined) {
@@ -235,8 +235,4 @@ function validateRequestedCount(value: number, label: string): number {
     throw new TypeError(`${label} requested count must be between 1 and 5000`);
   }
   return value;
-}
-
-export function publicTimePath(): string {
-  return BYBIT_PUBLIC_TIME_PATH;
 }

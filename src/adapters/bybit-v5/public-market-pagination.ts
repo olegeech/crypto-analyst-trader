@@ -65,12 +65,20 @@ export async function readCursorPages<T>({
   read,
   budget = DEFAULT_PUBLIC_PAGE_BUDGET,
   label,
+  minRows,
 }: {
   readonly read: (cursor?: string) => Promise<PublicPage<T>>;
   readonly budget?: PublicPaginationBudget;
   readonly label: string;
+  readonly minRows?: number;
 }): Promise<readonly T[]> {
   const checked = assertPublicPaginationBudget(budget);
+  if (
+    minRows !== undefined &&
+    (!Number.isSafeInteger(minRows) || minRows < 1 || minRows > checked.maxRows)
+  ) {
+    throw new TypeError("minimum row count is outside the pagination budget");
+  }
   const rows: T[] = [];
   const seenCursors = new Set<string>();
   let cursor: string | undefined;
@@ -83,6 +91,9 @@ export async function readCursorPages<T>({
       );
     }
     rows.push(...current.rows);
+    if (minRows !== undefined && rows.length >= minRows) {
+      return Object.freeze(rows);
+    }
     if (current.nextCursor === undefined) return Object.freeze(rows);
     if (seenCursors.has(current.nextCursor)) {
       throw new BybitPublicPaginationError(

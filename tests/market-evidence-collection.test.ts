@@ -34,7 +34,10 @@ function decimal(value: string) {
 
 function readerFor(
   exchangeTimes: readonly UtcTimestamp[],
-  options: { readonly fundingInterval?: number } = {},
+  options: {
+    readonly fundingInterval?: number;
+    readonly tickerObservedAt?: UtcTimestamp;
+  } = {},
 ): MarketEvidenceCollectionReader & {
   readonly calls: string[];
   readonly timeReads: number;
@@ -76,7 +79,7 @@ function readerFor(
     async readTicker(symbol) {
       calls.push(`ticker:${symbol}`);
       return {
-        observedAt: exchangeTimes[0]!,
+        observedAt: options.tickerObservedAt ?? exchangeTimes[0]!,
         bid: decimal("100") as never,
         ask: decimal("101") as never,
         last: decimal("100.5") as never,
@@ -185,5 +188,31 @@ test("OI provider lag remains valid freshness input when the bounded requested w
   assert.equal(
     result.value.symbols[0]?.ohlcv[0]?.observations.length,
     MARKET_OHLCV_WINDOWS["1h"],
+  );
+});
+
+test("a ticker newer than the selected cutoff remains incomplete evidence", async () => {
+  const initial = "2026-09-22T10:00:01.000Z" as UtcTimestamp;
+  const candidate = "2026-09-22T10:00:02.000Z" as UtcTimestamp;
+  const futureTicker = "2026-09-22T10:00:03.000Z" as UtcTimestamp;
+  const clock = fixedClock("2026-09-22T10:00:00.000Z");
+  assert.equal(clock.ok, true);
+  if (!clock.ok) return;
+  const reader = readerFor([initial, candidate], {
+    tickerObservedAt: futureTicker,
+  });
+  const result = await collectMarketEvidence(
+    { runId: "run-future-ticker" },
+    { reader, clock: clock.value },
+  );
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.equal(result.value.status, "incomplete");
+  assert.equal(result.value.symbols[0]?.ticker, undefined);
+  assert.equal(
+    result.value.symbols[0]?.diagnostics.some(
+      (diagnostic) => diagnostic.code === "future-observation",
+    ),
+    true,
   );
 });

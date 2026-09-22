@@ -173,6 +173,17 @@ function decimal(
   field: string,
   mode: "positive" | "non-negative" | "any" = "any",
 ): Result<DecimalValue> {
+  if (isDecimalValue(value)) {
+    if (
+      (mode === "positive" && !value.isPositive()) ||
+      (mode === "non-negative" && value.isNegative())
+    ) {
+      return fail(
+        domainError("INVALID_VALUE", `${field} is out of range`, { field }),
+      );
+    }
+    return ok(value);
+  }
   const result = DecimalValue.fromString(value);
   if (!result.ok) return result;
   if (

@@ -102,6 +102,7 @@ test("funding and open-interest mappings reject wrong identity, duplicates and m
     () =>
       mapFundingHistory(
         response({
+          symbol: "DOGEUSDT",
           list: [
             {
               symbol: "BTCUSDT",
@@ -120,6 +121,7 @@ test("funding and open-interest mappings reject wrong identity, duplicates and m
     () =>
       mapOpenInterest(
         response({
+          symbol: "DOGEUSDT",
           list: [
             {
               symbol: "DOGEUSDT",

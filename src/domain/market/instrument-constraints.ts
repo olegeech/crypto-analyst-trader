@@ -1,5 +1,5 @@
 import { domainError } from "../shared/errors.js";
-import { DecimalValue } from "../shared/decimal.js";
+import { DecimalValue, isDecimalValue } from "../shared/decimal.js";
 import { fail, ok, type Result } from "../shared/result.js";
 import {
   isRecord,
@@ -20,6 +20,16 @@ function parsePositiveDecimal(
   value: unknown,
   field: string,
 ): Result<DecimalValue> {
+  if (isDecimalValue(value)) {
+    if (!value.isPositive()) {
+      return fail(
+        domainError("INVALID_CONSTRAINT", `${field} must be positive`, {
+          field,
+        }),
+      );
+    }
+    return ok(value);
+  }
   const parsed = DecimalValue.fromString(value);
   if (!parsed.ok) return parsed;
   if (!parsed.value.isPositive()) {

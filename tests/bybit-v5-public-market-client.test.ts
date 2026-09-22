@@ -34,6 +34,7 @@ test("public market client propagates bounded OI cursors and keeps delayed obser
             : undefined;
         return cursor === undefined
           ? response({
+              symbol: "DOGEUSDT",
               list: [
                 {
                   symbol: "DOGEUSDT",
@@ -44,6 +45,7 @@ test("public market client propagates bounded OI cursors and keeps delayed obser
               nextPageCursor: "next-1",
             })
           : response({
+              symbol: "DOGEUSDT",
               list: [
                 {
                   symbol: "DOGEUSDT",
