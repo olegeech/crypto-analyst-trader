@@ -230,6 +230,23 @@ test("account-key mapping proves Demo identity and normalizes permissions", () =
   assert.equal(mapped.expiresAt, "2026-10-01T00:00:00.000Z");
 });
 
+test("account-key mapping canonicalizes Bybit numeric user IDs", () => {
+  const mapped = mapAccountKeyMetadata(
+    response({
+      userID: 123456789,
+      readOnly: 0,
+      permissions: {
+        ContractTrade: ["Order", "Position"],
+        Wallet: [],
+      },
+      ips: ["127.0.0.1"],
+    }),
+    "123456789",
+  );
+  assert.equal(mapped.userId, "123456789");
+  assert.equal(mapped.readOnly, false);
+});
+
 test("account-key mapping fails closed for identity, read-only and dangerous permissions", () => {
   const base = {
     userID: "demo-account",

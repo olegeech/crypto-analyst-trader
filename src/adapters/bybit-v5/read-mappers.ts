@@ -145,6 +145,18 @@ function text(
   return value;
 }
 
+function identifierText(
+  record: JsonObject,
+  field: string,
+  label: string,
+): string {
+  const value = record[field];
+  if (typeof value === "number" && Number.isSafeInteger(value) && value >= 0) {
+    return String(value);
+  }
+  return text(record, field, label);
+}
+
 function optionalText(
   record: JsonObject,
   field: string,
@@ -369,7 +381,7 @@ export function mapAccountKeyMetadata(
   expectedAccountId: string,
 ): BybitAccountKeyMetadata {
   const item = object(response.result, "user/query-api");
-  const userId = text(item, "userID", "user/query-api");
+  const userId = identifierText(item, "userID", "user/query-api");
   if (userId !== expectedAccountId) {
     precondition(
       "Bybit Demo authenticated userID does not match the configured account identity.",
