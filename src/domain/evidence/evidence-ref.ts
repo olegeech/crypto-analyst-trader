@@ -15,6 +15,7 @@ import { fail, ok, type Result } from "../shared/result.js";
 
 export type EvidenceKind =
   | "market-snapshot"
+  | "market-evidence-bundle"
   | "account-snapshot"
   | "capability-probe"
   | "risk-input"
@@ -40,6 +41,7 @@ export interface EvidenceCompatibility {
 
 const EVIDENCE_KINDS = new Set<EvidenceKind>([
   "market-snapshot",
+  "market-evidence-bundle",
   "account-snapshot",
   "capability-probe",
   "risk-input",

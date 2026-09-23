@@ -12,6 +12,26 @@ It applies to direct Bybit execution. Product boundaries live in `README.md`,
 and mandatory safety rules live in `docs/architecture/invariants.md`. If this
 runbook conflicts with an invariant, the invariant wins.
 
+## Bybit public market evidence smoke (issue #11)
+
+The public market-evidence boundary uses unsigned Bybit mainnet REST reads and
+does not load Demo, Testnet or private-account credentials. Run this check only
+after the offline release suite is green:
+
+```text
+npm run test:bybit:public
+```
+
+The command is intentionally opt-in and is excluded from default tests,
+`npm run test:release` and CI. It is pinned to `https://api.bybit.com`, uses
+bounded GET-only reads for the versioned M1 universe
+(`BTCUSDT`, `ETHUSDT`, `SOLUSDT`, `DOGEUSDT`), and emits only status, counts and
+a canonical hash. It never prints credentials, private-account data or raw
+provider payloads and does not create a local raw-payload artifact. An
+`incomplete` or failed collection is evidence that the public boundary could
+not prove the required bundle; it is not a clean market snapshot and must not
+be passed to planning.
+
 ## Bybit Testnet capability probe (issue #7)
 
 Before #8 freezes daily-order contracts, the bounded live capability check is
