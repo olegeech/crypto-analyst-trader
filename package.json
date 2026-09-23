@@ -38,7 +38,7 @@
     "@types/big.js": "^7.0.0",
     "@types/node": "^24.0.0",
     "eslint": "^10.11.0",
-    "prettier": "^3.8.0",
+    "prettier": "^3.9.8",
     "tsx": "^4.23.15",
     "typescript": "^5.9.0",
     "typescript-eslint": "^8.70.0"
