@@ -3,6 +3,7 @@ import test from "node:test";
 
 import { runCoinalyzeLiquidationFullSmoke } from "../scripts/coinalyze-liquidation-full-smoke.js";
 import type { CoinalyzeTransportPort } from "../src/adapters/coinalyze/coinalyze-client.js";
+import { CoinalyzeTransportError } from "../src/adapters/coinalyze/coinalyze-transport.js";
 import type { MarketEvidenceCollectionReader } from "../src/application/market-evidence-collection.js";
 import {
   type MarketSeriesInterval,
@@ -243,6 +244,39 @@ test("full smoke counts explicit zero buckets separately from omitted hours", as
   assert.equal(summary.explicitZeroBuckets, summary.observedHourlyBuckets);
   assert.equal(summary.omittedBuckets, 24);
   assert.deepEqual(batchSizes, [20, 4]);
+});
+
+test("early provider failure returns an incomplete sanitized summary", async () => {
+  const batchSizes: number[] = [];
+  const baseTransport = transportFor(batchSizes);
+  const transport: CoinalyzeTransportPort = {
+    getFutureMarkets: (apiKey) => baseTransport.getFutureMarkets(apiKey),
+    async getLiquidationHistory(_apiKey, request) {
+      batchSizes.push(request.symbols.length);
+      throw new CoinalyzeTransportError(
+        "unauthorized",
+        "provider rejected request",
+      );
+    },
+  };
+  const summary = await runCoinalyzeLiquidationFullSmoke({
+    liveConfirmed: true,
+    environment: { TRADER_ENV: "public-mainnet" },
+    secrets: secretProvider([0]),
+    marketEvidenceReader: marketEvidenceReader(),
+    coinalyzeTransport: transport,
+    clock: smokeClock(),
+  });
+
+  assert.equal(summary.status, "incomplete");
+  assert.equal(summary.coverageProof, "complete");
+  assert.equal(summary.historyProof, "incomplete");
+  assert.equal(summary.eligibleConstituents, 24);
+  assert.equal(summary.historyRequestCount, 1);
+  assert.equal(summary.historyRequestSymbols, 20);
+  assert.equal(summary.maximumSymbolsPerHistoryRequest, 20);
+  assert.ok(summary.diagnostics.includes("history-unavailable"));
+  assert.deepEqual(batchSizes, [20]);
 });
 
 test("full smoke stops before Coinalyze when exchange-time market evidence is incomplete", async () => {

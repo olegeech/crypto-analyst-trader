@@ -225,9 +225,7 @@ export async function runCoinalyzeLiquidationFullSmoke({
   });
 
   if (
-    summary.maximumSymbolsPerHistoryRequest > COINALYZE_HISTORY_SYMBOL_LIMIT ||
-    (summary.eligibleConstituents > 0 &&
-      summary.historyRequestSymbols < summary.eligibleConstituents)
+    summary.maximumSymbolsPerHistoryRequest > COINALYZE_HISTORY_SYMBOL_LIMIT
   ) {
     throw new Error(
       "Full Coinalyze smoke could not prove bounded history batching.",
