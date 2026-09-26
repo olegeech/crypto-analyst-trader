@@ -25,6 +25,7 @@
     "test:testnet": "node --import tsx scripts/testnet-smoke.ts",
     "test:bybit:public": "TRADER_ENV=public-mainnet node --import tsx scripts/public-market-smoke.ts",
     "coinalyze:liquidation:smoke": "node --import tsx scripts/coinalyze-liquidation-smoke.ts",
+    "coinalyze:liquidation:full-smoke": "TRADER_ENV=public-mainnet node --import tsx scripts/coinalyze-liquidation-full-smoke.ts",
     "probe:bybit:testnet": "node --import tsx scripts/bybit-capability-probe.ts --environment testnet",
     "probe:bybit:demo": "node --import tsx scripts/bybit-capability-probe.ts --environment demo",
     "probe:bybit:recover": "node --import tsx scripts/bybit-capability-probe.ts --manual-recover",

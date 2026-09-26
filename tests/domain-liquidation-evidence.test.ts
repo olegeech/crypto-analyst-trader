@@ -335,6 +335,20 @@ test("bundle rejects post-cutoff observations, duplicate market identities and f
   );
   assert.equal(duplicateResult.ok, false);
 
+  const conflictingContract = targets();
+  const firstBitcoin = conflictingContract[0]?.constituents[0];
+  assert.ok(firstBitcoin);
+  conflictingContract[0]?.constituents.push({
+    ...firstBitcoin,
+    providerSymbol: "BTCUSDT_PERP.BINANCE_ALT",
+    marginType: "COIN",
+    expireAt: 1_800_000_000,
+  });
+  const conflictingResult = createLiquidationEvidenceBundle(
+    input({ targets: conflictingContract }),
+  );
+  assert.equal(conflictingResult.ok, false);
+
   const missingObservation = targets();
   const marketWithGap = missingObservation[0]?.constituents[0];
   assert.ok(marketWithGap);

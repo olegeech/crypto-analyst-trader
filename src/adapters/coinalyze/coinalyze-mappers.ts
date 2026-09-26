@@ -98,14 +98,7 @@ function marketFromRow(value: unknown): CoinalyzeMarket | undefined {
 }
 
 function contractKey(market: CoinalyzeMarket): string {
-  return JSON.stringify([
-    market.exchange,
-    market.symbolOnExchange,
-    market.baseAsset,
-    market.quoteAsset,
-    market.marginType,
-    market.expireAt,
-  ]);
+  return JSON.stringify([market.exchange, market.symbolOnExchange]);
 }
 
 function sameMarket(left: CoinalyzeMarket, right: CoinalyzeMarket): boolean {

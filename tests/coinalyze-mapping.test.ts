@@ -36,6 +36,7 @@ test("maps the complete unpaginated catalogue without requiring a liquidation ca
     }),
     market({
       symbol: "BTCUSDT.OLD",
+      symbol_on_exchange: "BTCUSDT-OLD",
       is_perpetual: false,
       expire_at: "1700000000",
     }),
@@ -55,7 +56,11 @@ test("maps the complete unpaginated catalogue without requiring a liquidation ca
 test("invalid rows make coverage incomplete while preserving every trustworthy row", () => {
   const mapped = mapCoinalyzeFutureMarkets([
     market(),
-    market({ symbol: "ETHUSDT_PERP.BINANCE", base_asset: "ETH" }),
+    market({
+      symbol: "ETHUSDT_PERP.BINANCE",
+      symbol_on_exchange: "ETHUSDT",
+      base_asset: "ETH",
+    }),
     { symbol: "malformed" },
   ]);
 
@@ -76,13 +81,29 @@ test("duplicate identities never become complete and contradictory identities ar
   const contradictory = mapCoinalyzeFutureMarkets([
     market(),
     market({ exchange: "OTHER", symbol_on_exchange: "BTCUSDT-OTHER" }),
-    market({ symbol: "ETHUSDT_PERP.BINANCE", base_asset: "ETH" }),
+    market({
+      symbol: "ETHUSDT_PERP.BINANCE",
+      symbol_on_exchange: "ETHUSDT",
+      base_asset: "ETH",
+    }),
   ]);
   assert.equal(contradictory.complete, false);
   assert.deepEqual(
     contradictory.markets.map(({ symbol }) => symbol),
     ["ETHUSDT_PERP.BINANCE"],
   );
+
+  const conflictingMetadata = mapCoinalyzeFutureMarkets([
+    market(),
+    market({
+      symbol: "BTCUSDT_PERP.BINANCE_ALT",
+      margined: "COIN",
+      expire_at: "1800000000",
+    }),
+  ]);
+  assert.equal(conflictingMetadata.complete, false);
+  assert.deepEqual(conflictingMetadata.markets, []);
+  assert.equal(conflictingMetadata.diagnostics[0]?.code, "duplicate-market");
 });
 
 test("non-array future catalogue shape fails closed without inventing continuation semantics", () => {

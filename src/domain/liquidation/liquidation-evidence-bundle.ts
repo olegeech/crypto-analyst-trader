@@ -552,10 +552,6 @@ export function createLiquidationEvidenceBundle(
       const contractKey = JSON.stringify([
         constituent.exchange,
         constituent.symbolOnExchange,
-        constituent.baseAsset,
-        constituent.quoteAsset,
-        constituent.marginType,
-        constituent.expireAt,
       ]);
       if (seenContracts.has(contractKey)) {
         return invalid(

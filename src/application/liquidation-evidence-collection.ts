@@ -210,14 +210,7 @@ function parseMarket(value: unknown): CoinalyzeMarket | undefined {
 }
 
 function marketContractKey(market: CoinalyzeMarket): string {
-  return JSON.stringify([
-    market.exchange,
-    market.symbolOnExchange,
-    market.baseAsset,
-    market.quoteAsset,
-    market.marginType,
-    market.expireAt,
-  ]);
+  return JSON.stringify([market.exchange, market.symbolOnExchange]);
 }
 
 function sameMarket(left: CoinalyzeMarket, right: CoinalyzeMarket): boolean {

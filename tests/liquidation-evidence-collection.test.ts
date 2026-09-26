@@ -440,6 +440,36 @@ test("malformed and contradictory adapter catalogue results downgrade proof with
   );
 });
 
+test("same venue contract with conflicting metadata is excluded from aggregate", async () => {
+  const markets = targetMarkets();
+  const btc = markets[0];
+  assert.ok(btc);
+  const conflicting = {
+    ...btc,
+    symbol: "BTCUSDT_PERP.BINANCE_ALT",
+    marginType: "COIN",
+    expireAt: 1_800_000_000,
+  };
+  const h = harness({ markets: [btc, conflicting, ...markets.slice(1)] });
+
+  const result = await h.collect();
+
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.equal(result.value.bundle.status, "incomplete");
+  assert.equal(result.value.bundle.coverageProof, "incomplete");
+  assert.equal(result.value.bundle.targets[0]?.constituents.length, 0);
+  assert.ok(
+    result.value.bundle.diagnostics.some(
+      ({ code }) => code === "duplicate-market",
+    ),
+  );
+  const historyCall = h.calls.find(({ kind }) => kind === "history");
+  assert.ok(historyCall?.request);
+  assert.equal(historyCall.request.symbols.includes(btc.symbol), false);
+  assert.equal(historyCall.request.symbols.includes(conflicting.symbol), false);
+});
+
 test("incompatible #11 run identity stops before secret/provider access", async () => {
   const mismatched = marketEvidence({
     runId: "different-run",

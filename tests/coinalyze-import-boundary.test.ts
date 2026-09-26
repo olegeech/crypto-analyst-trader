@@ -7,6 +7,7 @@ const entrypoints = [
   "src/adapters/coinalyze/coinalyze-client.ts",
   "src/application/liquidation-evidence-collection.ts",
   "scripts/coinalyze-liquidation-smoke.ts",
+  "scripts/coinalyze-liquidation-full-smoke.ts",
 ];
 const importSpecifier = /\b(?:from|import)\s*["']([^"']+)["']/gu;
 const forbiddenPath =
