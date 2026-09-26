@@ -66,7 +66,9 @@ function marketFromRow(value: unknown): CoinalyzeMarket | undefined {
   const baseAsset = providerText(value.base_asset, 64);
   const quoteAsset = providerText(value.quote_asset, 64);
   const marginType = providerText(value.margined, 64);
-  const expireAt = unixSeconds(value.expire_at);
+  const isPerpetual = value.is_perpetual === true;
+  const expireAt =
+    value.expire_at === null && isPerpetual ? 0 : unixSeconds(value.expire_at);
   const notionalDenominatedIn = providerText(
     value.oi_lq_vol_denominated_in,
     64,

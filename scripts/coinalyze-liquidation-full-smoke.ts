@@ -58,6 +58,8 @@ export interface CoinalyzeLiquidationFullSmokeSummary {
   readonly constituentsWithHistory: number;
   readonly expectedHourlyBuckets: number;
   readonly observedHourlyBuckets: number;
+  readonly explicitZeroBuckets: number;
+  readonly omittedBuckets: number;
   readonly historyRequestCount: number;
   readonly historyRequestSymbols: number;
   readonly maximumSymbolsPerHistoryRequest: number;
@@ -111,6 +113,14 @@ function counts(bundle: LiquidationEvidenceBundle) {
     ).length,
     observedHourlyBuckets: constituents.reduce(
       (total, { observations }) => total + observations.length,
+      0,
+    ),
+    explicitZeroBuckets: constituents.reduce(
+      (total, { observations }) =>
+        total +
+        observations.filter(
+          ({ longUsd, shortUsd }) => longUsd.isZero() && shortUsd.isZero(),
+        ).length,
       0,
     ),
   };
@@ -203,6 +213,10 @@ export async function runCoinalyzeLiquidationFullSmoke({
     expectedHourlyBuckets:
       bundleCounts.eligibleConstituents * LIQUIDATION_HISTORY_BUCKETS,
     observedHourlyBuckets: bundleCounts.observedHourlyBuckets,
+    explicitZeroBuckets: bundleCounts.explicitZeroBuckets,
+    omittedBuckets:
+      bundleCounts.eligibleConstituents * LIQUIDATION_HISTORY_BUCKETS -
+      bundleCounts.observedHourlyBuckets,
     historyRequestCount: metrics.requestCount,
     historyRequestSymbols: metrics.requestSymbols,
     maximumSymbolsPerHistoryRequest: metrics.maximumSymbolsPerRequest,

@@ -116,7 +116,10 @@ function catalogue(): readonly Record<string, unknown>[] {
   );
 }
 
-function transportFor(batchSizes: number[]): CoinalyzeTransportPort {
+function transportFor(
+  batchSizes: number[],
+  omitLastBucket = false,
+): CoinalyzeTransportPort {
   return {
     async getFutureMarkets(apiKey) {
       assert.equal(apiKey, API_KEY);
@@ -128,7 +131,9 @@ function transportFor(batchSizes: number[]): CoinalyzeTransportPort {
       return request.symbols.map((symbol) => ({
         symbol,
         history: Array.from(
-          { length: LIQUIDATION_HISTORY_BUCKETS },
+          {
+            length: LIQUIDATION_HISTORY_BUCKETS - (omitLastBucket ? 1 : 0),
+          },
           (_, index) => ({
             t: String(request.from + index * 60 * 60),
             l: "0",
@@ -204,6 +209,8 @@ test("full live smoke runs all eligible constituents through the canonical colle
   assert.equal(summary.constituentsWithHistory, 24);
   assert.equal(summary.expectedHourlyBuckets, 24 * LIQUIDATION_HISTORY_BUCKETS);
   assert.equal(summary.observedHourlyBuckets, 24 * LIQUIDATION_HISTORY_BUCKETS);
+  assert.equal(summary.explicitZeroBuckets, 24 * LIQUIDATION_HISTORY_BUCKETS);
+  assert.equal(summary.omittedBuckets, 0);
   assert.equal(summary.historyRequestCount, 2);
   assert.equal(summary.historyRequestSymbols, 24);
   assert.equal(summary.maximumSymbolsPerHistoryRequest, 20);
@@ -213,6 +220,29 @@ test("full live smoke runs all eligible constituents through the canonical colle
   assert.equal(secretReads[0], 1);
   assert.equal(JSON.stringify(summary).includes(API_KEY), false);
   assert.equal(JSON.stringify(summary).includes("BTCUSDT"), false);
+});
+
+test("full smoke counts explicit zero buckets separately from omitted hours", async () => {
+  const batchSizes: number[] = [];
+  const summary = await runCoinalyzeLiquidationFullSmoke({
+    liveConfirmed: true,
+    environment: { TRADER_ENV: "public-mainnet" },
+    secrets: secretProvider([0]),
+    marketEvidenceReader: marketEvidenceReader(),
+    coinalyzeTransport: transportFor(batchSizes, true),
+    clock: smokeClock(),
+  });
+
+  assert.equal(summary.status, "incomplete");
+  assert.equal(summary.coverageProof, "complete");
+  assert.equal(summary.historyProof, "incomplete");
+  assert.equal(
+    summary.observedHourlyBuckets,
+    24 * (LIQUIDATION_HISTORY_BUCKETS - 1),
+  );
+  assert.equal(summary.explicitZeroBuckets, summary.observedHourlyBuckets);
+  assert.equal(summary.omittedBuckets, 24);
+  assert.deepEqual(batchSizes, [20, 4]);
 });
 
 test("full smoke stops before Coinalyze when exchange-time market evidence is incomplete", async () => {

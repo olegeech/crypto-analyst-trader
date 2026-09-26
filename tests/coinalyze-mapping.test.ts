@@ -53,6 +53,18 @@ test("maps the complete unpaginated catalogue without requiring a liquidation ca
   assert.equal(binance?.isPerpetual, true);
 });
 
+test("null expiry maps to no-expiry only for explicitly perpetual contracts", () => {
+  const perpetual = mapCoinalyzeFutureMarkets([market({ expire_at: null })]);
+  assert.equal(perpetual.complete, true);
+  assert.equal(perpetual.markets[0]?.expireAt, 0);
+
+  const datedMarket = mapCoinalyzeFutureMarkets([
+    market({ is_perpetual: false, expire_at: null }),
+  ]);
+  assert.equal(datedMarket.complete, false);
+  assert.deepEqual(datedMarket.markets, []);
+});
+
 test("invalid rows make coverage incomplete while preserving every trustworthy row", () => {
   const mapped = mapCoinalyzeFutureMarkets([
     market(),

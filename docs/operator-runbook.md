@@ -74,8 +74,8 @@ This command first collects a complete, exchange-cutoff Bybit public #11
 collector against the full supported catalogue and every eligible BTC, ETH,
 SOL and DOGE perpetual constituent. The client batches history requests at no
 more than 20 symbols each. Output includes status, independent coverage and
-history proofs, sanitized constituent/bucket/request counts, and the
-canonical bundle hash; it does not print symbols, raw responses, credentials,
+history proofs, sanitized constituent/bucket/request counts (including
+explicit zero and omitted hours), and the canonical bundle hash; it does not print symbols, raw responses, credentials,
 or run identity, and does not persist planning evidence. A complete result
 requires both proofs complete and all expected hourly buckets present. Any
 other result exits non-zero and must not be treated as complete planner input.
