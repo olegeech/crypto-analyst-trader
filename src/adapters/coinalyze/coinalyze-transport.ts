@@ -1,4 +1,7 @@
 import { parseCoinalyzeJson } from "./coinalyze-response.js";
+import type { CoinalyzeHistoryRequest } from "../../ports/coinalyze-liquidation-data.js";
+
+export type { CoinalyzeHistoryRequest } from "../../ports/coinalyze-liquidation-data.js";
 
 export const COINALYZE_API_ORIGIN = "https://api.coinalyze.net";
 export const COINALYZE_FUTURE_MARKETS_PATH = "/v1/future-markets";
@@ -33,12 +36,6 @@ export class CoinalyzeTransportError extends Error {
     this.httpStatus = options.httpStatus;
     this.retryAfterSeconds = options.retryAfterSeconds;
   }
-}
-
-export interface CoinalyzeHistoryRequest {
-  readonly symbols: readonly string[];
-  readonly from: number;
-  readonly to: number;
 }
 
 export interface CoinalyzeTransportOptions {
@@ -229,7 +226,7 @@ export class CoinalyzeTransport {
         "Coinalyze response came from a non-canonical origin.",
       );
     }
-    if (!response.ok) {
+    if (response.status !== 200) {
       if (response.status === 401) {
         throw new CoinalyzeTransportError(
           "unauthorized",

@@ -35,6 +35,12 @@ export class SecurityCommandTimeoutError extends Error {
   }
 }
 
+export function stripSecurityOutputLineEnding(stdout: string): string {
+  return stdout.endsWith("\n")
+    ? stdout.slice(0, -1).replace(/\r$/, "")
+    : stdout;
+}
+
 export function runSecurity(
   args: string[],
   input?: string,

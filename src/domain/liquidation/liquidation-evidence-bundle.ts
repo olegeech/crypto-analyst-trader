@@ -20,8 +20,8 @@ import {
 } from "./liquidation-evidence-diagnostics.js";
 import {
   deriveLiquidationWindows,
-  LIQUIDATION_HISTORY_BUCKETS,
   LIQUIDATION_HOUR_MS,
+  liquidationHistoryWindow,
   type LiquidationHourlyAggregate,
   type LiquidationWindowEvidence,
 } from "./liquidation-evidence-windows.js";
@@ -37,6 +37,8 @@ export {
   LIQUIDATION_HISTORY_BUCKETS,
   LIQUIDATION_HOUR_MS,
   LIQUIDATION_WINDOW_HOURS,
+  liquidationHistoryWindow,
+  type LiquidationHistoryWindow,
   type LiquidationHourlyAggregate,
   type LiquidationWindowEvidence,
   type LiquidationWindowHours,
@@ -241,15 +243,10 @@ function historyBounds(bundleCutoff: UtcTimestamp): {
   readonly oldestBucket: number;
   readonly latestClosedBucket: number;
 } {
-  const latestClosedBucket =
-    Math.floor(Date.parse(bundleCutoff) / LIQUIDATION_HOUR_MS) *
-      LIQUIDATION_HOUR_MS -
-    LIQUIDATION_HOUR_MS;
+  const history = liquidationHistoryWindow(Date.parse(bundleCutoff));
   return {
-    oldestBucket:
-      latestClosedBucket -
-      (LIQUIDATION_HISTORY_BUCKETS - 1) * LIQUIDATION_HOUR_MS,
-    latestClosedBucket,
+    oldestBucket: history.oldestEpoch,
+    latestClosedBucket: history.latestClosedEpoch,
   };
 }
 
@@ -464,41 +461,25 @@ function hasFullHistory(
   constituent: LiquidationConstituentEvidence,
   bundleCutoff: UtcTimestamp,
 ): boolean {
-  if (constituent.observations.length !== LIQUIDATION_HISTORY_BUCKETS)
-    return false;
-  const bounds = historyBounds(bundleCutoff);
+  const expectedBuckets = liquidationHistoryWindow(
+    Date.parse(bundleCutoff),
+  ).epochs;
+  if (constituent.observations.length !== expectedBuckets.length) return false;
   return constituent.observations.every(
     (observation, index) =>
-      Date.parse(observation.timestamp) ===
-      bounds.oldestBucket + index * LIQUIDATION_HOUR_MS,
+      Date.parse(observation.timestamp) === expectedBuckets[index],
   );
 }
 
-function targetAssetsHaveFullHistory(
+function selectedConstituentsHaveFullHistory(
   targets: readonly LiquidationTargetEvidence[],
   bundleCutoff: UtcTimestamp,
 ): boolean {
-  return targets.every(
-    (target) =>
-      target.constituents.length > 0 &&
-      target.constituents.every((constituent) =>
-        hasFullHistory(constituent, bundleCutoff),
-      ),
+  return targets.every((target) =>
+    target.constituents.every((constituent) =>
+      hasFullHistory(constituent, bundleCutoff),
+    ),
   );
-}
-
-function deepFreeze<T>(value: T, seen = new WeakSet<object>()): T {
-  if (
-    typeof value !== "object" ||
-    value === null ||
-    isDecimalValue(value) ||
-    seen.has(value)
-  ) {
-    return value;
-  }
-  seen.add(value);
-  for (const child of Object.values(value)) deepFreeze(child, seen);
-  return Object.freeze(value);
 }
 
 export function createLiquidationEvidenceBundle(
@@ -604,7 +585,7 @@ export function createLiquidationEvidenceBundle(
     (count, target) => count + target.constituents.length,
     0,
   );
-  const fullHistory = targetAssetsHaveFullHistory(
+  const fullHistory = selectedConstituentsHaveFullHistory(
     parsedTargets,
     bundleCutoff.value,
   );
@@ -619,31 +600,29 @@ export function createLiquidationEvidenceBundle(
       coverageProof !== "complete" ||
       historyProof !== "complete" ||
       !fullHistory ||
+      parsedTargets.some((target) => target.constituents.length === 0) ||
       diagnostics.value.length > 0
     ) {
       return invalid("complete liquidation bundle lacks complete proof");
     }
   } else if (status === "incomplete") {
-    if (
-      constituentCount === 0 ||
-      (coverageProof === "complete" && historyProof === "complete") ||
-      diagnostics.value.length === 0
-    ) {
+    if (constituentCount === 0 || diagnostics.value.length === 0) {
       return invalid(
         "incomplete liquidation bundle lacks partial evidence or diagnostics",
       );
     }
   } else if (
     constituentCount !== 0 ||
-    coverageProof !== "incomplete" ||
     historyProof !== "incomplete" ||
     diagnostics.value.length === 0
   ) {
-    return invalid("failed liquidation bundle must contain diagnostics only");
+    return invalid(
+      "failed liquidation bundle must contain only proof and diagnostics",
+    );
   }
 
   return ok(
-    deepFreeze({
+    Object.freeze({
       runId: runId.value,
       schemaVersion: LIQUIDATION_EVIDENCE_SCHEMA_VERSION,
       producer: producer.value,

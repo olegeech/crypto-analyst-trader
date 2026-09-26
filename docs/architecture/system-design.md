@@ -117,6 +117,17 @@ its constructors return immutable values or typed domain failures:
   attempt to that plan and a known exchange order, then verifies observed
   instrument, side and quantity against the approved intent.
 
+Issue #45 adds a separate Coinalyze liquidation-evidence collector. It binds
+its output to a validated #11 market-evidence run and cutoff, distinguishes
+full target-perpetual catalogue coverage from per-constituent history
+completeness, and preserves omitted hours as missing. A complete result
+requires both proofs; #13, not the collector, classifies freshness and quality.
+The provider key is read through the provider-neutral Keychain port, while the
+adapter is limited to public GET calls and does not share Bybit credential,
+account, execution, or persistence authority. Its explicit smoke is
+adapter-level characterization only and does not publish planner evidence or
+create a second storage path.
+
 External payload parsers validate required known fields and tolerate additive
 unknown fields. Domain-owned artifacts remain versioned and exact so their
 canonical identities cannot drift silently.

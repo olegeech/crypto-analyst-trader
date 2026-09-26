@@ -109,6 +109,7 @@ test("HTTP failures are classified without exposing provider bodies or API keys"
       kind: "rate-limited",
       retryAfter: 7,
     },
+    { status: 206, headers: {}, kind: "http-failed", retryAfter: undefined },
     { status: 500, headers: {}, kind: "http-failed", retryAfter: undefined },
   ] as const;
 

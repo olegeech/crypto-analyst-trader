@@ -1,26 +1,3 @@
-export interface CoinalyzeMarket {
-  readonly symbol: string;
-  readonly exchange: string;
-  readonly symbolOnExchange: string;
-  readonly baseAsset: string;
-  readonly quoteAsset: string;
-  readonly isPerpetual: boolean;
-  readonly marginType: string;
-  readonly expireAt: number;
-  readonly notionalDenominatedIn: string;
-}
-
-export interface CoinalyzeLiquidationObservation {
-  readonly timestamp: string;
-  readonly longUsd: string;
-  readonly shortUsd: string;
-}
-
-export interface CoinalyzeMarketHistory {
-  readonly symbol: string;
-  readonly observations: readonly CoinalyzeLiquidationObservation[];
-}
-
 export function isCoinalyzeRecord(
   value: unknown,
 ): value is Record<string, unknown> {

@@ -123,7 +123,21 @@ test("complete liquidation evidence validates exact aligned facts and derived wi
   assert.equal(bitcoin?.windows[3]?.shortUsd.toString(), "600");
   assert.equal(bitcoin?.windows[3]?.complete, true);
   assert.equal(Object.isFrozen(result.value), true);
+  assert.equal(Object.isFrozen(result.value.marketEvidence), true);
+  assert.equal(Object.isFrozen(result.value.targets), true);
+  assert.equal(Object.isFrozen(bitcoin), true);
+  assert.equal(Object.isFrozen(bitcoin?.constituents), true);
+  assert.equal(Object.isFrozen(bitcoin?.constituents[0]), true);
   assert.equal(Object.isFrozen(bitcoin?.constituents[0]?.observations), true);
+  assert.equal(
+    Object.isFrozen(bitcoin?.constituents[0]?.observations[0]),
+    true,
+  );
+  assert.equal(Object.isFrozen(bitcoin?.hourlyAggregates), true);
+  assert.equal(Object.isFrozen(bitcoin?.hourlyAggregates[0]), true);
+  assert.equal(Object.isFrozen(bitcoin?.windows), true);
+  assert.equal(Object.isFrozen(bitcoin?.windows[0]), true);
+  assert.equal(Object.isFrozen(result.value.diagnostics), true);
 });
 
 test("incomplete coverage preserves all trustworthy discovered constituents", () => {
@@ -268,6 +282,30 @@ test("failed collection contains no untrusted market facts and requires a diagno
   assert.equal(noReason.ok, false);
 });
 
+test("a full catalogue with no eligible target market can fail with coverage still proven", () => {
+  const failed = createLiquidationEvidenceBundle(
+    input({
+      coverageProof: "complete",
+      historyProof: "incomplete",
+      status: "failed",
+      targets: LIQUIDATION_EVIDENCE_ASSETS.map((asset) => ({
+        asset,
+        constituents: [],
+      })),
+      diagnostics: [
+        { code: "no-eligible-markets", operation: "discover-markets" },
+      ],
+    }),
+  );
+
+  assert.equal(failed.ok, true);
+  if (failed.ok) {
+    assert.equal(failed.value.coverageProof, "complete");
+    assert.equal(failed.value.historyProof, "incomplete");
+    assert.equal(failed.value.status, "failed");
+  }
+});
+
 test("bundle rejects post-cutoff observations, duplicate market identities and fabricated zero fill", () => {
   const afterCutoff = targets();
   const firstMarket = afterCutoff[0]?.constituents[0];
@@ -308,11 +346,15 @@ test("bundle rejects post-cutoff observations, duplicate market identities and f
 });
 
 test("canonical artifact hash is deterministic and rehydrates liquidation evidence", () => {
-  const first = createLiquidationEvidenceBundle(input());
-  const reorderedTargets = [...targets()].reverse().map((target) => ({
-    ...target,
-    constituents: [...target.constituents].reverse(),
-  }));
+  const first = createLiquidationEvidenceBundle(
+    input({ targets: targets({ perAssetCount: 2 }) }),
+  );
+  const reorderedTargets = [...targets({ perAssetCount: 2 })]
+    .reverse()
+    .map((target) => ({
+      ...target,
+      constituents: [...target.constituents].reverse(),
+    }));
   const reordered = createLiquidationEvidenceBundle(
     input({ targets: reorderedTargets }),
   );
@@ -356,7 +398,7 @@ test("canonical artifact hash is deterministic and rehydrates liquidation eviden
     assert.equal(rehydrated.value.status, "complete");
     assert.equal(
       rehydrated.value.targets[0]?.windows[3]?.totalUsd.toString(),
-      "900",
+      "1800",
     );
   }
 
@@ -388,6 +430,33 @@ test("canonical artifact hash is deterministic and rehydrates liquidation eviden
   assert.equal(
     rehydrateArtifact("liquidation-evidence-bundle", corruptedEnvelope.value)
       .ok,
+    false,
+  );
+
+  const corruptedWindows = {
+    ...first.value,
+    targets: first.value.targets.map((target, index) =>
+      index === 0
+        ? {
+            ...target,
+            windows: target.windows.map((window, windowIndex) =>
+              windowIndex === 0 ? { ...window, longUsd: "999" } : window,
+            ),
+          }
+        : target,
+    ),
+  };
+  const corruptedWindowsEnvelope = encodeCanonicalArtifact(
+    "liquidation-evidence-bundle",
+    corruptedWindows,
+  );
+  assert.equal(corruptedWindowsEnvelope.ok, true);
+  if (!corruptedWindowsEnvelope.ok) return;
+  assert.equal(
+    rehydrateArtifact(
+      "liquidation-evidence-bundle",
+      corruptedWindowsEnvelope.value,
+    ).ok,
     false,
   );
 });

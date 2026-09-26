@@ -1,23 +1,16 @@
 import { DecimalValue } from "../../domain/shared/decimal.js";
 import type { LiquidationEvidenceDiagnosticInput } from "../../domain/liquidation/liquidation-evidence-bundle.js";
-import { isCoinalyzeRecord } from "./coinalyze-response.js";
 import type {
+  CoinalyzeCatalogueResult,
+  CoinalyzeHistoryResult,
   CoinalyzeLiquidationObservation,
   CoinalyzeMarket,
   CoinalyzeMarketHistory,
-} from "./coinalyze-response.js";
+} from "../../ports/coinalyze-liquidation-data.js";
+import { isCoinalyzeRecord } from "./coinalyze-response.js";
 
-export interface CoinalyzeCatalogueMapping {
-  readonly markets: readonly CoinalyzeMarket[];
-  readonly complete: boolean;
-  readonly diagnostics: readonly LiquidationEvidenceDiagnosticInput[];
-}
-
-export interface CoinalyzeHistoryMapping {
-  readonly histories: readonly CoinalyzeMarketHistory[];
-  readonly responseValid: boolean;
-  readonly diagnostics: readonly LiquidationEvidenceDiagnosticInput[];
-}
+export type CoinalyzeCatalogueMapping = CoinalyzeCatalogueResult;
+export type CoinalyzeHistoryMapping = CoinalyzeHistoryResult;
 
 function diagnostic(
   code: LiquidationEvidenceDiagnosticInput["code"],

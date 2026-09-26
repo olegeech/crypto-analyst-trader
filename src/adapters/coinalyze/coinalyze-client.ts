@@ -1,9 +1,12 @@
 import type { LiquidationEvidenceDiagnosticInput } from "../../domain/liquidation/liquidation-evidence-bundle.js";
+import type {
+  CoinalyzeCatalogueResult,
+  CoinalyzeHistoryResult,
+  CoinalyzeLiquidationDataPort,
+} from "../../ports/coinalyze-liquidation-data.js";
 import {
   mapCoinalyzeFutureMarkets,
   mapCoinalyzeLiquidationHistory,
-  type CoinalyzeCatalogueMapping,
-  type CoinalyzeHistoryMapping,
 } from "./coinalyze-mappers.js";
 import {
   CoinalyzeTransport,
@@ -101,7 +104,7 @@ function sleepDefault(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
-export class CoinalyzeClient {
+export class CoinalyzeClient implements CoinalyzeLiquidationDataPort {
   private readonly transport: CoinalyzeTransportPort;
   private readonly now: () => number;
   private readonly sleep: (milliseconds: number) => Promise<void>;
@@ -123,7 +126,7 @@ export class CoinalyzeClient {
     }
   }
 
-  async fetchFutureMarkets(apiKey: string): Promise<CoinalyzeCatalogueMapping> {
+  async fetchFutureMarkets(apiKey: string): Promise<CoinalyzeCatalogueResult> {
     const budget: WaitBudget = { spentMs: 0 };
     try {
       const payload = await this.requestWithLimit(1, budget, () =>
@@ -147,7 +150,7 @@ export class CoinalyzeClient {
     symbols: readonly string[],
     from: number,
     to: number,
-  ): Promise<CoinalyzeHistoryMapping> {
+  ): Promise<CoinalyzeHistoryResult> {
     if (
       symbols.length === 0 ||
       new Set(symbols).size !== symbols.length ||
@@ -163,7 +166,7 @@ export class CoinalyzeClient {
     const budget: WaitBudget = { spentMs: 0 };
     const histories = new Map<
       string,
-      CoinalyzeHistoryMapping["histories"][number]
+      CoinalyzeHistoryResult["histories"][number]
     >();
     const diagnostics: LiquidationEvidenceDiagnosticInput[] = [];
     let responseValid = true;

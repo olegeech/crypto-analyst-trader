@@ -1,6 +1,7 @@
 import {
   SecurityCommandTimeoutError,
   runSecurity,
+  stripSecurityOutputLineEnding,
   type SecurityCommandResult,
   type SecurityRunner,
 } from "./macos-keychain-command.js";
@@ -32,9 +33,7 @@ function safeIdentity(identity: SecretIdentity): boolean {
 }
 
 function secretFromStdout(stdout: string): string | undefined {
-  const secret = stdout.endsWith("\n")
-    ? stdout.slice(0, -1).replace(/\r$/u, "")
-    : stdout;
+  const secret = stripSecurityOutputLineEnding(stdout);
   if (!secret || /[\u0000-\u001f\u007f]/u.test(secret)) return undefined;
   return secret;
 }

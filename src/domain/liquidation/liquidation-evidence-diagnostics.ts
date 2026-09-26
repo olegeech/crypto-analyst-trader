@@ -17,6 +17,7 @@ export type LiquidationEvidenceDiagnosticCode =
   | "invalid-catalogue"
   | "invalid-observation"
   | "missing-bucket"
+  | "no-eligible-markets"
   | "provider-unavailable"
   | "rate-limited"
   | "response-budget-exhausted"
@@ -51,6 +52,7 @@ const DIAGNOSTIC_CODES = new Set<LiquidationEvidenceDiagnosticCode>([
   "invalid-catalogue",
   "invalid-observation",
   "missing-bucket",
+  "no-eligible-markets",
   "provider-unavailable",
   "rate-limited",
   "response-budget-exhausted",

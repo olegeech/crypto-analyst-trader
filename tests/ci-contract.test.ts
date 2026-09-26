@@ -14,6 +14,10 @@ const demoVerificationScript = await readFile(
   "scripts/bybit-demo-adapter-verification.ts",
   "utf8",
 );
+const coinalyzeSmokeScript = await readFile(
+  "scripts/coinalyze-liquidation-smoke.ts",
+  "utf8",
+);
 const traderDemoCli = await readFile("src/cli/trader-demo.ts", "utf8");
 const tsconfig = JSON.parse(await readFile("tsconfig.json", "utf8")) as {
   include: string[];
@@ -141,4 +145,15 @@ test("the managed Demo trader CLI is fixed-origin and excluded from CI/release",
     traderDemoCli,
     /--environment|--time-in-force|--confirm-demo|--report/iu,
   );
+});
+
+test("Coinalyze live characterization is explicitly gated and excluded from release", () => {
+  assert.match(
+    packageJson.scripts["coinalyze:liquidation:smoke"] ?? "",
+    /scripts\/coinalyze-liquidation-smoke\.ts/,
+  );
+  assert.doesNotMatch(releaseScript, /coinalyze:liquidation:smoke/u);
+  assert.doesNotMatch(ciWorkflow, /coinalyze:liquidation:smoke/u);
+  assert.match(coinalyzeSmokeScript, /args\[0\] === "--live"/u);
+  assert.match(coinalyzeSmokeScript, /liveConfirmed/u);
 });

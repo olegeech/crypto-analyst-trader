@@ -152,3 +152,26 @@ service and account as the identity. Do not paste credentials into issue
 comments, logs, shell commands, tracked files or screenshots. The upcoming
 authenticated Bybit probe will use the typed provider boundary from the local
 runtime and will not add an `.env` fallback.
+
+## Coinalyze liquidation data key (#45)
+
+The Coinalyze adapter uses a provider-neutral, read-only Keychain lookup. The
+application sends the key only in the `api_key` HTTP header to the pinned
+Coinalyze API origin and uses public GET endpoints; it never reuses or reads
+Bybit credentials. The adapter does not persist the key.
+
+To configure the key, open **Keychain Access** and create one **generic
+password** item in the login keychain:
+
+| Field    | Value                                          |
+| -------- | ---------------------------------------------- |
+| Service  | `com.crypto-analyst-trader.provider.coinalyze` |
+| Account  | `api-key`                                      |
+| Password | Coinalyze API key                              |
+
+Do not place the key in a shell command, environment file, issue/PR comment,
+log, screenshot, or repository file. The explicit smoke command is documented
+in the operator runbook; it is opt-in and is not part of default tests, release
+checks, or CI. Revoke or rotate the key in Coinalyze and replace the Keychain
+item when needed. The adapter follows Coinalyze's documented
+[`api_key` header and public endpoints](https://api.coinalyze.net/v1/doc/).

@@ -15,6 +15,7 @@ import {
 import {
   runSecurity,
   SecurityCommandTimeoutError,
+  stripSecurityOutputLineEnding,
   type SecurityCommandResult,
   type SecurityRunner,
 } from "./macos-keychain-command.js";
@@ -136,12 +137,6 @@ function isValidCredentialValue(value: string): boolean {
   }
 }
 
-function valueFromReadResult(result: SecurityCommandResult): string {
-  return result.stdout.endsWith("\n")
-    ? result.stdout.slice(0, -1).replace(/\r$/, "")
-    : result.stdout;
-}
-
 type CredentialRecordState =
   | Readonly<{ kind: "present"; value: string }>
   | Readonly<{
@@ -234,7 +229,7 @@ export function createMacOSKeychainProvider({
       }
       throw safeCommandError(environment, "load");
     }
-    const value = valueFromReadResult(result);
+    const value = stripSecurityOutputLineEnding(result.stdout);
     try {
       validateCredentialValue(account, value);
     } catch {
@@ -268,7 +263,7 @@ export function createMacOSKeychainProvider({
         timedOut: isTimedOut(addResult) || isTimedOut(readResult),
       };
     }
-    const observedValue = valueFromReadResult(readResult);
+    const observedValue = stripSecurityOutputLineEnding(readResult.stdout);
     return {
       addSucceeded: addResult.exitCode === 0,
       exactMatch:
@@ -296,7 +291,7 @@ export function createMacOSKeychainProvider({
         states.push(Object.freeze({ kind: "unknown" }));
         continue;
       }
-      const value = valueFromReadResult(result);
+      const value = stripSecurityOutputLineEnding(result.stdout);
       if (!isValidCredentialValue(value)) {
         states.push(Object.freeze({ kind: "invalid" }));
         continue;

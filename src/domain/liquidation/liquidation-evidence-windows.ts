@@ -8,6 +8,12 @@ export const LIQUIDATION_WINDOW_HOURS = Object.freeze([1, 4, 12, 24] as const);
 
 export type LiquidationWindowHours = (typeof LIQUIDATION_WINDOW_HOURS)[number];
 
+export interface LiquidationHistoryWindow {
+  readonly epochs: readonly number[];
+  readonly oldestEpoch: number;
+  readonly latestClosedEpoch: number;
+}
+
 export interface LiquidationHourlyAggregate {
   readonly timestamp: UtcTimestamp;
   readonly longUsd: DecimalValue;
@@ -44,6 +50,27 @@ function bucketBoundary(cutoff: UtcTimestamp): number {
     Math.floor(Date.parse(cutoff) / LIQUIDATION_HOUR_MS) * LIQUIDATION_HOUR_MS -
     LIQUIDATION_HOUR_MS
   );
+}
+
+export function liquidationHistoryWindow(
+  cutoffMs: number,
+): LiquidationHistoryWindow {
+  const latestClosedStart =
+    Math.floor(cutoffMs / LIQUIDATION_HOUR_MS) * LIQUIDATION_HOUR_MS -
+    LIQUIDATION_HOUR_MS;
+  const oldestEpoch =
+    latestClosedStart - (LIQUIDATION_HISTORY_BUCKETS - 1) * LIQUIDATION_HOUR_MS;
+  const epochs = Object.freeze(
+    Array.from(
+      { length: LIQUIDATION_HISTORY_BUCKETS },
+      (_, index) => oldestEpoch + index * LIQUIDATION_HOUR_MS,
+    ),
+  );
+  return Object.freeze({
+    epochs,
+    oldestEpoch,
+    latestClosedEpoch: latestClosedStart,
+  });
 }
 
 function asTimestamp(epoch: number): UtcTimestamp {
@@ -101,14 +128,12 @@ export function deriveLiquidationWindows(
     let longUsd = ZERO;
     let shortUsd = ZERO;
     let observedConstituentBuckets = 0;
-    for (const constituent of constituents) {
-      for (const observation of constituent.observations) {
-        const epoch = Date.parse(observation.timestamp);
-        if (epoch < fromEpoch || epoch > toEpoch) continue;
-        longUsd = longUsd.add(observation.longUsd);
-        shortUsd = shortUsd.add(observation.shortUsd);
-        observedConstituentBuckets += 1;
-      }
+    for (const aggregate of hourlyAggregates) {
+      const epoch = Date.parse(aggregate.timestamp);
+      if (epoch < fromEpoch || epoch > toEpoch) continue;
+      longUsd = longUsd.add(aggregate.longUsd);
+      shortUsd = shortUsd.add(aggregate.shortUsd);
+      observedConstituentBuckets += aggregate.observedConstituents;
     }
     const expectedConstituentBuckets = expectedConstituents * hours;
     return Object.freeze({

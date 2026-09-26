@@ -32,6 +32,34 @@ provider payloads and does not create a local raw-payload artifact. An
 not prove the required bundle; it is not a clean market snapshot and must not
 be passed to planning.
 
+## Coinalyze liquidation evidence smoke (issue #45)
+
+After the offline release suite passes and the provider key is configured in
+Keychain as described in `docs/credentials.md`, run this explicit read-only
+characterization:
+
+```text
+npm run coinalyze:liquidation:smoke -- --live
+```
+
+The command reads the full documented Coinalyze future-market catalogue and
+requests at most one deterministically selected perpetual per configured asset
+for a bounded recent 24-hour history window. It uses the local clock only to
+bound this adapter probe; it does not create a planner cutoff, run identity,
+canonical hash, or standalone evidence bundle. `status=observed` means the
+catalogue and sampled history responses were structurally valid for BTC, ETH,
+SOL and DOGE; it does **not** prove history completeness for all eligible
+markets.
+
+The sanitized output includes eligible/sample/observation counts,
+`explicitZeroBuckets` (provider rows where both long and short are explicitly
+zero) and `omittedBuckets` (expected sample hours with no returned row). An
+omitted hour remains unknown, never zero. This smoke is the initial check of
+provider zero-bucket behavior; neither one observed zero nor an omitted bucket
+establishes a general provider rule. It emits no symbols, raw payloads, API
+key, account/execution data, report file, or persisted planner evidence, and is
+excluded from default tests, `test:release`, and CI.
+
 ## Bybit Testnet capability probe (issue #7)
 
 Before #8 freezes daily-order contracts, the bounded live capability check is
