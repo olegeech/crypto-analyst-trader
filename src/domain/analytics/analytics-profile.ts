@@ -8,6 +8,7 @@ import {
   type OpenInterestInterval,
 } from "../market/market-evidence-bundle.js";
 import { domainError } from "../shared/errors.js";
+import { compareAnalyticsText } from "./analytics-diagnostics.js";
 import { fail, ok, type Result } from "../shared/result.js";
 import {
   isRecord,
@@ -469,10 +470,6 @@ function parseExternalEvidence(
   );
 }
 
-function compareText(left: string, right: string): number {
-  return left < right ? -1 : left > right ? 1 : 0;
-}
-
 export function createAnalyticsProfile(
   input: unknown,
 ): Result<AnalyticsProfile> {
@@ -523,9 +520,9 @@ export function createAnalyticsProfile(
     return invalid("analytics profile must request at least one output");
   }
 
-  features.sort((left, right) => compareText(left.id, right.id));
+  features.sort((left, right) => compareAnalyticsText(left.id, right.id));
   externalEvidence.sort((left, right) =>
-    compareText(left.family, right.family),
+    compareAnalyticsText(left.family, right.family),
   );
   return ok(
     Object.freeze({

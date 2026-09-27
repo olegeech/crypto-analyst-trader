@@ -3,6 +3,7 @@ export const ANALYTICS_REASON_CODE_ORDER = Object.freeze([
   "INVALID_MARKET_PRICE",
   "MISSING_LIQUIDATION_EVIDENCE",
   "MISSING_EXTERNAL_EVIDENCE",
+  "INVALID_EXTERNAL_SCORE",
   "INCOMPLETE_LIQUIDATION_COVERAGE",
   "INCOMPLETE_LIQUIDATION_HISTORY",
   "INPUT_IDENTITY_MISMATCH",
@@ -18,6 +19,10 @@ export const ANALYTICS_REASON_CODE_ORDER = Object.freeze([
 ] as const);
 
 export type AnalyticsReasonCode = (typeof ANALYTICS_REASON_CODE_ORDER)[number];
+
+export function compareAnalyticsText(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
 
 export function normalizeAnalyticsReasonCodes(
   reasonCodes: readonly AnalyticsReasonCode[],

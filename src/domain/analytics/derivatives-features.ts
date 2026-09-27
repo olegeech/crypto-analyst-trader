@@ -31,6 +31,8 @@ import {
 } from "../shared/decimal.js";
 import type { UtcTimestamp } from "../shared/time.js";
 
+const HUNDRED = decimalConstant("100");
+
 export type DerivativeFeatureKind = Extract<
   AnalyticsFeatureRequest["kind"],
   | "funding-change"
@@ -448,10 +450,9 @@ function openInterestFeature(
       window,
     );
   }
-  const hundred = decimalConstant("100");
   return complete(request, window, {
     type: request.kind,
-    percent: ratio.value.multiply(hundred),
+    percent: ratio.value.multiply(HUNDRED),
     unit: "percent",
   });
 }
