@@ -1,6 +1,7 @@
 import { domainError } from "../shared/errors.js";
 import { DecimalValue, isDecimalValue } from "../shared/decimal.js";
 import { fail, ok, type Result } from "../shared/result.js";
+import { hashCanonical } from "../identity/canonical-serialization.js";
 import { parseUtcTimestamp, type UtcTimestamp } from "../shared/time.js";
 import {
   isRecord,
@@ -34,6 +35,7 @@ export const MARKET_EVIDENCE_SCHEMA_VERSION = "market-evidence/v1" as const;
 export const MARKET_EVIDENCE_UNIVERSE_VERSION = "m1-universe/v1" as const;
 export const MARKET_EVIDENCE_PRODUCER =
   "crypto-analyst-trader/bybit-public" as const;
+export const MARKET_EVIDENCE_VALID_FOR_MS = 86_400_000;
 export const MARKET_EVIDENCE_SYMBOLS = Object.freeze([
   "BTCUSDT",
   "ETHUSDT",
@@ -811,4 +813,23 @@ export function isCompleteMarketEvidenceBundle(
   bundle: MarketEvidenceBundle,
 ): boolean {
   return bundle.status === "complete";
+}
+
+export function marketEvidenceContentHash(
+  bundle: MarketEvidenceBundle,
+): Result<string> {
+  return hashCanonical({
+    runId: bundle.runId,
+    schemaVersion: bundle.schemaVersion,
+    producer: bundle.producer,
+    universeVersion: bundle.universeVersion,
+    universe: bundle.universe,
+    collectionStartedAt: bundle.collectionStartedAt,
+    collectionEndedAt: bundle.collectionEndedAt,
+    bundleCutoff: bundle.bundleCutoff,
+    source: bundle.source,
+    status: bundle.status,
+    symbols: bundle.symbols,
+    diagnostics: bundle.diagnostics,
+  });
 }

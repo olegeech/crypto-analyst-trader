@@ -29,6 +29,39 @@ test("the future authenticated probe has a typed vault seam and no dotenv fallba
   assert.doesNotMatch(ciWorkflow, /credentials:connect/);
 });
 
+test("provider secrets have a separate read-only Keychain boundary", async () => {
+  const secretPort = await readFile("src/ports/secret-provider.ts", "utf8");
+  const secretAdapter = await readFile(
+    "src/adapters/macos-keychain-secret-provider.ts",
+    "utf8",
+  );
+  const commandHelper = await readFile(
+    "src/adapters/macos-keychain-command.ts",
+    "utf8",
+  );
+
+  assert.match(secretPort, /export interface SecretProvider/);
+  assert.match(secretPort, /read\(identity: SecretIdentity\)/);
+  assert.match(secretPort, /kind: "unavailable"/);
+  assert.doesNotMatch(
+    secretPort,
+    /CredentialEnvironment|ExchangeCredentials|save\(|remove\(|accountId|bybit/iu,
+  );
+  assert.match(
+    secretAdapter,
+    /export function createMacOSKeychainSecretProvider/,
+  );
+  assert.match(secretAdapter, /find-generic-password/);
+  assert.doesNotMatch(
+    secretAdapter,
+    /credential-provider|bybit-v5|exchange-execution|add-generic-password|delete-generic-password/iu,
+  );
+  assert.doesNotMatch(
+    commandHelper,
+    /CredentialEnvironment|ExchangeCredentials|bybit/iu,
+  );
+});
+
 test("the credential guide presents Agent Connect as the only preferred onboarding path", async () => {
   const guide = await readFile("docs/credentials.md", "utf8");
   const agentConnectHeading = "## Bybit Agent Connect (preferred)";

@@ -47,6 +47,10 @@ import {
   type MarketEvidenceBundle,
 } from "../market/market-evidence-bundle.js";
 import {
+  createLiquidationEvidenceBundle,
+  type LiquidationEvidenceBundle,
+} from "../liquidation/liquidation-evidence-bundle.js";
+import {
   createInstrumentConstraints,
   type InstrumentConstraints,
 } from "../market/instrument-constraints.js";
@@ -87,6 +91,7 @@ export type ArtifactKind =
   | "capability-observation"
   | "market-snapshot"
   | "market-evidence-bundle"
+  | "liquidation-evidence-bundle"
   | "account-snapshot"
   | "order-intent"
   | "risk-decision"
@@ -116,6 +121,7 @@ export type RehydratedArtifact =
   | CapabilityObservation
   | MarketSnapshot
   | MarketEvidenceBundle
+  | LiquidationEvidenceBundle
   | AccountSnapshot
   | OrderIntent
   | RiskDecision
@@ -372,6 +378,96 @@ const marketEvidenceBundleSchema = object(
   },
 );
 
+const liquidationEvidenceMarketIdentitySchema = object([
+  "runId",
+  "universeVersion",
+  "bundleCutoff",
+  "contentHash",
+]);
+
+const liquidationObservationSchema = object([
+  "timestamp",
+  "longUsd",
+  "shortUsd",
+]);
+
+const liquidationConstituentSchema = object(
+  [
+    "providerSymbol",
+    "exchange",
+    "symbolOnExchange",
+    "baseAsset",
+    "quoteAsset",
+    "isPerpetual",
+    "marginType",
+    "expireAt",
+    "notionalDenominatedIn",
+    "observations",
+  ],
+  { observations: array(liquidationObservationSchema) },
+);
+
+const liquidationHourlyAggregateSchema = object([
+  "timestamp",
+  "longUsd",
+  "shortUsd",
+  "totalUsd",
+  "observedConstituents",
+  "expectedConstituents",
+  "complete",
+]);
+
+const liquidationWindowSchema = object([
+  "hours",
+  "from",
+  "to",
+  "longUsd",
+  "shortUsd",
+  "totalUsd",
+  "observedConstituentBuckets",
+  "expectedConstituentBuckets",
+  "complete",
+]);
+
+const liquidationTargetSchema = object(
+  ["asset", "constituents", "hourlyAggregates", "windows"],
+  {
+    constituents: array(liquidationConstituentSchema),
+    hourlyAggregates: array(liquidationHourlyAggregateSchema),
+    windows: array(liquidationWindowSchema),
+  },
+);
+
+const liquidationDiagnosticSchema = object(
+  ["code", "operation", "asset", "providerSymbol", "bucketTimestamp"],
+  {},
+  ["code", "operation"],
+);
+
+const liquidationEvidenceBundleSchema = object(
+  [
+    "runId",
+    "schemaVersion",
+    "producer",
+    "provider",
+    "policyVersion",
+    "collectionStartedAt",
+    "collectionEndedAt",
+    "bundleCutoff",
+    "marketEvidence",
+    "coverageProof",
+    "historyProof",
+    "status",
+    "targets",
+    "diagnostics",
+  ],
+  {
+    marketEvidence: liquidationEvidenceMarketIdentitySchema,
+    targets: array(liquidationTargetSchema),
+    diagnostics: array(liquidationDiagnosticSchema),
+  },
+);
+
 const accountSnapshotSchema = object(
   [
     "snapshotId",
@@ -621,6 +717,7 @@ const schemas: ReadonlyMap<ArtifactKind, Schema> = new Map([
   ["capability-observation", capabilitySchema],
   ["market-snapshot", marketSnapshotSchema],
   ["market-evidence-bundle", marketEvidenceBundleSchema],
+  ["liquidation-evidence-bundle", liquidationEvidenceBundleSchema],
   ["account-snapshot", accountSnapshotSchema],
   ["order-intent", orderIntentSchema],
   ["risk-decision", riskDecisionSchema],
@@ -972,6 +1069,10 @@ export function rehydrateArtifact(
   envelope: unknown,
 ): Result<MarketEvidenceBundle>;
 export function rehydrateArtifact(
+  artifactKind: "liquidation-evidence-bundle",
+  envelope: unknown,
+): Result<LiquidationEvidenceBundle>;
+export function rehydrateArtifact(
   artifactKind: "approval",
   envelope: unknown,
 ): Result<Approval>;
@@ -1002,6 +1103,8 @@ export function rehydrateArtifact(
       return createMarketSnapshot(toConstructorInput(decoded.value));
     case "market-evidence-bundle":
       return createMarketEvidenceBundle(toConstructorInput(decoded.value));
+    case "liquidation-evidence-bundle":
+      return createLiquidationEvidenceBundle(toConstructorInput(decoded.value));
     case "account-snapshot":
       return createAccountSnapshot(toConstructorInput(decoded.value));
     case "order-intent":

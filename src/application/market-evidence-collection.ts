@@ -1,12 +1,13 @@
-import { hashCanonical } from "../domain/identity/canonical-serialization.js";
 import {
   createEvidenceRef,
   type EvidenceRef,
 } from "../domain/evidence/evidence-ref.js";
 import {
   createMarketEvidenceBundle,
+  marketEvidenceContentHash,
   MARKET_EVIDENCE_PRODUCER,
   MARKET_EVIDENCE_SYMBOLS,
+  MARKET_EVIDENCE_VALID_FOR_MS,
   type FundingObservation,
   type MarketEvidenceBundle,
   type MarketEvidenceSymbol,
@@ -208,20 +209,7 @@ function hasUsableEvidence(facts: readonly SymbolFacts[]): boolean {
 function evidenceForBundle(
   bundle: MarketEvidenceBundle,
 ): Result<readonly EvidenceRef[]> {
-  const identity = hashCanonical({
-    runId: bundle.runId,
-    schemaVersion: bundle.schemaVersion,
-    producer: bundle.producer,
-    universeVersion: bundle.universeVersion,
-    universe: bundle.universe,
-    collectionStartedAt: bundle.collectionStartedAt,
-    collectionEndedAt: bundle.collectionEndedAt,
-    bundleCutoff: bundle.bundleCutoff,
-    source: bundle.source,
-    status: bundle.status,
-    symbols: bundle.symbols,
-    diagnostics: bundle.diagnostics,
-  });
+  const identity = marketEvidenceContentHash(bundle);
   if (!identity.ok) return identity;
   const evidence = createEvidenceRef({
     kind: "market-evidence-bundle",
@@ -229,7 +217,7 @@ function evidenceForBundle(
     producer: MARKET_EVIDENCE_PRODUCER,
     sourceId: `bybit-public:${bundle.runId}`,
     asOf: bundle.bundleCutoff,
-    validForMs: 86_400_000,
+    validForMs: MARKET_EVIDENCE_VALID_FOR_MS,
     contentHash: identity.value,
   });
   if (!evidence.ok) return evidence;
@@ -378,7 +366,7 @@ function buildBundle(
         producer: MARKET_EVIDENCE_PRODUCER,
         sourceId: `bybit-public:${runId}`,
         asOf: cutoff,
-        validForMs: 86_400_000,
+        validForMs: MARKET_EVIDENCE_VALID_FOR_MS,
         contentHash: `sha256:${"0".repeat(64)}`,
       },
     ],
