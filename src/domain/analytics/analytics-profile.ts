@@ -17,6 +17,7 @@ import {
 } from "../shared/validation.js";
 import type { LiquidationTargetAsset } from "../liquidation/liquidation-evidence-bundle.js";
 import type { LiquidationWindowHours } from "../liquidation/liquidation-evidence-windows.js";
+import { onlyKeys } from "./analytics-validation.js";
 
 export const ANALYTICS_PROFILE_SCHEMA_VERSION = "analytics-profile/v1" as const;
 export const ANALYTICS_FEATURES_VERSION = "analytics-features/v1" as const;
@@ -124,11 +125,13 @@ function invalid(message: string, field?: string): Result<never> {
   );
 }
 
-function onlyKeys(
-  value: Record<string, unknown>,
-  allowed: readonly string[],
-): boolean {
-  return Object.keys(value).every((key) => allowed.includes(key));
+export function isExternalEvidenceFamily(
+  value: unknown,
+): value is ExternalEvidenceFamily {
+  return (
+    typeof value === "string" &&
+    EXTERNAL_EVIDENCE_FAMILIES.has(value as ExternalEvidenceFamily)
+  );
 }
 
 function parseRequired(value: unknown): Result<boolean> {
@@ -455,11 +458,7 @@ function parseExternalEvidence(
   }
   const family = value.family;
   const required = parseRequired(value.required);
-  if (
-    typeof family !== "string" ||
-    !EXTERNAL_EVIDENCE_FAMILIES.has(family as ExternalEvidenceFamily) ||
-    !required.ok
-  ) {
+  if (!isExternalEvidenceFamily(family) || !required.ok) {
     return invalid("external evidence family or required flag is invalid");
   }
   return ok(
@@ -515,6 +514,16 @@ export function createAnalyticsProfile(
     }
     externalFamilies.add(parsed.value.family);
     externalEvidence.push(parsed.value);
+  }
+  if (
+    externalEvidence.some((request) =>
+      featureIds.has(`external:${request.family}`),
+    )
+  ) {
+    return invalid(
+      "analytics feature id collides with an external evidence request id",
+      "id",
+    );
   }
   if (features.length === 0 && externalEvidence.length === 0) {
     return invalid("analytics profile must request at least one output");

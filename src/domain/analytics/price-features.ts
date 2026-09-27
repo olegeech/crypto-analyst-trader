@@ -7,29 +7,21 @@ import {
   normalizeAnalyticsReasonCodes,
   type AnalyticsReasonCode,
 } from "./analytics-diagnostics.js";
-import {
-  DecimalValue,
-  RoundingMode,
-  type DecimalValue as Decimal,
-} from "../shared/decimal.js";
+import { type DecimalValue as Decimal } from "../shared/decimal.js";
 import { marketIntervalMilliseconds } from "../market/market-evidence-windows.js";
 import type {
   MarketEvidenceBundle,
   MarketSeriesInterval,
   OhlcvObservation,
 } from "../market/market-evidence-bundle.js";
+import {
+  ANALYTICS_FEATURE_OUTPUT_SCALE,
+  ANALYTICS_FEATURE_ROUNDING,
+  analyticsDecimalConstant as decimalConstant,
+} from "./analytics-numeric-policy.js";
 
-const FEATURE_OUTPUT_SCALE = 18;
-const FEATURE_ROUNDING = RoundingMode.HALF_EVEN;
 const ONE = decimalConstant("1");
 const HUNDRED = decimalConstant("100");
-
-function decimalConstant(value: string): Decimal {
-  const result = DecimalValue.fromString(value);
-  if (!result.ok)
-    throw new Error(`invalid analytics decimal constant: ${value}`);
-  return result.value;
-}
 
 export type PriceFeatureKind =
   | "close-return"
@@ -136,10 +128,9 @@ function selectTrailingWindow(
   count: number,
   interval: MarketSeriesInterval,
 ): WindowSelection {
-  const closed = observations.filter((observation) => observation.closed);
-  if (closed.length < count)
+  if (observations.length < count)
     return { ok: false, reason: "INSUFFICIENT_WINDOW" };
-  const selected = closed.slice(closed.length - count);
+  const selected = observations.slice(observations.length - count);
   const reason = validateWindow(selected, interval);
   return reason === undefined
     ? { ok: true, observations: selected }
@@ -199,8 +190,8 @@ function closeFraction(
   if (!current.isPositive() || !previous.isPositive()) return undefined;
   const ratio = current.divide(
     previous,
-    FEATURE_OUTPUT_SCALE,
-    FEATURE_ROUNDING,
+    ANALYTICS_FEATURE_OUTPUT_SCALE,
+    ANALYTICS_FEATURE_ROUNDING,
   );
   return ratio.ok ? ratio.value.subtract(ONE) : undefined;
 }
@@ -217,7 +208,10 @@ function realizedVolatility(
     if (fraction === undefined) return undefined;
     sumSquares = sumSquares.add(fraction.multiply(fraction));
   }
-  const root = sumSquares.squareRoot(FEATURE_OUTPUT_SCALE, FEATURE_ROUNDING);
+  const root = sumSquares.squareRoot(
+    ANALYTICS_FEATURE_OUTPUT_SCALE,
+    ANALYTICS_FEATURE_ROUNDING,
+  );
   return root.ok ? root.value.multiply(HUNDRED) : undefined;
 }
 
@@ -259,8 +253,8 @@ function computeAtr(
   for (const range of ranges.slice(0, period)) seed = seed.add(range);
   const seeded = seed.divide(
     periodValue,
-    FEATURE_OUTPUT_SCALE,
-    FEATURE_ROUNDING,
+    ANALYTICS_FEATURE_OUTPUT_SCALE,
+    ANALYTICS_FEATURE_ROUNDING,
   );
   if (!seeded.ok) return undefined;
   let atr = seeded.value;
@@ -269,7 +263,11 @@ function computeAtr(
     const smoothed = atr
       .multiply(previousWeight)
       .add(range)
-      .divide(periodValue, FEATURE_OUTPUT_SCALE, FEATURE_ROUNDING);
+      .divide(
+        periodValue,
+        ANALYTICS_FEATURE_OUTPUT_SCALE,
+        ANALYTICS_FEATURE_ROUNDING,
+      );
     if (!smoothed.ok) return undefined;
     atr = smoothed.value;
   }
@@ -280,8 +278,8 @@ function asPercent(value: Decimal, denominator: Decimal): Decimal | undefined {
   if (!denominator.isPositive()) return undefined;
   const ratio = value.divide(
     denominator,
-    FEATURE_OUTPUT_SCALE,
-    FEATURE_ROUNDING,
+    ANALYTICS_FEATURE_OUTPUT_SCALE,
+    ANALYTICS_FEATURE_ROUNDING,
   );
   return ratio.ok ? ratio.value.multiply(HUNDRED) : undefined;
 }
@@ -341,11 +339,10 @@ function computeOne(
   }
 
   if (request.kind === "atr") {
-    const closed = observations.filter((observation) => observation.closed);
-    const reason = validateWindow(closed, request.interval);
+    const reason = validateWindow(observations, request.interval);
     if (reason !== undefined) return makeUnavailable(request, reason);
-    const atr = computeAtr(closed, request.period);
-    const latest = closed[closed.length - 1];
+    const atr = computeAtr(observations, request.period);
+    const latest = observations[observations.length - 1];
     if (atr === undefined || latest === undefined) {
       return makeUnavailable(request, "INSUFFICIENT_WINDOW");
     }
@@ -353,7 +350,7 @@ function computeOne(
     if (normalizedPercent === undefined) {
       return makeUnavailable(request, "INVALID_MARKET_PRICE");
     }
-    return makeComplete(request, closed, {
+    return makeComplete(request, observations, {
       type: "atr",
       atr,
       normalizedPercent,
@@ -399,8 +396,8 @@ function computeOne(
   }
   const ratio = recent.divide(
     reference,
-    FEATURE_OUTPUT_SCALE,
-    FEATURE_ROUNDING,
+    ANALYTICS_FEATURE_OUTPUT_SCALE,
+    ANALYTICS_FEATURE_ROUNDING,
   );
   if (!ratio.ok) return makeUnavailable(request, "ZERO_VOLATILITY_REFERENCE");
   const relation =
@@ -434,19 +431,37 @@ export function computePriceFeatures(
   market: MarketEvidenceBundle,
   profile: AnalyticsProfile,
 ): readonly PriceFeatureOutcome[] {
+  const seriesBySymbol = new Map<
+    string,
+    Map<MarketSeriesInterval, readonly OhlcvObservation[]>
+  >();
+  const closedBySymbol = new Map<
+    string,
+    Map<MarketSeriesInterval, readonly OhlcvObservation[]>
+  >();
+  for (const symbol of market.symbols) {
+    const series = new Map<MarketSeriesInterval, readonly OhlcvObservation[]>();
+    for (const item of symbol.ohlcv)
+      series.set(item.interval, item.observations);
+    seriesBySymbol.set(symbol.symbol, series);
+  }
   const outcomes = profile.features.flatMap((request) => {
     if (!isPriceRequest(request)) return [];
-    const symbol = market.symbols.find(
-      (item) => item.symbol === request.symbol,
-    );
-    const series = symbol?.ohlcv.find(
-      (item) => item.interval === request.interval,
-    );
-    return [
-      series === undefined
-        ? makeUnavailable(request, "INSUFFICIENT_WINDOW")
-        : computeOne(request, series.observations),
-    ];
+    const source = seriesBySymbol.get(request.symbol)?.get(request.interval);
+    if (source === undefined) {
+      return [makeUnavailable(request, "INSUFFICIENT_WINDOW")];
+    }
+    let closed = closedBySymbol.get(request.symbol);
+    if (closed === undefined) {
+      closed = new Map();
+      closedBySymbol.set(request.symbol, closed);
+    }
+    let observations = closed.get(request.interval);
+    if (observations === undefined) {
+      observations = source.filter((observation) => observation.closed);
+      closed.set(request.interval, observations);
+    }
+    return [computeOne(request, observations)];
   });
   return Object.freeze(outcomes);
 }

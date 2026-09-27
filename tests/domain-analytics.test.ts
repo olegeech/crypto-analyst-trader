@@ -307,6 +307,25 @@ test("analytics profile rejects missing required fields and unsupported requests
   }
 });
 
+test("analytics profile rejects feature and external request ID collisions", () => {
+  const result = createAnalyticsProfile(
+    profileInput(
+      [
+        {
+          id: "external:trap",
+          kind: "close-return",
+          symbol: "BTCUSDT",
+          interval: "1h",
+          periods: 1,
+          required: true,
+        },
+      ],
+      [{ family: "trap", required: true }],
+    ),
+  );
+  assert.equal(result.ok, false);
+});
+
 test("input identity hashes both source bundles and accepts exact lineage", () => {
   const market = marketBundle();
   const liquidation = liquidationBundle(market);
@@ -386,7 +405,28 @@ test("sufficiency distinguishes complete, partial, and insufficient results", ()
     identity,
   );
   assert.equal(complete.ok, true);
-  if (complete.ok) assert.equal(complete.value.status, "complete");
+  if (complete.ok) assert.equal(complete.value.status, "partial");
+
+  const optionalOnlyProfile = requireProfile(
+    profileInput([
+      {
+        id: "optional-btc-return",
+        kind: "close-return",
+        symbol: "BTCUSDT",
+        interval: "1h",
+        periods: 1,
+        required: false,
+      },
+    ]),
+  );
+  const optionalOnlyUnavailable = reduceAnalyticsSufficiency(
+    optionalOnlyProfile,
+    [outcome("optional-btc-return", "unavailable", ["INSUFFICIENT_WINDOW"])],
+    identity,
+  );
+  assert.equal(optionalOnlyUnavailable.ok, true);
+  if (optionalOnlyUnavailable.ok)
+    assert.equal(optionalOnlyUnavailable.value.status, "insufficient");
 
   const partial = reduceAnalyticsSufficiency(
     profile,

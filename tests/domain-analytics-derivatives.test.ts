@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import {
+  createAnalyticsEvidenceBundle,
+  rehydrateAnalyticsEvidenceBundle,
+} from "../src/domain/analytics/analytics-evidence-bundle.js";
+import { createAnalyticsInputIdentity } from "../src/domain/analytics/analytics-inputs.js";
 import { computeDerivativeFeatures } from "../src/domain/analytics/derivatives-features.js";
 import { createAnalyticsProfile } from "../src/domain/analytics/analytics-profile.js";
 import { reduceAnalyticsSufficiency } from "../src/domain/analytics/analytics-sufficiency.js";
@@ -23,6 +28,7 @@ import {
   type OpenInterestObservation,
 } from "../src/domain/market/market-evidence-bundle.js";
 import { DecimalValue } from "../src/domain/shared/decimal.js";
+import { hashCanonical } from "../src/domain/identity/canonical-serialization.js";
 
 const CUTOFF = "2026-09-24T12:30:00.000Z";
 const HOUR_MS = 60 * 60 * 1_000;
@@ -631,4 +637,110 @@ test("liquidation facts with conflicting market identity are not joined", () => 
   assert.equal(result?.status, "unavailable");
   assert.deepEqual(result?.reasonCodes, ["INPUT_IDENTITY_MISMATCH"]);
   assert.equal(result?.value, undefined);
+});
+
+test("the public derivative helper cannot reuse a stale liquidation identity", () => {
+  const originalMarket = marketBundle();
+  const liquidation = liquidationBundle(originalMarket, {
+    coverageProof: "complete",
+    historyProof: "complete",
+    status: "complete",
+    allAssets: true,
+    rows: [{ timestamp: CUTOFF, longUsd: "2", shortUsd: "5" }],
+  });
+  const staleIdentity = createAnalyticsInputIdentity(
+    originalMarket,
+    liquidation,
+  );
+  assert.equal(staleIdentity.ok, true);
+  if (!staleIdentity.ok) return;
+
+  const differentMarket = marketBundle({
+    funding: [
+      {
+        timestamp: CUTOFF as FundingObservation["timestamp"],
+        rate: decimal("0.001"),
+      },
+    ],
+  });
+  const requested = profile([
+    {
+      id: "btc-liquidation-1h",
+      kind: "liquidation-window",
+      asset: "BTC",
+      windowHours: 1,
+      required: true,
+    },
+  ]);
+
+  assert.equal(computeDerivativeFeatures.length, 3);
+  const result = Reflect.apply(computeDerivativeFeatures, undefined, [
+    differentMarket,
+    liquidation,
+    requested,
+    staleIdentity.value,
+  ])[0];
+
+  assert.equal(result?.status, "unavailable");
+  assert.deepEqual(result?.reasonCodes, ["INPUT_IDENTITY_MISMATCH"]);
+});
+
+test("rehydration rejects complete liquidation outcomes without complete proofs", () => {
+  const market = marketBundle();
+  const liquidation = liquidationBundle(market, {
+    coverageProof: "complete",
+    historyProof: "complete",
+    status: "complete",
+    allAssets: true,
+    rows: [{ timestamp: CUTOFF, longUsd: "2", shortUsd: "5" }],
+  });
+  const created = createAnalyticsEvidenceBundle({
+    market,
+    liquidation,
+    profile: profile([
+      {
+        id: "btc-liquidation-1h",
+        kind: "liquidation-window",
+        asset: "BTC",
+        windowHours: 1,
+        required: true,
+      },
+    ]),
+  });
+  assert.equal(created.ok, true);
+  if (!created.ok) return;
+
+  const outcome = created.value.derivativeFeatures[0];
+  assert.ok(outcome !== undefined && outcome.kind === "liquidation-window");
+  if (outcome === undefined || outcome.kind !== "liquidation-window") return;
+  assert.equal(outcome.status, "complete");
+
+  const alteredOutcomes = [
+    { ...outcome, coverageProof: "incomplete" },
+    (() => {
+      const withoutHistoryProof: Record<string, unknown> = { ...outcome };
+      delete withoutHistoryProof.historyProof;
+      return withoutHistoryProof;
+    })(),
+    { ...outcome, window: { ...outcome.window, complete: false } },
+  ];
+
+  for (const alteredOutcome of alteredOutcomes) {
+    const alteredBundle: Record<string, unknown> = {
+      ...created.value,
+      derivativeFeatures: [alteredOutcome],
+    };
+    const payload = { ...alteredBundle };
+    delete payload.contentHash;
+    const recomputedHash = hashCanonical(payload);
+    assert.equal(recomputedHash.ok, true);
+    if (!recomputedHash.ok) continue;
+    assert.equal(
+      rehydrateAnalyticsEvidenceBundle({
+        ...payload,
+        contentHash: recomputedHash.value,
+      }).ok,
+      false,
+    );
+  }
 });

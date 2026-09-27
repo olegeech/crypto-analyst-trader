@@ -72,6 +72,7 @@ import {
   type RiskDecision,
 } from "../risk/risk-decision.js";
 import { DecimalValue, isDecimalValue } from "../shared/decimal.js";
+import { deepFreeze } from "../shared/deep-freeze.js";
 import { domainError } from "../shared/errors.js";
 import { fail, ok, type Result } from "../shared/result.js";
 import {
@@ -81,6 +82,11 @@ import {
 } from "../shared/validation.js";
 import type { ClearanceEvidence } from "../execution/clearance-evidence.js";
 import { createClearanceEvidence } from "../execution/clearance-evidence.js";
+import {
+  ANALYTICS_EVIDENCE_SCHEMA_VERSION,
+  rehydrateAnalyticsEvidenceBundle,
+  type AnalyticsEvidenceBundle,
+} from "../analytics/analytics-evidence-bundle.js";
 
 export const ARTIFACT_SCHEMA_VERSION = "artifact/v1" as const;
 
@@ -92,6 +98,7 @@ export type ArtifactKind =
   | "market-snapshot"
   | "market-evidence-bundle"
   | "liquidation-evidence-bundle"
+  | "analytics-evidence-bundle"
   | "account-snapshot"
   | "order-intent"
   | "risk-decision"
@@ -122,6 +129,7 @@ export type RehydratedArtifact =
   | MarketSnapshot
   | MarketEvidenceBundle
   | LiquidationEvidenceBundle
+  | AnalyticsEvidenceBundle
   | AccountSnapshot
   | OrderIntent
   | RiskDecision
@@ -468,6 +476,212 @@ const liquidationEvidenceBundleSchema = object(
   },
 );
 
+const analyticsFeatureOutcomeSchema = object(
+  [
+    "requestId",
+    "status",
+    "reasonCodes",
+    "kind",
+    "symbol",
+    "interval",
+    "asset",
+    "window",
+    "coverageProof",
+    "historyProof",
+    "value",
+  ],
+  {
+    reasonCodes: array(),
+    window: object(
+      [
+        "from",
+        "to",
+        "observationCount",
+        "cadenceMs",
+        "hours",
+        "observedConstituentBuckets",
+        "expectedConstituentBuckets",
+        "complete",
+      ],
+      {},
+      ["from", "to"],
+      true,
+    ),
+    value: object(
+      [
+        "type",
+        "percent",
+        "atr",
+        "normalizedPercent",
+        "recentPercent",
+        "referencePercent",
+        "ratio",
+        "relation",
+        "change",
+        "longUsd",
+        "shortUsd",
+        "totalUsd",
+        "imbalance",
+        "unit",
+      ],
+      {},
+      ["type"],
+      true,
+    ),
+  },
+  ["requestId", "status", "reasonCodes", "kind"],
+  true,
+);
+
+const analyticsInputIdentitySchema = object(
+  [
+    "runId",
+    "universeVersion",
+    "bundleCutoff",
+    "marketContentHash",
+    "marketBundleHash",
+    "liquidationRunId",
+    "liquidationUniverseVersion",
+    "liquidationBundleCutoff",
+    "liquidationMarketContentHash",
+    "liquidationBundleHash",
+    "compatibility",
+    "reasonCodes",
+  ],
+  { reasonCodes: array() },
+  [
+    "runId",
+    "universeVersion",
+    "bundleCutoff",
+    "marketContentHash",
+    "marketBundleHash",
+    "compatibility",
+    "reasonCodes",
+  ],
+);
+
+const analyticsExternalEvidenceSchema = object(
+  [
+    "family",
+    "schemaVersion",
+    "modelVersion",
+    "direction",
+    "score",
+    "confidence",
+    "trapType",
+    "reasons",
+    "subscores",
+    "scenarioProbabilities",
+    "horizon",
+    "confirmationSignals",
+    "invalidationSignals",
+    "provenance",
+    "inputManifestHash",
+    "inputEvidenceRefs",
+    "marketEvidenceHash",
+    "liquidationEvidenceHash",
+    "asOf",
+    "validForMs",
+    "generatedAt",
+    "contentHash",
+  ],
+  {
+    reasons: array(),
+    subscores: object([], {}, [], true),
+    scenarioProbabilities: object(
+      ["continuation", "reversal", "squeeze", "range"],
+      {},
+    ),
+    confirmationSignals: array(),
+    invalidationSignals: array(),
+    provenance: object(
+      ["producer", "sourceId", "modelName", "migration"],
+      {
+        migration: object(
+          [
+            "migrationId",
+            "sourceFamily",
+            "sourceSchemaVersion",
+            "sourceModelVersion",
+            "sourceContentHash",
+          ],
+          {},
+          [
+            "migrationId",
+            "sourceFamily",
+            "sourceSchemaVersion",
+            "sourceModelVersion",
+            "sourceContentHash",
+          ],
+        ),
+      },
+      ["producer", "sourceId", "modelName"],
+    ),
+    inputEvidenceRefs: array(
+      object(
+        [
+          "kind",
+          "schemaVersion",
+          "producer",
+          "sourceId",
+          "contentHash",
+          "runContext",
+        ],
+        {
+          runContext: object(["runId", "universeVersion", "bundleCutoff"]),
+        },
+        ["kind", "schemaVersion", "producer", "sourceId", "contentHash"],
+      ),
+    ),
+  },
+  [
+    "family",
+    "schemaVersion",
+    "modelVersion",
+    "provenance",
+    "inputManifestHash",
+    "inputEvidenceRefs",
+    "asOf",
+    "validForMs",
+    "contentHash",
+  ],
+  true,
+);
+
+const analyticsEvidenceBundleSchema = object(
+  [
+    "schemaVersion",
+    "featuresVersion",
+    "inputIdentity",
+    "profile",
+    "profileHash",
+    "priceFeatures",
+    "derivativeFeatures",
+    "externalOutcomes",
+    "externalEvidence",
+    "sufficiency",
+    "contentHash",
+  ],
+  {
+    inputIdentity: analyticsInputIdentitySchema,
+    profile: object(["schemaVersion", "features", "externalEvidence"], {
+      features: array(object([], {}, [], true)),
+      externalEvidence: array(object(["family", "required"])),
+    }),
+    priceFeatures: array(analyticsFeatureOutcomeSchema),
+    derivativeFeatures: array(analyticsFeatureOutcomeSchema),
+    externalOutcomes: array(
+      object(["requestId", "status", "reasonCodes"], {
+        reasonCodes: array(),
+      }),
+    ),
+    externalEvidence: array(analyticsExternalEvidenceSchema),
+    sufficiency: object(["status", "reasonCodes"], {
+      reasonCodes: array(),
+    }),
+  },
+);
+
 const accountSnapshotSchema = object(
   [
     "snapshotId",
@@ -718,6 +932,7 @@ const schemas: ReadonlyMap<ArtifactKind, Schema> = new Map([
   ["market-snapshot", marketSnapshotSchema],
   ["market-evidence-bundle", marketEvidenceBundleSchema],
   ["liquidation-evidence-bundle", liquidationEvidenceBundleSchema],
+  ["analytics-evidence-bundle", analyticsEvidenceBundleSchema],
   ["account-snapshot", accountSnapshotSchema],
   ["order-intent", orderIntentSchema],
   ["risk-decision", riskDecisionSchema],
@@ -832,20 +1047,6 @@ function decodeValue(value: unknown, path: string): Result<unknown> {
     decoded[key] = result.value;
   }
   return ok(decoded);
-}
-
-function deepFreeze<T>(value: T, seen = new WeakSet<object>()): T {
-  if (
-    typeof value !== "object" ||
-    value === null ||
-    isDecimalValue(value) ||
-    seen.has(value)
-  ) {
-    return value;
-  }
-  seen.add(value);
-  for (const child of Object.values(value)) deepFreeze(child, seen);
-  return Object.freeze(value);
 }
 
 export function encodeCanonicalArtifact(
@@ -1073,6 +1274,10 @@ export function rehydrateArtifact(
   envelope: unknown,
 ): Result<LiquidationEvidenceBundle>;
 export function rehydrateArtifact(
+  artifactKind: "analytics-evidence-bundle",
+  envelope: unknown,
+): Result<AnalyticsEvidenceBundle>;
+export function rehydrateArtifact(
   artifactKind: "approval",
   envelope: unknown,
 ): Result<Approval>;
@@ -1105,6 +1310,19 @@ export function rehydrateArtifact(
       return createMarketEvidenceBundle(toConstructorInput(decoded.value));
     case "liquidation-evidence-bundle":
       return createLiquidationEvidenceBundle(toConstructorInput(decoded.value));
+    case "analytics-evidence-bundle":
+      if (
+        isRecord(decoded.value) &&
+        decoded.value.schemaVersion !== ANALYTICS_EVIDENCE_SCHEMA_VERSION
+      ) {
+        return fail(
+          domainError(
+            "UNSUPPORTED_CONTRACT",
+            "analytics evidence schema version is unsupported",
+          ),
+        );
+      }
+      return rehydrateAnalyticsEvidenceBundle(decoded.value);
     case "account-snapshot":
       return createAccountSnapshot(toConstructorInput(decoded.value));
     case "order-intent":

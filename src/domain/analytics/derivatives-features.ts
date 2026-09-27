@@ -24,12 +24,13 @@ import {
   type MarketEvidenceBundle,
   type MarketEvidenceSymbol,
 } from "../market/market-evidence-bundle.js";
-import {
-  DecimalValue,
-  RoundingMode,
-  type DecimalValue as Decimal,
-} from "../shared/decimal.js";
+import { type DecimalValue as Decimal } from "../shared/decimal.js";
 import type { UtcTimestamp } from "../shared/time.js";
+import {
+  ANALYTICS_FEATURE_OUTPUT_SCALE,
+  ANALYTICS_FEATURE_ROUNDING,
+  analyticsDecimalConstant as decimalConstant,
+} from "./analytics-numeric-policy.js";
 
 const HUNDRED = decimalConstant("100");
 
@@ -112,55 +113,36 @@ function isDerivativeRequest(
   );
 }
 
-function hasCadence<T extends { readonly timestamp: UtcTimestamp }>(
-  observations: readonly T[],
-  cadenceMs: number,
-): boolean {
-  if (!Number.isSafeInteger(cadenceMs) || cadenceMs <= 0) return false;
-  for (let index = 0; index < observations.length; index += 1) {
-    const current = observations[index];
-    const previous = observations[index - 1];
-    if (current === undefined) return false;
-    if (
-      previous !== undefined &&
-      Date.parse(current.timestamp) - Date.parse(previous.timestamp) !==
-        cadenceMs
-    ) {
-      return false;
-    }
-  }
-  return true;
-}
-
 function selectTrailingCadenced<T extends { readonly timestamp: UtcTimestamp }>(
   observations: readonly T[],
   count: number,
   cadenceMs: number,
   cutoff: UtcTimestamp,
 ): CadencedSelection<T> {
-  if (observations.length < count) {
+  if (
+    observations.length < count ||
+    !Number.isSafeInteger(cadenceMs) ||
+    cadenceMs <= 0
+  ) {
     return { ok: false, reason: "INSUFFICIENT_WINDOW" };
   }
   const selected = observations.slice(observations.length - count);
-  if (
-    selected.some((item) => Date.parse(item.timestamp) > Date.parse(cutoff)) ||
-    !hasCadence(selected, cadenceMs)
-  ) {
-    return { ok: false, reason: "INSUFFICIENT_WINDOW" };
+  const cutoffMs = Date.parse(cutoff);
+  let previousMs: number | undefined;
+  for (const item of selected) {
+    const timestampMs = Date.parse(item.timestamp);
+    if (
+      timestampMs > cutoffMs ||
+      (previousMs !== undefined &&
+        (timestampMs <= previousMs || timestampMs - previousMs !== cadenceMs))
+    ) {
+      return { ok: false, reason: "INSUFFICIENT_WINDOW" };
+    }
+    previousMs = timestampMs;
   }
   const first = selected[0];
   const last = selected[selected.length - 1];
-  if (
-    first === undefined ||
-    last === undefined ||
-    selected.some((item, index) => {
-      const previous = selected[index - 1];
-      return (
-        previous !== undefined &&
-        Date.parse(item.timestamp) <= Date.parse(previous.timestamp)
-      );
-    })
-  ) {
+  if (first === undefined || last === undefined) {
     return { ok: false, reason: "INSUFFICIENT_WINDOW" };
   }
   return { ok: true, observations: selected };
@@ -184,8 +166,13 @@ function observationWindow(
 function unavailable(
   request: DerivativeRequest,
   reasons: readonly AnalyticsReasonCode[],
-  proof?: Pick<LiquidationEvidenceBundle, "coverageProof" | "historyProof">,
-  window?: DerivativeObservationWindow | DerivativeLiquidationWindow,
+  details?: {
+    readonly proof?: Pick<
+      LiquidationEvidenceBundle,
+      "coverageProof" | "historyProof"
+    >;
+    readonly window?: DerivativeObservationWindow | DerivativeLiquidationWindow;
+  },
 ): DerivativeFeatureOutcome {
   return Object.freeze({
     requestId: request.id,
@@ -195,15 +182,15 @@ function unavailable(
     ...(request.kind === "liquidation-window"
       ? {
           asset: request.asset,
-          ...(proof === undefined
+          ...(details?.proof === undefined
             ? {}
             : {
-                coverageProof: proof.coverageProof,
-                historyProof: proof.historyProof,
+                coverageProof: details.proof.coverageProof,
+                historyProof: details.proof.historyProof,
               }),
         }
       : { symbol: request.symbol }),
-    ...(window === undefined ? {} : { window }),
+    ...(details?.window === undefined ? {} : { window: details.window }),
   });
 }
 
@@ -257,7 +244,7 @@ function liquidationFeature(
     historyProof: liquidation.historyProof,
   } as const;
   if (!canJoinLiquidation(inputIdentity)) {
-    return unavailable(request, ["INPUT_IDENTITY_MISMATCH"], proof);
+    return unavailable(request, ["INPUT_IDENTITY_MISMATCH"], { proof });
   }
 
   const target = liquidation.targets.find(
@@ -275,8 +262,10 @@ function liquidationFeature(
     return unavailable(
       request,
       ["MISSING_LIQUIDATION_EVIDENCE", ...proofReasons],
-      proof,
-      window === undefined ? undefined : liquidationWindow(window),
+      {
+        proof,
+        ...(window === undefined ? {} : { window: liquidationWindow(window) }),
+      },
     );
   }
 
@@ -312,12 +301,16 @@ function liquidationFeature(
 
   const imbalance = window.shortUsd
     .subtract(window.longUsd)
-    .divide(window.totalUsd, 18, RoundingMode.HALF_EVEN);
+    .divide(
+      window.totalUsd,
+      ANALYTICS_FEATURE_OUTPUT_SCALE,
+      ANALYTICS_FEATURE_ROUNDING,
+    );
   if (!imbalance.ok) {
     return unavailable(
       request,
       [...proofReasons, "ZERO_LIQUIDATION_NOTIONAL"],
-      proof,
+      { proof },
     );
   }
   const value: DerivativeFeatureValue = {
@@ -432,37 +425,23 @@ function openInterestFeature(
     });
   }
   if (first.openInterest.isZero()) {
-    return unavailable(
-      request,
-      ["ZERO_OPEN_INTEREST_REFERENCE"],
-      undefined,
-      window,
-    );
+    return unavailable(request, ["ZERO_OPEN_INTEREST_REFERENCE"], { window });
   }
   const ratio = last.openInterest
     .subtract(first.openInterest)
-    .divide(first.openInterest, 18, RoundingMode.HALF_EVEN);
-  if (!ratio.ok) {
-    return unavailable(
-      request,
-      ["ZERO_OPEN_INTEREST_REFERENCE"],
-      undefined,
-      window,
+    .divide(
+      first.openInterest,
+      ANALYTICS_FEATURE_OUTPUT_SCALE,
+      ANALYTICS_FEATURE_ROUNDING,
     );
+  if (!ratio.ok) {
+    return unavailable(request, ["ZERO_OPEN_INTEREST_REFERENCE"], { window });
   }
   return complete(request, window, {
     type: request.kind,
     percent: ratio.value.multiply(HUNDRED),
     unit: "percent",
   });
-}
-
-function decimalConstant(value: string): Decimal {
-  const result = DecimalValue.fromString(value);
-  if (!result.ok) {
-    throw new Error(`invalid analytics decimal constant: ${value}`);
-  }
-  return result.value;
 }
 
 export function computeDerivativeFeatures(
@@ -490,8 +469,9 @@ export function computeDerivativeFeatures(
       ) {
         return [openInterestFeature(market, request)];
       }
-      if (request.kind !== "liquidation-window") return [];
-      return [liquidationFeature(request, liquidation, identity)];
+      return request.kind === "liquidation-window"
+        ? [liquidationFeature(request, liquidation, identity)]
+        : [];
     }),
   );
 }

@@ -4,7 +4,7 @@ import {
   compareAnalyticsText,
   type AnalyticsReasonCode,
 } from "./analytics-diagnostics.js";
-import type { ExternalEvidenceFamily as ProfileExternalEvidenceFamily } from "./analytics-profile.js";
+import { type ExternalEvidenceFamily as ProfileExternalEvidenceFamily } from "./analytics-profile.js";
 import { domainError } from "../shared/errors.js";
 import {
   DecimalValue,
@@ -33,6 +33,8 @@ import {
   LIQUIDATION_EVIDENCE_PRODUCER,
   LIQUIDATION_EVIDENCE_SCHEMA_VERSION,
 } from "../liquidation/liquidation-evidence-bundle.js";
+import { analyticsDecimalConstant } from "./analytics-numeric-policy.js";
+import { onlyKeys } from "./analytics-validation.js";
 
 export const EXTERNAL_EVIDENCE_SCHEMA_VERSIONS = Object.freeze({
   "market-regime-score": "market-regime-score/v1",
@@ -229,20 +231,9 @@ const TRAP_KEYS = Object.freeze([
 
 const LEGACY_CEWS_KEYS = Object.freeze([...SCORE_KEYS]);
 
-const ZERO = decimalConstant("0");
-const ONE = decimalConstant("1");
-const ONE_HUNDRED = decimalConstant("100");
-
-function decimalConstant(value: string): DecimalValue {
-  const result = DecimalValue.fromString(value);
-  if (!result.ok)
-    throw new Error(`invalid analytics decimal constant: ${value}`);
-  return result.value;
-}
-
-function onlyKeys(value: Record<string, unknown>, keys: readonly string[]) {
-  return Object.keys(value).every((key) => keys.includes(key));
-}
+const ZERO = analyticsDecimalConstant("0");
+const ONE = analyticsDecimalConstant("1");
+const ONE_HUNDRED = analyticsDecimalConstant("100");
 
 function failed<T>(reason: AnalyticsReasonCode): Check<T> {
   return { ok: false, reason };
@@ -357,21 +348,31 @@ function parseInputReferences(
     );
   }
 
-  references.sort((left, right) =>
-    compareAnalyticsText(inputReferenceKey(left), inputReferenceKey(right)),
-  );
+  const keyedReferences = references
+    .map((reference, index) => ({
+      reference,
+      index,
+      key: inputReferenceKey(reference),
+      identityKey: inputReferenceIdentity(reference),
+    }))
+    .sort(
+      (left, right) =>
+        compareAnalyticsText(left.key, right.key) || left.index - right.index,
+    );
   const canonical: ExternalInputEvidenceRef[] = [];
-  const seenIdentity = new Map<string, ExternalInputEvidenceRef>();
-  for (const reference of references) {
-    const identityKey = inputReferenceIdentity(reference);
+  const seenIdentity = new Map<
+    string,
+    { readonly reference: ExternalInputEvidenceRef; readonly key: string }
+  >();
+  for (const { reference, key, identityKey } of keyedReferences) {
     const previous = seenIdentity.get(identityKey);
     if (previous !== undefined) {
-      if (inputReferenceKey(previous) !== inputReferenceKey(reference)) {
+      if (previous.key !== key) {
         return failed("INPUT_IDENTITY_MISMATCH");
       }
       continue;
     }
-    seenIdentity.set(identityKey, reference);
+    seenIdentity.set(identityKey, { reference, key });
     canonical.push(reference);
   }
   return { ok: true, value: Object.freeze(canonical) };
@@ -762,7 +763,7 @@ function parseSubscores(
     compareAnalyticsText(left, right),
   );
   if (entries.length === 0) return undefined;
-  const result: Record<string, Decimal> = {};
+  const result = Object.create(null) as Record<string, Decimal>;
   for (const [key, item] of entries) {
     const name = requireSafeText(key, "subscore.name");
     const score = parseBoundedDecimal(item, ZERO, ONE_HUNDRED);

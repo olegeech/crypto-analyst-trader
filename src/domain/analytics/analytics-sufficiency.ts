@@ -30,7 +30,6 @@ export interface AnalyticsSufficiency {
 
 interface RequiredOutput {
   readonly requestId: string;
-  readonly required: boolean;
   readonly missingReason: AnalyticsReasonCode;
 }
 
@@ -59,7 +58,6 @@ function outputRequests(profile: AnalyticsProfile): RequiredOutput[] {
   return [
     ...profile.features.map((feature) => ({
       requestId: feature.id,
-      required: feature.required,
       missingReason:
         feature.kind === "liquidation-window"
           ? ("MISSING_LIQUIDATION_EVIDENCE" as const)
@@ -67,7 +65,6 @@ function outputRequests(profile: AnalyticsProfile): RequiredOutput[] {
     })),
     ...profile.externalEvidence.map((external) => ({
       requestId: externalRequestId(external.family),
-      required: external.required,
       missingReason: "MISSING_EXTERNAL_EVIDENCE" as const,
     })),
   ];
@@ -121,20 +118,19 @@ export function reduceAnalyticsSufficiency(
     reasonCodes.push("INPUT_IDENTITY_MISMATCH");
   }
 
-  const requiredRequests = requests.filter((request) => request.required);
-  const allRequiredComplete = requiredRequests.every(
+  const allOutputsComplete = requests.every(
     (request) => outcomeById.get(request.requestId)?.status === "complete",
   );
-  const anyRequiredDefensible = requiredRequests.some((request) => {
+  const anyOutputDefensible = requests.some((request) => {
     const status = outcomeById.get(request.requestId)?.status;
     return status === "complete" || status === "partial";
   });
   const hasIdentityConflict = inputIdentity?.compatibility === "incompatible";
   const status: AnalyticsSufficiencyStatus = hasIdentityConflict
     ? "insufficient"
-    : allRequiredComplete
+    : allOutputsComplete
       ? "complete"
-      : anyRequiredDefensible
+      : anyOutputDefensible
         ? "partial"
         : "insufficient";
 

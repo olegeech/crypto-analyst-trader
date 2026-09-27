@@ -234,3 +234,69 @@ export {
   type LedgerEntry,
   type LedgerEventKind,
 } from "./accounting/ledger-entry.js";
+export {
+  ANALYTICS_EVIDENCE_SCHEMA_VERSION,
+  createAnalyticsEvidenceBundle,
+  rehydrateAnalyticsEvidenceBundle,
+  type AnalyticsEvidenceBundle,
+  type CreateAnalyticsEvidenceBundleInput,
+} from "./analytics/analytics-evidence-bundle.js";
+export {
+  ANALYTICS_FEATURES_VERSION,
+  ANALYTICS_PROFILE_SCHEMA_VERSION,
+  createAnalyticsProfile,
+  hashAnalyticsProfile,
+  type AnalyticsFeatureKind,
+  type AnalyticsFeatureRequest,
+  type AnalyticsProfile,
+  type ExternalEvidenceRequest,
+} from "./analytics/analytics-profile.js";
+export {
+  ANALYTICS_REASON_CODE_ORDER,
+  normalizeAnalyticsReasonCodes,
+  type AnalyticsReasonCode,
+} from "./analytics/analytics-diagnostics.js";
+export {
+  createAnalyticsInputIdentity,
+  type AnalyticsInputIdentity,
+} from "./analytics/analytics-inputs.js";
+export {
+  reduceAnalyticsSufficiency,
+  type AnalyticsOutputOutcome,
+  type AnalyticsOutputStatus,
+  type AnalyticsSufficiency,
+  type AnalyticsSufficiencyStatus,
+} from "./analytics/analytics-sufficiency.js";
+export {
+  computePriceFeatures,
+  type PriceFeatureKind,
+  type PriceFeatureOutcome,
+  type PriceFeatureValue,
+  type PriceFeatureWindow,
+} from "./analytics/price-features.js";
+export {
+  computeDerivativeFeatures,
+  type DerivativeFeatureKind,
+  type DerivativeFeatureOutcome,
+  type DerivativeFeatureValue,
+  type DerivativeLiquidationWindow,
+  type DerivativeObservationWindow,
+} from "./analytics/derivatives-features.js";
+export {
+  EXTERNAL_EVIDENCE_MODEL_VERSIONS,
+  EXTERNAL_EVIDENCE_SCHEMA_VERSIONS,
+  HISTORICAL_CEWS_MIGRATION,
+  hashExternalInputManifest,
+  migrateHistoricalCewsEvidence,
+  normalizeExternalInputEvidenceRefs,
+  validateExternalRegimeEvidence,
+  type ExternalEvidenceFamily,
+  type ExternalEvidenceProvenance,
+  type ExternalEvidenceValidation,
+  type ExternalInputEvidenceRef,
+  type ExternalInputRunContext,
+  type ExternalRegimeEvidence,
+  type ExternalScoreEvidence,
+  type TrapEvidence,
+  type TrapScenario,
+} from "./analytics/external-regime-evidence.js";
