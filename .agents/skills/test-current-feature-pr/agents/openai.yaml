@@ -1,4 +1,4 @@
 interface:
   display_name: "Test Current Feature PR"
-  short_description: "Review an exact PR head without mainnet writes"
-  default_prompt: "Use $test-current-feature-pr to test the selected pull request at its exact head and report evidence without mainnet writes."
+  short_description: "PAUSED — deprecated pending workflow refresh"
+  default_prompt: "This skill is temporarily paused pending workflow refresh. Do not invoke it until the pause notice is removed."

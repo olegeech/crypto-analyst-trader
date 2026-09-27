@@ -1,9 +1,14 @@
 ---
 name: develop-next-roadmap-story
-description: "Select and deliver the next ready Crypto Analyst Trader work item from GitHub roadmap issue #33. Use when the user invokes $develop-next-roadmap-story or asks to take the next roadmap story through implementation, verification, push, and pull request. Resume an unambiguous owned in-progress branch when present; otherwise choose the earliest ready story, bug, or technical-debt item. Never select queued, blocked, needs-triage, epic, or already-owned work."
+description: "DEPRECATED — temporarily paused pending workflow refresh; do not invoke or use. Select and deliver the next ready Crypto Analyst Trader work item from GitHub roadmap issue #33 only after this pause notice is removed."
 ---
 
 # Develop Next Roadmap Story
+
+> **Temporarily deprecated — do not use.** This workflow is paused pending
+> review and update. Do not invoke or follow it until this notice is removed.
+> For matching requests, explain that the workflow is paused and ask how the
+> user wants to proceed.
 
 Deliver exactly one issue in one branch and one pull request.
 
