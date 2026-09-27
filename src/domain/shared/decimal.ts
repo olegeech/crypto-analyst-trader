@@ -119,6 +119,36 @@ export class DecimalValue {
     }
   }
 
+  public squareRoot(
+    decimalPlaces: number,
+    mode: RoundingMode,
+  ): Result<DecimalValue> {
+    if (!Number.isSafeInteger(decimalPlaces) || decimalPlaces < 0) {
+      return invalidDecimal(
+        "decimal places must be a non-negative safe integer",
+      );
+    }
+    if (this.isNegative()) {
+      return invalidDecimal("square root requires a non-negative value");
+    }
+    const previousDecimalPlaces = DecimalConstructor.DP;
+    const previousRoundingMode = DecimalConstructor.RM;
+    DecimalConstructor.DP = Math.max(decimalPlaces + 20, 20);
+    DecimalConstructor.RM = libraryRoundingMode(mode);
+    try {
+      return ok(
+        new DecimalValue(
+          this.#numeric.sqrt().round(decimalPlaces, libraryRoundingMode(mode)),
+        ),
+      );
+    } catch {
+      return invalidDecimal("square root could not be represented");
+    } finally {
+      DecimalConstructor.DP = previousDecimalPlaces;
+      DecimalConstructor.RM = previousRoundingMode;
+    }
+  }
+
   public compare(other: DecimalValue): -1 | 0 | 1 {
     return this.#numeric.cmp(other.#numeric);
   }
