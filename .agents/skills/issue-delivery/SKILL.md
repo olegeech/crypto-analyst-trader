@@ -1,9 +1,14 @@
 ---
 name: issue-delivery
-description: "Deliver one named eligible GitHub issue through PO/Ready, independent review, implementation, CI, exact-head PR review and a READY_FOR_MERGE verdict. Merge is opt-in."
+description: "DEPRECATED — temporarily paused pending workflow refresh; do not invoke or use. Deliver one named GitHub issue only after this pause notice is removed."
 ---
 
 # Issue Delivery
+
+> **Temporarily deprecated — do not use.** This workflow is paused pending
+> review and update. Do not invoke or follow it until this notice is removed.
+> For matching requests, explain that the workflow is paused and ask how the
+> user wants to proceed.
 
 Use `$issue-delivery #<issue>` to deliver one named GitHub delivery issue. The
 default flow stops at the skill verdict `READY_FOR_MERGE`. Use

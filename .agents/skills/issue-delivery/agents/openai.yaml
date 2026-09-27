@@ -1,4 +1,4 @@
 interface:
   display_name: "Issue Delivery"
-  short_description: "Deliver one named issue to an exact-head merge verdict"
-  default_prompt: "Use $issue-delivery with one named GitHub issue; stop at READY_FOR_MERGE unless the caller explicitly passes merge."
+  short_description: "PAUSED — deprecated pending workflow refresh"
+  default_prompt: "This skill is temporarily paused pending workflow refresh. Do not invoke it until the pause notice is removed."

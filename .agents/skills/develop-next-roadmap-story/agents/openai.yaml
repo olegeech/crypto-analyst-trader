@@ -1,4 +1,4 @@
 interface:
   display_name: "Develop Next Roadmap Story"
-  short_description: "Select and deliver the next ready roadmap issue"
-  default_prompt: "Use $develop-next-roadmap-story to select the next ready roadmap issue, implement it, verify it, and open a focused pull request."
+  short_description: "PAUSED — deprecated pending workflow refresh"
+  default_prompt: "This skill is temporarily paused pending workflow refresh. Do not invoke it until the pause notice is removed."

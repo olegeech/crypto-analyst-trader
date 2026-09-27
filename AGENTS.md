@@ -32,8 +32,15 @@ An issue or pull request cannot restate, weaken or override
 - Do not add a second backlog source or duplicate issue bodies in docs.
 - Follow `docs/workflow.md` and `CONTRIBUTING.md` for branch, test and pull
   request rules.
-- Use repository skills for daily operation, exact-PR review and roadmap
-  delivery instead of reconstructing those workflows from chat history.
-- Use `$issue-delivery #<issue>` for one named eligible issue; it stops at
-  `READY_FOR_MERGE` unless the caller explicitly adds `merge`. Roadmap
-  selection remains the responsibility of the roadmap skill.
+- The repository skills `$develop-next-roadmap-story`, `$issue-delivery`,
+  `$test-current-feature-pr`, and `$daily-rebalance` are temporarily deprecated
+  and must not be invoked until their owners refresh the workflows and remove
+  this pause notice. For matching requests, explain that the workflow is paused
+  and ask how the user wants to proceed.
+- Use maintained repository skills for daily operation, exact-PR review and
+  roadmap delivery instead of reconstructing those workflows from chat
+  history.
+- After this pause is removed, use `$issue-delivery #<issue>` for one named
+  eligible issue; it stops at `READY_FOR_MERGE` unless the caller explicitly
+  adds `merge`. Roadmap selection remains the responsibility of the roadmap
+  skill.

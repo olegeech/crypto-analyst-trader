@@ -1,9 +1,14 @@
 ---
 name: test-current-feature-pr
-description: "Test and review a Crypto Analyst Trader pull request at its exact head commit in an isolated worktree. Use when the user invokes $test-current-feature-pr or asks to verify a feature, fix, current PR, or release readiness. The default is review-only. Relevant public and authenticated read-only Bybit checks are part of complete validation when available; mainnet writes are never allowed, and Testnet writes require explicit scoped authorization."
+description: "DEPRECATED — temporarily paused pending workflow refresh; do not invoke or use. Test and review a Crypto Analyst Trader pull request only after this pause notice is removed."
 ---
 
 # Test Current Feature PR
+
+> **Temporarily deprecated — do not use.** This workflow is paused pending
+> review and update. Do not invoke or follow it until this notice is removed.
+> For matching requests, explain that the workflow is paused and ask how the
+> user wants to proceed.
 
 Validate one exact pull request and return an evidence-based readiness verdict.
 

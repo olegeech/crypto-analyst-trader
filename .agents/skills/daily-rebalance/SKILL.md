@@ -1,9 +1,14 @@
 ---
 name: daily-rebalance
-description: "Run the complete Crypto Analyst Trader daily rebalance from fresh Bybit market and account evidence through deterministic planning, risk review, exact-plan approval, bounded execution, reconciliation, and reporting. Use when the user invokes $daily-rebalance or asks for a full, routine, or saved-instruction daily rebalance. PREPARE_ONLY is the default; Testnet or mainnet writes require explicit environment authorization and approval of the final exact plan hash."
+description: "DEPRECATED — temporarily paused pending workflow refresh; do not invoke or use. Run the Crypto Analyst Trader daily rebalance only after this pause notice is removed."
 ---
 
 # Daily Rebalance
+
+> **Temporarily deprecated — do not use.** This workflow is paused pending
+> review and update. Do not invoke or follow it until this notice is removed.
+> For matching requests, explain that the workflow is paused and ask how the
+> user wants to proceed.
 
 Follow `docs/operator-runbook.md`; do not duplicate or override its trading,
 timing, approval, execution, incident, or reporting rules. Also read
