@@ -300,7 +300,7 @@ function trapEvidence() {
     trapType: "liquidity-sweep",
     reasons: ["rapid liquidation expansion"],
     subscores,
-    scenarioProbabilities: {
+    scenarioLikelihoods: {
       continuation: decimal("0.4"),
       reversal: decimal("0.3"),
       squeeze: decimal("0.2"),
@@ -505,7 +505,7 @@ test("external evidence is family scoped and failed validation stays as a reason
   assert.deepEqual(result.value.externalOutcomes[0]?.reasonCodes, [
     "SCORE_DIRECTION_MISMATCH",
   ]);
-  assert.equal(result.value.sufficiency.status, "partial");
+  assert.equal(result.value.sufficiency.status, "insufficient");
   assert.equal(
     result.value.sufficiency.reasonCodes.includes("SCORE_DIRECTION_MISMATCH"),
     true,

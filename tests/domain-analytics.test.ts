@@ -364,7 +364,7 @@ test("input identity detects each conflicting run boundary without losing hashes
   }
 });
 
-test("sufficiency distinguishes complete, partial, and insufficient results", () => {
+test("sufficiency applies requiredness without discarding optional outcomes", () => {
   const profile = requireProfile(
     profileInput([
       {
@@ -400,12 +400,25 @@ test("sufficiency distinguishes complete, partial, and insufficient results", ()
     [
       outcome("btc-return-1h", "complete"),
       outcome("eth-atr-4h", "complete"),
-      outcome("sol-drawdown", "unavailable", ["INSUFFICIENT_WINDOW"]),
+      outcome("sol-drawdown", "complete"),
     ],
     identity,
   );
   assert.equal(complete.ok, true);
-  if (complete.ok) assert.equal(complete.value.status, "partial");
+  if (complete.ok) assert.equal(complete.value.status, "complete");
+
+  const optionalUnavailable = reduceAnalyticsSufficiency(
+    profile,
+    [
+      outcome("btc-return-1h", "complete"),
+      outcome("eth-atr-4h", "complete"),
+      outcome("sol-drawdown", "unavailable", ["INSUFFICIENT_WINDOW"]),
+    ],
+    identity,
+  );
+  assert.equal(optionalUnavailable.ok, true);
+  if (optionalUnavailable.ok)
+    assert.equal(optionalUnavailable.value.status, "partial");
 
   const optionalOnlyProfile = requireProfile(
     profileInput([
@@ -428,19 +441,53 @@ test("sufficiency distinguishes complete, partial, and insufficient results", ()
   if (optionalOnlyUnavailable.ok)
     assert.equal(optionalOnlyUnavailable.value.status, "insufficient");
 
-  const partial = reduceAnalyticsSufficiency(
-    profile,
+  const optionalOnlyMixedProfile = requireProfile(
+    profileInput([
+      {
+        id: "optional-btc-return",
+        kind: "close-return",
+        symbol: "BTCUSDT",
+        interval: "1h",
+        periods: 1,
+        required: false,
+      },
+      {
+        id: "optional-eth-return",
+        kind: "close-return",
+        symbol: "ETHUSDT",
+        interval: "1h",
+        periods: 1,
+        required: false,
+      },
+    ]),
+  );
+  const optionalOnlyMixed = reduceAnalyticsSufficiency(
+    optionalOnlyMixedProfile,
     [
-      outcome("btc-return-1h", "complete"),
-      outcome("eth-atr-4h", "unavailable", ["INSUFFICIENT_WINDOW"]),
-      outcome("sol-drawdown", "unavailable", ["INSUFFICIENT_WINDOW"]),
+      outcome("optional-btc-return", "complete"),
+      outcome("optional-eth-return", "unavailable", ["INSUFFICIENT_WINDOW"]),
     ],
     identity,
   );
-  assert.equal(partial.ok, true);
-  if (partial.ok) {
-    assert.equal(partial.value.status, "partial");
-    assert.deepEqual(partial.value.reasonCodes, ["INSUFFICIENT_WINDOW"]);
+  assert.equal(optionalOnlyMixed.ok, true);
+  if (optionalOnlyMixed.ok)
+    assert.equal(optionalOnlyMixed.value.status, "partial");
+
+  const requiredPartial = reduceAnalyticsSufficiency(
+    profile,
+    [
+      outcome("btc-return-1h", "complete"),
+      outcome("eth-atr-4h", "partial", ["INSUFFICIENT_WINDOW"]),
+      outcome("sol-drawdown", "complete"),
+    ],
+    identity,
+  );
+  assert.equal(requiredPartial.ok, true);
+  if (requiredPartial.ok) {
+    assert.equal(requiredPartial.value.status, "insufficient");
+    assert.deepEqual(requiredPartial.value.reasonCodes, [
+      "INSUFFICIENT_WINDOW",
+    ]);
   }
 
   const insufficient = reduceAnalyticsSufficiency(

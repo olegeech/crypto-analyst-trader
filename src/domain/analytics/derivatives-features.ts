@@ -283,9 +283,16 @@ function liquidationFeature(
       totalUsd: window.totalUsd,
       unit: "USD",
     };
+    const status =
+      liquidation.status === "complete" &&
+      proof.coverageProof === "complete" &&
+      proof.historyProof === "complete" &&
+      window.complete
+        ? "complete"
+        : "partial";
     return Object.freeze({
       requestId: request.id,
-      status: "partial",
+      status,
       reasonCodes: normalizeAnalyticsReasonCodes([
         ...proofReasons,
         "ZERO_LIQUIDATION_NOTIONAL",

@@ -124,7 +124,7 @@ export interface TrapEvidence extends ExternalEvidenceBase {
   readonly trapType: string;
   readonly reasons: readonly string[];
   readonly subscores?: Readonly<Record<string, Decimal>>;
-  readonly scenarioProbabilities: Readonly<Record<TrapScenario, Decimal>>;
+  readonly scenarioLikelihoods: Readonly<Record<TrapScenario, Decimal>>;
   readonly horizon: string;
   readonly confirmationSignals: readonly string[];
   readonly invalidationSignals: readonly string[];
@@ -213,7 +213,7 @@ const TRAP_KEYS = Object.freeze([
   "trapType",
   "reasons",
   "subscores",
-  "scenarioProbabilities",
+  "scenarioLikelihoods",
   "horizon",
   "confirmationSignals",
   "invalidationSignals",
@@ -599,6 +599,14 @@ function parseCommonFields(
   if (Date.parse(asOf.value) > Date.parse(identity.bundleCutoff)) {
     return failed("EXTERNAL_EVIDENCE_AFTER_CUTOFF");
   }
+  if (
+    generatedAt?.ok === true &&
+    Date.parse(generatedAt.value) < Date.parse(asOf.value)
+  ) {
+    return failed(
+      family === "trap" ? "INVALID_TRAP_EVIDENCE" : "INVALID_EXTERNAL_SCORE",
+    );
+  }
   return {
     ok: true,
     value: Object.freeze({
@@ -773,16 +781,16 @@ function parseSubscores(
   return Object.freeze(result);
 }
 
-function parseScenarioProbabilities(
+function parseScenarioLikelihoods(
   value: unknown,
 ): Readonly<Record<TrapScenario, Decimal>> | undefined {
   if (!isRecord(value) || !onlyKeys(value, TRAP_SCENARIOS)) return undefined;
   if (Object.keys(value).length !== TRAP_SCENARIOS.length) return undefined;
   const result = {} as Record<TrapScenario, Decimal>;
   for (const scenario of TRAP_SCENARIOS) {
-    const probability = parseBoundedDecimal(value[scenario], ZERO, ONE);
-    if (probability === undefined) return undefined;
-    result[scenario] = probability;
+    const likelihood = parseBoundedDecimal(value[scenario], ZERO, ONE);
+    if (likelihood === undefined) return undefined;
+    result[scenario] = likelihood;
   }
   return Object.freeze(result);
 }
@@ -807,8 +815,8 @@ function parseTrapEvidence(
       : parseStringList(input.reasons);
   const subscores =
     input.subscores === undefined ? undefined : parseSubscores(input.subscores);
-  const scenarioProbabilities = parseScenarioProbabilities(
-    input.scenarioProbabilities,
+  const scenarioLikelihoods = parseScenarioLikelihoods(
+    input.scenarioLikelihoods,
   );
   const horizon = requireSafeText(input.horizon, "horizon");
   const confirmationSignals = parseStringList(input.confirmationSignals);
@@ -818,7 +826,7 @@ function parseTrapEvidence(
     !trapType.ok ||
     reasons === undefined ||
     (subscores === undefined && reasons.length === 0) ||
-    scenarioProbabilities === undefined ||
+    scenarioLikelihoods === undefined ||
     !horizon.ok ||
     confirmationSignals === undefined ||
     confirmationSignals.length === 0 ||
@@ -837,7 +845,7 @@ function parseTrapEvidence(
     trapType: trapType.value,
     reasons,
     ...(subscores === undefined ? {} : { subscores }),
-    scenarioProbabilities,
+    scenarioLikelihoods,
     horizon: horizon.value,
     confirmationSignals,
     invalidationSignals,

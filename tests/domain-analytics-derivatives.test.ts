@@ -533,6 +533,46 @@ test("zero liquidation totals remain explicit while imbalance is unavailable", (
   }
 });
 
+test("a fully proven explicit-zero liquidation window remains complete", () => {
+  const market = marketBundle();
+  const liquidation = liquidationBundle(market, {
+    coverageProof: "complete",
+    historyProof: "complete",
+    status: "complete",
+    allAssets: true,
+    rows: [hourlyRow(0, "0", "0")],
+  });
+  const requested = profile([
+    {
+      id: "btc-liquidation-1h",
+      kind: "liquidation-window",
+      asset: "BTC",
+      windowHours: 1,
+      required: true,
+    },
+  ]);
+  const result = computeDerivativeFeatures(market, liquidation, requested)[0];
+  const bundle = createAnalyticsEvidenceBundle({
+    market,
+    liquidation,
+    profile: requested,
+  });
+
+  assert.equal(bundle.ok, true);
+  if (bundle.ok) assert.equal(bundle.value.sufficiency.status, "complete");
+  assert.equal(result?.status, "complete");
+  assert.deepEqual(result?.reasonCodes, ["ZERO_LIQUIDATION_NOTIONAL"]);
+  if (result?.window !== undefined && "complete" in result.window) {
+    assert.equal(result.window.complete, true);
+  }
+  if (result?.value?.type === "liquidation-window") {
+    assert.equal(result.value.longUsd.toString(), "0");
+    assert.equal(result.value.shortUsd.toString(), "0");
+    assert.equal(result.value.totalUsd.toString(), "0");
+    assert.equal(result.value.imbalance, undefined);
+  }
+});
+
 test("liquidation proof states stay distinct and no-fact results retain missingness", () => {
   const market = marketBundle();
   const request = profile([
@@ -582,12 +622,17 @@ test("liquidation proof states stay distinct and no-fact results retain missingn
   if (historyIncomplete !== undefined) {
     const reduced = reduceAnalyticsSufficiency(request, [historyIncomplete]);
     assert.equal(reduced.ok, true);
-    if (reduced.ok) assert.equal(reduced.value.status, "partial");
+    if (reduced.ok) assert.equal(reduced.value.status, "insufficient");
   }
   assert.equal(coverageIncomplete?.status, "partial");
   assert.deepEqual(coverageIncomplete?.reasonCodes, [
     "INCOMPLETE_LIQUIDATION_COVERAGE",
   ]);
+  if (coverageIncomplete !== undefined) {
+    const reduced = reduceAnalyticsSufficiency(request, [coverageIncomplete]);
+    assert.equal(reduced.ok, true);
+    if (reduced.ok) assert.equal(reduced.value.status, "insufficient");
+  }
   assert.equal(noFacts?.status, "unavailable");
   assert.deepEqual(noFacts?.reasonCodes, [
     "MISSING_LIQUIDATION_EVIDENCE",

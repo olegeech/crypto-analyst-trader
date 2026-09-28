@@ -30,6 +30,7 @@ export interface AnalyticsSufficiency {
 
 interface RequiredOutput {
   readonly requestId: string;
+  readonly required: boolean;
   readonly missingReason: AnalyticsReasonCode;
 }
 
@@ -58,6 +59,7 @@ function outputRequests(profile: AnalyticsProfile): RequiredOutput[] {
   return [
     ...profile.features.map((feature) => ({
       requestId: feature.id,
+      required: feature.required,
       missingReason:
         feature.kind === "liquidation-window"
           ? ("MISSING_LIQUIDATION_EVIDENCE" as const)
@@ -65,6 +67,7 @@ function outputRequests(profile: AnalyticsProfile): RequiredOutput[] {
     })),
     ...profile.externalEvidence.map((external) => ({
       requestId: externalRequestId(external.family),
+      required: external.required,
       missingReason: "MISSING_EXTERNAL_EVIDENCE" as const,
     })),
   ];
@@ -121,6 +124,11 @@ export function reduceAnalyticsSufficiency(
   const allOutputsComplete = requests.every(
     (request) => outcomeById.get(request.requestId)?.status === "complete",
   );
+  const allRequiredOutputsComplete = requests
+    .filter((request) => request.required)
+    .every(
+      (request) => outcomeById.get(request.requestId)?.status === "complete",
+    );
   const anyOutputDefensible = requests.some((request) => {
     const status = outcomeById.get(request.requestId)?.status;
     return status === "complete" || status === "partial";
@@ -130,9 +138,9 @@ export function reduceAnalyticsSufficiency(
     ? "insufficient"
     : allOutputsComplete
       ? "complete"
-      : anyOutputDefensible
-        ? "partial"
-        : "insufficient";
+      : !allRequiredOutputsComplete || !anyOutputDefensible
+        ? "insufficient"
+        : "partial";
 
   return ok(
     Object.freeze({

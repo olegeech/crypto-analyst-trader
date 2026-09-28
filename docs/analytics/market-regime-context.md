@@ -487,7 +487,7 @@ An implementation-neutral evidence shape could look like:
     "modelVersion": "...",
     "score": 0,
     "type": "...",
-    "scenarioProbabilities": {}
+    "scenarioLikelihoods": {}
   },
   "regime": {
     "phase": "...",
@@ -501,8 +501,9 @@ An implementation-neutral evidence shape could look like:
 ```
 
 This is illustrative research context, not the production decision-evidence
-schema. Any production contract must respect canonical serialization, hashing,
-provenance and freshness rules in the system invariants and related research
+schema. In #12, `scenarioLikelihoods` are independent [0, 1] estimates, not a
+normalized probability distribution. Any production contract must respect
+canonical serialization, hashing, provenance and freshness rules in the system invariants and related research
 issues.
 
 ## 9. Strategy mapping used in the project

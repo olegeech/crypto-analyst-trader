@@ -143,7 +143,7 @@ function trapEvidence(overrides: Record<string, unknown> = {}) {
     modelVersion: EXTERNAL_EVIDENCE_MODEL_VERSIONS.trap,
     trapType: "distribution-trap",
     reasons: ["price rejected the breakout", "spot confirmation weakened"],
-    scenarioProbabilities: {
+    scenarioLikelihoods: {
       continuation: decimal("0.1"),
       reversal: decimal("0.3"),
       squeeze: decimal("0.2"),
@@ -396,7 +396,7 @@ test("macro-only evidence is accepted without inferred project-bundle lineage", 
   assert.equal(result.evidence?.liquidationEvidenceHash, undefined);
 });
 
-test("asOf gates information time while later generation and stale validity are preserved", () => {
+test("asOf gates information time and generatedAt cannot predate it", () => {
   const lateGenerated = withContentHash(
     externalScore("market-regime-score", {
       generatedAt: "2026-09-24T12:45:00.000Z",
@@ -427,22 +427,37 @@ test("asOf gates information time while later generation and stale validity are 
     ).reasonCodes,
     ["EXTERNAL_EVIDENCE_AFTER_CUTOFF"],
   );
+
+  const generatedBeforeAsOf = withContentHash(
+    externalScore("market-regime-score", {
+      generatedAt: "2026-09-24T12:29:59.999Z",
+    }),
+  );
+  const invalidChronology = validateExternalRegimeEvidence(
+    generatedBeforeAsOf,
+    "market-regime-score",
+    identity(),
+  );
+  assert.equal(invalidChronology.status, "unavailable");
+  assert.deepEqual(invalidChronology.reasonCodes, ["INVALID_EXTERNAL_SCORE"]);
 });
 
-test("Trap requires explanations and exact bounded scenario keys without sum-to-one", () => {
+test("Trap requires explainable evidence and independent bounded scenario likelihoods", () => {
   const evidence = withContentHash(trapEvidence());
   const result = validateExternalRegimeEvidence(evidence, "trap", identity());
   assert.equal(result.status, "complete");
   assert.deepEqual(result.reasonCodes, []);
   if (result.evidence?.family === "trap") {
-    assert.deepEqual(
-      Object.keys(result.evidence.scenarioProbabilities).sort(),
-      ["continuation", "range", "reversal", "squeeze"],
-    );
-    const probabilityTotal = Object.values(
-      result.evidence.scenarioProbabilities,
+    assert.deepEqual(Object.keys(result.evidence.scenarioLikelihoods).sort(), [
+      "continuation",
+      "range",
+      "reversal",
+      "squeeze",
+    ]);
+    const likelihoodTotal = Object.values(
+      result.evidence.scenarioLikelihoods,
     ).reduce((sum, item) => sum.add(item), decimal("0"));
-    assert.equal(probabilityTotal.toString(), "0.7");
+    assert.equal(likelihoodTotal.toString(), "0.7");
   }
   assert.equal(
     validateExternalRegimeEvidence(
@@ -454,8 +469,8 @@ test("Trap requires explanations and exact bounded scenario keys without sum-to-
   );
 
   const invalidCases = [
-    trapEvidence({ scenarioProbabilities: { continuation: decimal("0.1") } }),
-    trapEvidence({ scenarioProbabilities: { continuation: decimal("1.1") } }),
+    trapEvidence({ scenarioLikelihoods: { continuation: decimal("0.1") } }),
+    trapEvidence({ scenarioLikelihoods: { continuation: decimal("1.1") } }),
     trapEvidence({ reasons: [], subscores: {} }),
     trapEvidence({ confirmationSignals: [] }),
     trapEvidence({ invalidationSignals: [] }),

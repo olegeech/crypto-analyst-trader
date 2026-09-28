@@ -571,7 +571,7 @@ const analyticsExternalEvidenceSchema = object(
     "trapType",
     "reasons",
     "subscores",
-    "scenarioProbabilities",
+    "scenarioLikelihoods",
     "horizon",
     "confirmationSignals",
     "invalidationSignals",
@@ -588,7 +588,7 @@ const analyticsExternalEvidenceSchema = object(
   {
     reasons: array(),
     subscores: object([], {}, [], true),
-    scenarioProbabilities: object(
+    scenarioLikelihoods: object(
       ["continuation", "reversal", "squeeze", "range"],
       {},
     ),
