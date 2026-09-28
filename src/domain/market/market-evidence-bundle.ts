@@ -1,5 +1,6 @@
 import { domainError } from "../shared/errors.js";
 import { DecimalValue, isDecimalValue } from "../shared/decimal.js";
+import { deepFreeze } from "../shared/deep-freeze.js";
 import { fail, ok, type Result } from "../shared/result.js";
 import { hashCanonical } from "../identity/canonical-serialization.js";
 import { parseUtcTimestamp, type UtcTimestamp } from "../shared/time.js";
@@ -217,20 +218,6 @@ function optionalDecimal(
 ): Result<DecimalValue | undefined> {
   if (value === undefined) return ok(undefined);
   return decimal(value, field, mode);
-}
-
-function deepFreeze<T>(value: T, seen = new WeakSet<object>()): T {
-  if (
-    typeof value !== "object" ||
-    value === null ||
-    isDecimalValue(value) ||
-    seen.has(value)
-  ) {
-    return value;
-  }
-  seen.add(value);
-  for (const child of Object.values(value)) deepFreeze(child, seen);
-  return Object.freeze(value);
 }
 
 function parseSource(input: unknown): Result<MarketEvidenceSource> {

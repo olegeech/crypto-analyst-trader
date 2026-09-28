@@ -111,3 +111,57 @@ test("division and rounding policies do not leak through a shared constructor", 
   assert.equal(normalized.ok, true);
   if (normalized.ok) assert.equal(normalized.value.toString(), "1.23");
 });
+
+test("square root is exact-decimal, bounded, and uses the requested rounding", () => {
+  const zero = parseDecimal("0");
+  const exactSquare = parseDecimal("2.25");
+  const irrational = parseDecimal("2");
+  const halfwaySquare = parseDecimal("1.52399025");
+  assert.equal(zero.ok, true);
+  assert.equal(exactSquare.ok, true);
+  assert.equal(irrational.ok, true);
+  assert.equal(halfwaySquare.ok, true);
+  if (!zero.ok || !exactSquare.ok || !irrational.ok || !halfwaySquare.ok) {
+    return;
+  }
+
+  const zeroRoot = zero.value.squareRoot(18, RoundingMode.HALF_EVEN);
+  const exactRoot = exactSquare.value.squareRoot(18, RoundingMode.HALF_EVEN);
+  const approximateRoot = irrational.value.squareRoot(
+    18,
+    RoundingMode.HALF_EVEN,
+  );
+  const halfEvenRoot = halfwaySquare.value.squareRoot(
+    3,
+    RoundingMode.HALF_EVEN,
+  );
+  const halfUpRoot = halfwaySquare.value.squareRoot(3, RoundingMode.HALF_UP);
+  assert.equal(zeroRoot.ok, true);
+  assert.equal(exactRoot.ok, true);
+  assert.equal(approximateRoot.ok, true);
+  assert.equal(halfEvenRoot.ok, true);
+  assert.equal(halfUpRoot.ok, true);
+  if (
+    !zeroRoot.ok ||
+    !exactRoot.ok ||
+    !approximateRoot.ok ||
+    !halfEvenRoot.ok ||
+    !halfUpRoot.ok
+  ) {
+    return;
+  }
+
+  assert.equal(zeroRoot.value.toString(), "0");
+  assert.equal(exactRoot.value.toString(), "1.5");
+  assert.equal(approximateRoot.value.toString(), "1.414213562373095049");
+  assert.equal(halfEvenRoot.value.toString(), "1.234");
+  assert.equal(halfUpRoot.value.toString(), "1.235");
+
+  const negative = parseDecimal("-1");
+  assert.equal(negative.ok, true);
+  if (negative.ok) {
+    const invalid = negative.value.squareRoot(18, RoundingMode.HALF_EVEN);
+    assert.equal(invalid.ok, false);
+    if (!invalid.ok) assert.equal(invalid.error.code, "INVALID_DECIMAL");
+  }
+});

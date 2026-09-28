@@ -50,6 +50,10 @@ const EVIDENCE_KINDS = new Set<EvidenceKind>([
   "research-artifact",
 ]);
 
+export function isEvidenceKind(value: unknown): value is EvidenceKind {
+  return typeof value === "string" && EVIDENCE_KINDS.has(value as EvidenceKind);
+}
+
 function evidenceFailure(message: string, field?: string): Result<never> {
   return fail(
     domainError(
@@ -63,7 +67,7 @@ function evidenceFailure(message: string, field?: string): Result<never> {
 export function createEvidenceRef(input: unknown): Result<EvidenceRef> {
   if (!isRecord(input)) return evidenceFailure("evidence must be an object");
   const kind = input.kind;
-  if (typeof kind !== "string" || !EVIDENCE_KINDS.has(kind as EvidenceKind)) {
+  if (!isEvidenceKind(kind)) {
     return evidenceFailure("evidence kind is unsupported", "kind");
   }
   const schemaVersion = requireSafeText(input.schemaVersion, "schemaVersion");

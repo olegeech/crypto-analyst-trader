@@ -36,3 +36,40 @@ test("domain imports stay isolated from adapters, persistence and probe helpers"
     }
   }
 });
+
+test("analytics dependency graph stays domain-local and upstream-only", async () => {
+  const domainRoot = resolve(process.cwd(), "src/domain");
+  const analyticsFiles = await sourceFiles(join(domainRoot, "analytics"));
+  const importSpecifier =
+    /(?:from\s+|import\s*\(?\s*|require\s*\(\s*)["']([^"']+)["']/gu;
+  const visited = new Set<string>();
+  const pending = [...analyticsFiles];
+  const downstreamDomainPath =
+    /\/domain\/(?:planning|risk|execution|accounting|application|adapters|persistence|cli)\//u;
+
+  while (pending.length > 0) {
+    const file = pending.pop();
+    if (file === undefined || visited.has(file)) continue;
+    visited.add(file);
+    const source = await readFile(file, "utf8");
+    for (const match of source.matchAll(importSpecifier)) {
+      const specifier = match[1];
+      if (specifier === "node:crypto" || specifier === "big.js") continue;
+      assert.ok(specifier?.startsWith("."), `${file}: ${specifier}`);
+      const target = resolve(
+        dirname(file),
+        (specifier ?? "").replace(/\.js$/u, ".ts"),
+      );
+      assert.ok(
+        target === domainRoot || target.startsWith(`${domainRoot}/`),
+        `${file}: ${specifier} escapes src/domain`,
+      );
+      assert.equal(
+        downstreamDomainPath.test(target),
+        false,
+        `${file}: ${specifier} reaches a downstream authority layer`,
+      );
+      if (target.endsWith(".ts")) pending.push(target);
+    }
+  }
+});
