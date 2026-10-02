@@ -1,6 +1,10 @@
 import { createHash } from "node:crypto";
 
 import { canonicalSerialize } from "./canonical-serialization.js";
+import {
+  rehydrateDataQualityAssessment,
+  type DataQualityAssessment,
+} from "../quality/data-quality-assessment.js";
 
 import {
   createCapabilityObservation,
@@ -99,6 +103,7 @@ export type ArtifactKind =
   | "market-evidence-bundle"
   | "liquidation-evidence-bundle"
   | "analytics-evidence-bundle"
+  | "data-quality-assessment"
   | "account-snapshot"
   | "order-intent"
   | "risk-decision"
@@ -130,6 +135,7 @@ export type RehydratedArtifact =
   | MarketEvidenceBundle
   | LiquidationEvidenceBundle
   | AnalyticsEvidenceBundle
+  | DataQualityAssessment
   | AccountSnapshot
   | OrderIntent
   | RiskDecision
@@ -924,7 +930,55 @@ const clearanceEvidenceSchema = object([
   "affectedReconciliationRevision",
 ]);
 
+const qualityAssessmentSchema = object(
+  [
+    "schemaVersion",
+    "qualityGate",
+    "profileVersion",
+    "profileHash",
+    "evaluationTime",
+    "bundleCutoff",
+    "findings",
+    "dispositions",
+    "appliedPenalties",
+    "evidenceConfidence",
+    "contentHash",
+  ],
+  {
+    findings: array(
+      object(["role", "reasonCode", "blocking", "confidenceImpactGroup"], {}, [
+        "role",
+        "reasonCode",
+        "blocking",
+      ]),
+    ),
+    dispositions: array(
+      object(
+        ["role", "disposition", "contentHash", "bundleHash", "admission"],
+        {
+          admission: object(["issuer", "artifactHash"]),
+        },
+        ["role", "disposition"],
+      ),
+    ),
+    appliedPenalties: array(object(["confidenceImpactGroup", "penalty"])),
+  },
+  [
+    "schemaVersion",
+    "qualityGate",
+    "profileVersion",
+    "profileHash",
+    "evaluationTime",
+    "bundleCutoff",
+    "findings",
+    "dispositions",
+    "appliedPenalties",
+    "contentHash",
+  ],
+);
+
 const schemas: ReadonlyMap<ArtifactKind, Schema> = new Map([
+  ["data-quality-assessment", qualityAssessmentSchema],
   ["evidence-ref", evidenceSchema],
   ["instrument-constraints", constraintsSchema],
   ["strategy-config", strategySchema],
@@ -1262,6 +1316,10 @@ function rehydrateExecutionPlan(value: unknown): Result<ExecutionPlan> {
 }
 
 export function rehydrateArtifact(
+  artifactKind: "data-quality-assessment",
+  envelope: unknown,
+): Result<DataQualityAssessment>;
+export function rehydrateArtifact(
   artifactKind: "execution-plan",
   envelope: unknown,
 ): Result<ExecutionPlan>;
@@ -1296,6 +1354,8 @@ export function rehydrateArtifact(
   const decoded = decodeCanonicalArtifact(envelope, artifactKind);
   if (!decoded.ok) return decoded;
   switch (artifactKind) {
+    case "data-quality-assessment":
+      return rehydrateDataQualityAssessment(decoded.value);
     case "evidence-ref":
       return createEvidenceRef(toConstructorInput(decoded.value));
     case "instrument-constraints":

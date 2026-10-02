@@ -37,9 +37,12 @@ test("domain imports stay isolated from adapters, persistence and probe helpers"
   }
 });
 
-test("analytics dependency graph stays domain-local and upstream-only", async () => {
+test("analytics and quality dependency graphs stay domain-local and upstream-only", async () => {
   const domainRoot = resolve(process.cwd(), "src/domain");
-  const analyticsFiles = await sourceFiles(join(domainRoot, "analytics"));
+  const analyticsFiles = [
+    ...(await sourceFiles(join(domainRoot, "analytics"))),
+    ...(await sourceFiles(join(domainRoot, "quality"))),
+  ];
   const importSpecifier =
     /(?:from\s+|import\s*\(?\s*|require\s*\(\s*)["']([^"']+)["']/gu;
   const visited = new Set<string>();
@@ -68,6 +71,11 @@ test("analytics dependency graph stays domain-local and upstream-only", async ()
         downstreamDomainPath.test(target),
         false,
         `${file}: ${specifier} reaches a downstream authority layer`,
+      );
+      assert.equal(
+        target.endsWith("/identity/canonical-artifact.ts"),
+        false,
+        `${file}: ${specifier} reaches the downstream artifact registry`,
       );
       if (target.endsWith(".ts")) pending.push(target);
     }
