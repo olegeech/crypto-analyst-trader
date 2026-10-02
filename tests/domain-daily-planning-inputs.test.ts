@@ -1,72 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { prepareDailyPlanningInputs } from "../src/domain/planning/daily-planning-inputs.js";
-import { dailyEvidenceFixture } from "./fixtures/daily-planning-evidence-fixtures.js";
+import { dailyInputFixture } from "./fixtures/daily-planning-policy-fixtures.js";
+export { dailyInputFixture } from "./fixtures/daily-planning-policy-fixtures.js";
 import { createDataQualityAssessment } from "../src/domain/quality/data-quality-assessment.js";
 
-function policies() {
-  return {
-    decisionPolicy: {
-      schemaVersion: "decision-policy/v1",
-      policyVersion: "fixture-v1",
-      symbolApplicability: ["BTCUSDT"],
-      selectors: [
-        {
-          id: "return",
-          source: "native",
-          requestId: "return",
-          kind: "close-return",
-          field: "percent",
-          symbol: "BTCUSDT",
-          required: true,
-        },
-      ],
-      groups: [
-        {
-          id: "trend",
-          weight: "1",
-          rules: [
-            {
-              id: "add",
-              target: "ADD_LONG",
-              support: "90",
-              conditions: [
-                { selectorId: "return", comparison: "gte", threshold: "0" },
-              ],
-            },
-          ],
-        },
-      ],
-      addLong: { supportThreshold: "80", minAgreeingGroups: 1 },
-      reduceLong: { supportThreshold: "80", minAgreeingGroups: 1 },
-      reductionFraction: "0.25",
-    },
-    planningPolicy: {
-      schemaVersion: "planning-policy/v1",
-      policyVersion: "fixture-v1",
-      atrSelector: {
-        source: "native",
-        requestId: "atr",
-        kind: "atr",
-        field: "atr",
-        symbol: "BTCUSDT",
-        required: true,
-      },
-      anchor: "bid-capped-below-ask/v1",
-      entryRounding: "floor",
-      quantityRounding: "floor",
-      takeProfitRounding: "ceil",
-      timeInForce: "GTC",
-      levels: [
-        { atrOffset: "0", allocationWeight: "1", takeProfitAtrDistance: "1" },
-      ],
-    },
-  };
-}
-export function dailyInputFixture(bounds = true) {
-  const f = dailyEvidenceFixture(bounds);
-  return { ...f, ...policies(), symbol: "BTCUSDT", allocation: "100" };
-}
 test("daily inputs select only exact assessed source and output identities", () => {
   const raw = dailyInputFixture();
   const result = prepareDailyPlanningInputs(raw);
