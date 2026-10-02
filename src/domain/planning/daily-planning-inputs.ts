@@ -16,14 +16,14 @@ import {
 import { hashCanonical } from "../identity/canonical-serialization.js";
 import {
   createDecisionPolicy,
-  decisionPolicyHash,
   isPlanningSymbol,
   type DecisionPolicy,
+  type EvidenceSelector,
 } from "./decision-policy.js";
 import {
   createPlanningPolicy,
-  planningPolicyHash,
   type PlanningPolicy,
+  type AtrRequestSelector,
 } from "./planning-policy.js";
 import type { InstrumentConstraints } from "../market/instrument-constraints.js";
 import { DecimalValue, isDecimalValue } from "../shared/decimal.js";
@@ -166,26 +166,32 @@ export function prepareDailyPlanningInputs(
     return invalid("MANDATORY_INPUT_UNAVAILABLE");
   const constraints = symbol.instrument.constraints;
   const constraintsHash = hashCanonical(constraints);
-  const dHash = decisionPolicyHash(decision.value);
-  const pHash = planningPolicyHash(planning.value);
+  const dHash = hashCanonical(decision.value);
+  const pHash = hashCanonical(planning.value);
   if (!constraintsHash.ok || !dHash.ok || !pHash.ok)
     return invalid("INPUT_IDENTITY_MISMATCH");
 
   // Selectors are closed and validated by the versioned policy parser, never caller paths.
+  const nativeOutcomes = [
+    ...analyticsValue.priceFeatures,
+    ...analyticsValue.derivativeFeatures,
+  ];
+  const outcomesByRequest = new Map<string, (typeof nativeOutcomes)[number]>();
+  for (const row of nativeOutcomes) {
+    if (!outcomesByRequest.has(row.requestId))
+      outcomesByRequest.set(row.requestId, row);
+  }
   function observe(
-    selector: Record<string, unknown>,
+    selector: EvidenceSelector | AtrRequestSelector,
     selectorId: string,
   ): Result<DailySelectorObservation> {
     let value: unknown;
     let usable = false;
     if (selector.source === "ticker") {
       usable = selector.symbol === input.symbol;
-      value = symbol!.ticker![selector.field as keyof MarketTickerEvidence];
+      value = symbol!.ticker![selector.field];
     } else if (selector.source === "native") {
-      const row = [
-        ...analyticsValue.priceFeatures,
-        ...analyticsValue.derivativeFeatures,
-      ].find((outcome) => outcome.requestId === selector.requestId);
+      const row = outcomesByRequest.get(selector.requestId);
       const role = `analytics:${String(selector.requestId)}`;
       const assessed = disposition(role);
       if (
@@ -199,9 +205,11 @@ export function prepareDailyPlanningInputs(
         row &&
         (row.kind === "liquidation-window"
           ? "asset" in row &&
+            "asset" in selector &&
             row.asset === selector.asset &&
             row.asset === symbol!.instrument!.baseCoin
           : "symbol" in row &&
+            "symbol" in selector &&
             row.symbol === selector.symbol &&
             row.symbol === input.symbol);
       usable =
@@ -227,26 +235,28 @@ export function prepareDailyPlanningInputs(
         return invalid("INPUT_IDENTITY_MISMATCH");
       const applicability = selector.applicability;
       const context =
-        isRecord(applicability) &&
-        (applicability.scope === "symbol"
+        applicability.scope === "symbol"
           ? applicability.symbol === input.symbol
-          : Array.isArray(applicability.symbols) &&
-            applicability.symbols.includes(input.symbol));
+          : applicability.symbols.some(
+              (candidate) => candidate === input.symbol,
+            );
       usable =
         !!row &&
         !!context &&
         accepted(role, row.contentHash) &&
         assessed?.admission?.artifactHash === row.contentHash;
-      if (row?.family !== "trap" && row && selector.direction !== row.direction)
+      if (
+        row?.family !== "trap" &&
+        row &&
+        (!("direction" in selector) || selector.direction !== row.direction)
+      )
         return invalid("INPUT_IDENTITY_MISMATCH");
       value =
         row?.family === "trap"
           ? selector.field === "confidence"
             ? row.confidence
-            : row.scenarioLikelihoods[
-                selector.field as keyof typeof row.scenarioLikelihoods
-              ]
-          : row?.[selector.field as "score" | "confidence"];
+            : selectedField(row.scenarioLikelihoods, selector.field)
+          : selectedField(row, selector.field);
     }
     const status = !usable
       ? "unavailable"
@@ -263,17 +273,11 @@ export function prepareDailyPlanningInputs(
   }
   const selectors: DailySelectorObservation[] = [];
   for (const selector of decision.value.selectors) {
-    const result = observe(
-      selector as unknown as Record<string, unknown>,
-      selector.id,
-    );
+    const result = observe(selector, selector.id);
     if (!result.ok) return result;
     selectors.push(result.value);
   }
-  const atr = observe(
-    planning.value.atrSelector as unknown as Record<string, unknown>,
-    "grid-atr",
-  );
+  const atr = observe(planning.value.atrSelector, "grid-atr");
   if (!atr.ok) return atr;
   if (!atr.value.value?.isPositive())
     return invalid("MANDATORY_INPUT_UNAVAILABLE");

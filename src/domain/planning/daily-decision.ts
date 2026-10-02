@@ -18,7 +18,6 @@ import {
   invalidPlanning,
   planningConstant,
   planningDecimal,
-  textOrder,
 } from "./planning-validation.js";
 
 export interface DailyDecisionConditionTrace {
@@ -88,7 +87,7 @@ function conditionTrace(
   };
 }
 
-/** Pure evaluation of U2's admitted view; this does not mint admission or execution authority. */
+/** Pure evaluation of admitted planning inputs; this issues no admission or execution authority. */
 export function evaluateDailyDecision(
   inputs: DailyPlanningInputs,
 ): Result<DailyDecisionEvaluation> {
@@ -146,14 +145,12 @@ export function evaluateDailyDecision(
   let addAgreeingGroupCount = 0;
   let reduceAgreeingGroupCount = 0;
   const groups: DailyDecisionGroupTrace[] = [];
-  for (const group of [...policy.groups].sort((a, b) =>
-    textOrder(a.id, b.id),
-  )) {
+  for (const group of policy.groups) {
     let addSupport = zero;
     let reduceSupport = zero;
     let holdSupport = zero;
     const rules: DailyDecisionRuleTrace[] = [];
-    for (const rule of [...group.rules].sort((a, b) => textOrder(a.id, b.id))) {
+    for (const rule of group.rules) {
       const conditions: DailyDecisionConditionTrace[] = [];
       for (const condition of rule.conditions) {
         const observation = observations.get(condition.selectorId);

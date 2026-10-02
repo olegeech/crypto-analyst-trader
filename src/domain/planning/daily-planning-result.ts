@@ -49,7 +49,7 @@ export interface BlockedDailyPlanningResult {
   readonly orderIntents?: never;
 }
 
-/** Shared pre-risk shape; U5 owns the concrete immutable artifact and its parser. */
+/** Shared pre-risk shape; the daily artifact constructor owns concrete validation. */
 export interface DailyDecisionSummary {
   readonly recommendation: DailyRecommendation;
   readonly decisionSupport: DecimalValue;
