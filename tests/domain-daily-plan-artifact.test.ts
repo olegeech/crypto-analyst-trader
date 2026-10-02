@@ -12,6 +12,57 @@ import {
 } from "../src/domain/identity/canonical-artifact.js";
 import { createExecutionPlan } from "../src/domain/planning/execution-plan.js";
 import { hashCanonical } from "../src/domain/identity/canonical-serialization.js";
+import { createPlanningPolicy } from "../src/domain/planning/planning-policy.js";
+
+test("multilevel canonical artifact replay retains every leg and intent identity", () => {
+  const raw = dailyDecisionInputFixture();
+  // Non-calibrated test policy, not a runtime trading preset.
+  const planningPolicy = requireDailyFixture(
+    createPlanningPolicy({
+      ...raw.planningPolicy,
+      levels: [
+        {
+          atrOffset: "0.25",
+          allocationWeight: "0.3",
+          takeProfitAtrDistance: "0.75",
+        },
+        {
+          atrOffset: "1.25",
+          allocationWeight: "0.7",
+          takeProfitAtrDistance: "1.5",
+        },
+      ],
+    }),
+  );
+  const input = { ...raw, planningPolicy };
+  const plan = requireDailyFixture(createDailyDecisionPlan(input));
+  assert.equal(plan.decision.recommendation, "ADD_LONG");
+  assert.ok(plan.candidateLegs);
+  assert.ok(plan.orderIntents);
+  assert.equal(plan.candidateLegs.length, 2);
+  assert.equal(plan.orderIntents.length, 2);
+  assert.deepEqual(
+    plan.orderIntents,
+    plan.candidateLegs.map((leg) => leg.intent),
+  );
+  assert.equal(new Set(plan.candidateLegs.map((leg) => leg.legId)).size, 2);
+  assert.equal(
+    new Set(plan.orderIntents.map((intent) => intent.intentId)).size,
+    2,
+  );
+  assert.deepEqual(requireDailyFixture(createDailyDecisionPlan(input)), plan);
+  const envelope = requireDailyFixture(
+    encodeCanonicalArtifact("daily-decision-plan", plan),
+  );
+  const restored = requireDailyFixture(
+    rehydrateArtifact("daily-decision-plan", envelope),
+  );
+  assert.deepEqual(restored, plan);
+  const replayed = requireDailyFixture(rehydrateDailyDecisionPlan(restored));
+  assert.deepEqual(replayed.candidateLegs, plan.candidateLegs);
+  assert.deepEqual(replayed.orderIntents, plan.orderIntents);
+  assert.equal(replayed.orderIntents?.length, 2);
+});
 
 test("daily pre-risk identity is deterministic and canonical artifact roundtrips", () => {
   const input = dailyDecisionInputFixture();

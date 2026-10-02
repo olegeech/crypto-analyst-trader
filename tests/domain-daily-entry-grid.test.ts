@@ -7,6 +7,80 @@ import { requireDailyFixture } from "./fixtures/daily-planning-evidence-fixtures
 import { fixtureDecimal } from "./fixtures/data-quality-fixtures.js";
 import { createPlanningPolicy } from "../src/domain/planning/planning-policy.js";
 
+test("multilevel grid preserves unequal budgets, distinct prices and stable identities", () => {
+  const raw = dailyInputFixture();
+  // Non-calibrated test policy, not a runtime trading preset.
+  const planningPolicy = requireDailyFixture(
+    createPlanningPolicy({
+      ...raw.planningPolicy,
+      levels: [
+        {
+          atrOffset: "0.25",
+          allocationWeight: "0.3",
+          takeProfitAtrDistance: "0.75",
+        },
+        {
+          atrOffset: "1.25",
+          allocationWeight: "0.7",
+          takeProfitAtrDistance: "1.5",
+        },
+      ],
+    }),
+  );
+  const input = requireDailyFixture(
+    prepareDailyPlanningInputs({ ...raw, planningPolicy }),
+  );
+  const seed = `sha256:${"b".repeat(64)}`;
+  const grid = requireDailyFixture(
+    compileDailyEntryGrid(input, "ADD_LONG", seed),
+  );
+  assert.equal(grid.length, 2);
+  assert.deepEqual(
+    grid.map((leg) => ({
+      index: leg.index,
+      budget: leg.allocation.toString(),
+      price: leg.intent.price.toString(),
+      quantity: leg.intent.quantity.toString(),
+      notional: leg.intent.notional.toString(),
+      takeProfit: leg.intent.protection?.takeProfit?.toString(),
+    })),
+    [
+      {
+        index: 0,
+        budget: "30",
+        price: "101",
+        quantity: "0.29",
+        notional: "29.29",
+        takeProfit: "104",
+      },
+      {
+        index: 1,
+        budget: "70",
+        price: "97",
+        quantity: "0.72",
+        notional: "69.84",
+        takeProfit: "103",
+      },
+    ],
+  );
+  for (const leg of grid) {
+    assert.ok(leg.intent.notional.compare(leg.allocation) <= 0);
+    assert.equal(leg.timeInForce, "GTC");
+    assert.match(leg.legId, /^daily-leg:sha256:[a-f0-9]{64}$/);
+    assert.match(leg.intent.intentId, /^daily-intent:sha256:[a-f0-9]{64}$/);
+  }
+  const total = grid[0]!.intent.notional.add(grid[1]!.intent.notional);
+  assert.equal(total.toString(), "99.13");
+  assert.ok(total.compare(input.allocation) <= 0);
+  assert.equal(grid[0]!.allocation.add(grid[1]!.allocation).toString(), "100");
+  assert.equal(new Set(grid.map((leg) => leg.legId)).size, 2);
+  assert.equal(new Set(grid.map((leg) => leg.intent.intentId)).size, 2);
+  assert.deepEqual(
+    requireDailyFixture(compileDailyEntryGrid(input, "ADD_LONG", seed)),
+    grid,
+  );
+});
+
 test("ADD grid floors entries/quantities, preserves ceiled TP and fixed GTC", () => {
   const input = requireDailyFixture(
     prepareDailyPlanningInputs(dailyInputFixture()),
