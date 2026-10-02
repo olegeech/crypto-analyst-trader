@@ -84,6 +84,13 @@ function selectedField(value: unknown, field: string): unknown {
 export function prepareDailyPlanningInputs(
   input: DailyPlanningInput,
 ): Result<DailyPlanningInputs> {
+  if (
+    !isRecord(input) ||
+    Object.values(Object.getOwnPropertyDescriptors(input)).some(
+      (descriptor) => !Object.hasOwn(descriptor, "value"),
+    )
+  )
+    return invalid("INPUT_IDENTITY_MISMATCH");
   const decision = createDecisionPolicy(input.decisionPolicy);
   if (!decision.ok) return invalid("INVALID_DECISION_POLICY");
   const planning = createPlanningPolicy(input.planningPolicy);

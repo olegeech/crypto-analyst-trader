@@ -11,6 +11,7 @@ import {
   rehydrateArtifact,
 } from "../src/domain/identity/canonical-artifact.js";
 import { createExecutionPlan } from "../src/domain/planning/execution-plan.js";
+import { hashCanonical } from "../src/domain/identity/canonical-serialization.js";
 
 test("daily pre-risk identity is deterministic and canonical artifact roundtrips", () => {
   const input = dailyDecisionInputFixture();
@@ -53,4 +54,76 @@ test("historical rehydration recomputes semantics and identities, not only the o
     rehydrateDailyDecisionPlan({ ...plan, candidateLegs: [] }).ok,
     false,
   );
+});
+
+test("rehashing forged long-only/grid payloads cannot bypass canonical replay", () => {
+  const plan = requireDailyFixture(
+    createDailyDecisionPlan(dailyDecisionInputFixture()),
+  );
+  assert.equal(plan.decision.recommendation, "ADD_LONG");
+  if (plan.decision.recommendation !== "ADD_LONG" || !plan.candidateLegs)
+    return;
+  const leg = plan.candidateLegs[0]!;
+  for (const intent of [
+    { ...leg.intent, side: "sell" },
+    { ...leg.intent, protection: {} },
+    {
+      ...leg.intent,
+      protection: { ...leg.intent.protection, stopLoss: leg.intent.price },
+    },
+    { ...leg.intent, intentId: "forged-intent" },
+  ]) {
+    const { contentHash: _hash, ...payload } = plan;
+    void _hash;
+    const forged: Record<string, unknown> = {
+      ...payload,
+      candidateLegs: [{ ...leg, intent }],
+      orderIntents: [intent],
+    };
+    const withHash = {
+      ...forged,
+      contentHash: requireDailyFixture(hashCanonical(forged)),
+    };
+    const envelope = requireDailyFixture(
+      encodeCanonicalArtifact("daily-decision-plan", withHash),
+    );
+    assert.equal(rehydrateArtifact("daily-decision-plan", envelope).ok, false);
+  }
+});
+
+test("allocation and semantic policy changes alter plan/intent identities without cycles", () => {
+  const input = dailyDecisionInputFixture();
+  const plan = requireDailyFixture(createDailyDecisionPlan(input));
+  const changed = requireDailyFixture(
+    createDailyDecisionPlan({ ...input, allocation: "101" }),
+  );
+  assert.notEqual(plan.inputSeed, changed.inputSeed);
+  assert.notEqual(plan.planId, changed.planId);
+  assert.notEqual(plan.decisionId, changed.decisionId);
+  assert.notEqual(plan.contentHash, changed.contentHash);
+  const changedPolicy = requireDailyFixture(
+    createDailyDecisionPlan({
+      ...input,
+      decisionPolicy: { ...input.decisionPolicy, reductionFraction: "0.5" },
+    }),
+  );
+  assert.notEqual(plan.inputSeed, changedPolicy.inputSeed);
+});
+
+test("invalid runtime preparation input returns failure without reading accessors", () => {
+  for (const input of [null, undefined, 1]) {
+    assert.equal(
+      createDailyDecisionPlan(
+        input as unknown as Parameters<typeof createDailyDecisionPlan>[0],
+      ).ok,
+      false,
+    );
+  }
+  const input = dailyDecisionInputFixture();
+  Object.defineProperty(input, "market", {
+    get: () => {
+      throw new Error("accessor must not execute");
+    },
+  });
+  assert.equal(createDailyDecisionPlan(input).ok, false);
 });

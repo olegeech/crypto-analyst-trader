@@ -4,6 +4,18 @@ import { prepareDailyPlanningInputs } from "../src/domain/planning/daily-plannin
 import { dailyInputFixture } from "./fixtures/daily-planning-policy-fixtures.js";
 export { dailyInputFixture } from "./fixtures/daily-planning-policy-fixtures.js";
 import { createDataQualityAssessment } from "../src/domain/quality/data-quality-assessment.js";
+import {
+  analyticsFixture,
+  liquidationFixture,
+  liquidationFixtureRef,
+} from "./fixtures/data-quality-fixtures.js";
+import {
+  requireDailyFixture,
+  dailyQualityProfileFixture,
+} from "./fixtures/daily-planning-evidence-fixtures.js";
+import { createQualityProfile } from "../src/domain/quality/quality-profile.js";
+import { assessDataQuality } from "../src/domain/quality/assess-data-quality.js";
+import { rehydrateAnalyticsEvidenceBundle } from "../src/domain/analytics/analytics-evidence-bundle.js";
 
 test("daily inputs select only exact assessed source and output identities", () => {
   const raw = dailyInputFixture();
@@ -83,4 +95,124 @@ test("optional absent and rejected selectors remain unavailable rather than zero
   assert.equal(result.value.selectors[0]?.value, undefined);
   // Static upper bounds are needed only at ADD compilation, not evidence selection.
   assert.ok(prepareDailyPlanningInputs(dailyInputFixture(false)).ok);
+});
+
+test("proven explicit-zero liquidation remains available but absent imbalance is never fabricated", () => {
+  const raw = dailyInputFixture();
+  const observations = Array.from({ length: 24 }, (_, index) => ({
+    timestamp: new Date(
+      Date.parse(raw.market.bundleCutoff) - (24 - index) * 3600000,
+    ).toISOString(),
+    longUsd: "0",
+    shortUsd: "0",
+  }));
+  const liquidation = liquidationFixture(raw.market, {
+    coverageProof: "complete",
+    historyProof: "complete",
+    status: "complete",
+    diagnostics: [],
+    targets: (["BTC", "ETH", "SOL", "DOGE"] as const).map((asset) => ({
+      asset,
+      constituents: [
+        {
+          providerSymbol: `${asset}-fixture`,
+          exchange: "Bybit",
+          symbolOnExchange: `${asset}USDT`,
+          baseAsset: asset,
+          quoteAsset: "USDT",
+          isPerpetual: true,
+          marginType: "linear",
+          expireAt: 0,
+          notionalDenominatedIn: "USD",
+          observations,
+        },
+      ],
+    })),
+  });
+  const analytics = analyticsFixture(raw.market, {
+    liquidation,
+    profile: {
+      ...raw.analytics.profile,
+      features: [
+        ...raw.analytics.profile.features,
+        {
+          id: "liquidation",
+          kind: "liquidation-window",
+          asset: "BTC",
+          windowHours: 24,
+          required: false,
+        },
+      ],
+    },
+  });
+  const restored = rehydrateAnalyticsEvidenceBundle(analytics);
+  assert.ok(restored.ok, restored.ok ? "" : restored.error.message);
+  const sources = [
+    { role: "market" as const, value: raw.market },
+    { role: "analytics" as const, value: analytics },
+    {
+      role: "liquidation" as const,
+      value: liquidation,
+      evidenceRef: liquidationFixtureRef(liquidation),
+    },
+  ];
+  const profile = requireDailyFixture(
+    createQualityProfile({
+      ...dailyQualityProfileFixture(),
+      roles: [
+        ...dailyQualityProfileFixture().roles,
+        { id: "liquidation", required: false, maxAgeMs: 60000 },
+        { id: "analytics:liquidation", required: false, maxAgeMs: 60000 },
+      ],
+    }),
+  );
+  const assessment = requireDailyFixture(
+    assessDataQuality({
+      profile,
+      sources,
+      bundleCutoff: raw.market.bundleCutoff,
+      evaluationTime: raw.market.bundleCutoff,
+    }),
+  );
+  assert.equal(
+    assessment.qualityGate,
+    "OK",
+    JSON.stringify(assessment.findings),
+  );
+  const makePolicy = (field: string) => ({
+    ...raw.decisionPolicy,
+    selectors: [
+      {
+        id: "return",
+        source: "native",
+        requestId: "liquidation",
+        kind: "liquidation-window",
+        asset: "BTC",
+        field,
+        required: false,
+      },
+    ],
+  });
+  const zero = requireDailyFixture(
+    prepareDailyPlanningInputs({
+      ...raw,
+      liquidation,
+      analytics,
+      assessment,
+      decisionPolicy: makePolicy("totalUsd"),
+    }),
+  );
+  assert.equal(zero.selectors[0]?.status, "available");
+  assert.equal(zero.selectors[0]?.value?.toString(), "0");
+  const imbalance = requireDailyFixture(
+    prepareDailyPlanningInputs({
+      ...raw,
+      liquidation,
+      analytics,
+      assessment,
+      decisionPolicy: makePolicy("imbalance"),
+    }),
+  );
+  assert.equal(imbalance.selectors[0]?.status, "absent");
+  assert.equal(imbalance.selectors[0]?.value, undefined);
 });

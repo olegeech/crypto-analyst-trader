@@ -71,3 +71,40 @@ test("actual quality BLOCK cannot become HOLD and input JSON cannot override aut
     );
   }
 });
+
+test("rehydrated approval claims cannot bypass the fresh configured quality call", () => {
+  const f = dailyDecisionInputFixture();
+  let calls = 0;
+  const boundary = requireDailyFixture(
+    createDailyPlanningBoundary({
+      qualityBoundary: {
+        assess: (input) => {
+          calls += 1;
+          return f.boundary.assess(input);
+        },
+      },
+      decisionPolicy: f.decisionPolicy,
+      planningPolicy: f.planningPolicy,
+    }),
+  );
+  const input = {
+    sources: f.sources,
+    symbol: f.symbol,
+    allocation: f.allocation,
+    bundleCutoff: f.market.bundleCutoff,
+    evaluationTime: f.market.bundleCutoff,
+  };
+  assert.equal(boundary.prepare(input).status, "prepared");
+  assert.equal(calls, 1);
+  assert.equal(
+    boundary.prepare({ ...input, evaluationTime: "2026-09-24T15:00:00.000Z" })
+      .status,
+    "blocked",
+  );
+  assert.equal(calls, 2);
+  assert.equal(
+    boundary.prepare({ ...input, assessment: f.assessment }).status,
+    "blocked",
+  );
+  assert.equal(calls, 2);
+});
