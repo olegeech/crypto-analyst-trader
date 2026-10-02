@@ -353,6 +353,100 @@ test("future authoritative cutoff remains an explicit blocking assessment", () =
     assessment,
   );
 });
+test("assessor future cutoff blocks with assessment metadata and roundtrips canonically", () => {
+  const market = marketFixture();
+  const profile = value(
+    createQualityProfile({
+      schemaVersion: "quality-profile/v1",
+      profileVersion: "future-cutoff-test-v1",
+      roles: [{ id: "market", required: true, maxAgeMs: 60_000 }],
+      metadataSkewMs: 1_000,
+      trust: [],
+      penalties: [],
+    }),
+  );
+  const result = assessDataQuality({
+    profile,
+    sources: [{ role: "market", value: market }],
+    bundleCutoff: market.bundleCutoff,
+    evaluationTime: new Date(Date.parse(market.bundleCutoff) - 1).toISOString(),
+  });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  const assessment = value(result);
+  assert.equal(assessment.qualityGate, "BLOCK");
+  assert.ok(
+    assessment.findings.some(
+      (finding) =>
+        finding.role === "assessment" &&
+        finding.reasonCode === "FUTURE_INFORMATION" &&
+        finding.blocking,
+    ),
+  );
+  assert.deepEqual(
+    assessment.dispositions.map((row) => row.role),
+    ["market"],
+  );
+  assert.deepEqual(
+    value(
+      rehydrateArtifact(
+        "data-quality-assessment",
+        value(encodeCanonicalArtifact("data-quality-assessment", assessment)),
+      ),
+    ),
+    assessment,
+  );
+});
+test("only blocking assessment future-information may omit a disposition", () => {
+  const base = payload();
+  const variants: DataQualityAssessmentPayload[] = [
+    { ...base, dispositions: [] },
+    ...(
+      [
+        { role: "market", reasonCode: "FUTURE_INFORMATION", blocking: true },
+        { role: "assessment", reasonCode: "MISSING_EVIDENCE", blocking: true },
+        {
+          role: "assessment",
+          reasonCode: "FUTURE_INFORMATION",
+          blocking: false,
+        },
+      ] as const
+    ).map((finding) => ({
+      ...base,
+      qualityGate: finding.blocking ? ("BLOCK" as const) : ("OK" as const),
+      findings: [finding],
+      dispositions: [],
+      appliedPenalties: [],
+      evidenceConfidence: value(parseDecimal("100")),
+    })),
+    {
+      ...base,
+      qualityGate: "BLOCK",
+      findings: [
+        {
+          role: "assessment",
+          reasonCode: "FUTURE_INFORMATION",
+          blocking: true,
+        },
+      ],
+      dispositions: [
+        { role: "assessment", disposition: "accepted", contentHash: hash },
+      ],
+      appliedPenalties: [],
+      evidenceConfidence: value(parseDecimal("100")),
+    },
+  ];
+  for (const input of variants) {
+    assert.equal(
+      createDataQualityAssessment(input).ok,
+      false,
+      JSON.stringify(input),
+    );
+    assert.equal(
+      rehydrateDataQualityAssessment(signed({ ...input })).ok,
+      false,
+    );
+  }
+});
 test("reducer assessments roundtrip and persisted admissions cannot grant producer trust", () => {
   const market = marketFixture();
   const external = externalEvidenceFixture("market-regime-score", market);

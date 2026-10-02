@@ -299,6 +299,7 @@ export function classifyQualityEvidence(
       ];
       for (const outcome of outcomes) {
         const role = qualityRoleForOutcome(outcome.requestId);
+        if (role.startsWith("analytics:")) clocks(role, identity.bundleCutoff);
         if (outcome.status !== "complete")
           add(
             role,

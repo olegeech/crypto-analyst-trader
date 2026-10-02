@@ -18,6 +18,9 @@ Policy roles are `market`, `liquidation`, `analytics`,
 `analytics:<requestId>` or `external:<family>`. Requested roles explicitly
 declare requiredness and maximum age; analytics output policy does not inherit
 requiredness from the #12 aggregate sufficiency label.
+Each native `analytics:<requestId>` role also enforces its own `maxAgeMs`
+against the analytics information cutoff, even without an aggregate analytics
+freshness rule. External roles use the artifact's own `asOf` and `validForMs`.
 
 Penalties are explicit decimal strings in policy, keyed by stable reason code
 and confidence-impact group. Confidence starts at 100, subtracts the maximum

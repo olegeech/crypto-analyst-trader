@@ -254,6 +254,14 @@ function validatePayload(input: unknown): Result<DataQualityAssessmentPayload> {
   }
   for (const finding of findings) {
     const disposition = dispositions.find((row) => row.role === finding.role);
+    // Assessment-time metadata has no source artifact to disposition.
+    if (
+      !disposition &&
+      finding.role === "assessment" &&
+      finding.reasonCode === "FUTURE_INFORMATION" &&
+      finding.blocking
+    )
+      continue;
     if (
       !disposition ||
       (finding.reasonCode === "MISSING_EVIDENCE" &&

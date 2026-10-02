@@ -181,11 +181,13 @@ export function assessDataQuality(
   const orderedDispositions = [
     ...new Map(dispositions.map((d) => [d.role, d])).values(),
   ]
-    .map((d) =>
-      rejected.has(d.role) && d.disposition !== "missing"
-        ? { ...d, disposition: "rejected" as const }
-        : d,
-    )
+    .map((d) => {
+      if (!rejected.has(d.role) || d.disposition === "missing") return d;
+      const rejectedDisposition = { ...d, disposition: "rejected" as const };
+      // Admission describes accepted evidence only, even when trust preceded rejection.
+      delete rejectedDisposition.admission;
+      return rejectedDisposition;
+    })
     .sort((a, b) => compare(a.role, b.role));
   let confidence = decimal("100");
   for (const penalty of penaltyByGroup.values())
