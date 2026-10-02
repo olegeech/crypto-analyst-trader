@@ -22,7 +22,7 @@ src/
   cli/
 ```
 
-## Core use cases
+## Target core use cases
 
 - `daily prepare`: refresh evidence, snapshot the account, build a desired
   order plan, evaluate risk and cost, and write review artifacts.
@@ -36,6 +36,70 @@ src/
 
 Preparation and execution are separate commands. A scheduler may prepare a plan
 automatically; mainnet execution is not implicitly triggered.
+
+## Daily planning boundary
+
+The implemented preparation API is
+`createDailyPlanningBoundary({ qualityBoundary, decisionPolicy, planningPolicy })`
+in `src/application/daily-decision-planning.ts`. Construction returns a
+`Result<DailyPlanningBoundary>` after validating explicit versioned policies.
+`prepare(input: unknown)` accepts only `sources`, `symbol`, `allocation`,
+`bundleCutoff` and `evaluationTime`. Trusted composition supplies the quality
+boundary and policies; preparation JSON cannot replace the quality profile,
+issuer, admission authority or assessment. Each call obtains its assessment
+through the configured #13 quality boundary before compiling accepted #12
+analytics and market evidence. Rejected or unavailable optional evidence cannot
+contribute support; unusable mandatory operands, including the selected ATR,
+block preparation.
+
+A prepared result carries an immutable `plan`, with recommendation, rationale,
+rule contributions, Decimal support and confidence under `plan.decision`.
+Versioned decision rules calculate weighted support and directional agreement
+separately. Both qualifying directions or insufficient agreement produce HOLD;
+HOLD support comes only from matched HOLD rules. Confidence is
+`min(evidenceConfidence, decisionSupport)`; neither score predicts trading
+success. Configuration is explicit and has no calibrated production fallback.
+
+`ADD_LONG` carries static GTC Limit buy/open candidate legs and semantic order
+intents. Prices are tick-aligned below the accepted ask, quantities are rounded
+down to steps within allocation, and each entry has one tick-aligned TP above
+entry. The planning policy generates no SL. ADD requires instrument
+`minPrice`, `maxPrice` and `maxLimitQuantity`. Legacy evidence lacking those
+bounds can still produce HOLD or REDUCE when required analytics remain usable.
+`REDUCE_LONG` carries a desired reduction fraction and rationale, without an
+account-dependent close quantity or sell intent. `HOLD_LONG` carries no entry
+intents and means maintaining exposure, including staying flat. A blocked
+result has typed reasons and no plan, strategy decision or order intents;
+quality BLOCK never becomes HOLD.
+
+The daily artifact binds assessed sources, selected analytics, policy versions
+and hashes, allocation and constraints. Its input seed deterministically derives
+decision, leg and semantic intent identities before the final content hash is
+computed. Canonical rehydration reconstructs and compares the artifact; replay
+does not mint fresh quality authority, risk clearance or execution proof.
+Explicit timestamps and canonical inputs make repeat preparation reproducible.
+
+This boundary has no account snapshot: available capital, current long exposure,
+leverage and portfolio safety are unknown. Static candidate validity does not
+establish economic edge, live maker status, dynamic price-band validity or
+exchange acceptance. Downstream composition must obtain fresh account and order
+state, cap any reduction at the owned long position, evaluate cost/risk and live
+constraints, and produce the existing risk-approved `ExecutionPlan` before exact
+hash approval and execution. The daily plan does not carry approval authority,
+client-order IDs or exchange-order IDs. There is no daily planning CLI or
+execution integration in this API; the target commands above describe the
+broader product sequence.
+
+`tests/domain-import-boundary.test.ts` traverses compiler leaf dependencies and
+application preparation dependencies, including type imports and re-exports.
+The compiler cannot reach application, adapters, persistence, CLI, risk/execution
+authority, the domain barrel or canonical artifact registry. Application
+preparation cannot reach private Bybit or SQLite/write paths. Existing upstream
+analytics/quality checks remain independent. The fixture-backed
+`tests/daily-planning-sanity.test.ts` exercises actual analytics, quality and
+planning for ADD/REDUCE/HOLD/BLOCK, verifies repeated and replayed identities,
+and emits only compact allowlisted support/confidence, exact leg values and
+hash diagnostics. It does not write files or require credentials or live calls.
 
 ## Domain contracts
 

@@ -45,6 +45,29 @@ Explicitly out of scope for the MVP:
 
 ## Architecture
 
+Daily planning is available through the application API
+`createDailyPlanningBoundary({ qualityBoundary, decisionPolicy, planningPolicy })`.
+Its `prepare({ sources, symbol, allocation, bundleCutoff, evaluationTime })`
+method assesses evidence and returns either a pre-risk `DailyDecisionPlan` with
+`ADD_LONG`, `REDUCE_LONG` or `HOLD_LONG`, or a blocked result without a plan.
+ADD contains a static GTC buy/open grid with attached TP and no generated SL;
+REDUCE is a desired reduction fraction without a sell quantity; HOLD has no
+entry intents. Support measures explicit policy agreement, and confidence is
+the lower of support and evidence confidence, not a success probability.
+Policies are explicit configuration; fixture values are not calibrated presets.
+Account capacity and risk approval remain unknown at this boundary. Static
+normalization does not prove live maker status or exchange acceptance. This
+API has no daily CLI or execution path; fresh account/risk checks and exact-hash
+approval remain downstream. See the
+[planning boundary](docs/architecture/system-design.md#daily-planning-boundary).
+
+The credential-free operator sanity check prints sanitized exact values and
+deterministic hashes to test diagnostics, without writing artifacts:
+
+```bash
+node --import tsx --test tests/daily-planning-sanity.test.ts
+```
+
 The repository is a modular monolith with pure domain modules, narrow ports and
 Bybit V5 REST and SQLite adapters. The current component model, lifecycle and
 execution sequence live in the system design rather than being repeated here.
