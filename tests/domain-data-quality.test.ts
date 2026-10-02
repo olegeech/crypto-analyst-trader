@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { admitQualitySource } from "../src/domain/quality/quality-inputs.js";
 import {
   createQualityProfile,
   hashQualityProfile,
@@ -18,6 +19,16 @@ const policy = () => ({
       penalty: "15",
     },
   ],
+});
+
+test("malformed source admission retains sanitized failure, not raw payload", () => {
+  const record = admitQualitySource({
+    role: "market",
+    value: { secret: "must-not-be-recorded" },
+  });
+  assert.deepEqual(record.failures, ["INVALID_EVIDENCE"]);
+  assert.equal(record.value, undefined);
+  assert.ok(!JSON.stringify(record).includes("must-not-be-recorded"));
 });
 
 test("quality profile validates explicit policy and canonical identity", () => {
