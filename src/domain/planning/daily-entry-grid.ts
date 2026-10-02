@@ -1,5 +1,5 @@
 import { hashCanonical } from "../identity/canonical-serialization.js";
-import { DecimalValue, RoundingMode } from "../shared/decimal.js";
+import { type DecimalValue, RoundingMode } from "../shared/decimal.js";
 import { deepFreeze } from "../shared/deep-freeze.js";
 import { domainError } from "../shared/errors.js";
 import { fail, ok, type Result } from "../shared/result.js";
