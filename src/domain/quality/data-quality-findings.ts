@@ -1,4 +1,5 @@
 export const QUALITY_REASON_CODES = [
+  "INVALID_QUALITY_POLICY",
   "MISSING_EVIDENCE",
   "INVALID_EVIDENCE",
   "HASH_MISMATCH",
@@ -20,6 +21,7 @@ export const QUALITY_REASON_CODES = [
 export type QualityReasonCode = (typeof QUALITY_REASON_CODES)[number];
 export const INVARIANT_QUALITY_REASONS: ReadonlySet<QualityReasonCode> =
   new Set([
+    "INVALID_QUALITY_POLICY",
     "INVALID_EVIDENCE",
     "HASH_MISMATCH",
     "LINEAGE_MISMATCH",

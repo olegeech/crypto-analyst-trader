@@ -1,4 +1,6 @@
 import { hashCanonical } from "../identity/canonical-serialization.js";
+import { onlyKeys as keys } from "../analytics/analytics-validation.js";
+import { compareAnalyticsText as textOrder } from "../analytics/analytics-diagnostics.js";
 import {
   parseDecimal,
   isDecimalValue,
@@ -11,6 +13,7 @@ import {
   isRecord,
   requireIdentifier,
   requireFiniteInteger,
+  requireSafeText,
 } from "../shared/validation.js";
 import {
   QUALITY_REASON_CODES,
@@ -48,13 +51,6 @@ const invalid = () =>
   fail(
     domainError("INVALID_VALUE", "quality profile is invalid or unsupported"),
   );
-const textOrder = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
-function keys(
-  value: Record<string, unknown>,
-  allowed: readonly string[],
-): boolean {
-  return Object.keys(value).every((key) => allowed.includes(key));
-}
 export function createQualityProfile(input: unknown): Result<QualityProfile> {
   if (
     !isRecord(input) ||
@@ -105,7 +101,7 @@ export function createQualityProfile(input: unknown): Result<QualityProfile> {
       "modelVersion",
     ] as const;
     if (!isRecord(row) || !keys(row, fields)) return invalid();
-    const values = fields.map((key) => requireIdentifier(row[key], key));
+    const values = fields.map((key) => requireSafeText(row[key], key));
     if (values.some((v) => !v.ok)) return invalid();
     const identity = Object.fromEntries(
       fields.map((key, i) => [key, values[i]?.ok ? values[i].value : ""]),

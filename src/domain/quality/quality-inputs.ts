@@ -41,6 +41,12 @@ export interface TrustedQualityAdmission {
   readonly artifactHash: string;
 }
 
+export function qualityRoleForOutcome(requestId: string): string {
+  return requestId.startsWith("external:")
+    ? requestId
+    : `analytics:${requestId}`;
+}
+
 export function admitQualitySource(
   input: QualitySourceInput,
 ): QualityInputRecord {
