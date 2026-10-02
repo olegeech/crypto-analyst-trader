@@ -319,3 +319,23 @@ export {
   type TrapEvidence,
   type TrapScenario,
 } from "./analytics/external-regime-evidence.js";
+export {
+  createDecisionPolicy,
+  decisionPolicyHash,
+  type DecisionPolicy,
+  type DailyRecommendation,
+} from "./planning/decision-policy.js";
+export {
+  createPlanningPolicy,
+  planningPolicyHash,
+  type PlanningPolicy,
+} from "./planning/planning-policy.js";
+export {
+  createDailyDecisionPlan,
+  rehydrateDailyDecisionPlan,
+  type DailyDecisionPlan,
+} from "./planning/daily-decision-plan.js";
+export {
+  type DailyPlanningResult,
+  type BlockedDailyPlanningResult,
+} from "./planning/daily-planning-result.js";

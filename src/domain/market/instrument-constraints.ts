@@ -14,6 +14,9 @@ export interface InstrumentConstraints {
   readonly quantityStep: DecimalValue;
   readonly minQuantity: DecimalValue;
   readonly minNotional?: DecimalValue;
+  readonly minPrice?: DecimalValue;
+  readonly maxPrice?: DecimalValue;
+  readonly maxLimitQuantity?: DecimalValue;
 }
 
 function parsePositiveDecimal(
@@ -78,6 +81,31 @@ export function createInstrumentConstraints(
       ),
     );
   }
+  const bounds: {
+    minPrice?: DecimalValue;
+    maxPrice?: DecimalValue;
+    maxLimitQuantity?: DecimalValue;
+  } = {};
+  for (const key of ["minPrice", "maxPrice", "maxLimitQuantity"] as const) {
+    if (input[key] === undefined) continue;
+    const parsed = parsePositiveDecimal(input[key], key);
+    if (!parsed.ok) return parsed;
+    bounds[key] = parsed.value;
+  }
+  if (
+    (bounds.minPrice &&
+      bounds.maxPrice &&
+      bounds.minPrice.compare(bounds.maxPrice) > 0) ||
+    (bounds.maxLimitQuantity &&
+      bounds.maxLimitQuantity.compare(minQuantity.value) < 0)
+  ) {
+    return fail(
+      domainError(
+        "INVALID_CONSTRAINT",
+        "static constraint bounds are inconsistent",
+      ),
+    );
+  }
   const result: {
     instrument: string;
     version: string;
@@ -85,12 +113,16 @@ export function createInstrumentConstraints(
     quantityStep: DecimalValue;
     minQuantity: DecimalValue;
     minNotional?: DecimalValue;
+    minPrice?: DecimalValue;
+    maxPrice?: DecimalValue;
+    maxLimitQuantity?: DecimalValue;
   } = {
     instrument: instrument.value,
     version: version.value,
     priceTickSize: priceTickSize.value,
     quantityStep: quantityStep.value,
     minQuantity: minQuantity.value,
+    ...bounds,
   };
   if (minNotional.value !== undefined) result.minNotional = minNotional.value;
   return ok(Object.freeze(result));

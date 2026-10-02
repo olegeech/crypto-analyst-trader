@@ -2,6 +2,10 @@ import { createHash } from "node:crypto";
 
 import { canonicalSerialize } from "./canonical-serialization.js";
 import {
+  rehydrateDailyDecisionPlan,
+  type DailyDecisionPlan,
+} from "../planning/daily-decision-plan.js";
+import {
   rehydrateDataQualityAssessment,
   type DataQualityAssessment,
 } from "../quality/data-quality-assessment.js";
@@ -104,6 +108,7 @@ export type ArtifactKind =
   | "liquidation-evidence-bundle"
   | "analytics-evidence-bundle"
   | "data-quality-assessment"
+  | "daily-decision-plan"
   | "account-snapshot"
   | "order-intent"
   | "risk-decision"
@@ -136,6 +141,7 @@ export type RehydratedArtifact =
   | LiquidationEvidenceBundle
   | AnalyticsEvidenceBundle
   | DataQualityAssessment
+  | DailyDecisionPlan
   | AccountSnapshot
   | OrderIntent
   | RiskDecision
@@ -206,6 +212,9 @@ const constraintsSchema = object(
     "quantityStep",
     "minQuantity",
     "minNotional",
+    "minPrice",
+    "maxPrice",
+    "maxLimitQuantity",
   ],
   {},
   ["instrument", "version", "priceTickSize", "quantityStep", "minQuantity"],
@@ -978,6 +987,69 @@ const qualityAssessmentSchema = object(
 );
 
 const schemas: ReadonlyMap<ArtifactKind, Schema> = new Map([
+  [
+    "daily-decision-plan",
+    object(
+      [
+        "schemaVersion",
+        "planId",
+        "decisionId",
+        "inputSeed",
+        "inputIdentity",
+        "inputs",
+        "decision",
+        "contentHash",
+        "candidateLegs",
+        "orderIntents",
+        "reductionFraction",
+      ],
+      {
+        inputIdentity: object([], {}, [], true),
+        inputs: object(
+          [
+            "market",
+            "analytics",
+            "liquidation",
+            "assessment",
+            "symbol",
+            "allocation",
+            "decisionPolicy",
+            "planningPolicy",
+          ],
+          {
+            market: marketEvidenceBundleSchema,
+            analytics: analyticsEvidenceBundleSchema,
+            liquidation: liquidationEvidenceBundleSchema,
+            assessment: qualityAssessmentSchema,
+            decisionPolicy: object([], {}, [], true),
+            planningPolicy: object([], {}, [], true),
+          },
+          [
+            "market",
+            "analytics",
+            "assessment",
+            "symbol",
+            "allocation",
+            "decisionPolicy",
+            "planningPolicy",
+          ],
+        ),
+        decision: object([], {}, [], true),
+        candidateLegs: array(object([], {}, [], true)),
+        orderIntents: array(orderIntentSchema),
+      },
+      [
+        "schemaVersion",
+        "planId",
+        "decisionId",
+        "inputSeed",
+        "inputIdentity",
+        "inputs",
+        "decision",
+        "contentHash",
+      ],
+    ),
+  ],
   ["data-quality-assessment", qualityAssessmentSchema],
   ["evidence-ref", evidenceSchema],
   ["instrument-constraints", constraintsSchema],
@@ -1316,6 +1388,10 @@ function rehydrateExecutionPlan(value: unknown): Result<ExecutionPlan> {
 }
 
 export function rehydrateArtifact(
+  artifactKind: "daily-decision-plan",
+  envelope: unknown,
+): Result<DailyDecisionPlan>;
+export function rehydrateArtifact(
   artifactKind: "data-quality-assessment",
   envelope: unknown,
 ): Result<DataQualityAssessment>;
@@ -1354,6 +1430,8 @@ export function rehydrateArtifact(
   const decoded = decodeCanonicalArtifact(envelope, artifactKind);
   if (!decoded.ok) return decoded;
   switch (artifactKind) {
+    case "daily-decision-plan":
+      return rehydrateDailyDecisionPlan(decoded.value);
     case "data-quality-assessment":
       return rehydrateDataQualityAssessment(decoded.value);
     case "evidence-ref":

@@ -210,11 +210,14 @@ export function mapInstrumentInfo(
   );
   const constraintsResult = createInstrumentConstraints({
     instrument: symbol,
-    version: "bybit-v5:public-instrument/v1",
+    version: "bybit-v5:public-instrument/v2",
     priceTickSize: priceFilter.tickSize,
     quantityStep: lotSizeFilter.qtyStep,
     minQuantity: lotSizeFilter.minOrderQty,
     minNotional: lotSizeFilter.minNotionalValue,
+    minPrice: priceFilter.minPrice,
+    maxPrice: priceFilter.maxPrice,
+    maxLimitQuantity: lotSizeFilter.maxOrderQty,
   });
   if (!constraintsResult.ok)
     invalid(`Bybit instrument ${symbol} constraints are invalid.`);

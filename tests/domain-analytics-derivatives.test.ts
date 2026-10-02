@@ -559,7 +559,10 @@ test("a fully proven explicit-zero liquidation window remains complete", () => {
   });
 
   assert.equal(bundle.ok, true);
-  if (bundle.ok) assert.equal(bundle.value.sufficiency.status, "complete");
+  if (bundle.ok) {
+    assert.equal(bundle.value.sufficiency.status, "complete");
+    assert.deepEqual(rehydrateAnalyticsEvidenceBundle(bundle.value), bundle);
+  }
   assert.equal(result?.status, "complete");
   assert.deepEqual(result?.reasonCodes, ["ZERO_LIQUIDATION_NOTIONAL"]);
   if (result?.window !== undefined && "complete" in result.window) {

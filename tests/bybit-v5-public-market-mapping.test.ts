@@ -32,11 +32,17 @@ function instrumentResponse(
         quoteCoin: "USDT",
         settleCoin: "USDT",
         fundingInterval: "480",
-        priceFilter: { tickSize: "0.0001" },
+        priceFilter: {
+          tickSize: "0.0001",
+          minPrice: "0.0001",
+          maxPrice: "100",
+        },
         lotSizeFilter: {
           qtyStep: "1",
           minOrderQty: "1",
           minNotionalValue: "5",
+          maxOrderQty: "100000",
+          maxMktOrderQty: "1000",
         },
         ...overrides,
       },
@@ -49,6 +55,10 @@ test("public mappings validate instrument identity, funding interval and ticker 
   assert.equal(instrument.status, "trading");
   assert.equal(instrument.fundingInterval, 480);
   assert.equal(instrument.constraints.priceTickSize.toString(), "0.0001");
+  assert.equal(instrument.constraints.version, "bybit-v5:public-instrument/v2");
+  assert.equal(instrument.constraints.minPrice?.toString(), "0.0001");
+  assert.equal(instrument.constraints.maxPrice?.toString(), "100");
+  assert.equal(instrument.constraints.maxLimitQuantity?.toString(), "100000");
 
   const ticker = mapTicker(
     response({

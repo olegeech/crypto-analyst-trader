@@ -625,6 +625,17 @@ function validateOutcome(
   status: readonly string[],
   allowedKeys: readonly string[],
 ): value is AnalyticsOutputOutcome {
+  const explicitZeroDiagnostic =
+    isRecord(value) &&
+    value.kind === "liquidation-window" &&
+    Array.isArray(value.reasonCodes) &&
+    value.reasonCodes.length === 1 &&
+    value.reasonCodes[0] === "ZERO_LIQUIDATION_NOTIONAL" &&
+    isRecord(value.value) &&
+    [value.value.longUsd, value.value.shortUsd, value.value.totalUsd].every(
+      (amount) => isDecimalValue(amount) && amount.isZero(),
+    ) &&
+    value.value.imbalance === undefined;
   return (
     isRecord(value) &&
     onlyKeys(value, allowedKeys) &&
@@ -633,7 +644,7 @@ function validateOutcome(
     status.includes(value.status as string) &&
     validReasonCodes(value.reasonCodes) &&
     (value.status === "complete"
-      ? value.reasonCodes.length === 0
+      ? value.reasonCodes.length === 0 || explicitZeroDiagnostic
       : value.reasonCodes.length > 0)
   );
 }

@@ -5,6 +5,7 @@ import { createInstrumentConstraints } from "../src/domain/market/instrument-con
 import { normalizeOrderIntent } from "../src/domain/planning/normalize-order-intent.js";
 import { createOrderIntent } from "../src/domain/planning/order-intent.js";
 import { parseDecimal } from "../src/domain/shared/decimal.js";
+import { canonicalSerialize } from "../src/domain/identity/canonical-serialization.js";
 
 const constraints = createInstrumentConstraints({
   instrument: "DOGEUSDT",
@@ -12,6 +13,40 @@ const constraints = createInstrumentConstraints({
   quantityStep: "1",
   minQuantity: "1",
   minNotional: "5",
+});
+
+test("legacy constraint canonical bytes remain unchanged without static bounds", () => {
+  assert.ok(constraints.ok);
+  const serialized = canonicalSerialize(constraints.value);
+  assert.ok(serialized.ok);
+  assert.equal(
+    serialized.value,
+    '{"instrument":"DOGEUSDT","minNotional":{"$decimal":"5"},"minQuantity":{"$decimal":"1"},"priceTickSize":{"$decimal":"0.0001"},"quantityStep":{"$decimal":"1"},"version":"instrument-constraints/v1"}',
+  );
+});
+
+test("static constraints retain validated bounds without changing generic normalization", () => {
+  const raw = {
+    instrument: "DOGEUSDT",
+    priceTickSize: "0.0001",
+    quantityStep: "1",
+    minQuantity: "1",
+    minPrice: "0.0001",
+    maxPrice: "100",
+    maxLimitQuantity: "100000",
+  };
+  const bounded = createInstrumentConstraints(raw);
+  assert.ok(bounded.ok);
+  assert.equal(bounded.value.maxPrice?.toString(), "100");
+  assert.equal(bounded.value.maxLimitQuantity?.toString(), "100000");
+  for (const changes of [
+    { minPrice: "0" },
+    { maxPrice: "0.00001" },
+    { maxLimitQuantity: "0" },
+    { maxLimitQuantity: "0.5" },
+  ]) {
+    assert.equal(createInstrumentConstraints({ ...raw, ...changes }).ok, false);
+  }
 });
 
 test("order intents are normalized before risk and preserve the rounding policy", () => {
