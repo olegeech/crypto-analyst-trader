@@ -1,4 +1,6 @@
-import { createHmac } from "node:crypto";
+import { buildSignaturePayload, hmacSha256 } from "./request-signing.js";
+
+export { buildSignaturePayload, hmacSha256 } from "./request-signing.js";
 
 import type { ExchangeCredentials } from "../../ports/credential-provider.js";
 
@@ -77,19 +79,6 @@ export interface BybitDemoTransportOptions {
   readonly clockOffsetMs?: number;
   readonly recvWindow?: string;
   readonly timeoutMs?: number;
-}
-
-export function buildSignaturePayload(
-  timestamp: string,
-  apiKey: string,
-  recvWindow: string,
-  queryStringOrRawBody: string,
-): string {
-  return `${timestamp}${apiKey}${recvWindow}${queryStringOrRawBody}`;
-}
-
-export function hmacSha256(payload: string, secret: string): string {
-  return createHmac("sha256", secret).update(payload, "utf8").digest("hex");
 }
 
 export function classifyRetCode(retCode: number): RetCodeClassification {
