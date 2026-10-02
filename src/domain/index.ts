@@ -1,4 +1,14 @@
 export {
+  createQualityProfile,
+  hashQualityProfile,
+  type QualityProfile,
+} from "./quality/quality-profile.js";
+export { type DataQualityAssessment } from "./quality/data-quality-assessment.js";
+export {
+  type DataQualityFinding,
+  type QualityReasonCode,
+} from "./quality/data-quality-findings.js";
+export {
   DecimalValue,
   RoundingMode,
   ceilToStep,
