@@ -108,3 +108,43 @@ test("rehydrated approval claims cannot bypass the fresh configured quality call
   );
   assert.equal(calls, 2);
 });
+
+test("malformed source collections block without invoking quality or accessors", () => {
+  const f = dailyDecisionInputFixture();
+  let calls = 0;
+  const boundary = requireDailyFixture(
+    createDailyPlanningBoundary({
+      qualityBoundary: {
+        assess: (input) => {
+          calls += 1;
+          return f.boundary.assess(input);
+        },
+      },
+      decisionPolicy: f.decisionPolicy,
+      planningPolicy: f.planningPolicy,
+    }),
+  );
+  const accessorSources = [...f.sources];
+  Object.defineProperty(accessorSources, "0", {
+    get: () => {
+      throw new Error("must not invoke untrusted accessor");
+    },
+  });
+  for (const sources of [new Array(2), accessorSources]) {
+    const result = boundary.prepare({
+      sources,
+      symbol: f.symbol,
+      allocation: f.allocation,
+      bundleCutoff: f.market.bundleCutoff,
+      evaluationTime: f.market.bundleCutoff,
+    });
+    assert.equal(result.status, "blocked");
+    assert.ok(!("plan" in result));
+    if (result.status === "blocked")
+      assert.deepEqual(
+        result.reasons.map((reason) => reason.code),
+        ["INVALID_POLICY"],
+      );
+  }
+  assert.equal(calls, 0);
+});

@@ -11,6 +11,7 @@ import {
   type DailyPlanningBlockCode,
 } from "../domain/planning/daily-planning-result.js";
 import {
+  boundedList,
   closedRecord,
   invalidPlanning,
 } from "../domain/planning/planning-validation.js";
@@ -83,8 +84,7 @@ export function createDailyPlanningBoundary(configuration: {
             "bundleCutoff",
             "evaluationTime",
           ]) ||
-          !Array.isArray(input.sources) ||
-          input.sources.length > 3 ||
+          !boundedList(input.sources, 3) ||
           !input.sources.every(
             (source) =>
               closedRecord(source, [
