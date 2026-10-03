@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readdir, readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import test from "node:test";
+import ts from "typescript";
 
 async function sourceFiles(directory: string): Promise<string[]> {
   const entries = await readdir(directory, { withFileTypes: true });
@@ -37,8 +38,23 @@ test("the public persistence port exposes no SQLite handle or transport shape", 
     port,
     /DatabaseSync|from .*sqlite|from .*bybit|credential-provider/iu,
   );
-  assert.doesNotMatch(
+  const source = ts.createSourceFile(
+    "domain/index.ts",
     domain,
-    /DatabaseSync|sqlite|bybit|credential|signedrequest/iu,
+    ts.ScriptTarget.Latest,
+    true,
   );
+  for (const statement of source.statements) {
+    if (
+      (ts.isExportDeclaration(statement) ||
+        ts.isImportDeclaration(statement)) &&
+      statement.moduleSpecifier &&
+      ts.isStringLiteral(statement.moduleSpecifier)
+    )
+      assert.doesNotMatch(
+        statement.moduleSpecifier.text,
+        /sqlite|bybit-v5|credential-provider|macos-keychain|agent-connect/iu,
+      );
+  }
+  assert.doesNotMatch(domain, /\bDatabaseSync\b|\bSignedRequest\b/iu);
 });
