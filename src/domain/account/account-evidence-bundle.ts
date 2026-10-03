@@ -261,6 +261,9 @@ const booleanFact = fact(boolean),
   textFact = fact(identifier),
   integerFact = fact(integer),
   timeFact = fact(timestamp);
+const collateralRestrictionFact = fact(
+  oneOf("unknown", "unrestricted", "near-limit", "restricted"),
+);
 const category = oneOf("linear", "inverse", "spot", "option");
 const environment = oneOf("demo", "testnet", "mainnet");
 
@@ -333,7 +336,7 @@ const assetSchema = shape({
   unrealisedPnl: coin,
   collateralEligible: booleanFact,
   collateralSwitch: booleanFact,
-  restricted: booleanFact,
+  restricted: collateralRestrictionFact,
 });
 export type AccountAssetEvidence = Parsed<typeof assetSchema>;
 const totalsSchema = shape({
@@ -353,7 +356,7 @@ const collateralSchema = shape({
   coin: identifier,
   collateralEligible: booleanFact,
   collateralSwitch: booleanFact,
-  restricted: booleanFact,
+  restricted: collateralRestrictionFact,
   borrowable: booleanFact,
   borrowAmount: coin,
   otherBorrowAmount: coin,

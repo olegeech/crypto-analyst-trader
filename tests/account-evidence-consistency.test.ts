@@ -449,8 +449,8 @@ test("collateral switch N/A requires proven ineligibility; known restriction cha
     );
   }
   const changed = fixture();
-  changed.criticalPasses.B.assets[0]!.restricted = known(true);
-  changed.criticalPasses.B.collateral[0]!.restricted = known(true);
+  changed.criticalPasses.B.assets[0]!.restricted = known("restricted");
+  changed.criticalPasses.B.collateral[0]!.restricted = known("restricted");
   assert.ok(
     reasons({ ...changed, collectionStatus: "incomplete" }).includes(
       "CRITICAL_STATE_CHANGED",

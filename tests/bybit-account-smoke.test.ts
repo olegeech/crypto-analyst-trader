@@ -16,6 +16,70 @@ import {
 import { fixture } from "./account-evidence-fixture.js";
 
 const args = ["--environment", "demo", "--run-id", "smoke-1"];
+
+test("failed partition descriptors and A/B account-info are allowlisted and distinguish absent facts", () => {
+  const source = fixture();
+  const value = {
+    ...source,
+    collectionStatus: "incomplete",
+    criticalPasses: Object.fromEntries(
+      Object.entries(source.criticalPasses).map(([label, pass]) => [
+        label,
+        {
+          ...pass,
+          account: {
+            ...pass.account,
+            marginMode: { state: "unavailable", reason: "not-returned" },
+          },
+        },
+      ]),
+    ),
+    coverage: source.coverage.map((entry) =>
+      entry.partition.endpoint === "account-info"
+        ? { ...entry, status: "failed", reasonCodes: ["INVALID_RESPONSE"] }
+        : entry,
+    ),
+  };
+  const result = createAccountEvidenceBundle(value);
+  assert.ok(result.ok);
+  const summary = summarizeAccountEvidence({
+    kind: "account-evidence",
+    bundle: result.value,
+  });
+  assert.ok("failedPartitions" in summary);
+  assert.ok(summary.accountInfo);
+  assert.equal(summary.failedPartitions.length, 2);
+  for (const entry of summary.failedPartitions) {
+    assert.deepEqual(Object.keys(entry).sort(), [
+      "category",
+      "endpoint",
+      "pass",
+      "reasonCodes",
+      "status",
+    ]);
+    assert.equal(entry.endpoint, "account-info");
+    assert.deepEqual(entry.reasonCodes, ["INVALID_RESPONSE"]);
+  }
+  assert.deepEqual(
+    summary.accountInfo.map((entry) => entry.marginModeState),
+    ["unavailable", "unavailable"],
+  );
+  assert.deepEqual(
+    summary.accountInfo.map((entry) => entry.status),
+    ["failed", "failed"],
+  );
+  const valid = createAccountEvidenceBundle(source);
+  assert.ok(valid.ok);
+  const complete = summarizeAccountEvidence({
+    kind: "account-evidence",
+    bundle: valid.value,
+  });
+  assert.ok("accountInfo" in complete);
+  assert.deepEqual(
+    complete.accountInfo.map((entry) => entry.marginMode),
+    ["REGULAR_MARGIN", "REGULAR_MARGIN"],
+  );
+});
 test("explicit environment and run identity; strict flags and symbols", () => {
   for (const invalid of [
     [],

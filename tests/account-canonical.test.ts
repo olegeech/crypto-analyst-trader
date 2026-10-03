@@ -52,6 +52,42 @@ function envelope(value: unknown) {
     canonicalHash: `sha256:${createHash("sha256").update(canonicalJson).digest("hex")}`,
   };
 }
+test("canonical account evidence preserves near-limit and restricted provider facts", () => {
+  for (const restricted of ["near-limit", "restricted"] as const) {
+    const input = fixture();
+    input.criticalPasses.A.assets[0]!.restricted = {
+      state: "known",
+      value: restricted,
+    };
+    input.criticalPasses.B.assets[0]!.restricted = {
+      state: "known",
+      value: restricted,
+    };
+    for (const pass of [input.criticalPasses.A, input.criticalPasses.B])
+      pass.collateral[0]!.restricted = { state: "known", value: restricted };
+    const result = createAccountEvidenceBundle(input);
+    assert.ok(result.ok);
+    const encoded = encodeCanonicalArtifact(
+      "account-evidence-bundle",
+      result.value,
+    );
+    assert.ok(encoded.ok);
+    const restored = rehydrateArtifact(
+      "account-evidence-bundle",
+      encoded.value,
+    );
+    assert.ok(restored.ok);
+    assert.deepEqual(
+      restored.value.criticalPasses.A?.assets.find(
+        (asset) => asset.coin === input.criticalPasses.A.assets[0]!.coin,
+      )?.restricted,
+      {
+        state: "known",
+        value: restricted,
+      },
+    );
+  }
+});
 test("rehydration rejects recomputed hashes with forged incomplete/failed status", () => {
   for (const status of ["incomplete", "failed"] as const) {
     const original = bundle(status);

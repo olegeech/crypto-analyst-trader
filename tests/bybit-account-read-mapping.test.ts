@@ -24,6 +24,32 @@ const rows = (list: unknown[], category = "linear") =>
 const json = (value: unknown) => JSON.parse(JSON.stringify(value));
 const unknown = { state: "unavailable", reason: "not-returned" };
 
+test("wallet colRes retains all provider states and rejects undocumented values", () => {
+  for (const [colRes, value] of [
+    ["-1", "unknown"],
+    ["0", "unrestricted"],
+    ["1", "near-limit"],
+    ["2", "restricted"],
+  ]) {
+    const result = rows([
+      { accountType: "UNIFIED", coin: [{ coin: "USDT", colRes }] },
+    ]);
+    assert.deepEqual(mapAccountWallet(result).assets[0]?.restricted, {
+      state: "known",
+      value,
+    });
+  }
+  for (const colRes of ["3", "true", 2]) {
+    const result = rows([
+      { accountType: "UNIFIED", coin: [{ coin: "USDT", colRes }] },
+    ]);
+    assert.throws(
+      () => mapAccountWallet(result),
+      /^BybitAccountReadError: INVALID_RESPONSE$/,
+    );
+  }
+});
+
 test("spot order amount preserves base/quote market units independently of fills", () => {
   for (const [marketUnit, unit] of [
     ["baseCoin", "base-coin"],

@@ -104,6 +104,24 @@ function fact(v: unknown, parse: (v: unknown) => unknown = text) {
 function decimal(v: unknown, unit: AccountEvidenceDecimalFact["unit"]) {
   return { ...fact(v, (v) => unwrap(DecimalValue.fromString(v))), unit };
 }
+/** Wallet colRes is a provider state, not a capacity or boolean risk verdict.
+ * https://bybit-exchange.github.io/docs/v5/account/wallet-balance
+ */
+function collateralRestriction(v: unknown) {
+  if (missing(v)) return unavailable();
+  switch (v) {
+    case "-1":
+      return known("unknown" as const);
+    case "0":
+      return known("unrestricted" as const);
+    case "1":
+      return known("near-limit" as const);
+    case "2":
+      return known("restricted" as const);
+    default:
+      return invalid();
+  }
+}
 function time(v: unknown) {
   if (typeof v !== "string" || !/^\d+$/u.test(v)) invalid();
   const epoch = Number(v);
@@ -225,7 +243,7 @@ export function mapAccountWallet(response: AccountReadResponse): {
           a.marginCollateral === false
             ? { state: "not-applicable" }
             : fact(a.collateralSwitch, bool),
-        restricted: unavailable(),
+        restricted: collateralRestriction(a.colRes),
       }),
     );
   });

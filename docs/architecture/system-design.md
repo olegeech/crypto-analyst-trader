@@ -10,8 +10,9 @@ historical selection and delayed visibility mean the bounded sandwich is not
 an atomic snapshot. Unavailable Demo collateral tiers remain unverified without
 cross-environment fallback. See [credentials](../credentials.md) for invocation.
 
-Account evidence v1 retains unavailable restrictions as optional facts because
-the collected Bybit endpoints expose no restriction field; observed changes or
+Account evidence v1 maps wallet `colRes` to unknown, unrestricted, near-limit or
+restricted without collapsing the provider state to a boolean. Missing restriction
+facts remain unavailable (collateral-info has no equivalent field); observed changes or
 cross-endpoint contradictions still invalidate consistency. A collateral switch
 is legitimately not applicable when collateral eligibility is proven false.
 Spot order `qty` preserves `marketUnit` as base-coin or quote-coin, with unknown
@@ -20,6 +21,8 @@ remaining quantities use base-coin independently of the requested market unit;
 derivative quantities retain contracts. Unknown units cannot establish complete
 evidence. Collection status is derived from consistency and usable retained
 facts by the same domain function during collection and canonical rehydration.
+The sanitized smoke summary also identifies failed endpoint/pass/category partitions
+and account-info A/B availability, without account IDs or private records.
 
 ## Target shape
 

@@ -266,7 +266,11 @@ function crossEndpointAgreement(pass: AccountCriticalPass): boolean {
     ] as const) {
       const left = asset[field],
         right = collateral[field];
-      if (known(left) && known(right) && left.value !== right.value)
+      if (
+        left.state === "known" &&
+        right.state === "known" &&
+        left.value !== right.value
+      )
         return false;
     }
   }

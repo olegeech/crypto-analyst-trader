@@ -80,6 +80,16 @@ export function summarizeAccountEvidence(
   const tierCoverage = bundle.coverage.filter(
     (entry) => entry.partition.endpoint === "tiers",
   );
+  const safeMarginMode = (pass: typeof bundle.criticalPasses.A) => {
+    const mode = pass?.account.marginMode;
+    return mode?.state === "known"
+      ? ["REGULAR_MARGIN", "ISOLATED_MARGIN", "PORTFOLIO_MARGIN"].includes(
+          mode.value,
+        )
+        ? mode.value
+        : "unsupported"
+      : "unknown";
+  };
   return {
     kind: result.kind,
     environment: bundle.accountBinding.environment,
@@ -109,6 +119,32 @@ export function summarizeAccountEvidence(
       failed: bundle.coverage.filter((entry) => entry.status === "failed")
         .length,
     },
+    failedPartitions: bundle.coverage
+      .filter((entry) => entry.status !== "traversed")
+      .map((entry) => ({
+        endpoint: entry.partition.endpoint,
+        pass: entry.partition.pass,
+        category: entry.partition.category,
+        status: entry.status,
+        reasonCodes: entry.reasonCodes,
+      })),
+    accountInfo: (["A", "B"] as const).map((pass) => {
+      const info = bundle.coverage.find(
+        (entry) =>
+          entry.partition.endpoint === "account-info" &&
+          entry.partition.pass === pass,
+      );
+      const facts = bundle.criticalPasses[pass];
+      return {
+        pass,
+        status: info?.status ?? "not-observed",
+        reasonCodes: info?.reasonCodes ?? [],
+        marginMode: safeMarginMode(facts),
+        marginModeState: facts?.account.marginMode.state ?? "unavailable",
+        utaStatusState: facts?.account.utaStatus.state ?? "unavailable",
+        spotHedgingState: facts?.account.spotHedging.state ?? "unavailable",
+      };
+    }),
     recordCounts: {
       A: counts(bundle.criticalPasses.A),
       B: counts(bundle.criticalPasses.B),

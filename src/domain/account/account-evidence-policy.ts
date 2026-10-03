@@ -74,8 +74,8 @@ export const ACCOUNT_EVIDENCE_COLLECTION_POLICY = deepFreeze({
   positionPageLimit: 200,
   orderPageLimit: 50,
   executionPageLimit: 100,
-  // v1 endpoints do not publish a restriction fact. Preserve and compare it
-  // when observed, but its absence cannot make the required proof unattainable.
+  // Wallet colRes is retained when reported; collateral-info has no equivalent
+  // field. Missing optional restriction evidence never means unrestricted.
   optionalStructuralFields: ["restricted"],
   criticalStructuralFields: {
     account: ["utaStatus", "marginMode", "spotHedging"],

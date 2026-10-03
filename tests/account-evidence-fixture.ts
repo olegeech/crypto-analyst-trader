@@ -127,7 +127,7 @@ export function fixture() {
     unrealisedPnl: decimal("0", "coin"),
     collateralEligible: known(true),
     collateralSwitch: known(true),
-    restricted: known(false),
+    restricted: known("unrestricted"),
   });
   const pass = (label: "A" | "B") => ({
     account: {
@@ -152,7 +152,7 @@ export function fixture() {
       coin,
       collateralEligible: known(true),
       collateralSwitch: known(true),
-      restricted: known(false),
+      restricted: known("unrestricted"),
       borrowable: known(true),
       borrowAmount: decimal("0", "coin"),
       otherBorrowAmount: decimal("0", "coin"),
