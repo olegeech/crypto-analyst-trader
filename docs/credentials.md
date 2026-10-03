@@ -117,6 +117,34 @@ prompts. A terminal prompt such as `password data for new item:` therefore
 never belongs to a normal run; report it as a defect instead of typing a value.
 Terminal interrupts end any in-flight Keychain command together with the CLI.
 
+## Opt-in account evidence smoke
+
+```bash
+npm run smoke:bybit:account -- --environment demo --run-id account-smoke-1
+```
+
+Both environment (`demo`, `testnet`, or `mainnet`) and run identity are required.
+The command ignores `TRADER_ENV` and base URL environment variables. Symbols
+default to the existing four M1 symbols: BTCUSDT, ETHUSDT, SOLUSDT and DOGEUSDT;
+override with `--symbols BTCUSDT,ETHUSDT` (comma-separated, unique USDT symbols).
+It loads only the selected environment's existing Keychain credentials at
+runtime. It never initializes, saves, preflights or falls back to another store
+or environment. Missing credentials require separate setup.
+
+The read-only command prints a safe JSON summary and does not create a report
+or persist evidence. Pre-authentication failures expose only kind, environment,
+policy, start/end times and reason codes. Authenticated summaries show schema,
+policy, status, timing, duration, partition and record counts, mode and tier
+proofs, and the canonical bundle hash. They exclude account identity, raw
+orders/fills, balances, credentials, IP details and fees. Exit status is zero
+only for complete collection; failures or incomplete evidence return one.
+
+This characterizes fact integrity, not risk capacity or downstream freshness.
+History uses provider-native selection clocks and may become visible late; the
+bounded collection is not an atomic snapshot. Demo collateral tiers remain
+unverified when unavailable, with no mainnet or Testnet fallback. This command
+is opt-in and excluded from default tests and CI.
+
 ## Removal
 
 Remove only the selected environment's records:

@@ -1,5 +1,15 @@
 # System Design
 
+The opt-in `smoke:bybit:account` CLI delegates to `collectAccountEvidence` with
+an explicit environment, run identity, configured M1 symbols and a load-only
+runtime Keychain boundary. It emits only an allowlisted summary, using the
+domain canonical content hash and consistency mode proofs; no evidence report
+or persistence is created. Collection completeness characterizes fact integrity,
+not available risk capacity or freshness for a later decision. Provider-native
+historical selection and delayed visibility mean the bounded sandwich is not
+an atomic snapshot. Unavailable Demo collateral tiers remain unverified without
+cross-environment fallback. See [credentials](../credentials.md) for invocation.
+
 ## Target shape
 
 Crypto Analyst Trader is a modular TypeScript monolith. Domain logic remains
