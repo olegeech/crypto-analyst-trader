@@ -24,6 +24,61 @@ const rows = (list: unknown[], category = "linear") =>
 const json = (value: unknown) => JSON.parse(JSON.stringify(value));
 const unknown = { state: "unavailable", reason: "not-returned" };
 
+test("spot order amount preserves base/quote market units independently of fills", () => {
+  for (const [marketUnit, unit] of [
+    ["baseCoin", "base-coin"],
+    ["quoteCoin", "quote-coin"],
+    [undefined, "unknown"],
+    ["FutureUnit", "unknown"],
+  ]) {
+    const mapped = mapAccountOrders(
+      rows(
+        [
+          {
+            ...manualOrder,
+            orderType: "Market",
+            marketUnit,
+            qty: "100",
+            cumExecQty: "0.01",
+            leavesQty: "0",
+          },
+        ],
+        "spot",
+      ),
+    )[0]!;
+    assert.equal(mapped.qty.unit, unit);
+    assert.equal(mapped.cumExecQty.unit, "base-coin");
+    assert.equal(mapped.leavesQty.unit, "base-coin");
+    assert.deepEqual(
+      json(mapped.marketUnit),
+      marketUnit === undefined
+        ? unknown
+        : { state: "known", value: marketUnit },
+    );
+    assert.equal(json(mapped.qty).value, "100");
+  }
+  assert.equal(
+    mapAccountOrders(rows([manualOrder], "spot"))[0]?.qty.unit,
+    "base-coin",
+  );
+  assert.equal(
+    mapAccountExecutions(rows([{ ...fill, execQty: "0.01" }], "spot"))[0]?.qty
+      .unit,
+    "base-coin",
+  );
+  assert.throws(() =>
+    mapAccountOrders(
+      rows(
+        [
+          { ...manualOrder, orderType: "Market", marketUnit: "baseCoin" },
+          { ...manualOrder, orderType: "Market", marketUnit: "quoteCoin" },
+        ],
+        "spot",
+      ),
+    ),
+  );
+});
+
 test("account enums survive and missing wallet facts never become zero", () => {
   assert.deepEqual(
     mapAccountInfo(

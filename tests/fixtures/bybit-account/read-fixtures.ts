@@ -12,7 +12,8 @@ export const accountInfoResponse = accountReadResponse({
   spotHedgingStatus: "OFF",
 });
 // Restrictions/USD-equity basis are absent in the provider contract. These
-// fixtures intentionally retain that uncertainty instead of proving completeness.
+// fixtures retain that uncertainty; these conditional/optional facts do not
+// prevent completeness of the available v1 structural evidence.
 export const walletResponse = accountReadResponse({
   list: [
     {

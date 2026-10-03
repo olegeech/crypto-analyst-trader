@@ -27,7 +27,7 @@ import type {
   AccountEvidenceFailureCode,
 } from "../domain/account/account-evidence-diagnostics.js";
 import {
-  evaluateAccountEvidenceConsistency,
+  deriveAccountEvidenceCollectionStatus,
   countAccountEvidenceRows,
 } from "../domain/account/account-evidence-consistency.js";
 import { canonicalSerialize } from "../domain/identity/canonical-serialization.js";
@@ -713,28 +713,9 @@ export async function collectAccountEvidence(
     diagnostics,
     evidence: [],
   };
-  const consistent = evaluateAccountEvidenceConsistency(payload);
-  const usable =
-    [critical.A, critical.B].some(
-      (pass) =>
-        pass &&
-        (pass.account.utaStatus.state === "known" ||
-          pass.totals.totalWalletBalance.state === "known" ||
-          pass.assets.length > 0 ||
-          pass.collateral.length > 0 ||
-          pass.positions.length > 0 ||
-          pass.orders.length > 0),
-    ) ||
-    auxiliary.orders.length > 0 ||
-    auxiliary.executions.length > 0;
   const result = createAccountEvidenceBundle({
     ...payload,
-    collectionStatus:
-      consistent.complete && diagnostics.length === 0
-        ? "complete"
-        : usable
-          ? "incomplete"
-          : "failed",
+    collectionStatus: deriveAccountEvidenceCollectionStatus(payload),
   });
   if (!result.ok) throw new BybitAccountReadError("INVALID_RESPONSE");
   return Object.freeze({

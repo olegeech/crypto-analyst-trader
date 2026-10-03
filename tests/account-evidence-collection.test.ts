@@ -7,6 +7,7 @@ import { BybitAccountReadClient } from "../src/adapters/bybit-v5/account-read-cl
 import {
   accountInfoResponse,
   walletResponse,
+  collateralResponse,
   tierResponse,
   manualOrder,
   fill,
@@ -235,6 +236,45 @@ test("production-shaped stable traversal completes and closing time does not mov
       (q) => q.path === "/v5/execution/list" && q.query.baseCoin === "ETH",
     ),
   );
+});
+
+test("nonempty production wallet/collateral can complete with unknown restrictions", async () => {
+  for (const eligible of [true, false]) {
+    const { options } = scriptedOptions((path, _query, result) => {
+      if (path === "/v5/account/wallet-balance")
+        Object.assign(result, structuredClone(walletResponse.result));
+      if (path === "/v5/account/collateral-info")
+        Object.assign(result, structuredClone(collateralResponse.result));
+      if (
+        path === "/v5/account/wallet-balance" ||
+        path === "/v5/account/collateral-info"
+      ) {
+        const list = result.list as Record<string, unknown>[];
+        const row =
+          path === "/v5/account/wallet-balance"
+            ? (list[0]!.coin as Record<string, unknown>[])[0]!
+            : list[0]!;
+        row.marginCollateral = eligible;
+      }
+    });
+    const result = await collectAccountEvidence(options);
+    assert.equal(result.kind, "account-evidence");
+    if (result.kind !== "account-evidence") continue;
+    assert.equal(
+      result.bundle.collectionStatus,
+      "complete",
+      JSON.stringify(result.bundle.consistency.reasonCodes),
+    );
+    assert.equal(result.bundle.criticalPasses.A?.assets.length, 1);
+    assert.equal(
+      result.bundle.criticalPasses.A?.assets[0]?.restricted.state,
+      "unavailable",
+    );
+    assert.equal(
+      result.bundle.criticalPasses.A?.assets[0]?.collateralSwitch.state,
+      eligible ? "known" : "not-applicable",
+    );
+  }
 });
 test("new closing discovery scope invalidates coverage without retrospectively expanding pass A", async () => {
   const { options } = scriptedOptions((path, _query, result, phase) => {

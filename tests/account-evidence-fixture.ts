@@ -18,6 +18,7 @@ export function order() {
     status: "New",
     side: "Buy",
     orderType: "Limit",
+    marketUnit: na,
     price: decimal("100", "price"),
     qty: decimal("1", "contracts"),
     cumExecQty: decimal("0", "contracts"),

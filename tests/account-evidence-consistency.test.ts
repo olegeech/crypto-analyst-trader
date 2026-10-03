@@ -383,12 +383,12 @@ test("manifest raw row counts cannot underreport normalized wallet, collateral, 
   }
 });
 
-test("missing restrictions are retained unavailable and cannot establish structural completeness", () => {
+test("missing restrictions stay unknown without invalidating available v1 structure", () => {
   const input = fixture();
   const unavailable = { state: "unavailable", reason: "not-returned" };
   const partial = {
     ...input,
-    collectionStatus: "incomplete",
+    collectionStatus: "complete",
     criticalPasses: {
       A: {
         ...input.criticalPasses.A,
@@ -413,14 +413,47 @@ test("missing restrictions are retained unavailable and cannot establish structu
       result.value.criticalPasses.A?.assets[0]?.restricted,
       unavailable,
     );
-    assert.equal(
-      result.value.consistency.structuralComparison,
-      "unestablished",
-    );
+    assert.equal(result.value.consistency.structuralComparison, "unchanged");
   }
   assert.equal(
     createAccountEvidenceBundle({ ...partial, collectionStatus: "complete" })
       .ok,
-    false,
+    true,
+  );
+});
+
+test("collateral switch N/A requires proven ineligibility; known restriction changes stay material", () => {
+  const source = fixture();
+  for (const eligible of [true, false]) {
+    const criticalPasses = Object.fromEntries(
+      Object.entries(source.criticalPasses).map(([label, pass]) => [
+        label,
+        {
+          ...pass,
+          assets: pass.assets.map((asset) => ({
+            ...asset,
+            collateralEligible: known(eligible),
+            collateralSwitch: { state: "not-applicable" },
+          })),
+          collateral: pass.collateral.map((asset) => ({
+            ...asset,
+            collateralEligible: known(eligible),
+            collateralSwitch: { state: "not-applicable" },
+          })),
+        },
+      ]),
+    );
+    assert.equal(
+      createAccountEvidenceBundle({ ...source, criticalPasses }).ok,
+      !eligible,
+    );
+  }
+  const changed = fixture();
+  changed.criticalPasses.B.assets[0]!.restricted = known(true);
+  changed.criticalPasses.B.collateral[0]!.restricted = known(true);
+  assert.ok(
+    reasons({ ...changed, collectionStatus: "incomplete" }).includes(
+      "CRITICAL_STATE_CHANGED",
+    ),
   );
 });

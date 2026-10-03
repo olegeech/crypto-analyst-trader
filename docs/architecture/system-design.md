@@ -10,6 +10,17 @@ historical selection and delayed visibility mean the bounded sandwich is not
 an atomic snapshot. Unavailable Demo collateral tiers remain unverified without
 cross-environment fallback. See [credentials](../credentials.md) for invocation.
 
+Account evidence v1 retains unavailable restrictions as optional facts because
+the collected Bybit endpoints expose no restriction field; observed changes or
+cross-endpoint contradictions still invalidate consistency. A collateral switch
+is legitimately not applicable when collateral eligibility is proven false.
+Spot order `qty` preserves `marketUnit` as base-coin or quote-coin, with unknown
+units retained explicitly rather than inferred from side. Spot executed and
+remaining quantities use base-coin independently of the requested market unit;
+derivative quantities retain contracts. Unknown units cannot establish complete
+evidence. Collection status is derived from consistency and usable retained
+facts by the same domain function during collection and canonical rehydration.
+
 ## Target shape
 
 Crypto Analyst Trader is a modular TypeScript monolith. Domain logic remains

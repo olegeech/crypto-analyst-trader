@@ -25,6 +25,7 @@ import {
 } from "./account-evidence-diagnostics.js";
 import {
   evaluateAccountEvidenceConsistency,
+  deriveAccountEvidenceCollectionStatus,
   type AccountEvidenceConsistency,
 } from "./account-evidence-consistency.js";
 
@@ -46,7 +47,15 @@ export type AccountEvidenceFact<T> =
     }
   | { readonly state: "not-applicable" };
 export type AccountEvidenceDecimalFact = AccountEvidenceFact<DecimalValue> & {
-  readonly unit: "coin" | "USD" | "rate" | "contracts" | "price";
+  readonly unit:
+    | "coin"
+    | "USD"
+    | "rate"
+    | "contracts"
+    | "price"
+    | "base-coin"
+    | "quote-coin"
+    | "unknown";
 };
 
 // Small closed-schema parsers keep validation uniform at every nesting level.
@@ -207,6 +216,42 @@ function decimalFact<U extends AccountEvidenceDecimalFact["unit"]>(
 }
 const coin = decimalFact("coin");
 const quantity = decimalFact("contracts", true);
+const observedQuantity: Parser<AccountEvidenceDecimalFact> = (input) => {
+  if (!isRecord(input)) return invalid();
+  const descriptor = Object.getOwnPropertyDescriptor(input, "unit");
+  if (!descriptor || !Object.hasOwn(descriptor, "value")) return invalid();
+  const unit = oneOf(
+    "contracts",
+    "base-coin",
+    "quote-coin",
+    "unknown",
+  )(descriptor.value);
+  return unit.ok ? decimalFact(unit.value, true)(input) : invalid();
+};
+/** marketUnit describes requested spot quantity only, never executed quantity. */
+export function accountOrderQuantityUnit(
+  category: string,
+  orderType: string,
+  marketUnit: AccountEvidenceFact<string>,
+): AccountEvidenceDecimalFact["unit"] {
+  if (category !== "spot") return accountExecutedQuantityUnit(category);
+  if (orderType === "Limit") return "base-coin";
+  if (orderType !== "Market" || marketUnit.state !== "known") return "unknown";
+  return marketUnit.value === "baseCoin"
+    ? "base-coin"
+    : marketUnit.value === "quoteCoin"
+      ? "quote-coin"
+      : "unknown";
+}
+export function accountExecutedQuantityUnit(
+  category: string,
+): AccountEvidenceDecimalFact["unit"] {
+  return category === "spot"
+    ? "base-coin"
+    : ["linear", "inverse", "option"].includes(category)
+      ? "contracts"
+      : "unknown";
+}
 const usd = decimalFact("USD");
 const positionAmount: Parser<AccountEvidenceDecimalFact> = (input) =>
   isRecord(input) && input.unit === "coin" ? coin(input) : usd(input);
@@ -359,7 +404,7 @@ function positionSchema(input: unknown): Result<Parsed<typeof positionShape>> {
     : invalid();
 }
 export type AccountPositionEvidence = Parsed<typeof positionSchema>;
-const orderSchema = shape({
+const orderShape = shape({
   category: identifier,
   symbol: identifier,
   orderId: identifier,
@@ -367,10 +412,11 @@ const orderSchema = shape({
   status: identifier,
   side: identifier,
   orderType: identifier,
+  marketUnit: textFact,
   price,
-  qty: quantity,
-  cumExecQty: quantity,
-  leavesQty: quantity,
+  qty: observedQuantity,
+  cumExecQty: observedQuantity,
+  leavesQty: observedQuantity,
   positionIdx: integerFact,
   reduceOnly: booleanFact,
   closeOnTrigger: booleanFact,
@@ -386,6 +432,20 @@ const orderSchema = shape({
   createdAt: timeFact,
   updatedAt: timeFact,
 });
+function orderSchema(input: unknown): Result<Parsed<typeof orderShape>> {
+  const parsed = orderShape(input);
+  if (!parsed.ok) return parsed;
+  const row = parsed.value;
+  if (row.category !== "spot" && row.marketUnit.state !== "not-applicable")
+    return invalid();
+  return row.qty.unit ===
+    accountOrderQuantityUnit(row.category, row.orderType, row.marketUnit) &&
+    [row.cumExecQty, row.leavesQty].every(
+      (fact) => fact.unit === accountExecutedQuantityUnit(row.category),
+    )
+    ? parsed
+    : invalid();
+}
 export type AccountOrderEvidence = Parsed<typeof orderSchema>;
 const executionExtraFeeSchema = shape({
   feeCoin: textFact,
@@ -394,7 +454,7 @@ const executionExtraFeeSchema = shape({
   feeRate: rate,
   fee: coin,
 });
-const executionSchema = shape({
+const executionShape = shape({
   category: identifier,
   symbol: identifier,
   execId: identifier,
@@ -404,13 +464,22 @@ const executionSchema = shape({
   side: identifier,
   execTime: timestamp,
   price,
-  qty: quantity,
+  qty: observedQuantity,
   fee: coin,
   feeCurrency: textFact,
   feeRate: rate,
   execFeeV2: coin,
   extraFees: fact(list(executionExtraFeeSchema)),
 });
+function executionSchema(
+  input: unknown,
+): Result<Parsed<typeof executionShape>> {
+  const parsed = executionShape(input);
+  return parsed.ok &&
+    parsed.value.qty.unit !== accountExecutedQuantityUnit(parsed.value.category)
+    ? invalid()
+    : parsed;
+}
 export type AccountExecutionEvidence = Parsed<typeof executionSchema>;
 const tierSchema = shape({
   coin: identifier,
@@ -599,7 +668,10 @@ export function createAccountEvidenceBundle(
   )
     return invalid();
   const consistency = evaluateAccountEvidenceConsistency(payload);
-  if (payload.collectionStatus === "complete" && !consistency.complete)
+  if (
+    payload.collectionStatus !==
+    deriveAccountEvidenceCollectionStatus(payload, consistency)
+  )
     return invalid();
   if (
     payload.collectionStatus !== "complete" &&

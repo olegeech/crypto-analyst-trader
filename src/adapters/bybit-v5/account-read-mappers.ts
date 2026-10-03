@@ -5,6 +5,8 @@ import {
   createAccountOrderEvidence,
   createAccountExecutionEvidence,
   createAccountCollateralTierEvidence,
+  accountOrderQuantityUnit,
+  accountExecutedQuantityUnit,
   type AccountModeEvidence,
   type AccountTotalsEvidence,
   type AccountAssetEvidence,
@@ -13,6 +15,7 @@ import {
   type AccountOrderEvidence,
   type AccountExecutionEvidence,
   type AccountCollateralTierEvidence,
+  type AccountEvidenceDecimalFact,
 } from "../../domain/account/account-evidence-bundle.js";
 import { DecimalValue } from "../../domain/shared/decimal.js";
 import { deepFreeze } from "../../domain/shared/deep-freeze.js";
@@ -98,10 +101,7 @@ function bool(v: unknown) {
 function fact(v: unknown, parse: (v: unknown) => unknown = text) {
   return missing(v) ? unavailable() : known(parse(v));
 }
-function decimal(
-  v: unknown,
-  unit: "coin" | "USD" | "rate" | "contracts" | "price",
-) {
+function decimal(v: unknown, unit: AccountEvidenceDecimalFact["unit"]) {
   return { ...fact(v, (v) => unwrap(DecimalValue.fromString(v))), unit };
 }
 function time(v: unknown) {
@@ -315,8 +315,14 @@ export function mapAccountOrders(
   scope?: string,
 ): readonly AccountOrderEvidence[] {
   const category = responseCategory(response, scope);
-  const values = rows(response).map((a) =>
-    unwrap(
+  const values = rows(response).map((a) => {
+    const marketUnit =
+      category === "spot"
+        ? missing(a.marketUnit)
+          ? unavailable()
+          : known(text(a.marketUnit))
+        : { state: "not-applicable" as const };
+    return unwrap(
       createAccountOrderEvidence({
         category,
         symbol: text(a.symbol),
@@ -325,10 +331,17 @@ export function mapAccountOrders(
         status: text(a.orderStatus),
         side: text(a.side),
         orderType: text(a.orderType),
+        marketUnit,
         price: decimal(a.price, "price"),
-        qty: decimal(a.qty, "contracts"),
-        cumExecQty: decimal(a.cumExecQty, "contracts"),
-        leavesQty: decimal(a.leavesQty, "contracts"),
+        qty: decimal(
+          a.qty,
+          accountOrderQuantityUnit(category, text(a.orderType), marketUnit),
+        ),
+        cumExecQty: decimal(
+          a.cumExecQty,
+          accountExecutedQuantityUnit(category),
+        ),
+        leavesQty: decimal(a.leavesQty, accountExecutedQuantityUnit(category)),
         positionIdx: fact(a.positionIdx, integer),
         reduceOnly: fact(a.reduceOnly, bool),
         closeOnTrigger: fact(a.closeOnTrigger, bool),
@@ -344,8 +357,8 @@ export function mapAccountOrders(
         createdAt: fact(a.createdTime, time),
         updatedAt: fact(a.updatedTime, time),
       }),
-    ),
-  );
+    );
+  });
   return normalized(values, (a) => JSON.stringify([a.category, a.orderId]));
 }
 function extraFees(v: unknown) {
@@ -392,7 +405,7 @@ export function mapAccountExecutions(
         side: text(a.side),
         execTime: time(a.execTime),
         price: decimal(a.execPrice, "price"),
-        qty: decimal(a.execQty, "contracts"),
+        qty: decimal(a.execQty, accountExecutedQuantityUnit(category)),
         fee: decimal(a.execFee, "coin"),
         feeCurrency: fact(a.feeCurrency),
         feeRate: decimal(a.feeRate, "rate"),

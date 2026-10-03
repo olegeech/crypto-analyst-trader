@@ -23,6 +23,7 @@ export const ACCOUNT_EVIDENCE_COLLECTION_POLICY = deepFreeze({
     positionSide: ["Buy", "Sell", "None"],
     side: ["Buy", "Sell"],
     orderType: ["Limit", "Market"],
+    marketUnit: ["baseCoin", "quoteCoin"],
     tradeMode: [0, 1],
     triggerDirection: [0, 1, 2],
     timeInForce: ["GTC", "IOC", "FOK", "PostOnly"],
@@ -73,6 +74,9 @@ export const ACCOUNT_EVIDENCE_COLLECTION_POLICY = deepFreeze({
   positionPageLimit: 200,
   orderPageLimit: 50,
   executionPageLimit: 100,
+  // v1 endpoints do not publish a restriction fact. Preserve and compare it
+  // when observed, but its absence cannot make the required proof unattainable.
+  optionalStructuralFields: ["restricted"],
   criticalStructuralFields: {
     account: ["utaStatus", "marginMode", "spotHedging"],
     assets: [
@@ -121,6 +125,7 @@ export const ACCOUNT_EVIDENCE_COLLECTION_POLICY = deepFreeze({
       "status",
       "side",
       "orderType",
+      "marketUnit",
       "price",
       "qty",
       "cumExecQty",

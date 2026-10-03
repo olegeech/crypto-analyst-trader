@@ -31,7 +31,10 @@ function bundle(status: "complete" | "incomplete" | "failed" = "complete") {
       : {
           ...input,
           collectionStatus: status,
-          criticalPasses: { A: null, B: null },
+          criticalPasses: {
+            A: status === "incomplete" ? input.criticalPasses.A : null,
+            B: null,
+          },
           discovery: null,
         },
   );
@@ -49,6 +52,19 @@ function envelope(value: unknown) {
     canonicalHash: `sha256:${createHash("sha256").update(canonicalJson).digest("hex")}`,
   };
 }
+test("rehydration rejects recomputed hashes with forged incomplete/failed status", () => {
+  for (const status of ["incomplete", "failed"] as const) {
+    const original = bundle(status);
+    const forged = {
+      ...original,
+      collectionStatus: status === "incomplete" ? "failed" : "incomplete",
+    };
+    assert.equal(
+      rehydrateArtifact("account-evidence-bundle", envelope(forged)).ok,
+      false,
+    );
+  }
+});
 test("direct reordered account input has normalized, stable artifact identity", () => {
   const original = bundle();
   const reordered = { ...original, coverage: [...original.coverage].reverse() };

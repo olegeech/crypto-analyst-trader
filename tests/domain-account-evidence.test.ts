@@ -16,6 +16,87 @@ import {
   withCounts,
 } from "./account-evidence-fixture.js";
 
+test("constructor derives incomplete versus failed from usable facts", () => {
+  const input = fixture();
+  const partial = { ...input, collectionStatus: "incomplete", discovery: null };
+  assert.equal(createAccountEvidenceBundle(partial).ok, true);
+  assert.equal(
+    createAccountEvidenceBundle({ ...partial, collectionStatus: "failed" }).ok,
+    false,
+  );
+  const empty = {
+    ...partial,
+    criticalPasses: { A: null, B: null },
+    collectionStatus: "failed",
+  };
+  assert.equal(createAccountEvidenceBundle(empty).ok, true);
+  assert.equal(
+    createAccountEvidenceBundle({ ...empty, collectionStatus: "incomplete" })
+      .ok,
+    false,
+  );
+  assert.equal(
+    createAccountEvidenceBundle({
+      ...input,
+      collectionStatus: "incomplete",
+      diagnostics: [],
+    }).ok,
+    false,
+  );
+});
+
+test("spot quantity units are validated at the canonical constructor boundary", () => {
+  const source = order();
+  const spot = {
+    ...source,
+    category: "spot",
+    orderType: "Market",
+    marketUnit: { state: "known", value: "quoteCoin" },
+    qty: { ...source.qty, value: "100", unit: "quote-coin" },
+    cumExecQty: { ...source.cumExecQty, value: "0.01", unit: "base-coin" },
+    leavesQty: { ...source.leavesQty, value: "0", unit: "base-coin" },
+  };
+  assert.equal(createAccountOrderEvidence(spot).ok, true);
+  for (const forged of [
+    { ...spot, qty: { ...spot.qty, unit: "contracts" } },
+    { ...spot, marketUnit: { state: "known", value: "baseCoin" } },
+    { ...spot, cumExecQty: { ...spot.cumExecQty, unit: "quote-coin" } },
+  ])
+    assert.equal(createAccountOrderEvidence(forged).ok, false);
+  assert.equal(
+    createAccountExecutionEvidence({ ...execution(), category: "spot" }).ok,
+    false,
+  );
+  assert.equal(
+    createAccountExecutionEvidence({
+      ...execution(),
+      category: "spot",
+      qty: { ...execution().qty, unit: "base-coin" },
+    }).ok,
+    true,
+  );
+  const input = fixture();
+  const unknownUnit = {
+    ...spot,
+    qty: { ...spot.qty, unit: "unknown" },
+    marketUnit: { state: "unavailable", reason: "not-returned" },
+  };
+  const partial = {
+    ...input,
+    auxiliary: { ...input.auxiliary, orders: [unknownUnit] },
+    collectionStatus: "incomplete",
+  };
+  const result = createAccountEvidenceBundle(withCounts(partial));
+  assert.ok(result.ok);
+  assert.equal(
+    createAccountEvidenceBundle({
+      ...withCounts(partial),
+      collectionStatus: "complete",
+    }).ok,
+    false,
+  );
+});
+
 test("execution identity ignores time and rejects conflicting duplicates", () => {
   const input = fixture();
   input.auxiliary.executions = [
@@ -218,6 +299,9 @@ test("unknown order, position and execution enums retain native facts and make e
     side: "FutureSide",
     orderType: "FutureType",
     category: "future",
+    qty: { ...order().qty, unit: "unknown" },
+    cumExecQty: { ...order().cumExecQty, unit: "unknown" },
+    leavesQty: { ...order().leavesQty, unit: "unknown" },
   };
   const nativePosition = {
     ...position(),
@@ -240,6 +324,7 @@ test("unknown order, position and execution enums retain native facts and make e
           execType: "FutureExecution",
           side: "FutureSide",
           category: "future",
+          qty: { ...execution().qty, unit: "unknown" },
         },
       ],
     },

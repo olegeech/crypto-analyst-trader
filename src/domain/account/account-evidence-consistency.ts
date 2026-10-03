@@ -16,6 +16,7 @@ import type {
   AccountEvidenceDecimalFact,
   AccountEvidenceFact,
   AccountEvidencePayload,
+  AccountEvidenceCollectionStatus,
   AccountPositionModeProbe,
 } from "./account-evidence-bundle.js";
 
@@ -100,7 +101,11 @@ function structuralEstablished(pass: AccountCriticalPass): boolean {
           value &&
           typeof value === "object" &&
           "state" in value &&
-          value.state === "unavailable"
+          value.state === "unavailable" &&
+          !policy.optionalStructuralFields.some(
+            (optional) => optional === field,
+          ) &&
+          field !== "marketUnit"
         )
           return false;
       }
@@ -122,19 +127,55 @@ function structuralEstablished(pass: AccountCriticalPass): boolean {
         asset.spotBorrow,
         asset.accruedInterest,
         asset.collateralEligible,
-        asset.collateralSwitch,
-        asset.restricted,
       ].every((value) => value.state === "known")
+    )
+      return false;
+  for (const row of [...pass.assets, ...pass.collateral])
+    if (
+      !known(row.collateralEligible) ||
+      (!known(row.collateralSwitch) &&
+        !(
+          row.collateralEligible.value === false &&
+          row.collateralSwitch.state === "not-applicable"
+        ))
     )
       return false;
   for (const position of pass.positions)
     if (!known(position.size) || !known(position.avgPrice)) return false;
   for (const order of pass.orders)
     if (
-      ![order.price, order.qty, order.cumExecQty, order.leavesQty].every(known)
+      ![order.price, order.qty, order.cumExecQty, order.leavesQty].every(
+        known,
+      ) ||
+      [order.qty, order.cumExecQty, order.leavesQty].some(
+        (fact) => fact.unit === "unknown",
+      )
     )
       return false;
   return true;
+}
+
+/** Canonical status is derived from proof and retained usable facts, not a claim. */
+export function deriveAccountEvidenceCollectionStatus(
+  payload: AccountEvidencePayload,
+  consistency = evaluateAccountEvidenceConsistency(payload),
+): AccountEvidenceCollectionStatus {
+  if (consistency.complete && payload.diagnostics.length === 0)
+    return "complete";
+  const usable =
+    [payload.criticalPasses.A, payload.criticalPasses.B].some(
+      (pass) =>
+        pass &&
+        (pass.account.utaStatus.state === "known" ||
+          pass.totals.totalWalletBalance.state === "known" ||
+          pass.assets.length > 0 ||
+          pass.collateral.length > 0 ||
+          pass.positions.length > 0 ||
+          pass.orders.length > 0),
+    ) ||
+    payload.auxiliary.orders.length > 0 ||
+    payload.auxiliary.executions.length > 0;
+  return usable ? "incomplete" : "failed";
 }
 export function compareAccountCriticalPasses(
   a: AccountCriticalPass | null,
@@ -282,6 +323,7 @@ export function evaluateAccountEvidenceConsistency(
       !supported(order.status, policy.nativeEnums.orderStatus) ||
       !supported(order.side, policy.nativeEnums.side) ||
       !supported(order.orderType, policy.nativeEnums.orderType) ||
+      order.qty.unit === "unknown" ||
       (known(order.positionIdx) &&
         !supported(order.positionIdx.value, policy.nativeEnums.positionIdx))
     )
@@ -293,6 +335,7 @@ export function evaluateAccountEvidenceConsistency(
       "timeInForce",
       "orderFilter",
       "stopOrderType",
+      "marketUnit",
     ] as const)
       if (
         !supportedFact<string | number>(order[field], policy.nativeEnums[field])
