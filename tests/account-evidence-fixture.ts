@@ -79,8 +79,10 @@ export function execution(
     price: decimal("100", "price"),
     qty: decimal("1", "contracts"),
     fee: decimal("-0.01", "coin"),
-    feeCurrency: "USDT",
+    feeCurrency: known("USDT"),
     feeRate: decimal("-0.0001", "rate"),
+    execFeeV2: { state: "unavailable", reason: "not-returned", unit: "coin" },
+    extraFees: { state: "unavailable", reason: "not-returned" },
   };
 }
 export function fixture() {

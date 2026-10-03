@@ -372,6 +372,13 @@ const orderSchema = shape({
   updatedAt: timeFact,
 });
 export type AccountOrderEvidence = Parsed<typeof orderSchema>;
+const executionExtraFeeSchema = shape({
+  feeCoin: textFact,
+  feeType: textFact,
+  subFeeType: textFact,
+  feeRate: rate,
+  fee: coin,
+});
 const executionSchema = shape({
   category: identifier,
   symbol: identifier,
@@ -384,8 +391,10 @@ const executionSchema = shape({
   price,
   qty: quantity,
   fee: coin,
-  feeCurrency: identifier,
+  feeCurrency: textFact,
   feeRate: rate,
+  execFeeV2: coin,
+  extraFees: fact(list(executionExtraFeeSchema)),
 });
 export type AccountExecutionEvidence = Parsed<typeof executionSchema>;
 const tierSchema = shape({
