@@ -368,3 +368,117 @@ test("partial response remains incomplete and source-local facts survive a missi
     new Date(start + 1000).toISOString(),
   );
 });
+
+test("out-of-range exchange and observation times report INVALID_RESPONSE", async () => {
+  for (const source of ["exchange", "observation"] as const) {
+    const { options } = scriptedOptions();
+    const factory = options.createReadPort!;
+    const result = await collectAccountEvidence({
+      ...options,
+      createReadPort: (context) => {
+        const reader = factory(context);
+        if (source === "exchange")
+          reader.readExchangeTime = async () => Number.MAX_SAFE_INTEGER;
+        else {
+          const original = reader.readPartition.bind(reader);
+          const invalid = new BybitAccountReadClient({
+            utcClock: () => start,
+            transport: {
+              readExchangeTime: async () => start,
+              get: async () => ({
+                ...accountInfoResponse,
+                time: Number.MAX_SAFE_INTEGER,
+              }),
+            },
+          });
+          reader.readPartition = (p, window) =>
+            p.endpoint === "account-info"
+              ? invalid.readPartition(p, window)
+              : original(p, window);
+        }
+        return reader;
+      },
+    });
+    assert.equal(result.kind, "account-evidence");
+    if (result.kind !== "account-evidence") continue;
+    assert.notEqual(result.bundle.collectionStatus, "complete");
+    assert.ok(
+      result.bundle.diagnostics.some((d) => d.code === "INVALID_RESPONSE"),
+    );
+    assert.equal(
+      result.bundle.diagnostics.some((d) => d.code === "TRANSPORT_FAILED"),
+      false,
+    );
+    if (source === "observation") {
+      assert.ok(
+        result.bundle.coverage.some(
+          (c) =>
+            c.partition.endpoint === "account-info" &&
+            c.status === "failed" &&
+            c.reasonCodes.includes("INVALID_RESPONSE"),
+        ),
+      );
+      assert.equal(
+        result.bundle.criticalPasses.A?.observations.some(
+          (o) => o.partition.endpoint === "account-info",
+        ),
+        false,
+      );
+    }
+  }
+});
+
+test("terminal budgets retain successful current-partition pages and stop subsequent reads", async () => {
+  for (const code of [
+    "ATTEMPT_BUDGET_EXCEEDED",
+    "ROW_BUDGET_EXCEEDED",
+  ] as const)
+    for (const path of [
+      "/v5/order/realtime",
+      "/v5/order/history",
+      "/v5/execution/list",
+    ]) {
+      const { options, queries } = scriptedOptions(
+        (requestPath, query, response) => {
+          if (requestPath !== path) return;
+          if (query.cursor) throw new BybitAccountReadError(code);
+          response.list =
+            path === "/v5/execution/list"
+              ? [{ ...fill, execTime: String(start + 1000) }]
+              : [manualOrder];
+          response.nextPageCursor = "next";
+        },
+      );
+      const result = await collectAccountEvidence(options);
+      assert.equal(result.kind, "account-evidence");
+      if (result.kind !== "account-evidence") continue;
+      assert.equal(result.bundle.collectionStatus, "incomplete");
+      const facts =
+        path === "/v5/order/realtime"
+          ? result.bundle.criticalPasses.A?.orders
+          : path === "/v5/order/history"
+            ? result.bundle.auxiliary.orders
+            : result.bundle.auxiliary.executions;
+      assert.equal(facts?.length, 1);
+      const failed = result.bundle.coverage.find((c) =>
+        c.reasonCodes.includes(code),
+      );
+      assert.equal(failed?.status, "failed");
+      assert.equal(failed?.pages, 1);
+      assert.equal(failed?.rows, 1);
+      assert.ok(
+        result.bundle.diagnostics.some(
+          (d) => d.code === code && d.scope === "coverage",
+        ),
+      );
+      assert.ok(
+        result.bundle.diagnostics.some(
+          (d) => d.code === code && d.scope === "collection",
+        ),
+      );
+      assert.equal(queries.at(-1)?.path, path);
+      assert.equal(queries.at(-1)?.query.cursor, "next");
+      assert.equal(result.bundle.criticalPasses.B, null);
+      assert.equal(result.bundle.collectionEndedAt, null);
+    }
+});

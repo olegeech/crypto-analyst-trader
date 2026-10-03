@@ -32,7 +32,10 @@ import {
 } from "../domain/account/account-evidence-consistency.js";
 import { canonicalSerialize } from "../domain/identity/canonical-serialization.js";
 import { isRecord, requireIdentifier } from "../domain/shared/validation.js";
-import { parseUtcTimestamp, type UtcTimestamp } from "../domain/shared/time.js";
+import {
+  timestampFromEpochMs,
+  type UtcTimestamp,
+} from "../domain/shared/time.js";
 import type {
   CredentialProvider,
   ExchangeCredentials,
@@ -80,9 +83,7 @@ export interface AccountEvidenceCollectionOptions {
   }) => AccountEvidenceReadPort;
 }
 function timestamp(value: number): UtcTimestamp {
-  if (!Number.isSafeInteger(value) || value < 0)
-    throw new BybitAccountReadError("INVALID_RESPONSE");
-  const parsed = parseUtcTimestamp(new Date(value).toISOString());
+  const parsed = timestampFromEpochMs(value);
   if (!parsed.ok) throw new BybitAccountReadError("INVALID_RESPONSE");
   return parsed.value;
 }
@@ -298,6 +299,9 @@ export async function collectAccountEvidence(
   ): Promise<AccountPartitionRead> {
     const value = await bounded(() => readPort.readPartition(p, window));
     record(value);
+    return value;
+  }
+  function stopAfterTerminalBudget(value: AccountPartitionRead): void {
     for (const code of value.coverage.reasonCodes)
       if (
         [
@@ -307,7 +311,6 @@ export async function collectAccountEvidence(
         ].includes(code)
       )
         throw new BybitAccountReadError(code);
-    return value;
   }
   async function discover(): Promise<{
     settlements: string[];
@@ -343,6 +346,7 @@ export async function collectAccountEvidence(
       } catch (error) {
         invalidate(p, error);
       }
+      stopAfterTerminalBudget(result);
     }
     return { settlements: [...settlements].sort(), bases: [...bases].sort() };
   }
@@ -429,6 +433,7 @@ export async function collectAccountEvidence(
         } catch (error) {
           invalidate(p, error);
         }
+        stopAfterTerminalBudget(result);
       }
     } finally {
       output.observations = [...observations.values()].filter(
@@ -568,6 +573,7 @@ export async function collectAccountEvidence(
       } catch (error) {
         invalidate(p, error);
       }
+      stopAfterTerminalBudget(result);
     }
     const exposed = await exposureBases(
       [...auxiliary.orders, ...critical.A.orders],
@@ -599,6 +605,7 @@ export async function collectAccountEvidence(
       } catch (error) {
         invalidate(p, error);
       }
+      stopAfterTerminalBudget(result);
     }
     critical.B = await criticalPass("B");
     const second = await discover();

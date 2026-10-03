@@ -49,6 +49,36 @@ function envelope(value: unknown) {
     canonicalHash: `sha256:${createHash("sha256").update(canonicalJson).digest("hex")}`,
   };
 }
+test("direct reordered account input has normalized, stable artifact identity", () => {
+  const original = bundle();
+  const reordered = { ...original, coverage: [...original.coverage].reverse() };
+  assert.notDeepEqual(reordered.coverage, original.coverage);
+  const validated = createAccountEvidenceBundle(reordered);
+  assert.ok(validated.ok);
+  assert.deepEqual(validated.value, original);
+  const encoded = encodeCanonicalArtifact("account-evidence-bundle", reordered);
+  assert.ok(encoded.ok);
+  assert.deepEqual(
+    encoded,
+    encodeCanonicalArtifact("account-evidence-bundle", original),
+  );
+  const restored = rehydrateArtifact("account-evidence-bundle", encoded.value);
+  assert.ok(restored.ok);
+  assert.deepEqual(
+    encodeCanonicalArtifact("account-evidence-bundle", restored.value),
+    encoded,
+  );
+  assert.deepEqual(
+    accountEvidenceContentHash(restored.value),
+    accountEvidenceContentHash(validated.value),
+  );
+  const nonNormalized = envelope(reordered);
+  assert.equal(decodeCanonicalArtifact(nonNormalized).ok, false);
+  assert.equal(
+    rehydrateArtifact("account-evidence-bundle", nonNormalized).ok,
+    false,
+  );
+});
 for (const status of ["complete", "incomplete", "failed"] as const) {
   test(`canonical account ${status} round trip preserves historical identity`, () => {
     const original = bundle(status);

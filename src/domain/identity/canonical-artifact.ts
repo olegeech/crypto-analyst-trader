@@ -1166,6 +1166,16 @@ function validateShape(
   return ok(undefined);
 }
 
+function validateArtifactValue(
+  value: unknown,
+  schema: Schema,
+  path: string,
+): Result<unknown> {
+  if (schema.kind === "validated") return schema.validate(value);
+  const shape = validateShape(value, schema, path);
+  return shape.ok ? ok(value) : shape;
+}
+
 function decodeValue(value: unknown, path: string): Result<unknown> {
   if (Array.isArray(value)) {
     const decoded: unknown[] = [];
@@ -1202,9 +1212,9 @@ export function encodeCanonicalArtifact(
   const schema = schemas.get(artifactKind);
   if (schema === undefined)
     return unsupportedArtifact("artifact kind is unsupported");
-  const shape = validateShape(value, schema, artifactKind);
-  if (!shape.ok) return shape;
-  const canonical = canonicalSerialize(value);
+  const validated = validateArtifactValue(value, schema, artifactKind);
+  if (!validated.ok) return validated;
+  const canonical = canonicalSerialize(validated.value);
   if (!canonical.ok) return canonical;
   return ok(
     Object.freeze({
@@ -1271,13 +1281,13 @@ export function decodeCanonicalArtifact(
   const schema = schemas.get(artifactKind);
   if (schema === undefined)
     return unsupportedArtifact("artifact kind is unsupported");
-  const shape = validateShape(decoded.value, schema, artifactKind);
-  if (!shape.ok) return shape;
-  const canonical = canonicalSerialize(decoded.value);
+  const validated = validateArtifactValue(decoded.value, schema, artifactKind);
+  if (!validated.ok) return validated;
+  const canonical = canonicalSerialize(validated.value);
   if (!canonical.ok || canonical.value !== input.canonicalJson) {
     return artifactFailure("artifact JSON is not canonical");
   }
-  return ok(deepFreeze(decoded.value));
+  return ok(deepFreeze(validated.value));
 }
 
 function toConstructorInput(value: unknown): unknown {

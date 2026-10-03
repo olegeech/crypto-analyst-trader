@@ -10,6 +10,26 @@ const partition: AccountEvidencePartition = {
   symbol: null,
   settleCoin: null,
 };
+test("out-of-range response time fails coverage without an invalid observation", async () => {
+  const client = new BybitAccountReadClient({
+    transport: {
+      get: async () => ({
+        time: Number.MAX_SAFE_INTEGER,
+        result: { list: [], nextPageCursor: "" },
+      }),
+      readExchangeTime: async () => 1700000000000,
+    },
+    utcClock: () => 1700000000000,
+  });
+  const result = await client.readPartition(partition, {
+    from: 1699996400000,
+    to: 1700000000000,
+  });
+  assert.equal(result.coverage.status, "failed");
+  assert.deepEqual(result.coverage.reasonCodes, ["INVALID_RESPONSE"]);
+  assert.equal(result.observation, null);
+  assert.deepEqual(result.responses, []);
+});
 test("empty cursor pages continue and every page retains the exact option window", async () => {
   const queries: Readonly<Record<string, string>>[] = [];
   const client = new BybitAccountReadClient({

@@ -11,7 +11,7 @@ import {
 import type { AccountEvidenceFailureCode } from "../../domain/account/account-evidence-diagnostics.js";
 import { isRecord, requireIdentifier } from "../../domain/shared/validation.js";
 import {
-  parseUtcTimestamp,
+  timestampFromEpochMs,
   type UtcTimestamp,
 } from "../../domain/shared/time.js";
 import { BybitAccountReadError } from "./account-read-transport.js";
@@ -31,9 +31,7 @@ export function accountReadFailureCode(
     : "TRANSPORT_FAILED";
 }
 function utc(value: number): UtcTimestamp {
-  if (!Number.isSafeInteger(value) || value < 0)
-    throw new BybitAccountReadError("INVALID_RESPONSE");
-  const parsed = parseUtcTimestamp(new Date(value).toISOString());
+  const parsed = timestampFromEpochMs(value);
   if (!parsed.ok) throw new BybitAccountReadError("INVALID_RESPONSE");
   return parsed.value;
 }
@@ -170,6 +168,7 @@ export class BybitAccountReadClient implements AccountEvidenceReadPort {
             ...(cursor ? { cursor } : {}),
           });
           pages++;
+          utc(response.time);
           if (
             partition.category &&
             response.result.category !== undefined &&
