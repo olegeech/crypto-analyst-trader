@@ -6,6 +6,9 @@ import {
   ACCOUNT_EVIDENCE_COLLECTION_POLICY as policy,
   accountEvidencePartitionKey,
   deriveExpectedAccountEvidencePartitions,
+  type AccountEvidenceEndpoint,
+  type AccountEvidencePartition,
+  type AccountEvidenceCategory,
 } from "./account-evidence-policy.js";
 import type {
   AccountCollateralTierEvidence,
@@ -450,6 +453,20 @@ export function evaluateAccountEvidenceConsistency(
     if (group.some((obs) => obs.partition.pass !== pass))
       add("INVALID_RESPONSE");
   }
+  const observationByPartition = new Map<
+    string,
+    (typeof observations)[number]
+  >();
+  for (const observation of observations) {
+    const key = accountEvidencePartitionKey(observation.partition);
+    if (!observationByPartition.has(key))
+      observationByPartition.set(key, observation);
+  }
+  const coveredPartitions = new Set(
+    payload.coverage.map((entry) =>
+      accountEvidencePartitionKey(entry.partition),
+    ),
+  );
   for (const entry of payload.coverage) {
     if (
       entry.status !== "traversed" ||
@@ -460,10 +477,8 @@ export function evaluateAccountEvidenceConsistency(
     )
       add("COVERAGE_INCOMPLETE");
     if (entry.pages > policy.maxPagesPerPartition) add("PAGE_BUDGET_EXCEEDED");
-    const obs = observations.find(
-      (value) =>
-        accountEvidencePartitionKey(value.partition) ===
-        accountEvidencePartitionKey(entry.partition),
+    const obs = observationByPartition.get(
+      accountEvidencePartitionKey(entry.partition),
     );
     if (
       !obs ||
@@ -481,20 +496,16 @@ export function evaluateAccountEvidenceConsistency(
   if (
     observations.some(
       (obs) =>
-        !payload.coverage.some(
-          (entry) =>
-            accountEvidencePartitionKey(entry.partition) ===
-            accountEvidencePartitionKey(obs.partition),
-        ),
+        !coveredPartitions.has(accountEvidencePartitionKey(obs.partition)),
     )
   )
     add("COVERAGE_INCOMPLETE");
   // Counts describe raw returned rows and may exceed deduplicated retained facts,
   // but cannot be smaller. Aggregate where retained facts lack settlement/base.
   const count = (
-    endpoint: string,
-    pass: "A" | "B" | "auxiliary",
-    category?: string,
+    endpoint: AccountEvidenceEndpoint,
+    pass: AccountEvidencePartition["pass"],
+    category?: AccountEvidenceCategory,
     symbol?: string,
   ) =>
     payload.coverage
@@ -600,11 +611,14 @@ export function evaluateAccountEvidenceConsistency(
       add("COVERAGE_INCOMPLETE");
   }
   // A parent absent from bounded history is not itself a contradiction.
+  const parents = new Map<string, (typeof payload.auxiliary.orders)[number]>();
+  for (const order of payload.auxiliary.orders) {
+    const key = JSON.stringify([order.category, order.orderId]);
+    if (!parents.has(key)) parents.set(key, order);
+  }
   for (const execution of payload.auxiliary.executions) {
-    const parent = payload.auxiliary.orders.find(
-      (order) =>
-        order.category === execution.category &&
-        order.orderId === execution.orderId,
+    const parent = parents.get(
+      JSON.stringify([execution.category, execution.orderId]),
     );
     if (
       parent &&
