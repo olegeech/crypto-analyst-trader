@@ -87,6 +87,13 @@ function safeRetCode(code: number): AccountEvidenceFailureCode {
       return "INVALID_RESPONSE";
   }
 }
+function httpFailureCode(status: number): AccountEvidenceFailureCode {
+  if (status === 429) return "RATE_LIMITED";
+  if (status === 401) return "AUTHENTICATION_FAILED";
+  if (status === 403) return "READ_PERMISSION_DENIED";
+  if (status >= 500) return "TRANSPORT_FAILED";
+  return "UNSUPPORTED_CAPABILITY";
+}
 async function abortable<T>(
   promise: Promise<T>,
   signal: AbortSignal,
@@ -312,15 +319,7 @@ export class BybitAccountReadTransport {
             ? seconds * 1000
             : undefined;
         throw new BybitAccountReadError(
-          response.status === 429
-            ? "RATE_LIMITED"
-            : response.status === 401
-              ? "AUTHENTICATION_FAILED"
-              : response.status === 403
-                ? "READ_PERMISSION_DENIED"
-                : response.status >= 500
-                  ? "TRANSPORT_FAILED"
-                  : "UNSUPPORTED_CAPABILITY",
+          httpFailureCode(response.status),
           response.status,
           undefined,
           delay,

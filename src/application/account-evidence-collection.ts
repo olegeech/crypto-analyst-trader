@@ -26,7 +26,10 @@ import type {
   AccountEvidenceDiagnostic,
   AccountEvidenceFailureCode,
 } from "../domain/account/account-evidence-diagnostics.js";
-import { evaluateAccountEvidenceConsistency } from "../domain/account/account-evidence-consistency.js";
+import {
+  evaluateAccountEvidenceConsistency,
+  countAccountEvidenceRows,
+} from "../domain/account/account-evidence-consistency.js";
 import { canonicalSerialize } from "../domain/identity/canonical-serialization.js";
 import { isRecord, requireIdentifier } from "../domain/shared/validation.js";
 import { parseUtcTimestamp, type UtcTimestamp } from "../domain/shared/time.js";
@@ -658,26 +661,10 @@ export async function collectAccountEvidence(
   }
   const policyHash = accountEvidencePolicyHash();
   if (!policyHash.ok) throw new BybitAccountReadError("INVALID_RESPONSE");
-  const retainedRows =
-    (critical.A
-      ? 2 +
-        critical.A.assets.length +
-        critical.A.collateral.length +
-        critical.A.positions.length +
-        critical.A.orders.length +
-        critical.A.modeProbes.length
-      : 0) +
-    (critical.B
-      ? 2 +
-        critical.B.assets.length +
-        critical.B.collateral.length +
-        critical.B.positions.length +
-        critical.B.orders.length +
-        critical.B.modeProbes.length
-      : 0) +
-    auxiliary.tiers.length +
-    auxiliary.orders.length +
-    auxiliary.executions.length;
+  const retainedRows = countAccountEvidenceRows({
+    criticalPasses: critical,
+    auxiliary: { ...auxiliary, observations: [] },
+  });
   const payload: AccountEvidencePayload = {
     schemaVersion: ACCOUNT_EVIDENCE_SCHEMA_VERSION,
     producer: "bybit-account-read:v1",

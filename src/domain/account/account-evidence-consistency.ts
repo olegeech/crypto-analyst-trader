@@ -639,26 +639,7 @@ export function evaluateAccountEvidenceConsistency(
     payload.coverage.reduce((sum, entry) => sum + entry.pages, 0)
   )
     add("COVERAGE_INCOMPLETE");
-  const rows =
-    (A
-      ? 2 +
-        A.assets.length +
-        A.collateral.length +
-        A.positions.length +
-        A.orders.length +
-        A.modeProbes.length
-      : 0) +
-    (B
-      ? 2 +
-        B.assets.length +
-        B.collateral.length +
-        B.positions.length +
-        B.orders.length +
-        B.modeProbes.length
-      : 0) +
-    payload.auxiliary.tiers.length +
-    payload.auxiliary.orders.length +
-    payload.auxiliary.executions.length;
+  const rows = countAccountEvidenceRows(payload);
   if (budget.retainedRows < rows || rows > policy.maxRetainedRows)
     add("ROW_BUDGET_EXCEEDED");
   for (const diagnostic of payload.diagnostics)
@@ -675,4 +656,25 @@ export function evaluateAccountEvidenceConsistency(
     reconciliation,
     reasonCodes: [...reasons].sort(),
   });
+}
+
+export function countAccountEvidenceRows(
+  payload: Pick<AccountEvidencePayload, "criticalPasses" | "auxiliary">,
+): number {
+  const passRows = (pass: AccountCriticalPass | null) =>
+    pass
+      ? 2 +
+        pass.assets.length +
+        pass.collateral.length +
+        pass.positions.length +
+        pass.orders.length +
+        pass.modeProbes.length
+      : 0;
+  return (
+    passRows(payload.criticalPasses.A) +
+    passRows(payload.criticalPasses.B) +
+    payload.auxiliary.tiers.length +
+    payload.auxiliary.orders.length +
+    payload.auxiliary.executions.length
+  );
 }
