@@ -1,4 +1,21 @@
 export {
+  ACCOUNT_EVIDENCE_SCHEMA_VERSION,
+  accountEvidenceContentHash,
+  createAccountBinding,
+  createAccountCredentialPosture,
+  createAccountEvidenceBundle,
+  createAccountEvidenceCollectionResult,
+  type AccountBinding,
+  type AccountCredentialPosture,
+  type AccountEvidenceBundle,
+  type AccountEvidenceCollectionResult,
+  type AccountEvidenceCollectionStatus,
+  type AccountEvidenceDecimalFact,
+  type AccountEvidenceEnvironment,
+  type AccountEvidenceFact,
+  type AccountEvidencePreAuthFailure,
+} from "./account/account-evidence-bundle.js";
+export {
   createQualityProfile,
   hashQualityProfile,
   type QualityProfile,

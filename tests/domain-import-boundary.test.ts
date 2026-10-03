@@ -123,6 +123,18 @@ test("daily compiler leaf graphs cannot reach downstream authority or registry",
   );
 });
 
+test("account evidence leaf graphs cannot reach downstream authority or registry", async () => {
+  const visited = await leafGraph([
+    "src/domain/account/account-evidence-bundle.ts",
+    "src/domain/account/account-evidence-policy.ts",
+    "src/domain/account/account-evidence-consistency.ts",
+    "src/domain/account/account-evidence-diagnostics.ts",
+  ]);
+  assert.ok(
+    visited.has(resolve("src/domain/identity/canonical-serialization.ts")),
+  );
+});
+
 test("application daily preparation graph cannot reach private Bybit or SQLite writes", async () => {
   const visited = await leafGraph(
     ["src/application/daily-decision-planning.ts"],

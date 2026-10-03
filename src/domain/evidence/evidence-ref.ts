@@ -18,6 +18,7 @@ export type EvidenceKind =
   | "market-evidence-bundle"
   | "liquidation-evidence-bundle"
   | "account-snapshot"
+  | "account-evidence-bundle"
   | "capability-probe"
   | "risk-input"
   | "research-artifact";
@@ -45,6 +46,7 @@ const EVIDENCE_KINDS = new Set<EvidenceKind>([
   "market-evidence-bundle",
   "liquidation-evidence-bundle",
   "account-snapshot",
+  "account-evidence-bundle",
   "capability-probe",
   "risk-input",
   "research-artifact",
