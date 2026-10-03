@@ -262,3 +262,30 @@ test("documented never-traded sequence is not applicable, not an identity error"
   );
   assert.deepEqual(value[0]?.seq, { state: "not-applicable" });
 });
+test("inverse valuation and margin amounts retain coin units instead of being relabeled USD", () => {
+  const mapped = mapAccountPositions({
+    time: 1790942400000,
+    result: {
+      category: "inverse",
+      list: [
+        {
+          symbol: "BTCUSD",
+          positionIdx: 0,
+          side: "Buy",
+          size: "300",
+          positionValue: "0.01092319",
+          positionIM: "0.001",
+          positionMM: "0.0001",
+          unrealisedPnl: "-0.001",
+        },
+      ],
+    },
+  });
+  for (const field of [
+    "positionValue",
+    "positionIM",
+    "positionMM",
+    "unrealisedPnl",
+  ] as const)
+    assert.equal(mapped[0]?.[field].unit, "coin");
+});

@@ -262,6 +262,7 @@ export function mapAccountPositions(
   scope?: string,
 ): readonly AccountPositionEvidence[] {
   const category = responseCategory(response, scope);
+  const amountUnit = category === "inverse" ? "coin" : "USD";
   const values = rows(response).map((a) =>
     unwrap(
       createAccountPositionEvidence({
@@ -277,10 +278,10 @@ export function mapAccountPositions(
         size: decimal(a.size, "contracts"),
         avgPrice: decimal(a.avgPrice, "price"),
         markPrice: decimal(a.markPrice, "price"),
-        positionValue: decimal(a.positionValue, "USD"),
-        unrealisedPnl: decimal(a.unrealisedPnl, "USD"),
-        positionIM: decimal(a.positionIM, "USD"),
-        positionMM: decimal(a.positionMM, "USD"),
+        positionValue: decimal(a.positionValue, amountUnit),
+        unrealisedPnl: decimal(a.unrealisedPnl, amountUnit),
+        positionIM: decimal(a.positionIM, amountUnit),
+        positionMM: decimal(a.positionMM, amountUnit),
         leverage: decimal(a.leverage, "rate"),
         riskId: fact(a.riskId, integer),
         tradeMode: fact(a.tradeMode, integer),

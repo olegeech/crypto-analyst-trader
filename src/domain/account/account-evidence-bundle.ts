@@ -208,6 +208,8 @@ function decimalFact<U extends AccountEvidenceDecimalFact["unit"]>(
 const coin = decimalFact("coin");
 const quantity = decimalFact("contracts", true);
 const usd = decimalFact("USD");
+const positionAmount: Parser<AccountEvidenceDecimalFact> = (input) =>
+  isRecord(input) && input.unit === "coin" ? coin(input) : usd(input);
 const price = decimalFact("price", true);
 const rate = decimalFact("rate");
 const booleanFact = fact(boolean),
@@ -320,7 +322,7 @@ const accountSchema = shape({
   spotHedging: booleanFact,
 });
 export type AccountModeEvidence = Parsed<typeof accountSchema>;
-const positionSchema = shape({
+const positionShape = shape({
   category: identifier,
   symbol: identifier,
   positionIdx: integer,
@@ -328,10 +330,10 @@ const positionSchema = shape({
   size: quantity,
   avgPrice: price,
   markPrice: price,
-  positionValue: usd,
-  unrealisedPnl: usd,
-  positionIM: usd,
-  positionMM: usd,
+  positionValue: positionAmount,
+  unrealisedPnl: positionAmount,
+  positionIM: positionAmount,
+  positionMM: positionAmount,
   leverage: rate,
   riskId: integerFact,
   tradeMode: integerFact,
@@ -343,6 +345,19 @@ const positionSchema = shape({
   stopLoss: price,
   trailingStop: price,
 });
+function positionSchema(input: unknown): Result<Parsed<typeof positionShape>> {
+  const parsed = positionShape(input);
+  if (!parsed.ok) return parsed;
+  const unit = parsed.value.category === "inverse" ? "coin" : "USD";
+  return [
+    parsed.value.positionValue,
+    parsed.value.unrealisedPnl,
+    parsed.value.positionIM,
+    parsed.value.positionMM,
+  ].every((fact) => fact.unit === unit)
+    ? parsed
+    : invalid();
+}
 export type AccountPositionEvidence = Parsed<typeof positionSchema>;
 const orderSchema = shape({
   category: identifier,

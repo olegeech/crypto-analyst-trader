@@ -156,7 +156,7 @@ export class BybitAccountReadClient implements AccountEvidenceReadPort {
       // A default catalogue omits pre-market linear instruments; both scopes belong to this partition.
       const statuses =
         partition.endpoint === "settlement-discovery"
-          ? [undefined, "PreLaunch"]
+          ? [undefined, "PreLaunch", "Delivering"]
           : [undefined];
       for (const status of statuses) {
         let cursor = "";
@@ -182,7 +182,23 @@ export class BybitAccountReadClient implements AccountEvidenceReadPort {
             (!Array.isArray(list) || list.some((row) => !isRecord(row)))
           )
             throw new BybitAccountReadError("INVALID_RESPONSE");
-          const count = Array.isArray(list) ? list.length : 1;
+          let count = Array.isArray(list) ? list.length : 1;
+          if (partition.endpoint === "wallet" && Array.isArray(list))
+            count = list.reduce(
+              (sum, row) =>
+                sum +
+                (isRecord(row) && Array.isArray(row.coin)
+                  ? Math.max(1, row.coin.length)
+                  : 1),
+              0,
+            );
+          if (partition.endpoint === "tiers" && Array.isArray(list))
+            count = list.reduce((sum, row) => {
+              const tiers = isRecord(row)
+                ? (row.collateralRatioList ?? row.tiers)
+                : undefined;
+              return sum + (Array.isArray(tiers) ? tiers.length : 1);
+            }, 0);
           if (this.rows + count > policy.maxRetainedRows)
             throw new BybitAccountReadError("ROW_BUDGET_EXCEEDED");
           this.rows += count;
@@ -202,6 +218,8 @@ export class BybitAccountReadClient implements AccountEvidenceReadPort {
               }
             }
           const next = response.result.nextPageCursor;
+          if (paged && typeof next !== "string")
+            throw new BybitAccountReadError("INVALID_RESPONSE");
           if (
             next !== undefined &&
             (typeof next !== "string" ||

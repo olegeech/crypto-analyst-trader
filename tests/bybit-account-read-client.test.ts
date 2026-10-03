@@ -90,3 +90,50 @@ test("route failure preserves stable reason without leaking private exception te
   assert.doesNotMatch(JSON.stringify(result), /private-sentinel/u);
   assert.deepEqual(result.coverage.reasonCodes, ["TRANSPORT_FAILED"]);
 });
+
+test("coverage counts wallet coins and tier ranges, not just their outer envelopes", async () => {
+  for (const endpoint of ["wallet", "tiers"] as const) {
+    const list =
+      endpoint === "wallet"
+        ? [{ coin: [{ coin: "USDT" }, { coin: "USDC" }] }]
+        : [
+            {
+              currency: "USDC",
+              collateralRatioList: [
+                { minQty: "0" },
+                { minQty: "10" },
+                { minQty: "20" },
+              ],
+            },
+          ];
+    const client = new BybitAccountReadClient({
+      transport: {
+        get: async () => ({ time: 1700000000000, result: { list } }),
+        readExchangeTime: async () => 1700000000000,
+      },
+      utcClock: () => 1700000000000,
+    });
+    const output = await client.readPartition({
+      ...partition,
+      endpoint,
+      category: null,
+      baseCoin: null,
+    });
+    assert.equal(output.coverage.rows, endpoint === "wallet" ? 2 : 3);
+  }
+});
+test("a paged response cannot prove terminal coverage without a valid continuation field", async () => {
+  const client = new BybitAccountReadClient({
+    transport: {
+      get: async () => ({ time: 1700000000000, result: { list: [] } }),
+      readExchangeTime: async () => 1700000000000,
+    },
+    utcClock: () => 1700000000000,
+  });
+  const output = await client.readPartition(partition, {
+    from: 1699996400000,
+    to: 1700000000000,
+  });
+  assert.equal(output.coverage.status, "failed");
+  assert.deepEqual(output.coverage.reasonCodes, ["INVALID_RESPONSE"]);
+});
