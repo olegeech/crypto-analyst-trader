@@ -10,6 +10,38 @@ const partition: AccountEvidencePartition = {
   symbol: null,
   settleCoin: null,
 };
+test("only account-info may omit response time, without extra exchange-time reads", async () => {
+  let timeReads = 0;
+  const client = new BybitAccountReadClient({
+    transport: {
+      get: async () => ({
+        result: { marginMode: "REGULAR_MARGIN", list: [], nextPageCursor: "" },
+      }),
+      readExchangeTime: async () => {
+        timeReads++;
+        return 1700000000000;
+      },
+    },
+    utcClock: () => 1700000000000,
+  });
+  const account = await client.readPartition({
+    ...partition,
+    endpoint: "account-info",
+    pass: "A",
+    category: null,
+    baseCoin: null,
+  });
+  assert.equal(account.coverage.status, "traversed");
+  assert.equal(account.observation?.exchangeResponseTime, null);
+  assert.equal(account.observation?.timeProvenance, "collection-bracket");
+  assert.equal(timeReads, 0);
+  const history = await client.readPartition(partition, {
+    from: 1699996400000,
+    to: 1700000000000,
+  });
+  assert.equal(history.coverage.status, "failed");
+  assert.deepEqual(history.coverage.reasonCodes, ["INVALID_RESPONSE"]);
+});
 test("out-of-range response time fails coverage without an invalid observation", async () => {
   const client = new BybitAccountReadClient({
     transport: {

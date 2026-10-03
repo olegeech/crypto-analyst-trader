@@ -136,6 +136,7 @@ function scriptedOptions(
     result: Record<string, unknown>,
     phase: number,
   ) => void,
+  omitAccountInfoTime = false,
 ) {
   const queries: { path: string; query: Readonly<Record<string, string>> }[] =
     [];
@@ -195,13 +196,47 @@ function scriptedOptions(
                 nextPageCursor: "",
               };
             mutate?.(path, query, result, phase);
-            return { time: start + (phase - 1) * 1000, result };
+            return path === "/v5/account/info" && omitAccountInfoTime
+              ? { result }
+              : { time: start + (phase - 1) * 1000, result };
           },
         },
       }),
   };
-  return { options, queries };
+  return {
+    options,
+    queries,
+    get exchangeTimeReads() {
+      return phase;
+    },
+  };
 }
+test("collector completes time-less account-info using existing A/B provider brackets only", async () => {
+  const script = scriptedOptions(undefined, true);
+  const result = await collectAccountEvidence(script.options);
+  assert.equal(result.kind, "account-evidence");
+  if (result.kind !== "account-evidence") return;
+  assert.equal(
+    result.bundle.collectionStatus,
+    "complete",
+    JSON.stringify(result.bundle.consistency.reasonCodes),
+  );
+  assert.equal(script.exchangeTimeReads, 3);
+  assert.equal(
+    result.bundle.bundleCutoff,
+    new Date(start + 1000).toISOString(),
+  );
+  for (const pass of [
+    result.bundle.criticalPasses.A,
+    result.bundle.criticalPasses.B,
+  ]) {
+    const observation = pass?.observations.find(
+      (obs) => obs.partition.endpoint === "account-info",
+    );
+    assert.equal(observation?.exchangeResponseTime, null);
+    assert.equal(observation?.timeProvenance, "collection-bracket");
+  }
+});
 test("production-shaped stable traversal completes and closing time does not move T", async () => {
   const { options, queries } = scriptedOptions();
   const result = await collectAccountEvidence(options);

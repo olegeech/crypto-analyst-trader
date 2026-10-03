@@ -517,7 +517,8 @@ const observationSchema = shape({
   partition: partitionSchema,
   startedAt: timestamp,
   endedAt: timestamp,
-  exchangeResponseTime: timestamp,
+  exchangeResponseTime: nullable(timestamp),
+  timeProvenance: oneOf("response-envelope", "collection-bracket"),
   nativeRowTimes: list(timestamp, (value) => value),
 });
 export type AccountEndpointObservation = Parsed<typeof observationSchema>;

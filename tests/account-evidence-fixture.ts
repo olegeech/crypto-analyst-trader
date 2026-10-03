@@ -108,6 +108,7 @@ export function fixture() {
     startedAt: partition.pass === "A" ? start : cutoff,
     endedAt: partition.pass === "A" ? start : end,
     exchangeResponseTime: partition.pass === "A" ? start : end,
+    timeProvenance: "response-envelope" as const,
     nativeRowTimes: [],
   }));
   const asset = (coin: string) => ({

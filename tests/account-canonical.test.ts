@@ -52,6 +52,36 @@ function envelope(value: unknown) {
     canonicalHash: `sha256:${createHash("sha256").update(canonicalJson).digest("hex")}`,
   };
 }
+test("canonical account-info preserves collection-bracket provenance without inventing exact time", () => {
+  const input = fixture();
+  const criticalPasses = Object.fromEntries(
+    Object.entries(input.criticalPasses).map(([label, pass]) => [
+      label,
+      {
+        ...pass,
+        observations: pass.observations.map((obs) =>
+          obs.partition.endpoint === "account-info"
+            ? {
+                ...obs,
+                exchangeResponseTime: null,
+                timeProvenance: "collection-bracket",
+              }
+            : obs,
+        ),
+      },
+    ]),
+  );
+  const result = createAccountEvidenceBundle({ ...input, criticalPasses });
+  assert.ok(result.ok);
+  const encoded = encodeCanonicalArtifact(
+    "account-evidence-bundle",
+    result.value,
+  );
+  assert.ok(encoded.ok);
+  const restored = rehydrateArtifact("account-evidence-bundle", encoded.value);
+  assert.ok(restored.ok);
+  assert.deepEqual(restored.value, result.value);
+});
 test("canonical account evidence preserves near-limit and restricted provider facts", () => {
   for (const restricted of ["near-limit", "restricted"] as const) {
     const input = fixture();

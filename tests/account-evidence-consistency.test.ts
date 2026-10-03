@@ -23,6 +23,121 @@ function reasons(input: unknown) {
   assert.equal(result.value.consistency.complete, false);
   return result.value.consistency.reasonCodes;
 }
+test("failed account-info does not fabricate a retained-row contradiction", () => {
+  const source = fixture();
+  const result = reasons({
+    ...source,
+    collectionStatus: "incomplete",
+    coverage: source.coverage.map((entry) =>
+      entry.partition.endpoint === "account-info"
+        ? {
+            ...entry,
+            rows: 0,
+            pages: 0,
+            status: "failed",
+            reasonCodes: ["INVALID_RESPONSE"],
+          }
+        : entry,
+    ),
+  });
+  assert.ok(result.includes("COVERAGE_INCOMPLETE"));
+  assert.equal(result.includes("CONTRADICTORY_OBSERVATION"), false);
+  const successful = reasons({
+    ...source,
+    collectionStatus: "incomplete",
+    coverage: source.coverage.map((entry) =>
+      entry.partition.endpoint === "account-info"
+        ? { ...entry, rows: 0 }
+        : entry,
+    ),
+  });
+  assert.ok(successful.includes("CONTRADICTORY_OBSERVATION"));
+});
+
+test("account-info without exact time is complete only within the existing provider pass bracket", () => {
+  const source = fixture();
+  const passes = Object.fromEntries(
+    Object.entries(source.criticalPasses).map(([label, pass]) => [
+      label,
+      {
+        ...pass,
+        observations: pass.observations.map((obs) =>
+          obs.partition.endpoint === "account-info"
+            ? {
+                ...obs,
+                exchangeResponseTime: null,
+                timeProvenance: "collection-bracket",
+              }
+            : obs,
+        ),
+      },
+    ]),
+  );
+  const valid = createAccountEvidenceBundle({
+    ...source,
+    criticalPasses: passes,
+  });
+  assert.ok(valid.ok);
+  assert.equal(valid.value.collectionStatus, "complete");
+  for (const field of [
+    "collectionStartedAt",
+    "bundleCutoff",
+    "collectionEndedAt",
+  ] as const) {
+    assert.equal(
+      createAccountEvidenceBundle({
+        ...source,
+        criticalPasses: passes,
+        [field]: null,
+      }).ok,
+      false,
+    );
+  }
+  const unsupported = Object.fromEntries(
+    Object.entries(source.criticalPasses).map(([label, pass]) => [
+      label,
+      {
+        ...pass,
+        observations: pass.observations.map((obs) =>
+          obs.partition.endpoint === "wallet"
+            ? {
+                ...obs,
+                exchangeResponseTime: null,
+                timeProvenance: "collection-bracket",
+              }
+            : obs,
+        ),
+      },
+    ]),
+  );
+  assert.equal(
+    createAccountEvidenceBundle({ ...source, criticalPasses: unsupported }).ok,
+    false,
+  );
+  for (const [exchangeResponseTime, timeProvenance] of [
+    [null, "response-envelope"],
+    [source.collectionStartedAt, "collection-bracket"],
+  ] as const) {
+    const contradictory = Object.fromEntries(
+      Object.entries(source.criticalPasses).map(([label, pass]) => [
+        label,
+        {
+          ...pass,
+          observations: pass.observations.map((obs) =>
+            obs.partition.endpoint === "account-info"
+              ? { ...obs, exchangeResponseTime, timeProvenance }
+              : obs,
+          ),
+        },
+      ]),
+    );
+    assert.equal(
+      createAccountEvidenceBundle({ ...source, criticalPasses: contradictory })
+        .ok,
+      false,
+    );
+  }
+});
 
 test("coverage derives initial settlements, discoveries, exposure bases and symbols independently of requests", () => {
   const input = fixture();

@@ -30,6 +30,38 @@ const budget = () => ({
   maxResponseBytes: 1048576,
   maxObservedResponseBytes: 0,
 });
+test("successful account-info may omit time, but missing/malformed times elsewhere fail closed", async () => {
+  for (const time of [undefined, null, "invalid", 0]) {
+    const transport = createBybitAccountReadTransport({
+      environment: "demo",
+      credentials,
+      budget: budget(),
+      clockOffsetMs: 0,
+      request: async () =>
+        new Response(
+          JSON.stringify({
+            retCode: 0,
+            retMsg: "OK",
+            result: { marginMode: "REGULAR_MARGIN" },
+            ...(time === undefined ? {} : { time }),
+          }),
+        ),
+    });
+    if (time === undefined) {
+      assert.equal((await transport.get("/v5/account/info")).time, undefined);
+    } else {
+      await assert.rejects(
+        transport.get("/v5/account/info"),
+        BybitAccountReadError,
+      );
+    }
+    await assert.rejects(
+      transport.get("/v5/account/wallet-balance"),
+      BybitAccountReadError,
+    );
+    await assert.rejects(transport.readExchangeTime(), BybitAccountReadError);
+  }
+});
 
 test("account transport uses pinned GET signing bytes and a private credential copy", async () => {
   const source = { ...credentials };

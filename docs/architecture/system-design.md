@@ -24,6 +24,15 @@ facts by the same domain function during collection and canonical rehydration.
 The sanitized smoke summary also identifies failed endpoint/pass/category partitions
 and account-info A/B availability, without account IDs or private records.
 
+Account-info may legitimately omit the response-envelope time. Its observation
+then preserves a null exact timestamp with `timeProvenance: collection-bracket`:
+pass A is bracketed by the initial exchange time and cutoff, pass B by cutoff
+and closing exchange time. Completeness requires those existing ordered provider
+anchors; no extra time requests or local/settings-update timestamp substitution
+is used. Other endpoints still require valid envelope time. History selection
+retains its exact provider cutoff. Failed traversal is coverage uncertainty,
+not a row-count contradiction; row-count checks use only terminal successful scopes.
+
 ## Target shape
 
 Crypto Analyst Trader is a modular TypeScript monolith. Domain logic remains

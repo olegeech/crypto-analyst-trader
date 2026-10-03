@@ -168,7 +168,10 @@ export class BybitAccountReadClient implements AccountEvidenceReadPort {
             ...(cursor ? { cursor } : {}),
           });
           pages++;
-          utc(response.time);
+          if (response.time === undefined) {
+            if (partition.endpoint !== "account-info")
+              throw new BybitAccountReadError("INVALID_RESPONSE");
+          } else utc(response.time);
           if (
             partition.category &&
             response.result.category !== undefined &&
@@ -238,6 +241,13 @@ export class BybitAccountReadClient implements AccountEvidenceReadPort {
       reason = accountReadFailureCode(error);
     }
     const endedAt = utc(this.clock());
+    const responseTimes = responses.flatMap((response) =>
+      response.time === undefined ? [] : [response.time],
+    );
+    const exactTime =
+      responseTimes.length === responses.length && responses.length > 0
+        ? utc(Math.max(...responseTimes))
+        : null;
     return {
       responses,
       coverage: {
@@ -254,9 +264,9 @@ export class BybitAccountReadClient implements AccountEvidenceReadPort {
             partition,
             startedAt,
             endedAt,
-            exchangeResponseTime: utc(
-              Math.max(...responses.map((r) => r.time)),
-            ),
+            exchangeResponseTime: exactTime,
+            timeProvenance:
+              exactTime === null ? "collection-bracket" : "response-envelope",
             nativeRowTimes: [...new Set(nativeRowTimes)].sort(),
           }
         : null,

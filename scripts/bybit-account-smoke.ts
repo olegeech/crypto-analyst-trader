@@ -141,6 +141,10 @@ export function summarizeAccountEvidence(
         reasonCodes: info?.reasonCodes ?? [],
         marginMode: safeMarginMode(facts),
         marginModeState: facts?.account.marginMode.state ?? "unavailable",
+        timeProvenance:
+          facts?.observations.find(
+            (observation) => observation.partition.endpoint === "account-info",
+          )?.timeProvenance ?? "unavailable",
         utaStatusState: facts?.account.utaStatus.state ?? "unavailable",
         spotHedgingState: facts?.account.spotHedging.state ?? "unavailable",
       };

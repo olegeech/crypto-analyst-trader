@@ -514,15 +514,16 @@ export function evaluateAccountEvidenceConsistency(
       accountEvidencePartitionKey(entry.partition),
     ),
   );
+  const terminalCoverage = (
+    entry: AccountEvidencePayload["coverage"][number],
+  ) =>
+    entry.status === "traversed" &&
+    entry.reasonCodes.length === 0 &&
+    entry.pages >= 1 &&
+    entry.startedAt !== null &&
+    entry.endedAt !== null;
   for (const entry of payload.coverage) {
-    if (
-      entry.status !== "traversed" ||
-      entry.reasonCodes.length > 0 ||
-      entry.pages < 1 ||
-      entry.startedAt === null ||
-      entry.endedAt === null
-    )
-      add("COVERAGE_INCOMPLETE");
+    if (!terminalCoverage(entry)) add("COVERAGE_INCOMPLETE");
     if (entry.pages > policy.maxPagesPerPartition) add("PAGE_BUDGET_EXCEEDED");
     const obs = observationByPartition.get(
       accountEvidencePartitionKey(entry.partition),
@@ -554,18 +555,26 @@ export function evaluateAccountEvidenceConsistency(
     pass: AccountEvidencePartition["pass"],
     category?: AccountEvidenceCategory,
     symbol?: string,
-  ) =>
-    payload.coverage
-      .filter(
-        (entry) =>
-          entry.partition.endpoint === endpoint &&
-          entry.partition.pass === pass &&
-          (category === undefined || entry.partition.category === category) &&
-          (symbol === undefined || entry.partition.symbol === symbol),
-      )
-      .reduce((sum, entry) => sum + entry.rows, 0);
-  const requireRows = (observed: number, retained: number) => {
-    if (observed < retained) add("CONTRADICTORY_OBSERVATION");
+  ): number | undefined => {
+    const entries = payload.coverage.filter(
+      (entry) =>
+        entry.partition.endpoint === endpoint &&
+        entry.partition.pass === pass &&
+        (category === undefined || entry.partition.category === category) &&
+        (symbol === undefined || entry.partition.symbol === symbol),
+    );
+    // Failed/unterminated scopes already explain missing rows via coverage.
+    // Only terminal successful traversal can establish a row-count conflict.
+    if (
+      entries.length === 0 ||
+      entries.some((entry) => !terminalCoverage(entry))
+    )
+      return undefined;
+    return entries.reduce((sum, entry) => sum + entry.rows, 0);
+  };
+  const requireRows = (observed: number | undefined, retained: number) => {
+    if (observed !== undefined && observed < retained)
+      add("CONTRADICTORY_OBSERVATION");
   };
   for (const [label, pass] of [
     ["A", A],
@@ -618,6 +627,16 @@ export function evaluateAccountEvidenceConsistency(
     end = payload.collectionEndedAt,
     cutoff = payload.bundleCutoff,
     window = payload.historyWindow;
+  for (const obs of observations) {
+    if (
+      (obs.timeProvenance === "response-envelope") !==
+        (obs.exchangeResponseTime !== null) ||
+      (obs.timeProvenance === "collection-bracket" &&
+        (obs.partition.endpoint !== "account-info" ||
+          obs.partition.pass === "auxiliary"))
+    )
+      add("INVALID_RESPONSE");
+  }
   if (!start || !end || !cutoff || !window) add("COVERAGE_INCOMPLETE");
   else {
     if (
@@ -631,8 +650,9 @@ export function evaluateAccountEvidenceConsistency(
     if (
       observations.some(
         (obs) =>
-          Date.parse(obs.exchangeResponseTime) < Date.parse(start) ||
-          Date.parse(obs.exchangeResponseTime) > Date.parse(end) ||
+          (obs.exchangeResponseTime !== null &&
+            (Date.parse(obs.exchangeResponseTime) < Date.parse(start) ||
+              Date.parse(obs.exchangeResponseTime) > Date.parse(end))) ||
           Date.parse(obs.startedAt) > Date.parse(obs.endedAt) ||
           Date.parse(obs.startedAt) < Date.parse(payload.startedAt) ||
           Date.parse(obs.endedAt) > Date.parse(payload.endedAt),
@@ -641,10 +661,14 @@ export function evaluateAccountEvidenceConsistency(
       add("INVALID_RESPONSE");
     if (
       A?.observations.some(
-        (obs) => Date.parse(obs.exchangeResponseTime) > Date.parse(cutoff),
+        (obs) =>
+          obs.exchangeResponseTime !== null &&
+          Date.parse(obs.exchangeResponseTime) > Date.parse(cutoff),
       ) ||
       B?.observations.some(
-        (obs) => Date.parse(obs.exchangeResponseTime) < Date.parse(cutoff),
+        (obs) =>
+          obs.exchangeResponseTime !== null &&
+          Date.parse(obs.exchangeResponseTime) < Date.parse(cutoff),
       )
     )
       add("INVALID_RESPONSE");

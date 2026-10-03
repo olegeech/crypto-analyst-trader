@@ -53,7 +53,7 @@ export interface AccountReadBudget {
 }
 export interface AccountReadResponse {
   readonly result: Record<string, unknown>;
-  readonly time: number;
+  readonly time?: number;
 }
 export interface BybitAccountReadTransportOptions {
   readonly environment: CredentialEnvironment;
@@ -177,7 +177,7 @@ export class BybitAccountReadTransport {
         response.result.timeNano === undefined
           ? response.result
           : { timeNano: response.result.timeNano },
-      time: response.time,
+      ...(response.time === undefined ? {} : { time: response.time }),
     });
     if (time === undefined || !Number.isSafeInteger(time) || time <= 0)
       throw new BybitAccountReadError("INVALID_RESPONSE");
@@ -328,7 +328,17 @@ export class BybitAccountReadTransport {
       const text = await this.readBody(response, controller.signal);
       let parsed;
       try {
-        parsed = validateBybitPublicResponse(JSON.parse(text));
+        const envelope: unknown = JSON.parse(text);
+        parsed = validateBybitPublicResponse(envelope);
+        // Missing time is a documented account-info shape, not permission to
+        // silently discard a malformed timestamp that was actually returned.
+        if (
+          parsed.time === undefined &&
+          typeof envelope === "object" &&
+          envelope !== null &&
+          Object.hasOwn(envelope, "time")
+        )
+          throw new BybitAccountReadError("INVALID_RESPONSE");
       } catch {
         throw new BybitAccountReadError("INVALID_RESPONSE");
       }
@@ -339,12 +349,14 @@ export class BybitAccountReadTransport {
           parsed.retCode,
         );
       if (
-        parsed.time === undefined ||
-        !Number.isSafeInteger(parsed.time) ||
-        parsed.time <= 0
+        parsed.time === undefined
+          ? url.pathname !== "/v5/account/info"
+          : !Number.isSafeInteger(parsed.time) || parsed.time <= 0
       )
         throw new BybitAccountReadError("INVALID_RESPONSE");
-      return { result: parsed.result, time: parsed.time };
+      return parsed.time === undefined
+        ? { result: parsed.result }
+        : { result: parsed.result, time: parsed.time };
     } catch (error) {
       if (error instanceof BybitAccountReadError) throw error;
       if (controller.signal.aborted) throw controller.signal.reason;

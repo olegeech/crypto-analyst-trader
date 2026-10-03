@@ -8,7 +8,7 @@ import type {
 /** Source envelopes stay collection-local. Only mapped allowlisted facts enter artifacts. */
 export interface AccountReadEnvelope {
   readonly result: Record<string, unknown>;
-  readonly time: number;
+  readonly time?: number;
 }
 export interface AccountPartitionRead {
   readonly responses: readonly AccountReadEnvelope[];
