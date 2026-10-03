@@ -80,6 +80,10 @@ import {
   type RiskDecision,
 } from "../risk/risk-decision.js";
 import { DecimalValue, isDecimalValue } from "../shared/decimal.js";
+import {
+  createAccountEvidenceBundle,
+  type AccountEvidenceBundle,
+} from "../account/account-evidence-bundle.js";
 import { deepFreeze } from "../shared/deep-freeze.js";
 import { domainError } from "../shared/errors.js";
 import { fail, ok, type Result } from "../shared/result.js";
@@ -110,6 +114,7 @@ export type ArtifactKind =
   | "data-quality-assessment"
   | "daily-decision-plan"
   | "account-snapshot"
+  | "account-evidence-bundle"
   | "order-intent"
   | "risk-decision"
   | "execution-plan"
@@ -143,6 +148,7 @@ export type RehydratedArtifact =
   | DataQualityAssessment
   | DailyDecisionPlan
   | AccountSnapshot
+  | AccountEvidenceBundle
   | OrderIntent
   | RiskDecision
   | ExecutionPlan
@@ -158,6 +164,10 @@ export type RehydratedArtifact =
   | ClearanceEvidence;
 
 type Schema =
+  | {
+      readonly kind: "validated";
+      readonly validate: (value: unknown) => Result<unknown>;
+    }
   | { readonly kind: "leaf" }
   | { readonly kind: "array"; readonly item?: Schema }
   | {
@@ -987,6 +997,12 @@ const qualityAssessmentSchema = object(
 );
 
 const schemas: ReadonlyMap<ArtifactKind, Schema> = new Map([
+  // The constructor owns closed validation of every nested account fact and
+  // rechecks derived consistency and provenance. Do not duplicate that schema.
+  [
+    "account-evidence-bundle",
+    { kind: "validated", validate: createAccountEvidenceBundle },
+  ],
   [
     "daily-decision-plan",
     object(
@@ -1099,6 +1115,10 @@ function validateShape(
   schema: Schema,
   path: string,
 ): Result<void> {
+  if (schema.kind === "validated") {
+    const validated = schema.validate(value);
+    return validated.ok ? ok(undefined) : validated;
+  }
   if (isDecimalValue(value)) {
     return schema.kind === "leaf"
       ? ok(undefined)
@@ -1146,6 +1166,16 @@ function validateShape(
   return ok(undefined);
 }
 
+function validateArtifactValue(
+  value: unknown,
+  schema: Schema,
+  path: string,
+): Result<unknown> {
+  if (schema.kind === "validated") return schema.validate(value);
+  const shape = validateShape(value, schema, path);
+  return shape.ok ? ok(value) : shape;
+}
+
 function decodeValue(value: unknown, path: string): Result<unknown> {
   if (Array.isArray(value)) {
     const decoded: unknown[] = [];
@@ -1182,9 +1212,9 @@ export function encodeCanonicalArtifact(
   const schema = schemas.get(artifactKind);
   if (schema === undefined)
     return unsupportedArtifact("artifact kind is unsupported");
-  const shape = validateShape(value, schema, artifactKind);
-  if (!shape.ok) return shape;
-  const canonical = canonicalSerialize(value);
+  const validated = validateArtifactValue(value, schema, artifactKind);
+  if (!validated.ok) return validated;
+  const canonical = canonicalSerialize(validated.value);
   if (!canonical.ok) return canonical;
   return ok(
     Object.freeze({
@@ -1251,13 +1281,13 @@ export function decodeCanonicalArtifact(
   const schema = schemas.get(artifactKind);
   if (schema === undefined)
     return unsupportedArtifact("artifact kind is unsupported");
-  const shape = validateShape(decoded.value, schema, artifactKind);
-  if (!shape.ok) return shape;
-  const canonical = canonicalSerialize(decoded.value);
+  const validated = validateArtifactValue(decoded.value, schema, artifactKind);
+  if (!validated.ok) return validated;
+  const canonical = canonicalSerialize(validated.value);
   if (!canonical.ok || canonical.value !== input.canonicalJson) {
     return artifactFailure("artifact JSON is not canonical");
   }
-  return ok(deepFreeze(decoded.value));
+  return ok(deepFreeze(validated.value));
 }
 
 function toConstructorInput(value: unknown): unknown {
@@ -1388,6 +1418,10 @@ function rehydrateExecutionPlan(value: unknown): Result<ExecutionPlan> {
 }
 
 export function rehydrateArtifact(
+  artifactKind: "account-evidence-bundle",
+  envelope: unknown,
+): Result<AccountEvidenceBundle>;
+export function rehydrateArtifact(
   artifactKind: "daily-decision-plan",
   envelope: unknown,
 ): Result<DailyDecisionPlan>;
@@ -1430,6 +1464,10 @@ export function rehydrateArtifact(
   const decoded = decodeCanonicalArtifact(envelope, artifactKind);
   if (!decoded.ok) return decoded;
   switch (artifactKind) {
+    case "account-evidence-bundle":
+      // Decoded decimal tags remain DecimalValue instances. The constructor
+      // preserves historical binding claims; it never authenticates a new run.
+      return createAccountEvidenceBundle(decoded.value);
     case "daily-decision-plan":
       return rehydrateDailyDecisionPlan(decoded.value);
     case "data-quality-assessment":

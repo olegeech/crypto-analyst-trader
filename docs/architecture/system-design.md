@@ -1,5 +1,38 @@
 # System Design
 
+The opt-in `smoke:bybit:account` CLI delegates to `collectAccountEvidence` with
+an explicit environment, run identity, configured M1 symbols and a load-only
+runtime Keychain boundary. It emits only an allowlisted summary, using the
+domain canonical content hash and consistency mode proofs; no evidence report
+or persistence is created. Collection completeness characterizes fact integrity,
+not available risk capacity or freshness for a later decision. Provider-native
+historical selection and delayed visibility mean the bounded sandwich is not
+an atomic snapshot. Unavailable Demo collateral tiers remain unverified without
+cross-environment fallback. See [credentials](../credentials.md) for invocation.
+
+Account evidence v1 maps wallet `colRes` to unknown, unrestricted, near-limit or
+restricted without collapsing the provider state to a boolean. Missing restriction
+facts remain unavailable (collateral-info has no equivalent field); observed changes or
+cross-endpoint contradictions still invalidate consistency. A collateral switch
+is legitimately not applicable when collateral eligibility is proven false.
+Spot order `qty` preserves `marketUnit` as base-coin or quote-coin, with unknown
+units retained explicitly rather than inferred from side. Spot executed and
+remaining quantities use base-coin independently of the requested market unit;
+derivative quantities retain contracts. Unknown units cannot establish complete
+evidence. Collection status is derived from consistency and usable retained
+facts by the same domain function during collection and canonical rehydration.
+The sanitized smoke summary also identifies failed endpoint/pass/category partitions
+and account-info A/B availability, without account IDs or private records.
+
+Account-info may legitimately omit the response-envelope time. Its observation
+then preserves a null exact timestamp with `timeProvenance: collection-bracket`:
+pass A is bracketed by the initial exchange time and cutoff, pass B by cutoff
+and closing exchange time. Completeness requires those existing ordered provider
+anchors; no extra time requests or local/settings-update timestamp substitution
+is used. Other endpoints still require valid envelope time. History selection
+retains its exact provider cutoff. Failed traversal is coverage uncertainty,
+not a row-count contradiction; row-count checks use only terminal successful scopes.
+
 ## Target shape
 
 Crypto Analyst Trader is a modular TypeScript monolith. Domain logic remains
