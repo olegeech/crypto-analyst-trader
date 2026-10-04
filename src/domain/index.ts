@@ -232,6 +232,14 @@ export {
   type PortfolioRiskProjectionInput,
 } from "./risk/portfolio-risk-projection.js";
 export {
+  PORTFOLIO_RISK_CAPACITY_SCHEMA_VERSION,
+  evaluatePortfolioRiskCapacity,
+  type PortfolioRiskCapacity,
+  type PortfolioRiskCapacityInput,
+  type PortfolioRiskGateStatus,
+  type PortfolioRiskLeverageCheck,
+} from "./risk/portfolio-risk-capacity.js";
+export {
   PORTFOLIO_RISK_POLICY_SCHEMA_VERSION,
   createPortfolioRiskPolicy,
   portfolioRiskPolicyHash,
