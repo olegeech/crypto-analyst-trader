@@ -249,6 +249,14 @@ export {
   type PortfolioRiskFundingEvidenceReason,
 } from "./risk/portfolio-risk-economics.js";
 export {
+  PORTFOLIO_RISK_MATERIALIZATION_SCHEMA_VERSION,
+  materializePortfolioRiskAction,
+  type PortfolioRiskCloseProposal,
+  type PortfolioRiskMaterialization,
+  type PortfolioRiskMaterializationInput,
+  type PortfolioRiskReductionMaterialization,
+} from "./risk/portfolio-risk-materialization.js";
+export {
   PORTFOLIO_RISK_POLICY_SCHEMA_VERSION,
   createPortfolioRiskPolicy,
   portfolioRiskPolicyHash,
