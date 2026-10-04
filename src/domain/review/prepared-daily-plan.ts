@@ -6,6 +6,7 @@ import { accountEvidencePartitionKey } from "../account/account-evidence-policy.
 import {
   canonicalSerialize,
   hashCanonical,
+  type PlanHash,
 } from "../identity/canonical-serialization.js";
 import {
   prepareDailyPlanningInputs,
@@ -67,7 +68,7 @@ export type PreparedDailyPlanSummary = ReturnType<typeof materialSummary>;
 export interface PreparedDailyPlan {
   readonly schemaVersion: typeof PREPARED_DAILY_PLAN_SCHEMA_VERSION;
   readonly preparedPlanId: string;
-  readonly contentHash: string;
+  readonly contentHash: PlanHash;
   readonly inputIdentity: {
     readonly preflightContentHash: string;
     readonly preflightArtifactHash: string;

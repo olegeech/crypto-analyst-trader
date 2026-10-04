@@ -1,6 +1,7 @@
 import {
   canonicalSerialize,
   hashCanonical,
+  type PlanHash,
 } from "../identity/canonical-serialization.js";
 import { closedRecord } from "../planning/planning-validation.js";
 import { deepFreeze } from "../shared/deep-freeze.js";
@@ -20,7 +21,7 @@ import {
 export interface PreparedPlanApproval {
   readonly schemaVersion: "prepared-plan-approval/v1";
   readonly approvalId: string;
-  readonly contentHash: string;
+  readonly contentHash: PlanHash;
   readonly preparedHash: string;
   readonly preparedArtifactHash: string;
   readonly actor: string;
