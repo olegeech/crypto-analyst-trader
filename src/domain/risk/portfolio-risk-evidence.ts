@@ -384,6 +384,11 @@ export function validatePortfolioRiskLeverageEvidence(
       ),
     );
 
+  if (observationTimeMs < timestampToEpochMs(accountEndedAt))
+    return conflict(
+      "supplemental observation predates bound account collection",
+    );
+
   const mode = bundle.consistency.positionModes.find(
     (item) => item.symbol === expectedSymbol.value,
   );

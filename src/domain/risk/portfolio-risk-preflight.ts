@@ -232,6 +232,12 @@ function parseInput(
       "preflight requires valid nested evidence and policy inputs",
     );
 
+  if (
+    dailyPlan.value.decision.recommendation !== "ADD_LONG" &&
+    supplementalEvidence.value.length > 0
+  )
+    return invalid("supplemental evidence is only supported for ADD_LONG");
+
   const planning = prepareDailyPlanningInputs(dailyPlan.value.inputs);
   const profileHash = hashQualityProfile(qualityProfile.value);
   if (

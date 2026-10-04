@@ -323,6 +323,55 @@ test("plan, account, policy, profile and supplemental evidence each affect ident
   );
 });
 
+test("HOLD and REDUCE reject supplemental evidence during admission and canonical replay", () => {
+  for (const recommendation of ["HOLD_LONG", "REDUCE_LONG"] as const) {
+    const source = input(recommendation);
+    const account = requireDailyFixture(
+      createAccountEvidenceBundle(source.account),
+    );
+    const supplemental = requireDailyFixture(
+      createPortfolioRiskEvidence({
+        schemaVersion: "portfolio-risk-evidence/v1",
+        kind: "target-leverage",
+        environment: "mainnet",
+        accountIdentityHash: `sha256:${"b".repeat(64)}`,
+        accountEvidenceHash: `sha256:${"c".repeat(64)}`,
+        symbol: "BTCUSDT",
+        observedAt: account.collectionEndedAt,
+        rows: [
+          {
+            positionIdx: 0,
+            side: "None",
+            size: "0",
+            leverage: "1",
+            isReduceOnly: false,
+          },
+        ],
+      }),
+    );
+    const rejected = evaluatePortfolioRiskPreflight({
+      ...source,
+      supplementalEvidence: [supplemental],
+    });
+    assert.equal(rejected.ok, false);
+    if (!rejected.ok) assert.equal(rejected.error.code, "INVALID_EVIDENCE");
+
+    const valid = requireDailyFixture(evaluatePortfolioRiskPreflight(source));
+    assert.equal(valid.verdict, "PASS");
+    assert.deepEqual(valid.replayInputs.supplementalEvidence, []);
+    const forged = rehash({
+      ...valid,
+      replayInputs: {
+        ...valid.replayInputs,
+        supplementalEvidence: [supplemental],
+      },
+    });
+    const replayed = rehydratePortfolioRiskPreflight(forged);
+    assert.equal(replayed.ok, false);
+    if (!replayed.ok) assert.equal(replayed.error.code, "INVALID_EVIDENCE");
+  }
+});
+
 test("malformed nested input or mismatched original quality profile is admission failure", () => {
   const valid = input("ADD_LONG");
   assert.equal(

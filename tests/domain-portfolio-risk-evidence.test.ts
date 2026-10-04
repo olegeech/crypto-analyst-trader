@@ -140,6 +140,41 @@ test("future and stale account or supplemental observations are rejected", () =>
   );
 });
 
+test("independently fresh supplemental leverage cannot predate account collection end", () => {
+  const source = fixture();
+  const created = createAccountEvidenceBundle({
+    ...source,
+    endedAt: "2026-10-02T12:00:30.000Z",
+    collectionEndedAt: "2026-10-02T12:00:30.000Z",
+    budget: { ...source.budget, monotonicDurationMs: 30_000 },
+  });
+  assert.equal(created.ok, true);
+  if (!created.ok) return;
+  const at = "2026-10-02T12:00:40.000Z";
+  const rejected = validate(
+    evidenceInput(created.value, { observedAt: "2026-10-02T12:00:29.000Z" }),
+    created.value,
+    "BTCUSDT",
+    at,
+  );
+  assert.equal(rejected.ok, false);
+  if (!rejected.ok) assert.equal(rejected.error.code, "INCOMPATIBLE_EVIDENCE");
+
+  for (const observedAt of [
+    "2026-10-02T12:00:30.000Z",
+    "2026-10-02T12:00:31.000Z",
+  ])
+    assert.equal(
+      validate(
+        evidenceInput(created.value, { observedAt }),
+        created.value,
+        "BTCUSDT",
+        at,
+      ).ok,
+      true,
+    );
+});
+
 test("missing, duplicate, and non-flat supplemental position rows reject", () => {
   const account = validAccount();
   for (const rows of [

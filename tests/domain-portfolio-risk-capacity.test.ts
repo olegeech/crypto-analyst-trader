@@ -322,6 +322,25 @@ test("compatible supplemental evidence supplies only a missing flat target lever
   );
   assert.ok(!result.reasonCodes.includes("LEVERAGE_UNKNOWN"));
 
+  const { contentHash: _contentHash, ...payload } = evidence;
+  void _contentHash;
+  const earlier = requireDailyFixture(
+    createPortfolioRiskEvidence({
+      ...payload,
+      observedAt: "2026-10-02T12:00:01.000Z",
+    }),
+  );
+  const temporalConflict = evaluate(rawAccount, {
+    supplementalEvidence: [earlier],
+  });
+  assert.equal(temporalConflict.outcome, "block");
+  assert.ok(
+    temporalConflict.reasonCodes.includes("SUPPLEMENTAL_EVIDENCE_CONFLICT"),
+  );
+  assert.ok(
+    !temporalConflict.reasonCodes.includes("SUPPLEMENTAL_EVIDENCE_STALE"),
+  );
+
   const knownTarget = accountWithPositions([portfolioRiskPosition()]);
   const knownBundle = createAccountEvidenceBundle(knownTarget);
   assert.equal(knownBundle.ok, true);
