@@ -240,6 +240,15 @@ export {
   type PortfolioRiskLeverageCheck,
 } from "./risk/portfolio-risk-capacity.js";
 export {
+  PORTFOLIO_RISK_ECONOMICS_SCHEMA_VERSION,
+  evaluatePortfolioRiskEconomics,
+  type PortfolioRiskEconomicLeg,
+  type PortfolioRiskEconomics,
+  type PortfolioRiskEconomicsInput,
+  type PortfolioRiskFundingEvidence,
+  type PortfolioRiskFundingEvidenceReason,
+} from "./risk/portfolio-risk-economics.js";
+export {
   PORTFOLIO_RISK_POLICY_SCHEMA_VERSION,
   createPortfolioRiskPolicy,
   portfolioRiskPolicyHash,

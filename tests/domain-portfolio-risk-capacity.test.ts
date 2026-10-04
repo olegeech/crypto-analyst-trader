@@ -5,18 +5,10 @@ import {
   accountEvidenceContentHash,
   createAccountEvidenceBundle,
 } from "../src/domain/account/account-evidence-bundle.js";
-import { createDailyDecisionPlan } from "../src/domain/planning/daily-decision-plan.js";
 import { evaluatePortfolioRiskCapacity } from "../src/domain/risk/portfolio-risk-capacity.js";
 import { createPortfolioRiskEvidence } from "../src/domain/risk/portfolio-risk-evidence.js";
 import { DecimalValue } from "../src/domain/shared/decimal.js";
-import { assessDataQuality } from "../src/domain/quality/assess-data-quality.js";
-import { createQualityProfile } from "../src/domain/quality/quality-profile.js";
-import { analyticsFixture } from "./fixtures/data-quality-fixtures.js";
-import {
-  dailyQualityProfileFixture,
-  requireDailyFixture,
-} from "./fixtures/daily-planning-evidence-fixtures.js";
-import { dailyDecisionInputFixture } from "./fixtures/daily-planning-policy-fixtures.js";
+import { requireDailyFixture } from "./fixtures/daily-planning-evidence-fixtures.js";
 import {
   decimal as accountDecimal,
   fixture as accountFixture,
@@ -29,82 +21,16 @@ import {
   portfolioRiskCollateral,
   portfolioRiskOrder,
   portfolioRiskPosition,
-  portfolioRiskMarketFixture,
   portfolioRiskWalletAsset,
 } from "./fixtures/portfolio-risk-fixtures.js";
+import { portfolioRiskPlanningFixture } from "./fixtures/portfolio-risk-planning-fixtures.js";
 
 const evaluationTime = "2026-10-02T12:00:02.000Z";
 
 function riskPlan(
   recommendation: "ADD_LONG" | "REDUCE_LONG" | "HOLD_LONG" = "ADD_LONG",
 ) {
-  const raw = dailyDecisionInputFixture();
-  const market = portfolioRiskMarketFixture();
-  const analytics = analyticsFixture(market, {
-    profile: {
-      schemaVersion: "analytics-profile/v1",
-      features: [
-        {
-          id: "atr",
-          kind: "atr",
-          symbol: "BTCUSDT",
-          interval: "1h",
-          period: 1,
-          required: true,
-        },
-        {
-          id: "return",
-          kind: "close-return",
-          symbol: "BTCUSDT",
-          interval: "1h",
-          periods: 1,
-          required: true,
-        },
-      ],
-      externalEvidence: [],
-    },
-  });
-  const profile = requireDailyFixture(
-    createQualityProfile(dailyQualityProfileFixture()),
-  );
-  const assessment = requireDailyFixture(
-    assessDataQuality({
-      profile,
-      sources: [
-        { role: "market", value: market },
-        { role: "analytics", value: analytics },
-      ],
-      bundleCutoff: market.bundleCutoff,
-      evaluationTime: market.bundleCutoff,
-    }),
-  );
-  const decisionPolicy = {
-    ...raw.decisionPolicy,
-    groups: raw.decisionPolicy.groups.map((group) => ({
-      ...group,
-      rules: group.rules.map((rule) => ({
-        ...rule,
-        target: recommendation,
-        ...(recommendation === "HOLD_LONG"
-          ? {
-              conditions: rule.conditions.map((condition) => ({
-                ...condition,
-                threshold: "1000",
-              })),
-            }
-          : {}),
-      })),
-    })),
-  };
-  return requireDailyFixture(
-    createDailyDecisionPlan({
-      ...raw,
-      market,
-      analytics,
-      assessment,
-      decisionPolicy,
-    }),
-  );
+  return portfolioRiskPlanningFixture({ recommendation }).dailyPlan;
 }
 
 function accountWithAvailableBalance(value: string) {
