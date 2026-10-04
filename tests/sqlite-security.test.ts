@@ -39,7 +39,8 @@ function assertNoTransportDependency(sourceText: string, file: string) {
     if (ts.isCallExpression(node)) {
       assert.ok(
         !(
-          (ts.isIdentifier(node.expression) && node.expression.text === "fetch") ||
+          (ts.isIdentifier(node.expression) &&
+            node.expression.text === "fetch") ||
           (ts.isPropertyAccessExpression(node.expression) &&
             node.expression.name.text === "fetch")
         ),
