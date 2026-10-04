@@ -18,13 +18,24 @@ import { fail, ok } from "../../domain/shared/result.js";
 import { closedRecord } from "../../domain/planning/planning-validation.js";
 
 export const PROVISIONAL_M1_POLICY_VERSION = "provisional-m1-v1" as const;
+export const PROVISIONAL_M1_EXTERNAL_AVAILABILITY = deepFreeze(
+  (
+    [
+      "market-regime-score",
+      "early-warning-risk",
+      "liquidity-stress",
+      "trap",
+    ] as const
+  ).map((family) => ({ family, status: "not-configured" as const })),
+);
 
 /** Application authority: only symbol/allocation are caller inputs; no policy overrides. */
 export function createProvisionalM1Composition(input: unknown) {
   if (
     !closedRecord(input, ["symbol", "allocation"]) ||
     !isPlanningSymbol(input.symbol) ||
-    typeof input.allocation !== "string"
+    typeof input.allocation !== "string" ||
+    input.allocation.length > 128
   ) {
     return fail(
       domainError(
@@ -250,14 +261,7 @@ export function createProvisionalM1Composition(input: unknown) {
       planningPolicy: planningPolicy.value,
       riskPolicy: riskPolicy.value,
       externalAdmissions: [],
-      externalAvailability: (
-        [
-          "market-regime-score",
-          "early-warning-risk",
-          "liquidity-stress",
-          "trap",
-        ] as const
-      ).map((family) => ({ family, status: "not-configured" as const })),
+      externalAvailability: PROVISIONAL_M1_EXTERNAL_AVAILABILITY,
       reviewPolicy: {
         schemaVersion: "daily-review-policy/v1" as const,
         policyVersion: version,
