@@ -214,6 +214,65 @@ export {
   type RiskEvaluationInput,
 } from "./risk/risk-decision.js";
 export {
+  PORTFOLIO_RISK_EVIDENCE_SCHEMA_VERSION,
+  createPortfolioRiskEvidence,
+  createPortfolioRiskEvidenceSet,
+  portfolioRiskEvidenceContentHash,
+  validatePortfolioRiskLeverageEvidence,
+  type PortfolioRiskEvidence,
+  type PortfolioRiskLeverageRow,
+  type ValidatedPortfolioRiskLeverageEvidence,
+} from "./risk/portfolio-risk-evidence.js";
+export {
+  PORTFOLIO_RISK_PROJECTION_SCHEMA_VERSION,
+  createPortfolioRiskProjection,
+  type PortfolioRiskExposureLine,
+  type PortfolioRiskProjection,
+  type PortfolioRiskProjectionFact,
+  type PortfolioRiskProjectionInput,
+} from "./risk/portfolio-risk-projection.js";
+export {
+  PORTFOLIO_RISK_CAPACITY_SCHEMA_VERSION,
+  evaluatePortfolioRiskCapacity,
+  type PortfolioRiskCapacity,
+  type PortfolioRiskCapacityInput,
+  type PortfolioRiskGateStatus,
+  type PortfolioRiskLeverageCheck,
+} from "./risk/portfolio-risk-capacity.js";
+export {
+  PORTFOLIO_RISK_ECONOMICS_SCHEMA_VERSION,
+  evaluatePortfolioRiskEconomics,
+  type PortfolioRiskEconomicLeg,
+  type PortfolioRiskEconomics,
+  type PortfolioRiskEconomicsInput,
+  type PortfolioRiskFundingEvidence,
+  type PortfolioRiskFundingEvidenceReason,
+} from "./risk/portfolio-risk-economics.js";
+export {
+  PORTFOLIO_RISK_MATERIALIZATION_SCHEMA_VERSION,
+  materializePortfolioRiskAction,
+  type PortfolioRiskCloseProposal,
+  type PortfolioRiskMaterialization,
+  type PortfolioRiskMaterializationInput,
+  type PortfolioRiskReductionMaterialization,
+} from "./risk/portfolio-risk-materialization.js";
+export {
+  PORTFOLIO_RISK_PREFLIGHT_SCHEMA_VERSION,
+  evaluatePortfolioRiskPreflight,
+  rehydratePortfolioRiskPreflight,
+  type PortfolioRiskActionProposal,
+  type PortfolioRiskPreflight,
+  type PortfolioRiskPreflightIdentity,
+  type PortfolioRiskPreflightInput,
+  type PortfolioRiskPreflightReplayInputs,
+} from "./risk/portfolio-risk-preflight.js";
+export {
+  PORTFOLIO_RISK_POLICY_SCHEMA_VERSION,
+  createPortfolioRiskPolicy,
+  portfolioRiskPolicyHash,
+  type PortfolioRiskPolicy,
+} from "./risk/portfolio-risk-policy.js";
+export {
   createApproval,
   validateApproval,
   type Approval,

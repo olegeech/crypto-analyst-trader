@@ -85,6 +85,43 @@ does not characterize whether Coinalyze returns explicit zero-liquidation
 hours consistently; use the separate adapter-characterization smoke above for
 that bounded question.
 
+## Bybit portfolio-risk preflight smoke (issue #17)
+
+This explicit live smoke collects a fresh #16 account-evidence bundle, then
+runs the #17 read-only portfolio-risk boundary against a supplied #15 daily
+plan. It does not approve or execute the plan. It is excluded from default
+tests, release checks and CI.
+
+```bash
+npm run smoke:bybit:portfolio-risk -- --live \
+  --environment mainnet \
+  --run-id risk-smoke-2026-10-04 \
+  --daily-plan /path/to/daily-plan.json \
+  --composition /path/to/trusted-risk-composition.mjs
+```
+
+The composition module must be trusted application code with a default export
+containing exactly `policy`, `qualityProfile` and an application-owned
+`qualityBoundary` created from the configured #13 admission policy. The quality
+profile and boundary must match the #13 configuration that produced the plan's
+assessment; #17 re-assesses the plan inputs so serialized issuer/admission
+claims alone cannot establish trust. The CLI does not ship or choose a fallback
+profile, boundary or policy. Never use an arbitrary JSON profile/policy as
+trusted configuration. The plan file is parsed as data and must contain a
+valid canonical `DailyDecisionPlan`.
+
+The command uses only the selected environment's existing macOS Keychain
+credentials and the allowlisted #16/#17 Bybit GET readers. It collects the
+four versioned M1 symbols, does not persist the account bundle or report, and
+prints only status, reason codes, counts, timing, environment and canonical
+hashes. It never prints account identity, balances, positions/orders, raw
+responses or credentials. Exit status is zero only for an evaluated `PASS`;
+pre-auth failure, incomplete evidence, `BLOCK` or an unexpected failure exits
+non-zero. `exchangeWrites` is always zero. Mainnet invocation is an operator
+choice and is not run by CI. If a trusted application composition module is
+not available, stop rather than substituting a test fixture or weakening the
+profile/policy boundary.
+
 ## Bybit Testnet capability probe (issue #7)
 
 Before #8 freezes daily-order contracts, the bounded live capability check is
