@@ -31,6 +31,9 @@ const argumentsForSmoke = [
   "--composition",
   "/tmp/risk-composition.mjs",
 ];
+const ACCOUNT_TIME_SHIFT_MS =
+  Date.parse("2026-09-24T14:00:00.000Z") -
+  Date.parse("2026-10-02T12:00:00.000Z");
 
 function requireValue<T>(value: { ok: true; value: T } | { ok: false }): T {
   assert.equal(value.ok, true);
@@ -47,15 +50,34 @@ function fixtureQualityBoundary(qualityProfile: unknown) {
   );
 }
 
+function shiftAccountTimes<T>(value: T): T {
+  if (typeof value === "string" && /^\d{4}-\d\d-\d\dT.*Z$/.test(value))
+    return new Date(
+      Date.parse(value) + ACCOUNT_TIME_SHIFT_MS,
+    ).toISOString() as T;
+  if (Array.isArray(value))
+    return value.map((entry) => shiftAccountTimes(entry)) as T;
+  if (value !== null && typeof value === "object")
+    return Object.fromEntries(
+      Object.entries(value).map(([key, child]) => [
+        key,
+        shiftAccountTimes(child),
+      ]),
+    ) as T;
+  return value;
+}
+
 function evaluatedResult(marketMaxAgeMs?: number, marketValidForMs?: number) {
   const planning = portfolioRiskPlanningFixture({
     fundingRate: "0",
     ...(marketMaxAgeMs === undefined ? {} : { marketMaxAgeMs }),
     ...(marketValidForMs === undefined ? {} : { marketValidForMs }),
   });
-  const source = portfolioRiskAccountInput({
-    positions: [portfolioRiskPosition()],
-  });
+  const source = shiftAccountTimes(
+    portfolioRiskAccountInput({
+      positions: [portfolioRiskPosition()],
+    }),
+  );
   const hash = hashCanonical({
     exchange: "bybit",
     environment: "demo",
@@ -94,7 +116,7 @@ function evaluatedResult(marketMaxAgeMs?: number, marketValidForMs?: number) {
     createQualityProfile(planning.qualityProfile),
   );
   const evaluationTime = requireValue(
-    parseUtcTimestamp("2026-10-02T12:00:03.000Z"),
+    parseUtcTimestamp("2026-09-24T14:00:03.000Z"),
   );
   const result = evaluatePortfolioRiskPreflight({
     dailyPlan: planning.dailyPlan,
@@ -211,7 +233,7 @@ test("live smoke collects, authenticates and evaluates PASS/BLOCK with stable ex
   const passOutput: string[] = [];
   let providerReads = 0;
   const providerTime = requireValue(
-    parseUtcTimestamp("2026-10-02T12:00:03.000Z"),
+    parseUtcTimestamp("2026-09-24T14:00:03.000Z"),
   );
   const dependencies = {
     loadComposition: async () => ({

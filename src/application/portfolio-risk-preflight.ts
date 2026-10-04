@@ -232,10 +232,17 @@ function toSupplementalEvidence(input: {
     size: position.size.state === "known" ? position.size.value : null,
     leverage:
       position.leverage.state === "known" ? position.leverage.value : null,
+    isReduceOnly:
+      position.isReduceOnly.state === "known"
+        ? position.isReduceOnly.value
+        : null,
   }));
-  if (rows.some((row) => row.size === null))
+  if (rows.some((row) => row.size === null || row.isReduceOnly === null))
     return fail(
-      domainError("INVALID_EVIDENCE", "target position size unavailable"),
+      domainError(
+        "INVALID_EVIDENCE",
+        "target position size or restriction unavailable",
+      ),
     );
   return createPortfolioRiskEvidence({
     schemaVersion: "portfolio-risk-evidence/v1",
@@ -250,6 +257,7 @@ function toSupplementalEvidence(input: {
       side: row.side,
       size: row.size,
       leverage: row.leverage,
+      isReduceOnly: row.isReduceOnly,
     })),
   });
 }

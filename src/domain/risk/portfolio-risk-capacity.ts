@@ -245,8 +245,11 @@ function deriveLeverageChecks(input: {
           policy: input.policy,
         },
       );
-      if (validated.ok) supplementalLeverage = validated.value.leverage;
-      else reasons.add(supplementalFailureCode(validated.error.code));
+      if (validated.ok) {
+        supplementalLeverage = validated.value.leverage;
+        if (validated.value.isReduceOnly)
+          reasons.add("ACCOUNT_RESTRICTION_ACTIVE");
+      } else reasons.add(supplementalFailureCode(validated.error.code));
     }
   }
 
@@ -292,6 +295,13 @@ function deriveLeverageChecks(input: {
     }
 
     for (const position of rowsToCheck) {
+      if (
+        target &&
+        isRelevantPosition(position) &&
+        known(position.isReduceOnly) &&
+        position.isReduceOnly.value
+      )
+        reasons.add("ACCOUNT_RESTRICTION_ACTIVE");
       const value = leverageValue(position);
       const targetFlat = target && isFlatTarget(position);
       const useSupplement =

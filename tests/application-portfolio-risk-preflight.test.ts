@@ -9,6 +9,7 @@ import { mapAccountPositions } from "../src/adapters/bybit-v5/account-read-mappe
 import { hashCanonical } from "../src/domain/identity/canonical-serialization.js";
 import type { AccountEvidenceEnvironment } from "../src/domain/account/account-evidence-bundle.js";
 import { createDailyDecisionPlan } from "../src/domain/planning/daily-decision-plan.js";
+import { rehydratePortfolioRiskPreflight } from "../src/domain/risk/portfolio-risk-preflight.js";
 import { BybitAccountReadError } from "../src/adapters/bybit-v5/account-read-transport.js";
 import {
   parseUtcTimestamp,
@@ -49,6 +50,9 @@ function requireQualityBoundary(
   return result.value;
 }
 const providerTime = utc("2026-10-02T12:00:03.000Z");
+const ACCOUNT_TIME_SHIFT_MS =
+  Date.parse("2026-09-24T14:00:00.000Z") -
+  Date.parse("2026-10-02T12:00:00.000Z");
 const byEnvironment: Record<AccountEvidenceEnvironment, string> = {
   demo: "https://api-demo.bybit.com",
   testnet: "https://api-testnet.bybit.com",
@@ -64,6 +68,23 @@ function queryIdentityHash(environment: AccountEvidenceEnvironment) {
   assert.equal(result.ok, true);
   if (!result.ok) throw new Error("fixture identity hash failed");
   return result.value;
+}
+
+function shiftAccountTimes<T>(value: T): T {
+  if (typeof value === "string" && /^\d{4}-\d\d-\d\dT.*Z$/.test(value))
+    return new Date(
+      Date.parse(value) + ACCOUNT_TIME_SHIFT_MS,
+    ).toISOString() as T;
+  if (Array.isArray(value))
+    return value.map((entry) => shiftAccountTimes(entry)) as T;
+  if (value !== null && typeof value === "object")
+    return Object.fromEntries(
+      Object.entries(value).map(([key, child]) => [
+        key,
+        shiftAccountTimes(child),
+      ]),
+    ) as T;
+  return value;
 }
 
 function accountFixture(
@@ -149,6 +170,7 @@ function targetRows(
             side: options.side ?? "",
             size: options.size ?? "0",
             leverage: options.leverage ?? "1",
+            isReduceOnly: false,
             seq: "-1",
           },
         ],
@@ -543,6 +565,69 @@ test("a successful supplemental read cannot keep an expired account bundle usabl
   assert.equal(result.supplementalEvidenceStatus, "collected");
   assert.equal(result.preflight.verdict, "BLOCK");
   assert.ok(result.preflight.reasonCodes.includes("ACCOUNT_EVIDENCE_STALE"));
+});
+
+test("required analytics that expires during provider reads blocks preflight", async () => {
+  const fixture = portfolioRiskPlanningFixture({ fundingRate: "0" });
+  const qualityProfile = {
+    ...fixture.qualityProfile,
+    roles: fixture.qualityProfile.roles.map((role) =>
+      role.id === "analytics" ? { ...role, maxAgeMs: 1_000 } : role,
+    ),
+  };
+  const qualityBoundary = requireQualityBoundary(
+    createDataQualityBoundary({
+      qualityProfile,
+      issuer: "portfolio-risk-fixture",
+    }),
+  );
+  const assessment = qualityBoundary.assess({
+    sources: [
+      { role: "market", value: fixture.market },
+      { role: "analytics", value: fixture.analytics },
+    ],
+    bundleCutoff: fixture.market.bundleCutoff,
+    evaluationTime: fixture.market.bundleCutoff,
+  });
+  assert.equal(assessment.ok, true);
+  if (!assessment.ok) return;
+  assert.equal(assessment.value.qualityGate, "OK");
+  const dailyPlan = createDailyDecisionPlan({
+    ...fixture.dailyPlan.inputs,
+    assessment: assessment.value,
+  });
+  assert.equal(dailyPlan.ok, true);
+  if (!dailyPlan.ok) return;
+
+  const finalProviderTime = utc(
+    new Date(Date.parse(fixture.market.bundleCutoff) + 3_000).toISOString(),
+  );
+  const setupResult = setup({
+    dailyPlan: dailyPlan.value,
+    account: shiftAccountTimes(accountFixture()),
+    identity: async () => ({
+      ...providerIdentity(),
+      time: Date.parse(finalProviderTime),
+    }),
+    qualityProfile,
+    qualityBoundary,
+    exchangeTime: async () => finalProviderTime,
+  });
+  const result = await setupResult.boundary.prepare(setupResult.input);
+  assert.equal(result.kind, "evaluated", JSON.stringify(result));
+  if (result.kind !== "evaluated") return;
+  assert.equal(result.preflight.evaluationTime, finalProviderTime);
+  assert.equal(result.preflight.verdict, "BLOCK");
+  assert.ok(
+    result.preflight.reasonCodes.includes("REQUIRED_EVIDENCE_STALE"),
+    JSON.stringify(result.preflight.reasonCodes),
+  );
+  const replayed = rehydratePortfolioRiskPreflight(result.preflight);
+  assert.equal(replayed.ok, true);
+  if (replayed.ok) {
+    assert.equal(replayed.value.verdict, "BLOCK");
+    assert.ok(replayed.value.reasonCodes.includes("REQUIRED_EVIDENCE_STALE"));
+  }
 });
 
 test("HOLD and REDUCE never request supplemental leverage", async () => {

@@ -33,6 +33,7 @@ export interface PortfolioRiskLeverageRow {
   readonly size: DecimalValue;
   /** Null records a valid provider row that omitted leverage. */
   readonly leverage: DecimalValue | null;
+  readonly isReduceOnly: boolean;
 }
 
 export interface PortfolioRiskEvidence {
@@ -50,6 +51,7 @@ export interface PortfolioRiskEvidence {
 export interface ValidatedPortfolioRiskLeverageEvidence {
   readonly evidence: PortfolioRiskEvidence;
   readonly leverage: DecimalValue;
+  readonly isReduceOnly: boolean;
 }
 
 const evidenceKeys = [
@@ -112,11 +114,13 @@ function parseRow(value: unknown): Result<PortfolioRiskLeverageRow> {
   if (
     !isRecord(value) ||
     !hasPlainDataProperties(value) ||
-    Reflect.ownKeys(value).length !== 4 ||
+    Reflect.ownKeys(value).length !== 5 ||
     Reflect.ownKeys(value).some(
       (key) =>
         typeof key !== "string" ||
-        !["positionIdx", "side", "size", "leverage"].includes(key),
+        !["positionIdx", "side", "size", "leverage", "isReduceOnly"].includes(
+          key,
+        ),
     )
   )
     return invalid();
@@ -126,7 +130,8 @@ function parseRow(value: unknown): Result<PortfolioRiskLeverageRow> {
     !Number.isSafeInteger(positionIdx) ||
     ![0, 1, 2].includes(positionIdx) ||
     typeof side !== "string" ||
-    !sides.includes(side as (typeof sides)[number])
+    !sides.includes(side as (typeof sides)[number]) ||
+    typeof value.isReduceOnly !== "boolean"
   )
     return invalid();
   const size = decimal(value.size);
@@ -138,6 +143,7 @@ function parseRow(value: unknown): Result<PortfolioRiskLeverageRow> {
     side: side as PortfolioRiskLeverageRow["side"],
     size: size.value,
     leverage: leverage.value,
+    isReduceOnly: value.isReduceOnly,
   });
 }
 
@@ -435,5 +441,9 @@ export function validatePortfolioRiskLeverageEvidence(
   )
     return conflict("supplemental target state changed from pass B");
 
-  return ok({ evidence: evidence.value, leverage: row.leverage });
+  return ok({
+    evidence: evidence.value,
+    leverage: row.leverage,
+    isReduceOnly: row.isReduceOnly,
+  });
 }

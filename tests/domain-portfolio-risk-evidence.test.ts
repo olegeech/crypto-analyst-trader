@@ -45,6 +45,7 @@ function evidenceInput(
         side: "None",
         size: "0",
         leverage: "1",
+        isReduceOnly: false,
       },
     ],
     ...overrides,
@@ -181,6 +182,7 @@ test("supplemental observation cannot replace known or changed pass-B target sta
             side: "None",
             size: "0",
             leverage: "2",
+            isReduceOnly: false,
           },
         ],
       }),
@@ -257,7 +259,15 @@ test("every supplemental fact change changes its canonical identity", () => {
   const first = createPortfolioRiskEvidence(evidenceInput(validAccount()));
   const second = createPortfolioRiskEvidence(
     evidenceInput(validAccount(), {
-      rows: [{ positionIdx: 0, side: "None", size: "0", leverage: "2" }],
+      rows: [
+        {
+          positionIdx: 0,
+          side: "None",
+          size: "0",
+          leverage: "2",
+          isReduceOnly: false,
+        },
+      ],
     }),
   );
   assert.equal(first.ok, true);

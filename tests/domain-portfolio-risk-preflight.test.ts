@@ -19,6 +19,7 @@ import { requireDailyFixture } from "./fixtures/daily-planning-evidence-fixtures
 import {
   decimal as accountDecimal,
   fixture as accountFixture,
+  known as accountKnown,
   withCounts,
 } from "./account-evidence-fixture.js";
 import {
@@ -140,6 +141,7 @@ test("REDUCE produces a quantity-only action or a typed no-op, while HOLD has no
     side: "Buy",
     size: accountDecimal("1", "contracts"),
     positionValue: accountDecimal("100", "USD"),
+    isReduceOnly: accountKnown(true),
   });
   const reduce = evaluate("REDUCE_LONG", {
     account: portfolioRiskAccountInput({ positions: [long] }),
@@ -190,6 +192,40 @@ test("capacity failure blocks the unchanged ADD plan without a partial action", 
   assert.equal(result.actionProposal, null);
   assert.equal(result.projection.addProjection.status, "complete");
   assert.equal(result.economics.outcome, "pass");
+});
+
+test("exchange reduce-only target state blocks ADD without an action", () => {
+  const restricted = portfolioRiskPosition({
+    side: "Buy",
+    size: accountDecimal("1", "contracts"),
+    positionValue: accountDecimal("100", "USD"),
+    isReduceOnly: accountKnown(true),
+  });
+  const source = portfolioRiskAccountInput({ positions: [restricted] });
+  const balance = accountDecimal("1000", "USD");
+  const account = withCounts({
+    ...source,
+    criticalPasses: {
+      A: {
+        ...source.criticalPasses.A!,
+        totals: {
+          ...source.criticalPasses.A!.totals,
+          totalAvailableBalance: balance,
+        },
+      },
+      B: {
+        ...source.criticalPasses.B!,
+        totals: {
+          ...source.criticalPasses.B!.totals,
+          totalAvailableBalance: balance,
+        },
+      },
+    },
+  });
+  const result = evaluate("ADD_LONG", { account });
+  assert.equal(result.verdict, "BLOCK");
+  assert.ok(result.reasonCodes.includes("ACCOUNT_RESTRICTION_ACTIVE"));
+  assert.equal(result.actionProposal, null);
 });
 
 test("identity includes evaluation time and replay inputs include the exact original policy/profile", () => {
@@ -256,7 +292,15 @@ test("plan, account, policy, profile and supplemental evidence each affect ident
       accountEvidenceHash: accountHash,
       symbol: "ETHUSDT",
       observedAt: parsedAccount.collectionEndedAt,
-      rows: [{ positionIdx: 0, side: "None", size: "0", leverage: "1" }],
+      rows: [
+        {
+          positionIdx: 0,
+          side: "None",
+          size: "0",
+          leverage: "1",
+          isReduceOnly: false,
+        },
+      ],
     }),
   );
   const supplementalChanged = requireDailyFixture(

@@ -14,10 +14,16 @@ import {
 } from "../planning/daily-decision-plan.js";
 import type { OrderIntent } from "../planning/order-intent.js";
 import {
+  createLiquidationEvidenceBundle,
+  createLiquidationEvidenceRef,
+} from "../liquidation/liquidation-evidence-bundle.js";
+import { admitQualitySource } from "../quality/quality-inputs.js";
+import {
   createQualityProfile,
   hashQualityProfile,
   type QualityProfile,
 } from "../quality/quality-profile.js";
+import { classifyQualityEvidence } from "../quality/quality-validation.js";
 import { deepFreeze } from "../shared/deep-freeze.js";
 import { domainError } from "../shared/errors.js";
 import { fail, ok, type Result } from "../shared/result.js";
@@ -317,10 +323,69 @@ function deriveActionProposal(input: {
   }
 }
 
+function hasBlockingStaleQualityEvidence(
+  dailyPlan: DailyDecisionPlan,
+  qualityProfile: QualityProfile,
+  evaluationTime: UtcTimestamp,
+): Result<boolean> {
+  const planning = prepareDailyPlanningInputs(dailyPlan.inputs);
+  if (!planning.ok) return invalid("quality freshness inputs are invalid");
+
+  const records = [
+    admitQualitySource({ role: "market", value: planning.value.market }),
+    admitQualitySource({ role: "analytics", value: planning.value.analytics }),
+  ];
+  if (dailyPlan.inputs.liquidation !== undefined) {
+    const liquidation = createLiquidationEvidenceBundle(
+      dailyPlan.inputs.liquidation,
+    );
+    if (!liquidation.ok)
+      return invalid("liquidation freshness input is invalid");
+    const liquidationHash = hashCanonical(liquidation.value);
+    if (!liquidationHash.ok) return liquidationHash;
+    const liquidationPolicy = qualityProfile.roles.find(
+      (role) => role.id === "liquidation",
+    );
+    if (!liquidationPolicy)
+      return invalid("liquidation freshness policy is unavailable");
+    const evidenceRef = createLiquidationEvidenceRef(
+      liquidation.value,
+      liquidationHash.value,
+      liquidationPolicy.maxAgeMs,
+    );
+    if (!evidenceRef.ok) return evidenceRef;
+    records.push(
+      admitQualitySource({
+        role: "liquidation",
+        value: liquidation.value,
+        evidenceRef: evidenceRef.value,
+      }),
+    );
+  }
+
+  const findings = classifyQualityEvidence(
+    records,
+    qualityProfile,
+    planning.value.market.bundleCutoff,
+    evaluationTime,
+  );
+  return ok(
+    findings.some(
+      (finding) => finding.blocking && finding.reasonCode === "STALE_EVIDENCE",
+    ),
+  );
+}
+
 function buildPreflight(rawInputs: unknown): Result<PortfolioRiskPreflight> {
   const parsed = parseInput(rawInputs);
   if (!parsed.ok) return parsed;
   const inputs = parsed.value;
+  const staleRequiredEvidence = hasBlockingStaleQualityEvidence(
+    inputs.dailyPlan,
+    inputs.qualityProfile,
+    inputs.evaluationTime,
+  );
+  if (!staleRequiredEvidence.ok) return staleRequiredEvidence;
   const identity = identityFor(inputs);
   if (!identity.ok) return identity;
 
@@ -349,6 +414,7 @@ function buildPreflight(rawInputs: unknown): Result<PortfolioRiskPreflight> {
   const reasons = new Set<PortfolioRiskBlockReasonCode>(
     projection.value.sharedAdmission.reasonCodes,
   );
+  if (staleRequiredEvidence.value) reasons.add("REQUIRED_EVIDENCE_STALE");
   if (recommendation === "ADD_LONG") {
     for (const code of capacity.value.reasonCodes) reasons.add(code);
     for (const code of economics.value.reasonCodes) reasons.add(code);
@@ -359,6 +425,7 @@ function buildPreflight(rawInputs: unknown): Result<PortfolioRiskPreflight> {
   if (!normalizedReasons.ok) return invalid();
 
   const blocked =
+    staleRequiredEvidence.value ||
     projection.value.sharedAdmission.status === "blocked" ||
     (recommendation === "ADD_LONG" &&
       (capacity.value.outcome !== "pass" ||

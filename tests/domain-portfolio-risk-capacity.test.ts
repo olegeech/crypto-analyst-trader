@@ -58,8 +58,29 @@ function accountWithAvailableBalance(value: string) {
 
 function accountWithPositions(
   positions: readonly ReturnType<typeof portfolioRiskPosition>[],
+  availableBalance = "100",
 ) {
-  return portfolioRiskAccountInput({ positions });
+  const source = portfolioRiskAccountInput({ positions });
+  const balance = accountDecimal(availableBalance, "USD");
+  return withCounts({
+    ...source,
+    criticalPasses: {
+      A: {
+        ...source.criticalPasses.A!,
+        totals: {
+          ...source.criticalPasses.A!.totals,
+          totalAvailableBalance: balance,
+        },
+      },
+      B: {
+        ...source.criticalPasses.B!,
+        totals: {
+          ...source.criticalPasses.B!.totals,
+          totalAvailableBalance: balance,
+        },
+      },
+    },
+  });
 }
 
 function evaluate(
@@ -254,6 +275,18 @@ test("unknown target or above-policy relevant leverage blocks ADD", () => {
   assert.ok(missing.reasonCodes.includes("LEVERAGE_UNKNOWN"));
 });
 
+test("an exchange reduce-only target position blocks ADD", () => {
+  const restricted = portfolioRiskPosition({
+    side: "Buy",
+    size: accountDecimal("1", "contracts"),
+    positionValue: accountDecimal("100", "USD"),
+    isReduceOnly: known(true),
+  });
+  const result = evaluate(accountWithPositions([restricted], "1000"));
+  assert.equal(result.outcome, "block");
+  assert.ok(result.reasonCodes.includes("ACCOUNT_RESTRICTION_ACTIVE"));
+});
+
 test("compatible supplemental evidence supplies only a missing flat target leverage", () => {
   const rawAccount = accountFixture();
   const account = createAccountEvidenceBundle(rawAccount);
@@ -271,7 +304,15 @@ test("compatible supplemental evidence supplies only a missing flat target lever
       accountEvidenceHash: accountHash.value,
       symbol: "BTCUSDT",
       observedAt: evaluationTime,
-      rows: [{ positionIdx: 0, side: "None", size: "0", leverage: "1" }],
+      rows: [
+        {
+          positionIdx: 0,
+          side: "None",
+          size: "0",
+          leverage: "1",
+          isReduceOnly: false,
+        },
+      ],
     }),
   );
   const result = evaluate(rawAccount, { supplementalEvidence: [evidence] });
@@ -297,13 +338,54 @@ test("compatible supplemental evidence supplies only a missing flat target lever
       accountEvidenceHash: knownHash.value,
       symbol: "BTCUSDT",
       observedAt: evaluationTime,
-      rows: [{ positionIdx: 0, side: "None", size: "0", leverage: "2" }],
+      rows: [
+        {
+          positionIdx: 0,
+          side: "None",
+          size: "0",
+          leverage: "2",
+          isReduceOnly: false,
+        },
+      ],
     }),
   );
   const overridden = evaluate(knownTarget, {
     supplementalEvidence: [override],
   });
   assert.ok(overridden.reasonCodes.includes("SUPPLEMENTAL_EVIDENCE_CONFLICT"));
+});
+
+test("supplemental reduce-only target state blocks ADD", () => {
+  const rawAccount = accountFixture();
+  const account = createAccountEvidenceBundle(rawAccount);
+  assert.equal(account.ok, true);
+  if (!account.ok) return;
+  const accountHash = accountEvidenceContentHash(account.value);
+  assert.equal(accountHash.ok, true);
+  if (!accountHash.ok) return;
+  const evidence = requireDailyFixture(
+    createPortfolioRiskEvidence({
+      schemaVersion: "portfolio-risk-evidence/v1",
+      kind: "target-leverage",
+      environment: account.value.accountBinding.environment,
+      accountIdentityHash: account.value.accountBinding.accountIdentityHash,
+      accountEvidenceHash: accountHash.value,
+      symbol: "BTCUSDT",
+      observedAt: evaluationTime,
+      rows: [
+        {
+          positionIdx: 0,
+          side: "None",
+          size: "0",
+          leverage: "1",
+          isReduceOnly: true,
+        },
+      ],
+    }),
+  );
+  const result = evaluate(rawAccount, { supplementalEvidence: [evidence] });
+  assert.equal(result.outcome, "block");
+  assert.ok(result.reasonCodes.includes("ACCOUNT_RESTRICTION_ACTIVE"));
 });
 
 test("HOLD and REDUCE do not require capacity or leverage evidence", () => {
