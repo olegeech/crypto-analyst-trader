@@ -34,6 +34,9 @@
     "probe:bybit:testnet:recover": "node --import tsx scripts/bybit-capability-probe.ts --manual-recover --environment testnet",
     "verify:bybit:demo-adapter": "node --import tsx scripts/bybit-demo-adapter-verification.ts",
     "trader:demo": "node --import tsx src/cli/trader-demo.ts",
+    "daily:prepare": "node --import tsx src/cli/daily.ts prepare",
+    "daily:review": "node --import tsx src/cli/daily.ts review",
+    "daily:approve": "node --import tsx src/cli/daily.ts approve",
     "audit:dependencies": "npm audit --audit-level=high",
     "test": "node --import tsx --test tests/**/*.test.ts",
     "test:release": "npm run typecheck && npm run lint && npm run format:check && npm run check:repository-safety && npm test"

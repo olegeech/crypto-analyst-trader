@@ -12,6 +12,46 @@ It applies to direct Bybit execution. Product boundaries live in `README.md`,
 and mandatory safety rules live in `docs/architecture/invariants.md`. If this
 runbook conflicts with an invariant, the invariant wins.
 
+## Released daily prepare, review and consent (issue #19)
+
+This M1 path ends at decision-only consent, **not execution**. Explicit prepare
+performs bounded public Bybit mainnet and Coinalyze reads, then selected-environment
+authenticated account/risk GETs. It never trades. Configure credentials in Keychain
+before an operator-authorized live run; these commands are absent from default CI.
+
+```bash
+npm run daily:prepare -- --environment mainnet --symbol BTCUSDT --allocation 100
+npm run daily:review -- --environment mainnet --prepared-hash sha256:<exact-64-hex>
+npm run daily:approve -- --environment mainnet --prepared-hash sha256:<exact-64-hex>
+```
+
+Substitute the exact `PREPARED_HASH`, not a filename or latest alias. Private
+canonical artifacts use the existing environment SQLite database with authenticated
+hashed account scope; no default report file is created. Review/approve work offline
+after restart, reproduce the saved snapshot, and never recollect or reprice. No
+`--daily-plan`, `--composition`, `--actor`, policy/time override or automatic yes
+option exists. Actor is derived from the local OS identity; approval needs a terminal
+and explicit `yes`. REVIEW also needs a nonblank note (prompt or `--note`).
+
+The fixed `provisional-m1-v1` policy requires native returns, funding, OI,
+liquidation imbalance and ATR. External Regime/CEWS/LSI/Trap absence and provisional
+policy are visible informational metadata, not REVIEW triggers. Real non-blocking
+quality degradation or exceptional warnings produce REVIEW. Missing required native
+data fails closed; Coinalyze omitted hours remain unknown under #99 and can block.
+
+ADD requires a flat target with no active target orders; other account state is
+evaluated by risk. HOLD is no action, and REDUCE is a declarative quantity-only
+proposal/no-op, not execution authority. Review shows normalized Limit/GTC grid/TP,
+quality, target comparison, aggregate capacity/economics, policy identities and
+historical provider evaluation time. Consent expires 15 minutes after approval;
+the exact expiry is expired. Neither consent nor TTL refreshes stale account facts
+or creates authority for a future exchange write.
+
+Exit codes: 0 success, 2 invalid input, 3 declined/noninteractive consent, 4 unavailable
+provider/admission, 5 BLOCKED/invalid approval, 1 unexpected failure. Reasons are
+shown separately. An upstream failure has no invented prepared/account hash; a
+trustworthy account-bound risk BLOCK can be saved as a BLOCKED review artifact.
+
 ## Bybit public market evidence smoke (issue #11)
 
 The public market-evidence boundary uses unsigned Bybit mainnet REST reads and
@@ -87,6 +127,8 @@ that bounded question.
 
 ## Bybit portfolio-risk preflight smoke (issue #17)
 
+This adapter integration diagnostic is not the normal daily operator entry point;
+use the released `daily:prepare` command above for application-owned composition.
 This explicit live smoke collects a fresh #16 account-evidence bundle, then
 runs the #17 read-only portfolio-risk boundary against a supplied #15 daily
 plan. It does not approve or execute the plan. It is excluded from default
