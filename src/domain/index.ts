@@ -224,6 +224,14 @@ export {
   type ValidatedPortfolioRiskLeverageEvidence,
 } from "./risk/portfolio-risk-evidence.js";
 export {
+  PORTFOLIO_RISK_PROJECTION_SCHEMA_VERSION,
+  createPortfolioRiskProjection,
+  type PortfolioRiskExposureLine,
+  type PortfolioRiskProjection,
+  type PortfolioRiskProjectionFact,
+  type PortfolioRiskProjectionInput,
+} from "./risk/portfolio-risk-projection.js";
+export {
   PORTFOLIO_RISK_POLICY_SCHEMA_VERSION,
   createPortfolioRiskPolicy,
   portfolioRiskPolicyHash,
