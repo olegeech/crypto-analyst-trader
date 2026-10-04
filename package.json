@@ -24,6 +24,7 @@
     "credentials:connect:mainnet": "node --import tsx scripts/credentials-connect.ts mainnet",
     "test:testnet": "node --import tsx scripts/testnet-smoke.ts",
     "smoke:bybit:account": "node --import tsx scripts/bybit-account-smoke.ts",
+    "smoke:bybit:portfolio-risk": "node --import tsx scripts/smoke-bybit-portfolio-risk.ts",
     "test:bybit:public": "TRADER_ENV=public-mainnet node --import tsx scripts/public-market-smoke.ts",
     "coinalyze:liquidation:smoke": "node --import tsx scripts/coinalyze-liquidation-smoke.ts",
     "coinalyze:liquidation:full-smoke": "TRADER_ENV=public-mainnet node --import tsx scripts/coinalyze-liquidation-full-smoke.ts",

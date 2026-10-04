@@ -20,6 +20,7 @@ export function portfolioRiskPlanningFixture(
     readonly fundingRate?: string;
     readonly tickerObservedAt?: string;
     readonly marketMaxAgeMs?: number;
+    readonly marketValidForMs?: number;
     readonly planningLevels?: readonly {
       readonly atrOffset: string;
       readonly allocationWeight: string;
@@ -57,7 +58,10 @@ export function portfolioRiskPlanningFixture(
           },
         },
   );
-  const market = marketFixture({ ...marketPayload, symbols });
+  const market = marketFixture(
+    { ...marketPayload, symbols },
+    options.marketValidForMs,
+  );
   const analytics = analyticsFixture(market, {
     profile: {
       schemaVersion: "analytics-profile/v1",

@@ -14,6 +14,7 @@ import {
 } from "../market/market-evidence-bundle.js";
 import { prepareDailyPlanningInputs } from "../planning/daily-planning-inputs.js";
 import { rehydrateDailyDecisionPlan } from "../planning/daily-decision-plan.js";
+import type { DailyCandidateLeg } from "../planning/daily-entry-grid.js";
 import { deepFreeze } from "../shared/deep-freeze.js";
 import { DecimalValue } from "../shared/decimal.js";
 import { domainError } from "../shared/errors.js";
@@ -42,7 +43,8 @@ export type PortfolioRiskProjectionFact =
   | { readonly state: "not-evaluated" };
 
 export interface PortfolioRiskExposureLine {
-  readonly source: "position" | "open-order" | "spot-inventory" | "cash";
+  readonly source:
+    "position" | "open-order" | "planned-order" | "spot-inventory" | "cash";
   readonly category: "linear" | "inverse" | "spot" | "option" | null;
   readonly symbol: string;
   readonly side: string | null;
@@ -73,6 +75,7 @@ export interface PortfolioRiskProjection {
     readonly availableBalance: PortfolioRiskProjectionFact;
     readonly currentDerivativesGrossUsd: PortfolioRiskProjectionFact;
     readonly pendingDerivativesGrossUsd: PortfolioRiskProjectionFact;
+    readonly plannedDerivativesGrossUsd: PortfolioRiskProjectionFact;
     readonly spotInventoryGrossUsd: PortfolioRiskProjectionFact;
     readonly totalGrossExposureUsd: PortfolioRiskProjectionFact;
     readonly exposures: readonly PortfolioRiskExposureLine[];
@@ -94,6 +97,7 @@ type SupportedCategory = "linear" | "inverse" | "spot" | "option";
 type ExposureTotals = {
   derivatives: DecimalValue;
   pending: DecimalValue;
+  planned: DecimalValue;
   spot: DecimalValue;
   readonly exposures: PortfolioRiskExposureLine[];
   readonly reasonCodes: Set<PortfolioRiskBlockReasonCode>;
@@ -207,6 +211,26 @@ function projectPositions(
         : undefined;
     const notional = positionNotional(position, instrument);
     const positive = size?.isPositive() ?? true;
+    const zeroSizeHasNotional =
+      size?.isZero() === true &&
+      known(position.positionValue) &&
+      !position.positionValue.value.isZero();
+    if (zeroSizeHasNotional) {
+      totals.reasonCodes.add("CURRENT_STATE_UNVALUABLE");
+      totals.exposures.push(
+        line({
+          source: "position",
+          category,
+          symbol: position.symbol,
+          side: position.side,
+          quantity: size,
+          quantityUnit: position.size.unit,
+          notionalUsd: null,
+          treatment: "unvalued",
+        }),
+      );
+      continue;
+    }
     if (!positive) {
       totals.exposures.push(
         line({
@@ -259,6 +283,27 @@ function projectPositions(
         quantity: size,
         quantityUnit: "contracts",
         notionalUsd: notional,
+        treatment: "gross-exposure",
+      }),
+    );
+  }
+}
+
+function projectPlannedOrders(
+  legs: readonly DailyCandidateLeg[],
+  totals: ExposureTotals,
+): void {
+  for (const leg of legs) {
+    totals.planned = totals.planned.add(leg.intent.notional);
+    totals.exposures.push(
+      line({
+        source: "planned-order",
+        category: "linear",
+        symbol: leg.intent.instrument,
+        side: leg.intent.side,
+        quantity: leg.intent.quantity,
+        quantityUnit: "contracts",
+        notionalUsd: leg.intent.notional,
         treatment: "gross-exposure",
       }),
     );
@@ -449,7 +494,34 @@ function projectWallet(
 ): void {
   const pass = account.criticalPasses.B;
   if (!pass) return;
+  function checkLiabilityFacts(
+    facts: readonly AccountEvidenceDecimalFact[],
+  ): void {
+    for (const fact of facts) {
+      if (!known(fact) || fact.unit !== "coin") {
+        totals.reasonCodes.add("REQUIRED_ACCOUNT_FACT_UNKNOWN");
+      } else if (!fact.value.isZero()) {
+        // M1 does not net borrow or interest against the provider's available balance.
+        totals.reasonCodes.add("ACCOUNT_LIABILITY_UNMODELED");
+      }
+    }
+  }
+  for (const collateral of pass.collateral)
+    checkLiabilityFacts([
+      collateral.borrowAmount,
+      collateral.otherBorrowAmount,
+    ]);
   for (const asset of pass.assets) {
+    if (!known(asset.restricted) || asset.restricted.value === "unknown")
+      totals.reasonCodes.add("REQUIRED_ACCOUNT_FACT_UNKNOWN");
+    else if (asset.restricted.value !== "unrestricted")
+      totals.reasonCodes.add("ACCOUNT_RESTRICTION_ACTIVE");
+    checkLiabilityFacts([
+      asset.borrowAmount,
+      asset.spotBorrow,
+      asset.accruedInterest,
+    ]);
+
     const balanceKnown = known(asset.walletBalance);
     const balance = balanceKnown ? asset.walletBalance.value : null;
     const cash = asset.coin === "USDT" || asset.coin === "USDC";
@@ -495,7 +567,21 @@ function projectWallet(
       continue;
     }
     if (balance.isZero()) {
-      if (cash)
+      if (known(asset.usdValue) && asset.usdValue.value.isPositive()) {
+        totals.reasonCodes.add("CURRENT_STATE_UNVALUABLE");
+        totals.exposures.push(
+          line({
+            source: cash ? "cash" : "spot-inventory",
+            category: "spot",
+            symbol: asset.coin,
+            side: null,
+            quantity: balance,
+            quantityUnit: "coin",
+            notionalUsd: null,
+            treatment: "unvalued",
+          }),
+        );
+      } else if (cash)
         totals.exposures.push(
           line({
             source: "cash",
@@ -652,6 +738,7 @@ function buildProjection(
     availableBalance: notEvaluated(),
     currentDerivativesGrossUsd: notEvaluated(),
     pendingDerivativesGrossUsd: notEvaluated(),
+    plannedDerivativesGrossUsd: notEvaluated(),
     spotInventoryGrossUsd: notEvaluated(),
     totalGrossExposureUsd: notEvaluated(),
     exposures: emptyExposure,
@@ -667,6 +754,7 @@ function buildProjection(
     const totals: ExposureTotals = {
       derivatives: zero.value,
       pending: zero.value,
+      planned: zero.value,
       spot: zero.value,
       exposures: [],
       reasonCodes: new Set(),
@@ -681,15 +769,26 @@ function buildProjection(
     else if (!availableBalance.value.isPositive()) {
       // Non-positive provider capacity is known and is handled by U4 as zero.
     }
+    const targetInstrument = p.market.symbols.find(
+      (row) => row.symbol === p.symbol,
+    )?.instrument;
+    if (targetInstrument?.status !== "trading")
+      totals.reasonCodes.add("TARGET_INSTRUMENT_NOT_TRADING");
     projectPositions(bundle, p.market, totals);
     projectOrders(bundle, p.market, p.symbol, totals);
+    if (!Array.isArray(plan.value.candidateLegs))
+      return invalid("ADD plan is missing candidate legs");
+    projectPlannedOrders(plan.value.candidateLegs, totals);
     projectWallet(bundle, totals);
     const normalizedReasons = createPortfolioRiskBlockReasonCodes([
       ...totals.reasonCodes,
     ]);
     if (!normalizedReasons.ok) return invalid();
     const projectionComplete = normalizedReasons.value.length === 0;
-    const totalGross = totals.derivatives.add(totals.pending).add(totals.spot);
+    const totalGross = totals.derivatives
+      .add(totals.pending)
+      .add(totals.planned)
+      .add(totals.spot);
     const unavailable: PortfolioRiskProjectionFact = { state: "unavailable" };
     addProjection = {
       status: projectionComplete ? "complete" : "blocked",
@@ -700,6 +799,9 @@ function buildProjection(
         : unavailable,
       pendingDerivativesGrossUsd: projectionComplete
         ? amount(totals.pending)
+        : unavailable,
+      plannedDerivativesGrossUsd: projectionComplete
+        ? amount(totals.planned)
         : unavailable,
       spotInventoryGrossUsd: projectionComplete
         ? amount(totals.spot)

@@ -58,6 +58,7 @@ export function fixtureCanonicalHash(value: unknown) {
 /** Small partial source facts; overrides are validated and the embedded ref is rebuilt. */
 export function marketFixture(
   overrides: Partial<Omit<MarketEvidenceBundle, "evidence">> = {},
+  validForMs = MARKET_EVIDENCE_VALID_FOR_MS,
 ): MarketEvidenceBundle {
   const runId = overrides.runId ?? DATA_QUALITY_FIXTURE_RUN_ID;
   const bundleCutoff =
@@ -69,7 +70,7 @@ export function marketFixture(
     producer: MARKET_EVIDENCE_PRODUCER,
     sourceId: `bybit-public:${runId}`,
     asOf: bundleCutoff,
-    validForMs: MARKET_EVIDENCE_VALID_FOR_MS,
+    validForMs,
   };
   const provisional = requireFixture(
     createMarketEvidenceBundle({

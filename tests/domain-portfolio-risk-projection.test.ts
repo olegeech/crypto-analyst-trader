@@ -7,7 +7,9 @@ import { createAccountEvidenceBundle } from "../src/domain/account/account-evide
 import { createDailyDecisionPlan } from "../src/domain/planning/daily-decision-plan.js";
 import { createPortfolioRiskProjection } from "../src/domain/risk/portfolio-risk-projection.js";
 import { createPortfolioRiskPolicy } from "../src/domain/risk/portfolio-risk-policy.js";
+import { DecimalValue } from "../src/domain/shared/decimal.js";
 import { analyticsFixture } from "./fixtures/data-quality-fixtures.js";
+import { marketFixture } from "./fixtures/data-quality-fixtures.js";
 import {
   dailyQualityProfileFixture,
   requireDailyFixture,
@@ -32,9 +34,29 @@ const evaluationTime = "2026-10-02T12:00:02.000Z";
 
 function planningInput(
   recommendation: "ADD_LONG" | "REDUCE_LONG" | "HOLD_LONG" = "ADD_LONG",
+  targetInstrumentStatus?: "trading" | "non-trading" | "unavailable",
 ) {
   const raw = dailyDecisionInputFixture();
-  const market = portfolioRiskMarketFixture();
+  const originalMarket = portfolioRiskMarketFixture();
+  const { evidence: _evidence, ...marketPayload } = originalMarket;
+  void _evidence;
+  const market =
+    targetInstrumentStatus === undefined
+      ? originalMarket
+      : marketFixture({
+          ...marketPayload,
+          symbols: marketPayload.symbols.map((row) =>
+            row.symbol !== "BTCUSDT" || row.instrument === undefined
+              ? row
+              : {
+                  ...row,
+                  instrument: {
+                    ...row.instrument,
+                    status: targetInstrumentStatus,
+                  },
+                },
+          ),
+        });
   const analytics = analyticsFixture(market, {
     profile: {
       schemaVersion: "analytics-profile/v1",
@@ -104,13 +126,16 @@ function projection(
   options: {
     readonly recommendation?: "ADD_LONG" | "REDUCE_LONG" | "HOLD_LONG";
     readonly evaluationTime?: string;
+    readonly targetInstrumentStatus?: "trading" | "non-trading" | "unavailable";
   } = {},
 ) {
   const dailyPlan = requireDailyFixture(
-    createDailyDecisionPlan(planningInput(options.recommendation)),
+    createDailyDecisionPlan(
+      planningInput(options.recommendation, options.targetInstrumentStatus),
+    ),
   );
   const account = createAccountEvidenceBundle(accountInput);
-  assert.equal(account.ok, true);
+  assert.equal(account.ok, true, account.ok ? "" : account.error.message);
   if (!account.ok) throw new Error("account fixture must be valid");
   const policy = requireDailyFixture(
     createPortfolioRiskPolicy(portfolioRiskPolicyInput()),
@@ -286,6 +311,100 @@ test("existing supported positions and open limit orders each contribute once", 
     );
 });
 
+test("projected gross exposure includes current positions, open orders and planned ADD legs once", () => {
+  const input = portfolioRiskAccountInput({
+    positions: [
+      portfolioRiskPosition({
+        symbol: "BTCUSDT",
+        side: "Buy",
+        size: accountDecimal("1", "contracts"),
+        positionValue: accountDecimal("100", "USD"),
+      }),
+      portfolioRiskPosition({
+        symbol: "ETHUSDT",
+        side: "Buy",
+        size: accountDecimal("1", "contracts"),
+        positionValue: accountDecimal("200", "USD"),
+      }),
+    ],
+    orders: [
+      portfolioRiskOrder({
+        orderId: "eth-open-1",
+        symbol: "ETHUSDT",
+        side: "Buy",
+        qty: accountDecimal("1", "contracts"),
+        leavesQty: accountDecimal("0.5", "contracts"),
+        price: accountDecimal("200", "price"),
+      }),
+    ],
+  });
+  const result = projection(input);
+  assert.equal(result.addProjection.status, "complete");
+  const plan = requireDailyFixture(
+    createDailyDecisionPlan(planningInput("ADD_LONG")),
+  );
+  if (plan.decision.recommendation !== "ADD_LONG")
+    throw new Error("ADD fixture must retain its candidate legs");
+  if (!Array.isArray(plan.candidateLegs))
+    throw new Error("ADD fixture is missing its candidate legs");
+  const candidateLegs = plan.candidateLegs;
+  const zero = requireDailyFixture(DecimalValue.fromString("0"));
+  const plannedNotional = candidateLegs.reduce(
+    (total, leg) => total.add(leg.intent.notional),
+    zero,
+  );
+  assert.equal(result.addProjection.plannedDerivativesGrossUsd.state, "known");
+  if (
+    result.addProjection.plannedDerivativesGrossUsd.state !== "known" ||
+    result.addProjection.currentDerivativesGrossUsd.state !== "known" ||
+    result.addProjection.pendingDerivativesGrossUsd.state !== "known" ||
+    result.addProjection.spotInventoryGrossUsd.state !== "known" ||
+    result.addProjection.totalGrossExposureUsd.state !== "known"
+  )
+    return;
+  assert.equal(
+    result.addProjection.plannedDerivativesGrossUsd.value.toString(),
+    plannedNotional.toString(),
+  );
+  assert.equal(
+    result.addProjection.exposures.filter(
+      (line) => line.source === "planned-order",
+    ).length,
+    candidateLegs.length,
+  );
+  const expectedTotal = result.addProjection.currentDerivativesGrossUsd.value
+    .add(result.addProjection.pendingDerivativesGrossUsd.value)
+    .add(result.addProjection.plannedDerivativesGrossUsd.value)
+    .add(result.addProjection.spotInventoryGrossUsd.value);
+  const existingExposure = requireDailyFixture(DecimalValue.fromString("400"));
+  assert.equal(
+    expectedTotal.toString(),
+    plannedNotional.add(existingExposure).toString(),
+  );
+  assert.equal(
+    result.addProjection.totalGrossExposureUsd.value.toString(),
+    expectedTotal.toString(),
+  );
+});
+
+test("zero-size positions with nonzero provider notional block ADD as contradictory", () => {
+  const input = portfolioRiskAccountInput({
+    positions: [
+      portfolioRiskPosition({
+        symbol: "BTCUSDT",
+        side: "None",
+        size: accountDecimal("0", "contracts"),
+        positionValue: accountDecimal("100", "USD"),
+      }),
+    ],
+  });
+  const result = projection(input);
+  assert.equal(result.addProjection.status, "blocked");
+  assert.ok(
+    result.addProjection.reasonCodes.includes("CURRENT_STATE_UNVALUABLE"),
+  );
+});
+
 test("protective close orders are reported separately and do not create short exposure", () => {
   const input = portfolioRiskAccountInput({
     positions: [
@@ -398,7 +517,7 @@ test("out-of-universe contracts and unpriced increasing orders block ADD, not HO
   );
 });
 
-test("non-cash spot inventory is counted once; cash and optional restriction are not a second budget", () => {
+test("non-cash spot inventory is counted once; cash is not a second budget", () => {
   const input = portfolioRiskAccountInput({
     assets: [
       portfolioRiskWalletAsset("BTC", {
@@ -406,14 +525,14 @@ test("non-cash spot inventory is counted once; cash and optional restriction are
         usdValue: "100",
         collateralEligible: false,
         collateralSwitch: "not-applicable",
-        restricted: null,
+        restricted: "unrestricted",
       }),
     ],
     collateral: [
       portfolioRiskCollateral("BTC", {
         collateralEligible: false,
         collateralSwitch: "not-applicable",
-        restricted: null,
+        restricted: "unrestricted",
       }),
     ],
   });
@@ -459,4 +578,197 @@ test("positive non-cash inventory without provider USD valuation is not zero-fil
     result.addProjection.reasonCodes.includes("CURRENT_STATE_UNVALUABLE"),
   );
   assert.equal(result.addProjection.spotInventoryGrossUsd.state, "unavailable");
+});
+
+test("zero coin balance with positive provider USD value is contradictory", () => {
+  const input = portfolioRiskAccountInput({
+    assets: [
+      portfolioRiskWalletAsset("BTC", {
+        balance: "0",
+        usdValue: "100",
+        collateralEligible: false,
+        collateralSwitch: "not-applicable",
+      }),
+    ],
+    collateral: [
+      portfolioRiskCollateral("BTC", {
+        collateralEligible: false,
+        collateralSwitch: "not-applicable",
+      }),
+    ],
+  });
+  const result = projection(input);
+  assert.equal(result.addProjection.status, "blocked");
+  assert.ok(
+    result.addProjection.reasonCodes.includes("CURRENT_STATE_UNVALUABLE"),
+  );
+  assert.ok(
+    result.addProjection.exposures.some(
+      (line) =>
+        line.symbol === "BTC" &&
+        line.treatment === "unvalued" &&
+        line.notionalUsd === null,
+    ),
+  );
+});
+
+test("active, unknown, or unavailable collateral restrictions block ADD", () => {
+  for (const restricted of ["restricted", "near-limit", "unknown"] as const) {
+    const input = portfolioRiskAccountInput({
+      assets: [
+        portfolioRiskWalletAsset("BTC", {
+          balance: "0",
+          usdValue: "0",
+          collateralEligible: false,
+          collateralSwitch: "not-applicable",
+          restricted,
+        }),
+      ],
+      collateral: [
+        portfolioRiskCollateral("BTC", {
+          collateralEligible: false,
+          collateralSwitch: "not-applicable",
+          restricted: null,
+        }),
+      ],
+    });
+    const result = projection(input);
+    assert.equal(result.addProjection.status, "blocked", restricted);
+    assert.ok(
+      result.addProjection.reasonCodes.includes(
+        restricted === "unknown"
+          ? "REQUIRED_ACCOUNT_FACT_UNKNOWN"
+          : "ACCOUNT_RESTRICTION_ACTIVE",
+      ),
+    );
+  }
+  const unavailable = portfolioRiskAccountInput({
+    assets: [
+      portfolioRiskWalletAsset("BTC", {
+        restricted: null,
+        collateralEligible: false,
+        collateralSwitch: "not-applicable",
+      }),
+    ],
+    collateral: [
+      portfolioRiskCollateral("BTC", {
+        collateralEligible: false,
+        collateralSwitch: "not-applicable",
+        restricted: null,
+      }),
+    ],
+  });
+  const result = projection(unavailable);
+  assert.equal(result.addProjection.status, "blocked");
+  assert.ok(
+    result.addProjection.reasonCodes.includes("REQUIRED_ACCOUNT_FACT_UNKNOWN"),
+  );
+});
+
+test("unmodeled borrow and accrued-interest liabilities block ADD", () => {
+  const borrowed = portfolioRiskAccountInput({
+    assets: [
+      {
+        ...portfolioRiskWalletAsset("BTC", {
+          balance: "1",
+          usdValue: "50",
+          collateralEligible: false,
+          collateralSwitch: "not-applicable",
+        }),
+        spotBorrow: accountDecimal("1", "coin"),
+      },
+    ],
+    collateral: [
+      portfolioRiskCollateral("BTC", {
+        collateralEligible: false,
+        collateralSwitch: "not-applicable",
+      }),
+    ],
+  });
+  const result = projection(borrowed);
+  assert.equal(result.addProjection.status, "blocked");
+  assert.ok(
+    result.addProjection.reasonCodes.includes("ACCOUNT_LIABILITY_UNMODELED"),
+  );
+  const collateralDebt = portfolioRiskAccountInput({
+    assets: [
+      portfolioRiskWalletAsset("BTC", {
+        collateralEligible: false,
+        collateralSwitch: "not-applicable",
+      }),
+    ],
+    collateral: [
+      {
+        ...portfolioRiskCollateral("BTC", {
+          collateralEligible: false,
+          collateralSwitch: "not-applicable",
+        }),
+        otherBorrowAmount: accountDecimal("0.1", "coin"),
+      },
+    ],
+  });
+  const collateralResult = projection(collateralDebt);
+  assert.equal(collateralResult.addProjection.status, "blocked");
+  assert.ok(
+    collateralResult.addProjection.reasonCodes.includes(
+      "ACCOUNT_LIABILITY_UNMODELED",
+    ),
+  );
+});
+
+test("ADD blocks target instruments that are non-trading or unavailable", () => {
+  for (const status of ["non-trading", "unavailable"] as const) {
+    const result = projection(accountFixture(), {
+      targetInstrumentStatus: status,
+    });
+    assert.equal(result.addProjection.status, "blocked", status);
+    assert.ok(
+      result.addProjection.reasonCodes.includes(
+        "TARGET_INSTRUMENT_NOT_TRADING",
+      ),
+    );
+  }
+});
+
+test("linear position notional falls back to exact size times mark price", () => {
+  const unavailableUsd = {
+    state: "unavailable" as const,
+    reason: "not-returned" as const,
+    unit: "USD" as const,
+  } as unknown as ReturnType<typeof portfolioRiskPosition>["positionValue"];
+  const unavailablePrice = {
+    state: "unavailable" as const,
+    reason: "not-returned" as const,
+    unit: "price" as const,
+  } as unknown as ReturnType<typeof portfolioRiskPosition>["markPrice"];
+  const input = portfolioRiskAccountInput({
+    positions: [
+      portfolioRiskPosition({
+        side: "Buy",
+        size: accountDecimal("2", "contracts"),
+        positionValue: unavailableUsd,
+        markPrice: accountDecimal("100", "price"),
+      }),
+    ],
+  });
+  const result = projection(input);
+  assert.equal(result.addProjection.status, "complete");
+  assert.equal(result.addProjection.currentDerivativesGrossUsd.state, "known");
+  if (result.addProjection.currentDerivativesGrossUsd.state === "known")
+    assert.equal(
+      result.addProjection.currentDerivativesGrossUsd.value.toString(),
+      "200",
+    );
+
+  const unpriced = portfolioRiskAccountInput({
+    positions: [
+      portfolioRiskPosition({
+        side: "Buy",
+        size: accountDecimal("2", "contracts"),
+        positionValue: unavailableUsd,
+        markPrice: unavailablePrice,
+      }),
+    ],
+  });
+  assert.equal(projection(unpriced).addProjection.status, "blocked");
 });
