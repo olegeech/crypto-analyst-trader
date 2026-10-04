@@ -99,6 +99,10 @@ import {
   rehydrateAnalyticsEvidenceBundle,
   type AnalyticsEvidenceBundle,
 } from "../analytics/analytics-evidence-bundle.js";
+import {
+  rehydratePortfolioRiskPreflight,
+  type PortfolioRiskPreflight,
+} from "../risk/portfolio-risk-preflight.js";
 
 export const ARTIFACT_SCHEMA_VERSION = "artifact/v1" as const;
 
@@ -111,6 +115,7 @@ export type ArtifactKind =
   | "market-evidence-bundle"
   | "liquidation-evidence-bundle"
   | "analytics-evidence-bundle"
+  | "portfolio-risk-preflight"
   | "data-quality-assessment"
   | "daily-decision-plan"
   | "account-snapshot"
@@ -145,6 +150,7 @@ export type RehydratedArtifact =
   | MarketEvidenceBundle
   | LiquidationEvidenceBundle
   | AnalyticsEvidenceBundle
+  | PortfolioRiskPreflight
   | DataQualityAssessment
   | DailyDecisionPlan
   | AccountSnapshot
@@ -1075,6 +1081,10 @@ const schemas: ReadonlyMap<ArtifactKind, Schema> = new Map([
   ["market-evidence-bundle", marketEvidenceBundleSchema],
   ["liquidation-evidence-bundle", liquidationEvidenceBundleSchema],
   ["analytics-evidence-bundle", analyticsEvidenceBundleSchema],
+  [
+    "portfolio-risk-preflight",
+    { kind: "validated", validate: rehydratePortfolioRiskPreflight },
+  ],
   ["account-snapshot", accountSnapshotSchema],
   ["order-intent", orderIntentSchema],
   ["risk-decision", riskDecisionSchema],
@@ -1446,6 +1456,10 @@ export function rehydrateArtifact(
   envelope: unknown,
 ): Result<AnalyticsEvidenceBundle>;
 export function rehydrateArtifact(
+  artifactKind: "portfolio-risk-preflight",
+  envelope: unknown,
+): Result<PortfolioRiskPreflight>;
+export function rehydrateArtifact(
   artifactKind: "approval",
   envelope: unknown,
 ): Result<Approval>;
@@ -1499,6 +1513,8 @@ export function rehydrateArtifact(
         );
       }
       return rehydrateAnalyticsEvidenceBundle(decoded.value);
+    case "portfolio-risk-preflight":
+      return rehydratePortfolioRiskPreflight(decoded.value);
     case "account-snapshot":
       return createAccountSnapshot(toConstructorInput(decoded.value));
     case "order-intent":

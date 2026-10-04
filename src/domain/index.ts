@@ -257,6 +257,16 @@ export {
   type PortfolioRiskReductionMaterialization,
 } from "./risk/portfolio-risk-materialization.js";
 export {
+  PORTFOLIO_RISK_PREFLIGHT_SCHEMA_VERSION,
+  evaluatePortfolioRiskPreflight,
+  rehydratePortfolioRiskPreflight,
+  type PortfolioRiskActionProposal,
+  type PortfolioRiskPreflight,
+  type PortfolioRiskPreflightIdentity,
+  type PortfolioRiskPreflightInput,
+  type PortfolioRiskPreflightReplayInputs,
+} from "./risk/portfolio-risk-preflight.js";
+export {
   PORTFOLIO_RISK_POLICY_SCHEMA_VERSION,
   createPortfolioRiskPolicy,
   portfolioRiskPolicyHash,
