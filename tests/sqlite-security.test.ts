@@ -38,7 +38,11 @@ function assertNoTransportDependency(sourceText: string, file: string) {
       assert.doesNotMatch(node.argument.literal.text, forbidden, file);
     if (ts.isCallExpression(node)) {
       assert.ok(
-        !(ts.isIdentifier(node.expression) && node.expression.text === "fetch"),
+        !(
+          (ts.isIdentifier(node.expression) && node.expression.text === "fetch") ||
+          (ts.isPropertyAccessExpression(node.expression) &&
+            node.expression.name.text === "fetch")
+        ),
         `${file}: network call`,
       );
       if (
@@ -53,8 +57,14 @@ function assertNoTransportDependency(sourceText: string, file: string) {
         assert.doesNotMatch(argument.text, forbidden, file);
       }
     }
-    if (ts.isStringLiteral(node))
-      assert.doesNotMatch(node.text, /^https?:\/\//iu, file);
+    if (
+      ts.isStringLiteral(node) ||
+      ts.isNoSubstitutionTemplateLiteral(node) ||
+      ts.isTemplateHead(node) ||
+      ts.isTemplateMiddle(node) ||
+      ts.isTemplateTail(node)
+    )
+      assert.doesNotMatch(node.text, /https?:\/\//iu, file);
     ts.forEachChild(node, visit);
   }
   visit(source);
@@ -80,6 +90,13 @@ test("SQLite dependency guard checks executable imports, not exchange labels or 
     'type X = import("../ports/credential-provider.js");',
     "const x = import(path);",
     "fetch(url);",
+    "globalThis.fetch(url);",
+    "transport.fetch(url);",
+    'const url = "https://example.com";',
+    "const url = `http://example.com`;",
+    "const url = `https://example.com/${path}`;",
+    "const url = `${prefix}http://example.com/${path}`;",
+    "const url = `${prefix}https://example.com`;",
   ])
     assert.throws(() => assertNoTransportDependency(code, "fixture.ts"));
 });

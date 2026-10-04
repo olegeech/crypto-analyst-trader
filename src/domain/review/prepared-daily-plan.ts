@@ -335,8 +335,30 @@ function reviewAction(
       return { kind: action.kind };
     case "reduction-no-op":
       return { kind: action.kind, reasonCode: action.reasonCode };
-    case "close-long-quantity":
-      return { kind: action.kind, proposal: action.proposal };
+    case "close-long-quantity": {
+      const reduction = preflight.materialization.reduction;
+      return {
+        kind: action.kind,
+        proposal: action.proposal,
+        comparison: {
+          currentQuantity: reduction.currentQuantity,
+          reductionFraction: reduction.reductionFraction,
+          requestedQuantity: reduction.requestedQuantity,
+          normalizedQuantity: reduction.normalizedQuantity,
+          quantityStep: reduction.quantityStep,
+          remainingQuantity:
+            reduction.currentQuantity.state === "known" &&
+            reduction.normalizedQuantity.state === "known"
+              ? {
+                  state: "known" as const,
+                  value: reduction.currentQuantity.value.subtract(
+                    reduction.normalizedQuantity.value,
+                  ),
+                }
+              : { state: "unavailable" as const },
+        },
+      };
+    }
   }
 }
 

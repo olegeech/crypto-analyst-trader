@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createProvisionalM1Composition } from "../src/application/policies/provisional-m1.js";
-import { createPreparedDailyPlan } from "../src/domain/review/prepared-daily-plan.js";
+import {
+  createPreparedDailyPlan,
+  rehydratePreparedDailyPlan,
+} from "../src/domain/review/prepared-daily-plan.js";
+import { renderPreparedReview } from "../src/cli/daily-command.js";
 import { evaluatePortfolioRiskPreflight } from "../src/domain/risk/portfolio-risk-preflight.js";
 import { createDailyDecisionPlan } from "../src/domain/planning/daily-decision-plan.js";
 import { assessDataQuality } from "../src/domain/quality/assess-data-quality.js";
@@ -383,6 +387,71 @@ test("HOLD, REDUCE no-op and quantity-only reduction confer no execution authori
     assert.deepEqual(result.summary.grid, []);
     assert.equal("orderIntents" in result, false);
   }
+});
+
+test("REDUCE review compares validated current and proposed quantities and binds replay", () => {
+  const source = input({
+    recommendation: "REDUCE_LONG",
+    positions: [
+      portfolioRiskPosition({
+        side: "Buy",
+        size: decimal("1.003", "contracts"),
+        positionValue: decimal("100"),
+      }),
+    ],
+  });
+  const prepared = value(createPreparedDailyPlan(source));
+  const action = prepared.summary.action;
+  assert.equal(action.kind, "close-long-quantity");
+  if (action.kind !== "close-long-quantity") assert.fail("expected reduction");
+  const reduction = source.preflight.materialization.reduction;
+  for (const field of [
+    "currentQuantity",
+    "reductionFraction",
+    "requestedQuantity",
+    "normalizedQuantity",
+    "quantityStep",
+  ] as const) {
+    assert.deepEqual(action.comparison[field], reduction[field]);
+  }
+  assert.equal(action.comparison.currentQuantity.state, "known");
+  assert.equal(action.comparison.remainingQuantity.state, "known");
+  if (action.comparison.remainingQuantity.state !== "known")
+    assert.fail("expected remaining quantity");
+  assert.equal(
+    action.comparison.remainingQuantity.value.toString(),
+    fixtureDecimal("1.003").subtract(action.proposal.quantity).toString(),
+  );
+  const rendered = renderPreparedReview(prepared);
+  for (const [field, fact] of Object.entries(action.comparison)) {
+    assert.ok(rendered.includes(`"${field}":`));
+    assert.equal(fact.state, "known");
+    if (fact.state === "known")
+      assert.ok(rendered.includes(`"value": "${fact.value.toString()}"`));
+  }
+  for (const forbidden of [
+    "accountIdentityHash",
+    "orderId",
+    "orderLinkId",
+    "uid",
+  ])
+    assert.equal(JSON.stringify(action).includes(forbidden), false);
+  assert.equal(prepared.executionAuthority, "none");
+  assert.ok(rehydratePreparedDailyPlan(prepared).ok);
+  const tampered = {
+    ...prepared,
+    summary: {
+      ...prepared.summary,
+      action: {
+        ...action,
+        comparison: {
+          ...action.comparison,
+          currentQuantity: { state: "known", value: fixtureDecimal("2") },
+        },
+      },
+    },
+  };
+  assert.equal(rehydratePreparedDailyPlan(tampered).ok, false);
 });
 
 test("real quality degradation or explicit exceptional policy warning requires review, never softens BLOCK", () => {
