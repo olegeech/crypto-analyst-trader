@@ -214,6 +214,22 @@ export {
   type RiskEvaluationInput,
 } from "./risk/risk-decision.js";
 export {
+  PORTFOLIO_RISK_EVIDENCE_SCHEMA_VERSION,
+  createPortfolioRiskEvidence,
+  createPortfolioRiskEvidenceSet,
+  portfolioRiskEvidenceContentHash,
+  validatePortfolioRiskLeverageEvidence,
+  type PortfolioRiskEvidence,
+  type PortfolioRiskLeverageRow,
+  type ValidatedPortfolioRiskLeverageEvidence,
+} from "./risk/portfolio-risk-evidence.js";
+export {
+  PORTFOLIO_RISK_POLICY_SCHEMA_VERSION,
+  createPortfolioRiskPolicy,
+  portfolioRiskPolicyHash,
+  type PortfolioRiskPolicy,
+} from "./risk/portfolio-risk-policy.js";
+export {
   createApproval,
   validateApproval,
   type Approval,
