@@ -5,7 +5,10 @@ import {
   createPreparedDailyPlan,
   type PreparedDailyPlan,
 } from "../domain/review/prepared-daily-plan.js";
-import type { MarketEvidenceBundle } from "../domain/market/market-evidence-bundle.js";
+import {
+  MARKET_EVIDENCE_SYMBOLS,
+  type MarketEvidenceBundle,
+} from "../domain/market/market-evidence-bundle.js";
 import { type Clock } from "../domain/shared/time.js";
 import type { Result } from "../domain/shared/result.js";
 import { requireIdentifier } from "../domain/shared/validation.js";
@@ -246,7 +249,7 @@ export function createDailyPrepareBoundary(deps: DailyPrepareDependencies) {
         const account = await deps.collectAccount({
           environment,
           runId,
-          configuredM1Symbols: ["BTCUSDT", "ETHUSDT", "SOLUSDT", "DOGEUSDT"],
+          configuredM1Symbols: [...MARKET_EVIDENCE_SYMBOLS],
           credentialLoader: credentials,
           ...(deps.createAccountReadPort
             ? { createReadPort: deps.createAccountReadPort }

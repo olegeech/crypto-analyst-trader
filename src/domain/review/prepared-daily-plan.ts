@@ -247,20 +247,20 @@ function targetGate(preflight: PortfolioRiskPreflight): PreparedTargetGate {
       p.pass === "B" &&
       (p.endpoint === "positions" || p.endpoint === "open-orders"),
   );
+  const traversed = new Set(
+    account.coverage
+      .filter(
+        (entry) =>
+          entry.status === "traversed" && entry.reasonCodes.length === 0,
+      )
+      .map((entry) => accountEvidencePartitionKey(entry.partition)),
+  );
   const relevantCoverageComplete =
     account.collectionStatus === "complete" &&
     account.consistency.complete &&
     pass !== null &&
     relevant.length > 0 &&
-    relevant.every((p) =>
-      account.coverage.some(
-        (entry) =>
-          accountEvidencePartitionKey(entry.partition) ===
-            accountEvidencePartitionKey(p) &&
-          entry.status === "traversed" &&
-          entry.reasonCodes.length === 0,
-      ),
-    ) &&
+    relevant.every((p) => traversed.has(accountEvidencePartitionKey(p))) &&
     ["linear", "inverse", "spot", "option"].every((category) =>
       relevant.some(
         (p) => p.endpoint === "open-orders" && p.category === category,

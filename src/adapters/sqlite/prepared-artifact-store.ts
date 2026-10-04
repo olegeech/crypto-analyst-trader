@@ -117,11 +117,16 @@ export function openSqlitePreparedArtifactStore(
   function boundApproval(input: unknown): Result<PreparedPlanApproval> {
     const a = rehydratePreparedPlanApproval(input);
     if (!a.ok) return a;
-    const p = loadPrepared(a.value.preparedHash);
+    return checkApprovalAssociation(a.value);
+  }
+  function checkApprovalAssociation(
+    a: PreparedPlanApproval,
+  ): Result<PreparedPlanApproval> {
+    const p = loadPrepared(a.preparedHash);
     if (!p.ok || !p.value) return invalid();
     const fullHash = hashCanonical(p.value);
-    return fullHash.ok && fullHash.value === a.value.preparedArtifactHash
-      ? a
+    return fullHash.ok && fullHash.value === a.preparedArtifactHash
+      ? ok(a)
       : invalid();
   }
   return ok(
@@ -175,7 +180,7 @@ export function openSqlitePreparedArtifactStore(
             scope.value.environment
         )
           return invalid();
-        return boundApproval(decoded.value);
+        return checkApprovalAssociation(decoded.value);
       },
       close: () => connection.close(),
     }),

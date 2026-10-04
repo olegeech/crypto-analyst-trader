@@ -15,18 +15,73 @@ async function sourceFiles(directory: string): Promise<string[]> {
   return files;
 }
 
+function assertNoTransportDependency(sourceText: string, file: string) {
+  const source = ts.createSourceFile(
+    file,
+    sourceText,
+    ts.ScriptTarget.Latest,
+    true,
+  );
+  const forbidden = /bybit|credential-provider|macos-keychain|agent-connect/iu;
+  function visit(node: ts.Node) {
+    if (
+      (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) &&
+      node.moduleSpecifier &&
+      ts.isStringLiteral(node.moduleSpecifier)
+    )
+      assert.doesNotMatch(node.moduleSpecifier.text, forbidden, file);
+    if (
+      ts.isImportTypeNode(node) &&
+      ts.isLiteralTypeNode(node.argument) &&
+      ts.isStringLiteral(node.argument.literal)
+    )
+      assert.doesNotMatch(node.argument.literal.text, forbidden, file);
+    if (ts.isCallExpression(node)) {
+      assert.ok(
+        !(ts.isIdentifier(node.expression) && node.expression.text === "fetch"),
+        `${file}: network call`,
+      );
+      if (
+        node.expression.kind === ts.SyntaxKind.ImportKeyword ||
+        (ts.isIdentifier(node.expression) && node.expression.text === "require")
+      ) {
+        const argument = node.arguments[0];
+        assert.ok(
+          argument && ts.isStringLiteral(argument),
+          `${file}: nonliteral dependency`,
+        );
+        assert.doesNotMatch(argument.text, forbidden, file);
+      }
+    }
+    if (ts.isStringLiteral(node))
+      assert.doesNotMatch(node.text, /^https?:\/\//iu, file);
+    ts.forEachChild(node, visit);
+  }
+  visit(source);
+}
+
 test("SQLite adapters have no exchange transport or credential dependency", async () => {
   const root = resolve(process.cwd(), "src/adapters/sqlite");
   const files = await sourceFiles(root);
   for (const file of files) {
     const source = await readFile(file, "utf8");
-    assert.doesNotMatch(
-      source,
-      /bybit|credential-provider|macos-keychain|agent-connect/iu,
-      file,
-    );
-    assert.doesNotMatch(source, /\bfetch\s*\(|https?:\/\//iu, file);
+    assertNoTransportDependency(source, file);
   }
+});
+
+test("SQLite dependency guard checks executable imports, not exchange labels or comments", () => {
+  assertNoTransportDependency(
+    '// No macos-keychain access\nconst scope = { exchange: "bybit" };',
+    "fixture.ts",
+  );
+  for (const code of [
+    'import "../bybit-v5/transport.js";',
+    'export * from "../macos-keychain.js";',
+    'type X = import("../ports/credential-provider.js");',
+    "const x = import(path);",
+    "fetch(url);",
+  ])
+    assert.throws(() => assertNoTransportDependency(code, "fixture.ts"));
 });
 
 test("the public persistence port exposes no SQLite handle or transport shape", async () => {
