@@ -2,11 +2,18 @@
 
 ## Purpose
 
-This is the canonical operator procedure for one bounded daily trading run:
+This runbook documents the bounded daily operator workflow and related
+environment-scoped capability checks. The target lifecycle is:
 
 ```text
 prepare -> review -> approve -> execute -> reconcile -> report
 ```
+
+The released #19 daily CLI path is `prepare -> review -> approve` and ends at
+decision-only consent; it does not execute. Execution, reconciliation and
+reporting are separate target use cases unless a command is released by its
+own issue. Testnet/Demo capability probes are separate opt-in flows, not stages
+in the forward release path.
 
 It applies to direct Bybit execution. Product boundaries live in `README.md`,
 and mandatory safety rules live in `docs/architecture/invariants.md`. If this
@@ -31,7 +38,9 @@ hashed account scope; no default report file is created. Review/approve work off
 after restart, reproduce the saved snapshot, and never recollect or reprice. No
 `--daily-plan`, `--composition`, `--actor`, policy/time override or automatic yes
 option exists. Actor is derived from the local OS identity; approval needs a terminal
-and explicit `yes`. REVIEW also needs a nonblank note (prompt or `--note`).
+and explicit `yes`. An ordinary note is optional; an actual REVIEW requires a
+nonblank note (prompt or `--note`). A BLOCKED artifact cannot be approved or
+overridden by consent.
 
 The fixed `provisional-m1-v1` policy requires native returns, funding, OI,
 liquidation imbalance and ATR. External Regime/CEWS/LSI/Trap absence and provisional
@@ -51,6 +60,20 @@ Exit codes: 0 success, 2 invalid input, 3 declined/noninteractive consent, 4 una
 provider/admission, 5 BLOCKED/invalid approval, 1 unexpected failure. Reasons are
 shown separately. An upstream failure has no invented prepared/account hash; a
 trustworthy account-bound risk BLOCK can be saved as a BLOCKED review artifact.
+
+## Forward Mainnet validation path
+
+The forward release evidence is deterministic and fault-injection/replay
+verification followed by explicit read-only Mainnet readiness checks against
+the isolated AI Subaccount. The first deliberately authorized Mainnet write is
+the bounded canary in [issue #31](https://github.com/olegeech/crypto-analyst-trader/issues/31),
+after the #30 release gate and the applicable live-risk gate pass.
+
+Testnet is not a release prerequisite. The bounded Testnet and Demo probes
+below remain opt-in, environment-scoped capability checks; their observations
+do not establish Mainnet readiness or grant Mainnet write authority. Preserve
+each probe's exact-plan, isolation, ownership, bounded-action and reconciliation
+rules.
 
 ## Bybit public market evidence smoke (issue #11)
 
@@ -345,22 +368,15 @@ implemented by the current `package.json` and released for the selected
 environment. A missing capability is `CAPABILITY_NOT_RELEASED`; do not replace
 it with an ad hoc API call.
 
-## Operating modes
+## Current execution scope
 
-| Mode              | Exchange writes    | Required authorization                                                     |
-| ----------------- | ------------------ | -------------------------------------------------------------------------- |
-| `PREPARE_ONLY`    | None               | Default for a daily rebalance request                                      |
-| `TESTNET_EXECUTE` | Bybit Testnet only | Explicit Testnet request plus approval of the exact plan hash              |
-| `MAINNET_EXECUTE` | Bybit mainnet      | Explicit mainnet request after reviewing and approving the exact plan hash |
-
-Preparation and execution are separate. Words such as "full", "daily",
-"rebalance", "refresh", or a supplied capital limit do not authorize exchange
-writes. Approval cannot be given before the final plan hash exists.
-
-`MAINNET_EXECUTE` is unavailable until the production-canary milestone permits
-it. It also requires explicit mainnet configuration, a dedicated bounded
-account scope, an unexpired approval, and every release and preflight gate to
-pass. No mode may override a `BLOCK` or `HALT`.
+The released daily CLI supports prepare, review and decision-only approval; no
+generic `daily:execute` command or `TESTNET_EXECUTE` / `MAINNET_EXECUTE` daily
+mode is released. The Testnet and Demo probes documented below are separate,
+opt-in capability checks. The first deliberately authorized Mainnet write is
+the bounded #31 canary after its release, readiness and live-risk gates; that
+authority does not imply a general Mainnet execution mode. No future mode may
+override a `BLOCK` or `HALT`.
 
 ## Market window
 

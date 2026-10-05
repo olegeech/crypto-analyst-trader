@@ -272,6 +272,16 @@ review attempt. Count total PR-review attempts, including the first valid bound
 review, and stop after attempt three with `PR_REVIEW_CAP_REACHED` if a blocker
 remains.
 
+For operator-facing changes, assess whether each new prompt, required field or
+manual recovery step addresses a concrete failure mode that cannot reasonably
+be handled automatically. Check that diagnostics preserve the sanitized
+provider cause, known-versus-ambiguous outcome and actionable next step. Use
+the canonical [Product Principles](../../../docs/product-principles.md#product-intent--reviewed-2026-10-05)
+and [Contributing diagnostics checklist](../../../CONTRIBUTING.md#operator-safeguards-and-diagnostics);
+do not create another approval or audit framework. Treat missing safeguards or
+hidden original causes as blocking findings; other diagnostic gaps are
+advisory.
+
 Non-blocking findings are recorded as residual risk or optional follow-up and
 do not force stylistic churn. A moved head, new failing check, requested
 changes, or unresolved material finding invalidates readiness.
