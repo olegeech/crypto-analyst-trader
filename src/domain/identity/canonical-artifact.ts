@@ -103,10 +103,20 @@ import {
   rehydratePortfolioRiskPreflight,
   type PortfolioRiskPreflight,
 } from "../risk/portfolio-risk-preflight.js";
+import {
+  rehydratePreparedDailyPlan,
+  type PreparedDailyPlan,
+} from "../review/prepared-daily-plan.js";
+import {
+  rehydratePreparedPlanApproval,
+  type PreparedPlanApproval,
+} from "../review/prepared-plan-approval.js";
 
 export const ARTIFACT_SCHEMA_VERSION = "artifact/v1" as const;
 
 export type ArtifactKind =
+  | "prepared-daily-plan"
+  | "prepared-plan-approval"
   | "evidence-ref"
   | "instrument-constraints"
   | "strategy-config"
@@ -142,6 +152,8 @@ export interface CanonicalArtifactEnvelope {
 }
 
 export type RehydratedArtifact =
+  | PreparedDailyPlan
+  | PreparedPlanApproval
   | EvidenceRef
   | InstrumentConstraints
   | StrategyConfig
@@ -1003,6 +1015,14 @@ const qualityAssessmentSchema = object(
 );
 
 const schemas: ReadonlyMap<ArtifactKind, Schema> = new Map([
+  [
+    "prepared-daily-plan",
+    { kind: "validated", validate: rehydratePreparedDailyPlan },
+  ],
+  [
+    "prepared-plan-approval",
+    { kind: "validated", validate: rehydratePreparedPlanApproval },
+  ],
   // The constructor owns closed validation of every nested account fact and
   // rechecks derived consistency and provenance. Do not duplicate that schema.
   [
@@ -1428,6 +1448,14 @@ function rehydrateExecutionPlan(value: unknown): Result<ExecutionPlan> {
 }
 
 export function rehydrateArtifact(
+  artifactKind: "prepared-daily-plan",
+  envelope: unknown,
+): Result<PreparedDailyPlan>;
+export function rehydrateArtifact(
+  artifactKind: "prepared-plan-approval",
+  envelope: unknown,
+): Result<PreparedPlanApproval>;
+export function rehydrateArtifact(
   artifactKind: "account-evidence-bundle",
   envelope: unknown,
 ): Result<AccountEvidenceBundle>;
@@ -1478,6 +1506,10 @@ export function rehydrateArtifact(
   const decoded = decodeCanonicalArtifact(envelope, artifactKind);
   if (!decoded.ok) return decoded;
   switch (artifactKind) {
+    case "prepared-daily-plan":
+      return rehydratePreparedDailyPlan(decoded.value);
+    case "prepared-plan-approval":
+      return rehydratePreparedPlanApproval(decoded.value);
     case "account-evidence-bundle":
       // Decoded decimal tags remain DecimalValue instances. The constructor
       // preserves historical binding claims; it never authenticates a new run.

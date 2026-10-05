@@ -110,7 +110,9 @@ resolution. Non-blocking review findings do not require stylistic churn.
 - release checks pass;
 - risk and execution changes cover negative, duplicate, partial-failure and
   restart paths;
-- live changes include Testnet evidence, disable/rollback and reconciliation;
+- live changes include deterministic fault-test evidence, explicit read-only
+  Mainnet readiness checks, disable/rollback and reconciliation; Testnet or an
+  earlier Mainnet write is not a release prerequisite;
 - contracts or operator behavior are documented;
 - no secret or private account artifact is committed;
 - the pull request closes the issue;

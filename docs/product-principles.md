@@ -22,11 +22,16 @@ authorizes only the documented Testnet scenarios and necessary probe-owned
 cleanup, while each write still receives an exact, expiring plan hash and
 final revalidation.
 
-Required decision evidence includes, at minimum:
+Production decision evidence may include versioned market-regime,
+early-warning-risk, liquidity-stress and trap evidence described by the
+[market-regime research context](analytics/market-regime-context.md) and tracked
+by issue #12. Whether an evidence family is mandatory is defined by the active
+versioned strategy/quality policy. In `provisional-m1-v1` these external model
+families are optional; unavailable or unconfigured evidence remains visible in
+review and is never fabricated.
 
-- versioned market-regime, early-warning-risk, liquidity-stress and trap evidence
-  described by the [market-regime research context](analytics/market-regime-context.md)
-  and tracked by issue #12;
+Required native decision evidence includes, at minimum:
+
 - OHLCV market history;
 - derivatives evidence including funding, open interest and liquidation data,
   with liquidation ownership tracked by
@@ -35,8 +40,10 @@ Required decision evidence includes, at minimum:
 - listing and instrument metadata, including delist or expiry restrictions; and
 - completeness, freshness, integrity and provenance checks for required inputs.
 
-Missing, stale or incompatible required evidence blocks exposure according to
-invariants 1 and 18. Ordinary uncertainty that does not violate a required gate
+Missing, stale or incompatible policy-required evidence blocks exposure
+according to invariants 1 and 18. Optional unavailable evidence remains explicit
+in review; whether it affects warnings or confidence is defined by the active
+versioned policy. Ordinary uncertainty that does not violate a required gate
 should remain visible through confidence and review warnings rather than being
 silently converted into fabricated certainty or an unnecessary blocked run.
 
@@ -150,7 +157,9 @@ prioritization interview following the discovery recorded in issue #35.
 7. **Net economics.** Research and promotion use fees, funding, slippage,
    turnover, exposure and drawdown; gross PnL alone is insufficient.
 8. **Evidence-based promotion.** Strategies move from research to shadow,
-   Testnet, canary and live only after explicit gates.
+   canary and live only after explicit gates. Deterministic fault testing and
+   read-only Mainnet readiness checks precede the first deliberately authorized
+   Mainnet write; Testnet is not a prerequisite.
 9. **Small reversible steps.** Initial live scope uses a dedicated subaccount,
    one symbol/side and a strict capital cap.
 10. **Earn complexity.** Realtime state, grid replenishment, extra exchanges and
