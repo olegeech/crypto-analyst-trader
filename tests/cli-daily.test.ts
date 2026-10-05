@@ -11,6 +11,47 @@ import { fail } from "../src/domain/shared/result.js";
 import { domainError } from "../src/domain/shared/errors.js";
 import { fixedClock } from "../src/domain/shared/time.js";
 import type { PreparedPlanApproval } from "../src/domain/review/prepared-plan-approval.js";
+import { portfolioRiskPosition } from "./fixtures/portfolio-risk-fixtures.js";
+import { decimal } from "./account-evidence-fixture.js";
+
+test("human review describes HOLD, REDUCE, no-op and BLOCKED without inventing an entry", () => {
+  const hold = preparedPlanFixture("review");
+  const reduce = preparedPlanFixture("review", {
+    recommendation: "REDUCE_LONG",
+    positions: [
+      portfolioRiskPosition({ side: "Buy", size: decimal("1", "contracts") }),
+    ],
+  });
+  const noOp = preparedPlanFixture("review", { recommendation: "REDUCE_LONG" });
+  const tooSmall = preparedPlanFixture("review", {
+    recommendation: "REDUCE_LONG",
+    positions: [
+      portfolioRiskPosition({
+        side: "Buy",
+        size: decimal("0.001", "contracts"),
+      }),
+    ],
+  });
+  const blocked = preparedPlanFixture("blocked");
+  assert.equal(hold.summary.action.kind, "hold-no-action");
+  assert.equal(reduce.summary.action.kind, "close-long-quantity");
+  assert.equal(noOp.summary.action.kind, "reduction-no-op");
+  assert.equal(tooSmall.summary.action.kind, "reduction-no-op");
+  assert.equal(blocked.state, "BLOCKED");
+  for (const [prepared, expected] of [
+    [hold, "HOLD: no action proposed"],
+    [reduce, "REDUCE proposal: quantity-only, decision-only"],
+    [noOp, "REDUCE: NO_REDUCIBLE_LONG; no action"],
+    [tooSmall, "REDUCE: REDUCTION_QUANTITY_TOO_SMALL; no action"],
+    [blocked, "No action: prepared plan is BLOCKED"],
+  ] as const) {
+    const output = renderPreparedReview(prepared);
+    assert.ok(output.split("\n").includes(expected));
+    assert.ok(!output.includes("Entry proposal:"));
+    assert.ok(!output.includes("ADD proposal:"));
+    assert.ok(output.includes("Execution authority: none."));
+  }
+});
 
 test("closed CLI surface rejects authority overrides before any dependencies", async () => {
   for (const flag of [

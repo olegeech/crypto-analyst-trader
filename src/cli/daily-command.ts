@@ -82,6 +82,22 @@ export function parseDailyArguments(
 
 /** Only the domain's redacted material summary, never its private replay inputs. */
 export function renderPreparedReview(p: PreparedDailyPlan): string {
+  const action = p.summary.action;
+  const proposal = (() => {
+    if (p.state === "BLOCKED") return "No action: prepared plan is BLOCKED";
+    switch (action.kind) {
+      case "blocked-no-action":
+        return "No action: prepared plan is BLOCKED";
+      case "add-long-proposal":
+        return `ADD proposal: ${p.summary.grid.length} Limit/GTC entries, attached TP, no SL`;
+      case "hold-no-action":
+        return "HOLD: no action proposed";
+      case "close-long-quantity":
+        return "REDUCE proposal: quantity-only, decision-only";
+      case "reduction-no-op":
+        return `REDUCE: ${action.reasonCode}; no action`;
+    }
+  })();
   return [
     `State: ${p.state} | reasons: ${p.reasonCodes.join(",") || "none"}`,
     `Environment: ${p.inputIdentity.environment} | account binding: ${p.inputIdentity.accountIdentityHash}`,
@@ -89,7 +105,7 @@ export function renderPreparedReview(p: PreparedDailyPlan): string {
     `PREPARED_HASH: ${p.contentHash}`,
     `Historical preflight evaluated at: ${p.inputIdentity.evaluationTime}`,
     `Approval TTL: ${p.summary.policies.approvalTtlMs} ms from explicit consent; historical approval does not refresh evidence`,
-    "Entry proposal: Limit + GTC; TP required; no SL; no execution authority",
+    proposal,
     JSON.stringify(p.summary, null, 2),
     "Execution authority: none. No exchange writes. No default report file.",
   ].join("\n");

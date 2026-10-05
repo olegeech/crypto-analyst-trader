@@ -1,8 +1,11 @@
 import { createProvisionalM1Composition } from "../../src/application/policies/provisional-m1.js";
 import { createPreparedDailyPlan } from "../../src/domain/review/prepared-daily-plan.js";
 import { evaluatePortfolioRiskPreflight } from "../../src/domain/risk/portfolio-risk-preflight.js";
-import { fixture } from "../account-evidence-fixture.js";
-import { portfolioRiskPolicyInput } from "./portfolio-risk-fixtures.js";
+import {
+  portfolioRiskAccountInput,
+  portfolioRiskPolicyInput,
+  type portfolioRiskPosition,
+} from "./portfolio-risk-fixtures.js";
 import { portfolioRiskPlanningFixture } from "./portfolio-risk-planning-fixtures.js";
 import { requireDailyFixture as value } from "./daily-planning-evidence-fixtures.js";
 import { createAnalyticsEvidenceBundle } from "../../src/domain/analytics/analytics-evidence-bundle.js";
@@ -106,8 +109,14 @@ export function shiftAccountTimes(input: unknown): unknown {
 
 export function preparedPlanFixture(
   state: "ready" | "review" | "blocked" = "ready",
+  options: {
+    recommendation?: "ADD_LONG" | "HOLD_LONG" | "REDUCE_LONG";
+    positions?: readonly ReturnType<typeof portfolioRiskPosition>[];
+  } = {},
 ) {
-  const p = portfolioRiskPlanningFixture({ recommendation: "HOLD_LONG" });
+  const p = portfolioRiskPlanningFixture({
+    recommendation: options.recommendation ?? "HOLD_LONG",
+  });
   const market = state === "ready" ? completeMarketFixture(p.market) : p.market;
   const analytics = value(
     createAnalyticsEvidenceBundle({ market, profile: p.analytics.profile }),
@@ -131,7 +140,10 @@ export function preparedPlanFixture(
       assessment,
     }),
   );
-  const account = { ...fixture(), runId: p.dailyPlan.inputIdentity.runId };
+  const account = {
+    ...portfolioRiskAccountInput({ positions: options.positions ?? [] }),
+    runId: p.dailyPlan.inputIdentity.runId,
+  };
   const preflight = value(
     evaluatePortfolioRiskPreflight({
       dailyPlan,

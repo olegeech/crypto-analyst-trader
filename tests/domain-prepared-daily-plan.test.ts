@@ -267,6 +267,13 @@ test("clean ADD PASS stays ready with informational provisional/optional metadat
   assert.ok(result.summary.grid.length > 0);
   assert.ok(result.summary.nativeAvailability.length > 0);
   assert.equal(result.summary.risk.verdict, "PASS");
+  assert.ok(
+    renderPreparedReview(result)
+      .split("\n")
+      .includes(
+        `ADD proposal: ${result.summary.grid.length} Limit/GTC entries, attached TP, no SL`,
+      ),
+  );
 });
 
 test("existing target exposure blocks even when #17 passes", () => {
