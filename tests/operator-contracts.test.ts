@@ -58,17 +58,28 @@ test("documents the fixed Demo managed-entry lifecycle and safe stop states", as
   );
 });
 
-test("keeps execution modes and exact approval fail closed in canonical docs", async () => {
+test("keeps the released daily boundary and exact approval fail closed in canonical docs", async () => {
   const [runbook, invariants] = await Promise.all([
     read("docs/operator-runbook.md"),
     read("docs/architecture/invariants.md"),
   ]);
 
-  for (const mode of ["PREPARE_ONLY", "TESTNET_EXECUTE", "MAINNET_EXECUTE"]) {
-    assert.match(runbook, new RegExp(`\\b${mode}\\b`));
-  }
-
-  assert.match(runbook, /approval of the exact plan hash/i);
+  const normalizedRunbook = runbook.replace(/\s+/g, " ");
+  assert.match(
+    normalizedRunbook,
+    /released #19 daily CLI path is `prepare -> review -> approve` and ends at decision-only consent; it does not execute/i,
+  );
+  assert.match(normalizedRunbook, /Testnet is not a release prerequisite/i);
+  assert.match(
+    normalizedRunbook,
+    /no generic `daily:execute` command or `TESTNET_EXECUTE` \/ `MAINNET_EXECUTE` daily mode is released/i,
+  );
+  assert.match(
+    normalizedRunbook,
+    /first deliberately authorized Mainnet write is the bounded canary in \[issue #31\]/i,
+  );
+  assert.match(runbook, /exact plan hash/i);
+  assert.match(runbook, /`BLOCK` items cannot be approved/i);
   assert.match(invariants, /approved, unexpired exact plan hash/i);
   assert.match(runbook, /Never blind-retry an ambiguous write/i);
   assert.match(runbook, /Set `HALT`/);

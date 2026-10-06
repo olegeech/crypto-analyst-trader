@@ -110,18 +110,22 @@ credential boundaries. For local authenticated Bybit work, use the
 [macOS Keychain credential setup](docs/credentials.md); credentials are never
 read from a repository `.env` file by the authenticated path.
 
-Repository-native skills:
+Repository-native workflows:
 
-- `$daily-rebalance`: run the released daily operator path;
-- `npm run trader:demo -- --symbol <SYMBOL> --side <buy|sell> --notional <DECIMAL> (--take-profit-percent <DECIMAL> | --take-profit-price <DECIMAL>)`: run one explicitly approved, Demo-only managed entry;
-- `$test-current-feature-pr`: validate an exact pull request without mainnet
-  writes;
-- `$develop-next-roadmap-story`: select and deliver the next ready roadmap
-  item.
-- `$issue-delivery #<issue>`: deliver one named eligible issue through review,
-  development, CI and exact-head PR review to `READY_FOR_MERGE`; append
-  `merge` only for an explicitly authorized merge. Roadmap-selection skills
-  choose queued work; `$issue-delivery` does not select a roadmap item.
+The following repository-local skills are currently paused pending refresh:
+
+- `$daily-rebalance`
+- `$test-current-feature-pr`
+- `$develop-next-roadmap-story`
+- `$issue-delivery`
+
+Do not invoke them until their pause notices are removed. See
+[Development Workflow](docs/workflow.md#named-issue-delivery) for the current
+delivery guidance.
+
+The released command
+`npm run trader:demo -- --symbol <SYMBOL> --side <buy|sell> --notional <DECIMAL> (--take-profit-percent <DECIMAL> | --take-profit-price <DECIMAL>)`
+runs one explicitly approved, Demo-only managed entry.
 
 ## Safety
 
