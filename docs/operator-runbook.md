@@ -47,6 +47,12 @@ liquidation imbalance and ATR. External Regime/CEWS/LSI/Trap absence and provisi
 policy are visible informational metadata, not REVIEW triggers. Real non-blocking
 quality degradation or exceptional warnings produce REVIEW. Missing required native
 data fails closed; Coinalyze omitted hours remain unknown under #99 and can block.
+The `daily:prepare` summary keeps global `coverageProof`/`historyProof` separate and
+lists each required liquidation request's asset, window, observed/expected
+constituent-bucket counts, completeness and missing counts by venue (up to 20
+sorted venues, plus omitted-group/missing totals). Counts are `null` when the
+source or catalogue coverage is not proven; these diagnostics do not change the
+quality verdict.
 
 ADD requires a flat target with no active target orders; other account state is
 evaluated by risk. HOLD is no action, and REDUCE is a declarative quantity-only

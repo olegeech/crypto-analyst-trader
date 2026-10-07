@@ -1,4 +1,7 @@
-import { createAnalyticsProfile } from "../../domain/analytics/analytics-profile.js";
+import {
+  ANALYTICS_FEATURES_VERSION_V2,
+  createAnalyticsProfile,
+} from "../../domain/analytics/analytics-profile.js";
 import {
   createQualityProfile,
   hashQualityProfile,
@@ -109,7 +112,8 @@ export function createProvisionalM1Composition(input: unknown) {
   if (!analyticsProfile.ok) return analyticsProfile;
   const qualityProfile = createQualityProfile({
     schemaVersion: "quality-profile/v1",
-    profileVersion: version,
+    profileVersion: "provisional-m1-quality/v2",
+    liquidationHistoryScope: "requested-feature-windows/v1",
     roles: [
       "market",
       "analytics",
@@ -255,6 +259,7 @@ export function createProvisionalM1Composition(input: unknown) {
       symbol,
       allocation: allocation.value,
       analyticsProfile: analyticsProfile.value,
+      analyticsFeaturesVersion: ANALYTICS_FEATURES_VERSION_V2,
       qualityProfile: qualityProfile.value,
       qualityProfileHash: qualityProfileHash.value,
       decisionPolicy: decisionPolicy.value,

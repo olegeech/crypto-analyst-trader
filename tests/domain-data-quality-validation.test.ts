@@ -1,8 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { liquidationHistoryWindow } from "../src/domain/liquidation/liquidation-evidence-windows.js";
 import { classifyQualityEvidence } from "../src/domain/quality/quality-validation.js";
 import { admitQualitySource } from "../src/domain/quality/quality-inputs.js";
-import { createQualityProfile } from "../src/domain/quality/quality-profile.js";
+import { assessDataQuality } from "../src/domain/quality/assess-data-quality.js";
+import {
+  createQualityProfile,
+  hashQualityProfile,
+} from "../src/domain/quality/quality-profile.js";
 import { parseUtcTimestamp } from "../src/domain/shared/time.js";
 import {
   marketFixture,
@@ -37,6 +42,315 @@ function profile(required = false, maxAgeMs = 86_400_000) {
   assert.ok(result.ok);
   return result.value;
 }
+
+function scopedProfile(
+  scope = true,
+  version = scope ? "provisional-m1-quality/v2" : "provisional-m1-quality/v1",
+) {
+  const result = createQualityProfile({
+    schemaVersion: "quality-profile/v1",
+    profileVersion: version,
+    ...(scope
+      ? { liquidationHistoryScope: "requested-feature-windows/v1" }
+      : {}),
+    roles: [
+      { id: "market", required: false, maxAgeMs: 86_400_000 },
+      { id: "liquidation", required: true, maxAgeMs: 86_400_000 },
+      {
+        id: "analytics:btc-liquidation-12h",
+        required: true,
+        maxAgeMs: 86_400_000,
+      },
+    ],
+    metadataSkewMs: 1000,
+    trust: [],
+    penalties: [
+      {
+        reasonCode: "INCOMPLETE_EVIDENCE",
+        confidenceImpactGroup: "market-incomplete",
+        penalty: "0",
+      },
+    ],
+  });
+  assert.equal(result.ok, true);
+  if (!result.ok) throw new Error("quality profile fixture is invalid");
+  return result.value;
+}
+
+function scopedEvidence(
+  options: {
+    readonly missingIndex?: number;
+    readonly missingIndexes?: readonly number[];
+    readonly diagnosticIndex?: number;
+    readonly coverageProof?: "complete" | "incomplete";
+    readonly emptyAsset?: "ETH" | "SOL" | "DOGE";
+    readonly diagnostic?: "missing-bucket" | "history-incomplete";
+  } = {},
+) {
+  const market = marketFixture();
+  const base = liquidationFixture(market);
+  const expected = liquidationHistoryWindow(
+    Date.parse(market.bundleCutoff),
+  ).epochs;
+  const missingIndexes = new Set(
+    options.missingIndexes ??
+      (options.missingIndex === undefined ? [] : [options.missingIndex]),
+  );
+  const targets = base.targets.map((target) => ({
+    asset: target.asset,
+    constituents:
+      target.asset === options.emptyAsset
+        ? []
+        : [
+            {
+              providerSymbol: `${target.asset}USDT_PERP.A`,
+              exchange: "Bybit",
+              symbolOnExchange: `${target.asset}USDT`,
+              baseAsset: target.asset,
+              quoteAsset: "USDT",
+              isPerpetual: true as const,
+              marginType: "linear",
+              expireAt: 0,
+              notionalDenominatedIn: "USD",
+              observations: expected
+                .filter(
+                  (_, index) =>
+                    target.asset !== "BTC" || !missingIndexes.has(index),
+                )
+                .map((epoch) => ({
+                  timestamp: new Date(epoch).toISOString(),
+                  longUsd: "1",
+                  shortUsd: "2",
+                })),
+            },
+          ],
+  }));
+  const diagnostic = options.diagnostic ?? "missing-bucket";
+  const liquidation = liquidationFixture(market, {
+    coverageProof: options.coverageProof ?? "complete",
+    historyProof: "incomplete",
+    status: "incomplete",
+    targets,
+    diagnostics:
+      diagnostic === "missing-bucket" && missingIndexes.size > 0
+        ? [
+            {
+              code: diagnostic,
+              operation: "fetch-liquidation-history",
+              asset: "BTC",
+              providerSymbol: "BTCUSDT_PERP.A",
+              bucketTimestamp: new Date(
+                expected[options.diagnosticIndex ?? [...missingIndexes][0]!]!,
+              ).toISOString(),
+            },
+          ]
+        : [{ code: diagnostic, operation: "fetch-liquidation-history" }],
+  });
+  const analytics = analyticsFixture(market, {
+    liquidation,
+    featuresVersion: "analytics-features/v2",
+    profile: {
+      schemaVersion: "analytics-profile/v1",
+      features: [
+        {
+          id: "btc-liquidation-12h",
+          kind: "liquidation-window",
+          asset: "BTC",
+          windowHours: 12,
+          required: true,
+        },
+      ],
+      externalEvidence: [],
+    },
+  });
+  const sources = [
+    { role: "market" as const, value: market },
+    {
+      role: "liquidation" as const,
+      value: liquidation,
+      evidenceRef: liquidationFixtureRef(liquidation),
+    },
+    { role: "analytics" as const, value: analytics },
+  ];
+  return { market, liquidation, analytics, sources };
+}
+
+test("quality scope is explicit, hash-bound, and requires linked roles", () => {
+  const scoped = scopedProfile();
+  assert.equal(scoped.profileVersion, "provisional-m1-quality/v2");
+  assert.equal(scoped.liquidationHistoryScope, "requested-feature-windows/v1");
+  const legacy = scopedProfile(false);
+  const sameVersionWithoutScope = scopedProfile(
+    false,
+    "provisional-m1-quality/v2",
+  );
+  assert.equal(Object.hasOwn(legacy, "liquidationHistoryScope"), false);
+  const scopedHash = hashQualityProfile(scoped);
+  const legacyHash = hashQualityProfile(legacy);
+  const sameVersionHash = hashQualityProfile(sameVersionWithoutScope);
+  assert.equal(scopedHash.ok, true);
+  assert.equal(legacyHash.ok, true);
+  assert.equal(sameVersionHash.ok, true);
+  if (scopedHash.ok && sameVersionHash.ok)
+    assert.notEqual(scopedHash.value, sameVersionHash.value);
+  if (scopedHash.ok && legacyHash.ok)
+    assert.notEqual(scopedHash.value, legacyHash.value);
+  assert.equal(
+    createQualityProfile({
+      schemaVersion: "quality-profile/v1",
+      profileVersion: "bad-scope",
+      liquidationHistoryScope: "requested-feature-windows/v1",
+      roles: [
+        { id: "liquidation", required: false, maxAgeMs: 60_000 },
+        {
+          id: "analytics:btc-liquidation-12h",
+          required: true,
+          maxAgeMs: 60_000,
+        },
+      ],
+      metadataSkewMs: 1000,
+      trust: [],
+      penalties: [],
+    }).ok,
+    false,
+  );
+});
+
+test("scoped quality accepts multiple proven history gaps outside required window", () => {
+  const evidence = scopedEvidence({ missingIndexes: [0, 1] });
+  assert.equal(evidence.analytics.derivativeFeatures[0]?.status, "complete");
+  const result = assessDataQuality({
+    profile: scopedProfile(),
+    sources: evidence.sources,
+    bundleCutoff: evidence.market.bundleCutoff,
+    evaluationTime: evidence.market.bundleCutoff,
+  });
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.equal(result.value.qualityGate, "OK");
+  assert.equal(
+    result.value.findings.some(
+      (finding) =>
+        finding.role === "liquidation" &&
+        ["INCOMPLETE_LIQUIDATION_HISTORY", "GAPPED_WINDOW"].includes(
+          finding.reasonCode,
+        ),
+    ),
+    false,
+  );
+});
+
+test("scoped quality blocks required-window gaps and structurally invalid responses", () => {
+  const invalidResponse = scopedEvidence({ diagnostic: "history-incomplete" });
+  const invalidWindow = invalidResponse.liquidation.targets
+    .find((target) => target.asset === "BTC")
+    ?.windows.find((item) => item.hours === 12);
+  assert.equal(invalidWindow?.complete, true);
+  assert.equal(
+    invalidResponse.analytics.derivativeFeatures[0]?.status,
+    "partial",
+  );
+
+  for (const evidence of [
+    scopedEvidence({ missingIndex: 22 }),
+    invalidResponse,
+  ]) {
+    const result = assessDataQuality({
+      profile: scopedProfile(),
+      sources: evidence.sources,
+      bundleCutoff: evidence.market.bundleCutoff,
+      evaluationTime: evidence.market.bundleCutoff,
+    });
+    assert.equal(result.ok, true);
+    if (!result.ok) continue;
+    assert.equal(result.value.qualityGate, "BLOCK");
+    assert.ok(
+      result.value.findings.some(
+        (finding) =>
+          finding.role === "liquidation" &&
+          finding.reasonCode === "INCOMPLETE_LIQUIDATION_HISTORY" &&
+          finding.blocking,
+      ),
+    );
+  }
+});
+
+test("scoped quality keeps incomplete coverage, empty assets and invalid diagnostics blocking", () => {
+  for (const evidence of [
+    scopedEvidence({ missingIndex: 0, coverageProof: "incomplete" }),
+    scopedEvidence({ missingIndex: 0, emptyAsset: "ETH" }),
+    scopedEvidence({ missingIndexes: [0, 1], diagnosticIndex: 5 }),
+  ]) {
+    const result = assessDataQuality({
+      profile: scopedProfile(),
+      sources: evidence.sources,
+      bundleCutoff: evidence.market.bundleCutoff,
+      evaluationTime: evidence.market.bundleCutoff,
+    });
+    assert.equal(result.ok, true);
+    if (!result.ok) continue;
+    assert.equal(result.value.qualityGate, "BLOCK");
+    assert.ok(result.value.findings.some((finding) => finding.blocking));
+  }
+});
+
+test("legacy quality profile keeps strict global liquidation history semantics", () => {
+  const evidence = scopedEvidence({ missingIndex: 0 });
+  const legacyAnalytics = analyticsFixture(evidence.market, {
+    liquidation: evidence.liquidation,
+    profile: {
+      schemaVersion: "analytics-profile/v1",
+      features: [
+        {
+          id: "btc-liquidation-12h",
+          kind: "liquidation-window",
+          asset: "BTC",
+          windowHours: 12,
+          required: true,
+        },
+      ],
+      externalEvidence: [],
+    },
+  });
+  const records = [
+    admitQualitySource({ role: "market", value: evidence.market }),
+    admitQualitySource({
+      role: "liquidation",
+      value: evidence.liquidation,
+      evidenceRef: liquidationFixtureRef(evidence.liquidation),
+    }),
+    admitQualitySource({ role: "analytics", value: legacyAnalytics }),
+  ];
+  const findings = classifyQualityEvidence(
+    records,
+    scopedProfile(false),
+    time(),
+    time(),
+  );
+  assert.equal(
+    findings.some(
+      (finding) =>
+        finding.role === "liquidation" &&
+        finding.reasonCode === "INCOMPLETE_LIQUIDATION_HISTORY" &&
+        finding.blocking,
+    ),
+    true,
+  );
+  const scopedV1Findings = classifyQualityEvidence(
+    records,
+    scopedProfile(),
+    time(),
+    time(),
+  );
+  assert.ok(
+    scopedV1Findings.some(
+      (finding) =>
+        finding.role === "liquidation" &&
+        finding.reasonCode === "INCOMPLETE_LIQUIDATION_HISTORY" &&
+        finding.blocking,
+    ),
+  );
+});
 test("optional market incompleteness is preserved without assigning confidence groups", () => {
   const record = admitQualitySource({ role: "market", value: marketFixture() });
   assert.deepEqual(

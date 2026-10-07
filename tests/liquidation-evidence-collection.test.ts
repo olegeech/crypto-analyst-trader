@@ -1,12 +1,19 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { createAnalyticsEvidenceBundle } from "../src/domain/analytics/analytics-evidence-bundle.js";
+import { qualityRoleForOutcome } from "../src/domain/quality/quality-inputs.js";
+import { assessDataQuality } from "../src/domain/quality/assess-data-quality.js";
+import { createQualityProfile } from "../src/domain/quality/quality-profile.js";
 import { collectLiquidationEvidence } from "../src/application/liquidation-evidence-collection.js";
 import {
+  createLiquidationEvidenceRef,
   LIQUIDATION_EVIDENCE_ASSETS,
   LIQUIDATION_HISTORY_BUCKETS,
   LIQUIDATION_HOUR_MS,
 } from "../src/domain/liquidation/liquidation-evidence-bundle.js";
+import { liquidationHistoryWindow } from "../src/domain/liquidation/liquidation-evidence-windows.js";
+import { hashCanonical } from "../src/domain/identity/canonical-serialization.js";
 import {
   createMarketEvidenceBundle,
   MARKET_EVIDENCE_PRODUCER,
@@ -26,6 +33,7 @@ import type {
   CoinalyzeMarketHistory,
 } from "../src/ports/coinalyze-liquidation-data.js";
 import type { SecretProvider } from "../src/ports/secret-provider.js";
+import { dailyPrepareMarket } from "./fixtures/daily-prepare-fixtures.js";
 
 const API_KEY = "coinalyze-application-secret-sentinel";
 const RUN_ID = "run-45-application";
@@ -126,7 +134,11 @@ function targetMarkets(perAssetCount = 1): CoinalyzeMarket[] {
 
 function completeHistories(
   symbols: readonly string[],
-  options: { missing?: ReadonlyMap<string, number> } = {},
+  options: {
+    missing?: ReadonlyMap<string, number>;
+    missingBuckets?: ReadonlyMap<string, ReadonlySet<number>>;
+    lastClosedBucket?: number;
+  } = {},
 ): readonly CoinalyzeMarketHistory[] {
   return symbols.map((symbol) => ({
     symbol,
@@ -134,9 +146,13 @@ function completeHistories(
       { length: LIQUIDATION_HISTORY_BUCKETS },
       (_, index) => {
         const bucket =
-          LAST_CLOSED_BUCKET -
+          (options.lastClosedBucket ?? LAST_CLOSED_BUCKET) -
           (LIQUIDATION_HISTORY_BUCKETS - 1 - index) * LIQUIDATION_HOUR_MS;
-        if (options.missing?.get(symbol) === bucket) return undefined;
+        if (
+          options.missing?.get(symbol) === bucket ||
+          options.missingBuckets?.get(symbol)?.has(bucket)
+        )
+          return undefined;
         return {
           timestamp: timestamp(bucket),
           longUsd: index === 0 ? "0" : String(index + 1),
@@ -164,6 +180,7 @@ function harness(
     ) => CoinalyzeHistoryResult;
     readonly secret?: SecretProvider;
     readonly evidence?: MarketEvidenceBundle;
+    readonly clockTime?: string;
   } = {},
 ) {
   const calls: Array<{
@@ -200,7 +217,7 @@ function harness(
       return { kind: "available", secret: API_KEY };
     },
   };
-  const clock = fixedClock("2026-09-24T12:31:00.000Z");
+  const clock = fixedClock(options.clockTime ?? "2026-09-24T12:31:00.000Z");
   assert.equal(clock.ok, true);
   if (!clock.ok) throw new Error("invalid application test clock");
   return {
@@ -352,6 +369,110 @@ test("complete catalogue with one missing history bucket retains the market and 
         bucketTimestamp === timestamp(missing),
     ),
   );
+});
+
+test("real collector's single per-constituent diagnostic permits only older gaps outside the required 12h window", async () => {
+  const marketBundle = dailyPrepareMarket();
+  const expected = liquidationHistoryWindow(
+    Date.parse(marketBundle.bundleCutoff),
+  ).epochs;
+  const target = targetMarkets();
+  const btcSymbol = target.find(({ baseAsset }) => baseAsset === "BTC")?.symbol;
+  assert.ok(btcSymbol);
+  const missing = new Set([expected[0]!, expected[1]!]);
+  const h = harness({
+    evidence: marketBundle,
+    markets: target,
+    clockTime: "2026-09-24T14:01:00.000Z",
+    histories: (request) => ({
+      histories: completeHistories(request.symbols, {
+        lastClosedBucket: expected.at(-1)!,
+        missingBuckets: new Map([[btcSymbol, missing]]),
+      }),
+      responseValid: true,
+      diagnostics: [],
+    }),
+  });
+  const collected = await h.collect();
+  assert.equal(collected.ok, true);
+  if (!collected.ok) return;
+  const liquidation = collected.value.bundle;
+  assert.equal(liquidation.coverageProof, "complete");
+  assert.equal(liquidation.historyProof, "incomplete");
+  assert.equal(liquidation.diagnostics.length, 1);
+  assert.equal(liquidation.diagnostics[0]?.code, "missing-bucket");
+  assert.equal(
+    liquidation.diagnostics[0]?.bucketTimestamp,
+    new Date(expected[0]!).toISOString(),
+  );
+
+  const analytics = createAnalyticsEvidenceBundle({
+    market: marketBundle,
+    liquidation,
+    featuresVersion: "analytics-features/v2",
+    profile: {
+      schemaVersion: "analytics-profile/v1",
+      features: [
+        {
+          id: "btc-liquidation-12h",
+          kind: "liquidation-window",
+          asset: "BTC",
+          windowHours: 12,
+          required: true,
+        },
+      ],
+      externalEvidence: [],
+    },
+  });
+  assert.equal(analytics.ok, true);
+  if (!analytics.ok) return;
+  assert.equal(analytics.value.derivativeFeatures[0]?.status, "complete");
+
+  const qualityProfile = createQualityProfile({
+    schemaVersion: "quality-profile/v1",
+    profileVersion: "provisional-m1-quality/v2",
+    liquidationHistoryScope: "requested-feature-windows/v1",
+    roles: [
+      { id: "market", required: false, maxAgeMs: 86_400_000 },
+      { id: "liquidation", required: true, maxAgeMs: 86_400_000 },
+      {
+        id: qualityRoleForOutcome("btc-liquidation-12h"),
+        required: true,
+        maxAgeMs: 86_400_000,
+      },
+    ],
+    metadataSkewMs: 1000,
+    trust: [],
+    penalties: [],
+  });
+  assert.equal(qualityProfile.ok, true);
+  if (!qualityProfile.ok) return;
+  const liquidationHash = hashCanonical(liquidation);
+  assert.equal(liquidationHash.ok, true);
+  if (!liquidationHash.ok) return;
+  const liquidationRef = createLiquidationEvidenceRef(
+    liquidation,
+    liquidationHash.value,
+    86_400_000,
+  );
+  assert.equal(liquidationRef.ok, true);
+  if (!liquidationRef.ok) return;
+  const assessment = assessDataQuality({
+    profile: qualityProfile.value,
+    sources: [
+      { role: "market", value: marketBundle },
+      {
+        role: "liquidation",
+        value: liquidation,
+        evidenceRef: liquidationRef.value,
+      },
+      { role: "analytics", value: analytics.value },
+    ],
+    bundleCutoff: marketBundle.bundleCutoff,
+    evaluationTime: "2026-09-24T14:01:00.000Z",
+  });
+  assert.equal(assessment.ok, true);
+  if (assessment.ok) assert.equal(assessment.value.qualityGate, "OK");
 });
 
 test("missing secret fails without provider access or empty successful evidence", async () => {
@@ -594,7 +715,9 @@ test("#11 run identity rejects duplicate matching EvidenceRefs", async () => {
 });
 
 test("a false history validity flag without adapter diagnostics stays incomplete", async () => {
+  const marketBundle = marketEvidence();
   const h = harness({
+    evidence: marketBundle,
     histories: (request) => ({
       histories: completeHistories(request.symbols),
       responseValid: false,
@@ -609,10 +732,105 @@ test("a false history validity flag without adapter diagnostics stays incomplete
   assert.equal(result.value.bundle.status, "incomplete");
   assert.equal(result.value.bundle.historyProof, "incomplete");
   assert.ok(
+    result.value.bundle.targets.every((target) =>
+      target.constituents.every(
+        (constituent) =>
+          constituent.observations.length === LIQUIDATION_HISTORY_BUCKETS,
+      ),
+    ),
+  );
+  assert.ok(
+    result.value.bundle.targets.every((target) =>
+      target.windows.every((window) => window.complete),
+    ),
+  );
+  assert.ok(
     result.value.bundle.diagnostics.some(
       ({ code, operation }) =>
         code === "history-incomplete" &&
         operation === "fetch-liquidation-history",
+    ),
+  );
+
+  const analytics = createAnalyticsEvidenceBundle({
+    market: marketBundle,
+    liquidation: result.value.bundle,
+    featuresVersion: "analytics-features/v2",
+    profile: {
+      schemaVersion: "analytics-profile/v1",
+      features: [
+        {
+          id: "btc-liquidation-12h",
+          kind: "liquidation-window",
+          asset: "BTC",
+          windowHours: 12,
+          required: true,
+        },
+      ],
+      externalEvidence: [],
+    },
+  });
+  assert.equal(analytics.ok, true);
+  if (!analytics.ok) return;
+  assert.equal(analytics.value.derivativeFeatures[0]?.status, "partial");
+  const featureWindow = analytics.value.derivativeFeatures[0]?.window;
+  assert.ok(featureWindow && "complete" in featureWindow);
+  if (featureWindow && "complete" in featureWindow)
+    assert.equal(featureWindow.complete, true);
+
+  const qualityProfile = createQualityProfile({
+    schemaVersion: "quality-profile/v1",
+    profileVersion: "response-invalid-scope-test-v1",
+    liquidationHistoryScope: "requested-feature-windows/v1",
+    roles: [
+      { id: "market", required: false, maxAgeMs: 86_400_000 },
+      { id: "liquidation", required: true, maxAgeMs: 86_400_000 },
+      { id: "analytics", required: true, maxAgeMs: 86_400_000 },
+      {
+        id: "analytics:btc-liquidation-12h",
+        required: true,
+        maxAgeMs: 86_400_000,
+      },
+    ],
+    metadataSkewMs: 1000,
+    trust: [],
+    penalties: [],
+  });
+  assert.equal(qualityProfile.ok, true);
+  if (!qualityProfile.ok) return;
+  const liquidationHash = hashCanonical(result.value.bundle);
+  assert.equal(liquidationHash.ok, true);
+  if (!liquidationHash.ok) return;
+  const liquidationRef = createLiquidationEvidenceRef(
+    result.value.bundle,
+    liquidationHash.value,
+    86_400_000,
+  );
+  assert.equal(liquidationRef.ok, true);
+  if (!liquidationRef.ok) return;
+  const assessment = assessDataQuality({
+    profile: qualityProfile.value,
+    sources: [
+      { role: "market", value: marketBundle },
+      {
+        role: "liquidation",
+        value: result.value.bundle,
+        evidenceRef: liquidationRef.value,
+      },
+      { role: "analytics", value: analytics.value },
+    ],
+    bundleCutoff: BUNDLE_CUTOFF,
+    evaluationTime: BUNDLE_CUTOFF,
+  });
+  assert.equal(assessment.ok, true);
+  if (!assessment.ok) return;
+  assert.equal(assessment.value.qualityGate, "BLOCK");
+  assert.ok(
+    assessment.value.findings.some(
+      (finding) =>
+        finding.role === "liquidation" &&
+        finding.reasonCode === "INCOMPLETE_LIQUIDATION_HISTORY" &&
+        finding.blocking,
     ),
   );
 });

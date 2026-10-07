@@ -64,18 +64,26 @@ export function dailyPrepareMarket(runId = DAILY_PREPARE_RUN_ID) {
   });
 }
 
-/** Every constituent has every closed hour; zero means observed zero, not missing. */
+/** Complete/zero modes include every closed hour; missing removes one bucket.
+ * An observed zero is still distinct from an omitted bucket.
+ */
 export function dailyPrepareLiquidation(
   market: MarketEvidenceBundle,
-  mode: "complete" | "zero" | "missing" = "complete",
+  mode: "complete" | "zero" | "missing" | "invalid-response" = "complete",
 ) {
   const last =
     Math.floor(Date.parse(market.bundleCutoff) / 3_600_000) * 3_600_000 -
     3_600_000;
   const bundle = liquidationFixture(market, {
     coverageProof: "complete",
-    historyProof: mode === "missing" ? "incomplete" : "complete",
-    status: mode === "missing" ? "incomplete" : "complete",
+    historyProof:
+      mode === "missing" || mode === "invalid-response"
+        ? "incomplete"
+        : "complete",
+    status:
+      mode === "missing" || mode === "invalid-response"
+        ? "incomplete"
+        : "complete",
     targets: LIQUIDATION_EVIDENCE_ASSETS.map((asset) => ({
       asset,
       constituents: [
@@ -99,13 +107,21 @@ export function dailyPrepareLiquidation(
     })),
     diagnostics:
       mode === "missing"
-        ? [
-            {
-              code: "history-incomplete",
-              operation: "fetch-liquidation-history",
-            },
-          ]
-        : [],
+        ? LIQUIDATION_EVIDENCE_ASSETS.map((asset) => ({
+            code: "missing-bucket",
+            operation: "fetch-liquidation-history",
+            asset,
+            providerSymbol: `${asset}USDT_PERP.BYBIT`,
+            bucketTimestamp: new Date(last - 3 * 3_600_000).toISOString(),
+          }))
+        : mode === "invalid-response"
+          ? [
+              {
+                code: "history-incomplete",
+                operation: "fetch-liquidation-history",
+              },
+            ]
+          : [],
   });
   return {
     bundle,

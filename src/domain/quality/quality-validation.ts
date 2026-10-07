@@ -2,11 +2,13 @@ import {
   rehydrateAnalyticsEvidenceBundle,
   type AnalyticsEvidenceBundle,
 } from "../analytics/analytics-evidence-bundle.js";
+import { ANALYTICS_FEATURES_VERSION_V2 } from "../analytics/analytics-profile.js";
 import { compareAnalyticsText } from "../analytics/analytics-diagnostics.js";
 import { qualityRoleForOutcome } from "./quality-inputs.js";
 import { createAnalyticsInputIdentity } from "../analytics/analytics-inputs.js";
 import { validateExternalRegimeEvidence } from "../analytics/external-regime-evidence.js";
 import { hashCanonical } from "../identity/canonical-serialization.js";
+import { isCanonicalMissingBucketHistory } from "../liquidation/liquidation-history-classification.js";
 import {
   marketEvidenceContentHash,
   type MarketEvidenceBundle,
@@ -24,6 +26,76 @@ import {
 } from "./data-quality-findings.js";
 import type { QualityInputRecord } from "./quality-inputs.js";
 import type { QualityProfile } from "./quality-profile.js";
+
+function analyticsDeclaresVerifiedRequiredWindows(
+  analytics: AnalyticsEvidenceBundle,
+  market: MarketEvidenceBundle,
+  liquidation: LiquidationEvidenceBundle,
+  qualityProfile: QualityProfile,
+): boolean {
+  if (analytics.featuresVersion !== ANALYTICS_FEATURES_VERSION_V2) return false;
+  const expectedIdentity = createAnalyticsInputIdentity(market, liquidation);
+  const expectedIdentityHash = expectedIdentity.ok
+    ? hashCanonical(expectedIdentity.value)
+    : undefined;
+  const claimedIdentityHash = hashCanonical(analytics.inputIdentity);
+  if (
+    !expectedIdentityHash?.ok ||
+    !claimedIdentityHash.ok ||
+    expectedIdentityHash.value !== claimedIdentityHash.value
+  )
+    return false;
+
+  const requests = analytics.profile.features.filter(
+    (
+      request,
+    ): request is Extract<
+      AnalyticsEvidenceBundle["profile"]["features"][number],
+      { readonly kind: "liquidation-window" }
+    > => request.kind === "liquidation-window" && request.required,
+  );
+  if (requests.length === 0) return false;
+  for (const request of requests) {
+    const role = qualityRoleForOutcome(request.id);
+    if (
+      qualityProfile.roles.find((item) => item.id === role)?.required !== true
+    )
+      return false;
+    const target = liquidation.targets.find(
+      (item) => item.asset === request.asset,
+    );
+    const sourceWindow = target?.windows.find(
+      (item) => item.hours === request.windowHours,
+    );
+    const outcomes = analytics.derivativeFeatures.filter(
+      (item) => item.requestId === request.id,
+    );
+    const outcome = outcomes[0];
+    const featureWindow = outcome?.window;
+    if (
+      outcomes.length !== 1 ||
+      outcome?.kind !== "liquidation-window" ||
+      outcome.asset !== request.asset ||
+      sourceWindow === undefined ||
+      featureWindow === undefined ||
+      !("hours" in featureWindow) ||
+      featureWindow.hours !== sourceWindow.hours ||
+      featureWindow.from !== sourceWindow.from ||
+      featureWindow.to !== sourceWindow.to ||
+      featureWindow.observedConstituentBuckets !==
+        sourceWindow.observedConstituentBuckets ||
+      featureWindow.expectedConstituentBuckets !==
+        sourceWindow.expectedConstituentBuckets ||
+      featureWindow.complete !== sourceWindow.complete ||
+      outcome.coverageProof !== liquidation.coverageProof ||
+      outcome.historyProof !== liquidation.historyProof ||
+      outcome.status !== "complete" ||
+      !sourceWindow.complete
+    )
+      return false;
+  }
+  return true;
+}
 
 /** Classify supplied facts only. Missing roles, trust and confidence belong to the host. */
 export function classifyQualityEvidence(
@@ -82,6 +154,7 @@ export function classifyQualityEvidence(
   function diagnostics(
     role: string,
     rows: readonly { readonly code: string }[],
+    ignoreCanonicalMissingBuckets = false,
   ) {
     const mapping: Record<string, QualityReasonCode> = {
       "duplicate-observation": "DUPLICATE_OBSERVATION",
@@ -97,8 +170,11 @@ export function classifyQualityEvidence(
       "missing-required-data": "GAPPED_WINDOW",
       "history-incomplete": "GAPPED_WINDOW",
     };
-    for (const row of rows)
+    for (const row of rows) {
+      if (ignoreCanonicalMissingBuckets && row.code === "missing-bucket")
+        continue;
       if (mapping[row.code]) add(role, mapping[row.code]!);
+    }
   }
   function sourceTime(role: string, timestamp: UtcTimestamp | undefined) {
     if (timestamp !== undefined && Date.parse(timestamp) > cutoff)
@@ -125,6 +201,31 @@ export function classifyQualityEvidence(
   const liquidations = records
     .filter((r) => r.role === "liquidation" && r.value !== undefined)
     .map((r) => r.value as LiquidationEvidenceBundle);
+  const scopedHistoryLiquidations = new Set<LiquidationEvidenceBundle>();
+  if (profile.liquidationHistoryScope === "requested-feature-windows/v1") {
+    for (const liquidation of liquidations) {
+      if (!isCanonicalMissingBucketHistory(liquidation)) continue;
+      for (const market of markets) {
+        for (const record of records) {
+          if (
+            record.role !== "analytics" ||
+            record.value === undefined ||
+            record.failures.length > 0
+          )
+            continue;
+          if (
+            analyticsDeclaresVerifiedRequiredWindows(
+              record.value as AnalyticsEvidenceBundle,
+              market,
+              liquidation,
+              profile,
+            )
+          )
+            scopedHistoryLiquidations.add(liquidation);
+        }
+      }
+    }
+  }
   for (const market of markets)
     for (const liquidation of liquidations) {
       const identity = createAnalyticsInputIdentity(market, liquidation);
@@ -153,7 +254,12 @@ export function classifyQualityEvidence(
           evaluation + profile.metadataSkewMs
       )
         add(record.role, "METADATA_CLOCK_SKEW");
-      diagnostics(record.role, value.diagnostics);
+      diagnostics(
+        record.role,
+        value.diagnostics,
+        record.role === "liquidation" &&
+          scopedHistoryLiquidations.has(value as LiquidationEvidenceBundle),
+      );
       const content =
         record.role === "market"
           ? marketEvidenceContentHash(value as MarketEvidenceBundle)
@@ -218,9 +324,10 @@ export function classifyQualityEvidence(
         }
       } else {
         const liquidation = value as LiquidationEvidenceBundle;
+        const scopedMissingBuckets = scopedHistoryLiquidations.has(liquidation);
         if (liquidation.coverageProof !== "complete")
           add("liquidation", "INCOMPLETE_LIQUIDATION_COVERAGE");
-        if (liquidation.historyProof !== "complete")
+        if (liquidation.historyProof !== "complete" && !scopedMissingBuckets)
           add("liquidation", "INCOMPLETE_LIQUIDATION_HISTORY");
         if (
           liquidation.marketEvidence.runId !== liquidation.runId ||
@@ -228,7 +335,10 @@ export function classifyQualityEvidence(
         )
           add("liquidation", "LINEAGE_MISMATCH");
         for (const target of liquidation.targets) {
-          if (target.windows.some((w) => !w.complete))
+          if (
+            target.windows.some((w) => !w.complete) &&
+            (!scopedMissingBuckets || target.constituents.length === 0)
+          )
             add("liquidation", "GAPPED_WINDOW");
           for (const row of target.constituents.flatMap((c) => c.observations))
             sourceTime("liquidation", row.timestamp);

@@ -29,6 +29,10 @@ import {
 } from "../src/domain/market/market-evidence-bundle.js";
 import { DecimalValue } from "../src/domain/shared/decimal.js";
 import { hashCanonical } from "../src/domain/identity/canonical-serialization.js";
+import {
+  encodeCanonicalArtifact,
+  rehydrateArtifact,
+} from "../src/domain/identity/canonical-artifact.js";
 
 const CUTOFF = "2026-09-24T12:30:00.000Z";
 const HOUR_MS = 60 * 60 * 1_000;
@@ -42,6 +46,23 @@ function decimal(value: string): DecimalValue {
 
 function timestamp(epoch: number): string {
   return new Date(epoch).toISOString();
+}
+
+function missingBucketDiagnostic(
+  asset: LiquidationTargetAsset,
+  offset: number,
+) {
+  const epoch = liquidationHistoryWindow(Date.parse(CUTOFF)).epochs.find(
+    (_, index) => 23 - index === offset,
+  );
+  assert.notEqual(epoch, undefined);
+  return {
+    code: "missing-bucket" as const,
+    operation: "fetch-liquidation-history" as const,
+    asset,
+    providerSymbol: `${asset}USDT_PERP.A`,
+    bucketTimestamp: timestamp(epoch!),
+  };
 }
 
 function profile(features: readonly Record<string, unknown>[]) {
@@ -141,6 +162,17 @@ function liquidationBundle(
       readonly longUsd: string;
       readonly shortUsd: string;
     }[];
+    readonly includeFullHistory?: boolean;
+    readonly missingOffsetsByAsset?: Partial<
+      Record<LiquidationTargetAsset, readonly number[]>
+    >;
+    readonly diagnostics?: readonly {
+      readonly code: "missing-bucket" | "history-incomplete";
+      readonly operation: "fetch-liquidation-history";
+      readonly asset?: string;
+      readonly providerSymbol?: string;
+      readonly bucketTimestamp?: string;
+    }[];
     readonly allAssets?: boolean;
     readonly marketHash?: string;
   } = {},
@@ -150,7 +182,8 @@ function liquidationBundle(
   if (!contentHash.ok) throw new Error("market content hash is invalid");
   const rows = options.rows ?? [];
   const hasRows = rows.length > 0;
-  const fullHistory = options.historyProof === "complete";
+  const fullHistory =
+    options.historyProof === "complete" || options.includeFullHistory === true;
   const result = createLiquidationEvidenceBundle({
     runId: market.runId,
     schemaVersion: LIQUIDATION_EVIDENCE_SCHEMA_VERSION,
@@ -172,7 +205,8 @@ function liquidationBundle(
     targets: LIQUIDATION_EVIDENCE_ASSETS.map((asset) => ({
       asset,
       constituents:
-        (asset === "BTC" || options.allAssets) && (fullHistory || hasRows)
+        (asset === "BTC" || options.allAssets) &&
+        (fullHistory || hasRows || options.missingOffsetsByAsset?.[asset])
           ? [
               {
                 providerSymbol: `${asset}USDT_PERP.A`,
@@ -185,13 +219,22 @@ function liquidationBundle(
                 expireAt: 0,
                 notionalDenominatedIn: "USD",
                 observations: fullHistory
-                  ? liquidationHistoryWindow(
-                      Date.parse(market.bundleCutoff),
-                    ).epochs.map((epoch) => ({
-                      timestamp: timestamp(epoch),
-                      longUsd: rows[0]?.longUsd ?? "1",
-                      shortUsd: rows[0]?.shortUsd ?? "1",
-                    }))
+                  ? liquidationHistoryWindow(Date.parse(market.bundleCutoff))
+                      .epochs.map((epoch, index) => ({
+                        epoch,
+                        offset: 23 - index,
+                      }))
+                      .filter(
+                        ({ offset }) =>
+                          !options.missingOffsetsByAsset?.[asset]?.includes(
+                            offset,
+                          ),
+                      )
+                      .map(({ epoch }) => ({
+                        timestamp: timestamp(epoch),
+                        longUsd: rows[0]?.longUsd ?? "1",
+                        shortUsd: rows[0]?.shortUsd ?? "1",
+                      }))
                   : asset === "BTC"
                     ? rows
                     : [],
@@ -200,14 +243,15 @@ function liquidationBundle(
           : [],
     })),
     diagnostics:
-      (options.status ?? (hasRows ? "incomplete" : "failed")) === "complete"
+      options.diagnostics ??
+      ((options.status ?? (hasRows ? "incomplete" : "failed")) === "complete"
         ? []
         : [
             {
-              code: "provider-unavailable",
+              code: "history-incomplete",
               operation: "fetch-liquidation-history",
             },
-          ],
+          ]),
   });
   assert.equal(result.ok, true);
   if (!result.ok) throw new Error("liquidation fixture is invalid");
@@ -576,6 +620,149 @@ test("a fully proven explicit-zero liquidation window remains complete", () => {
   }
 });
 
+test("analytics-features/v2 scopes history completeness to exact requested windows", () => {
+  const market = marketBundle();
+  const requested = profile([
+    {
+      id: "btc-liquidation-12h",
+      kind: "liquidation-window",
+      asset: "BTC",
+      windowHours: 12,
+      required: true,
+    },
+  ]);
+  const olderBtcGap = liquidationBundle(market, {
+    coverageProof: "complete",
+    historyProof: "incomplete",
+    status: "incomplete",
+    includeFullHistory: true,
+    allAssets: true,
+    missingOffsetsByAsset: { BTC: [20] },
+    diagnostics: [missingBucketDiagnostic("BTC", 20)],
+  });
+  const v2 = createAnalyticsEvidenceBundle({
+    market,
+    liquidation: olderBtcGap,
+    profile: requested,
+    featuresVersion: "analytics-features/v2",
+  });
+  const v1 = createAnalyticsEvidenceBundle({
+    market,
+    liquidation: olderBtcGap,
+    profile: requested,
+  });
+
+  assert.equal(v2.ok, true);
+  assert.equal(v1.ok, true);
+  if (!v2.ok || !v1.ok) return;
+  assert.equal(v2.value.featuresVersion, "analytics-features/v2");
+  assert.equal(v2.value.derivativeFeatures[0]?.status, "complete");
+  assert.equal(v2.value.derivativeFeatures[0]?.historyProof, "incomplete");
+  assert.equal(v2.value.sufficiency.status, "complete");
+  assert.equal(v1.value.featuresVersion, "analytics-features/v1");
+  assert.equal(v1.value.derivativeFeatures[0]?.status, "partial");
+  assert.equal(v1.value.sufficiency.status, "insufficient");
+  assert.deepEqual(rehydrateAnalyticsEvidenceBundle(v2.value), v2);
+  const canonical = encodeCanonicalArtifact(
+    "analytics-evidence-bundle",
+    v2.value,
+  );
+  assert.equal(canonical.ok, true);
+  if (canonical.ok) {
+    const restored = rehydrateArtifact(
+      "analytics-evidence-bundle",
+      canonical.value,
+    );
+    assert.deepEqual(restored, v2);
+    assert.deepEqual(
+      encodeCanonicalArtifact("analytics-evidence-bundle", restored.value),
+      canonical,
+    );
+  }
+});
+
+test("analytics-features/v2 keeps unrelated assets out of selected-window completeness", () => {
+  const market = marketBundle();
+  const source = liquidationBundle(market, {
+    coverageProof: "complete",
+    historyProof: "incomplete",
+    status: "incomplete",
+    includeFullHistory: true,
+    allAssets: true,
+    missingOffsetsByAsset: { ETH: [2] },
+    diagnostics: [missingBucketDiagnostic("ETH", 2)],
+  });
+  const result = computeDerivativeFeatures(
+    market,
+    source,
+    profile([
+      {
+        id: "btc-liquidation-12h",
+        kind: "liquidation-window",
+        asset: "BTC",
+        windowHours: 12,
+        required: true,
+      },
+    ]),
+    "analytics-features/v2",
+  )[0];
+
+  assert.equal(result?.status, "complete");
+  assert.equal(result?.historyProof, "incomplete");
+});
+
+test("analytics-features/v2 blocks required-window gaps and generic invalid history", () => {
+  const market = marketBundle();
+  const requested = profile([
+    {
+      id: "btc-liquidation-12h",
+      kind: "liquidation-window",
+      asset: "BTC",
+      windowHours: 12,
+      required: true,
+    },
+  ]);
+  const insideGap = computeDerivativeFeatures(
+    market,
+    liquidationBundle(market, {
+      coverageProof: "complete",
+      historyProof: "incomplete",
+      status: "incomplete",
+      includeFullHistory: true,
+      allAssets: true,
+      missingOffsetsByAsset: { BTC: [3] },
+      diagnostics: [missingBucketDiagnostic("BTC", 3)],
+    }),
+    requested,
+    "analytics-features/v2",
+  )[0];
+  const invalidResponse = computeDerivativeFeatures(
+    market,
+    liquidationBundle(market, {
+      coverageProof: "complete",
+      historyProof: "incomplete",
+      status: "incomplete",
+      includeFullHistory: true,
+      allAssets: true,
+      diagnostics: [
+        { code: "history-incomplete", operation: "fetch-liquidation-history" },
+      ],
+    }),
+    requested,
+    "analytics-features/v2",
+  )[0];
+
+  assert.equal(insideGap?.status, "partial");
+  assert.ok(insideGap?.window && "complete" in insideGap.window);
+  if (insideGap?.window && "complete" in insideGap.window)
+    assert.equal(insideGap.window.complete, false);
+  assert.equal(invalidResponse?.status, "partial");
+  assert.equal(
+    invalidResponse?.reasonCodes.includes("INCOMPLETE_LIQUIDATION_HISTORY"),
+    true,
+  );
+});
+
 test("liquidation proof states stay distinct and no-fact results retain missingness", () => {
   const market = marketBundle();
   const request = profile([
@@ -788,6 +975,67 @@ test("rehydration rejects complete liquidation outcomes without complete proofs"
         ...payload,
         contentHash: recomputedHash.value,
       }).ok,
+      false,
+    );
+  }
+});
+
+test("analytics-features/v2 rehydration binds complete outcomes to proven selected windows", () => {
+  const market = marketBundle();
+  const requested = profile([
+    {
+      id: "btc-liquidation-12h",
+      kind: "liquidation-window",
+      asset: "BTC",
+      windowHours: 12,
+      required: true,
+    },
+  ]);
+  const source = liquidationBundle(market, {
+    coverageProof: "complete",
+    historyProof: "incomplete",
+    status: "incomplete",
+    includeFullHistory: true,
+    allAssets: true,
+    missingOffsetsByAsset: { BTC: [20] },
+    diagnostics: [missingBucketDiagnostic("BTC", 20)],
+  });
+  const result = createAnalyticsEvidenceBundle({
+    market,
+    liquidation: source,
+    profile: requested,
+    featuresVersion: "analytics-features/v2",
+  });
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  const outcome = result.value.derivativeFeatures[0];
+  assert.ok(outcome !== undefined && outcome.kind === "liquidation-window");
+  if (outcome === undefined || outcome.kind !== "liquidation-window") return;
+  assert.equal(outcome.status, "complete");
+  assert.equal(outcome.historyProof, "incomplete");
+
+  const invalidOutcomes = [
+    { ...outcome, coverageProof: "incomplete" },
+    { ...outcome, window: { ...outcome.window, complete: false } },
+    { ...outcome, reasonCodes: ["INCOMPLETE_LIQUIDATION_HISTORY"] },
+    (() => {
+      const withoutHistoryProof: Record<string, unknown> = { ...outcome };
+      delete withoutHistoryProof.historyProof;
+      return withoutHistoryProof;
+    })(),
+  ];
+  for (const invalidOutcome of invalidOutcomes) {
+    const payload: Record<string, unknown> = {
+      ...result.value,
+      derivativeFeatures: [invalidOutcome],
+    };
+    delete payload.contentHash;
+    const hash = hashCanonical(payload);
+    assert.equal(hash.ok, true);
+    if (!hash.ok) continue;
+    assert.equal(
+      rehydrateAnalyticsEvidenceBundle({ ...payload, contentHash: hash.value })
+        .ok,
       false,
     );
   }

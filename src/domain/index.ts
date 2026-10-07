@@ -182,6 +182,7 @@ export {
   type LiquidationWindowEvidence,
   type LiquidationWindowHours,
 } from "./liquidation/liquidation-evidence-bundle.js";
+export { isCanonicalMissingBucketHistory } from "./liquidation/liquidation-history-classification.js";
 export {
   createStrategyConfig,
   type StrategyConfig,
@@ -338,11 +339,13 @@ export {
 } from "./analytics/analytics-evidence-bundle.js";
 export {
   ANALYTICS_FEATURES_VERSION,
+  ANALYTICS_FEATURES_VERSION_V2,
   ANALYTICS_PROFILE_SCHEMA_VERSION,
   createAnalyticsProfile,
   hashAnalyticsProfile,
   type AnalyticsFeatureKind,
   type AnalyticsFeatureRequest,
+  type AnalyticsFeaturesVersion,
   type AnalyticsProfile,
   type ExternalEvidenceRequest,
 } from "./analytics/analytics-profile.js";

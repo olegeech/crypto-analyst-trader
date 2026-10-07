@@ -24,6 +24,7 @@ import {
   INVARIANT_QUALITY_REASONS,
   type DataQualityFinding,
 } from "./data-quality-findings.js";
+import { parseQualityProfileVersion } from "./quality-profile.js";
 
 export interface QualityEvidenceDisposition {
   readonly role: string;
@@ -104,10 +105,7 @@ function validatePayload(input: unknown): Result<DataQualityAssessmentPayload> {
         "quality assessment schema version is unsupported",
       ),
     );
-  const profileVersion = requireIdentifier(
-    input.profileVersion,
-    "profileVersion",
-  );
+  const profileVersion = parseQualityProfileVersion(input.profileVersion);
   const profileHash = requireHash(input.profileHash, "profileHash");
   const evaluationTime = parseUtcTimestamp(input.evaluationTime);
   const bundleCutoff = parseUtcTimestamp(input.bundleCutoff);
