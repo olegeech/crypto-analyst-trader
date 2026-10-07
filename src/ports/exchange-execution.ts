@@ -114,6 +114,25 @@ export interface ExchangeReadState {
   readonly capabilities: readonly CapabilityObservation[];
 }
 
+/** Symbol-scoped position facts; deliberately contains no account identity. */
+export interface ExchangeExecutionPosition {
+  readonly instrument: string;
+  readonly side: "long" | "short" | "flat";
+  readonly quantity: DecimalValue;
+  readonly leverage: DecimalValue;
+  readonly entryPrice?: DecimalValue;
+}
+
+/** Mainnet execution facts without a parallel account snapshot or identity. */
+export interface MainnetExchangeReadState {
+  readonly serverTime: UtcTimestamp;
+  readonly market: MarketSnapshot;
+  readonly position: ExchangeExecutionPosition;
+  readonly openOrders: readonly ExchangeOrderObservation[];
+  readonly leverage: ExchangeLeverage;
+  readonly capabilities: readonly CapabilityObservation[];
+}
+
 export type ExchangeTimeInForce = "GTC" | "IOC" | "FOK" | "PostOnly";
 
 /**
@@ -210,4 +229,14 @@ export interface ExchangeExecutionPort {
   cancelOrder(
     request: ExchangeCancelOrderRequest,
   ): Promise<ExchangeResult<ExchangeOrderAcknowledgement>>;
+}
+
+/** Mainnet keeps the same typed single-operation surface with a sanitized read projection. */
+export interface MainnetExchangeExecutionPort extends Omit<
+  ExchangeExecutionPort,
+  "readState"
+> {
+  readState(
+    request: ExchangeReadStateRequest,
+  ): Promise<ExchangeResult<MainnetExchangeReadState>>;
 }

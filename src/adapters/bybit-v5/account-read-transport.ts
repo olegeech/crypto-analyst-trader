@@ -3,7 +3,7 @@ import type {
   CredentialEnvironment,
 } from "../../ports/credential-provider.js";
 import { buildSignaturePayload, hmacSha256 } from "./request-signing.js";
-import { BYBIT_CANONICAL_ORIGINS } from "./transport.js";
+import { BYBIT_CANONICAL_ORIGINS } from "./origins.js";
 import { classifyRetCode } from "./response-errors.js";
 import {
   validateBybitPublicResponse,

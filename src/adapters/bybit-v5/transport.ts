@@ -12,14 +12,13 @@ export {
 export { buildSignaturePayload, hmacSha256 } from "./request-signing.js";
 
 import type { ExchangeCredentials } from "../../ports/credential-provider.js";
+import { BYBIT_CANONICAL_ORIGINS } from "./origins.js";
+export {
+  BYBIT_CANONICAL_ORIGINS,
+  BYBIT_DEMO_ORIGIN,
+  BYBIT_MAINNET_ORIGIN,
+} from "./origins.js";
 
-export const BYBIT_CANONICAL_ORIGINS = Object.freeze({
-  demo: "https://api-demo.bybit.com",
-  testnet: "https://api-testnet.bybit.com",
-  mainnet: "https://api.bybit.com",
-} as const);
-export const BYBIT_DEMO_ORIGIN = BYBIT_CANONICAL_ORIGINS.demo;
-export const BYBIT_MAINNET_ORIGIN = BYBIT_CANONICAL_ORIGINS.mainnet;
 export const BYBIT_TIME_PATH = "/v5/market/time";
 export const BYBIT_DEMO_TIME_PATH = BYBIT_TIME_PATH;
 export const DEFAULT_RECV_WINDOW = "5000";
@@ -246,6 +245,16 @@ export class BybitPrivateTransport {
     this.clockOffset = options.clockOffsetMs;
     this.recvWindow = options.recvWindow ?? DEFAULT_RECV_WINDOW;
     this.timeoutMs = options.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+  }
+
+  /** The fixed environment selected from the closed canonical-origin map. */
+  get environment(): BybitPrivateEnvironment {
+    return this.#environment;
+  }
+
+  /** The canonical origin for the fixed environment; callers cannot override it. */
+  get origin(): string {
+    return this.#origin;
   }
 
   async get(path: string, query?: QueryInput): Promise<BybitResponse> {

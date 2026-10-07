@@ -1,4 +1,5 @@
-import { responseList, type BybitResponse } from "./transport.js";
+import { responseList } from "./public-response.js";
+import type { BybitPublicResponse as BybitResponse } from "./public-response.js";
 import type {
   ExchangeOrderStatus,
   ExchangeProtectionType,

@@ -4,7 +4,10 @@ import type {
 } from "../../ports/exchange-execution.js";
 import { BybitOrderMappingError } from "./order-mappers.js";
 import { BybitReadMappingError } from "./read-mappers.js";
-import { BybitDemoTransportError } from "./transport.js";
+import {
+  BybitDemoTransportError,
+  type BybitPrivateEnvironment,
+} from "./transport.js";
 
 export interface BybitFailureContext {
   readonly operation: ExchangeOperation;
@@ -42,7 +45,9 @@ function failure(
 export function normalizeBybitFailure(
   error: unknown,
   context: BybitFailureContext,
+  environment: BybitPrivateEnvironment = "demo",
 ): ExchangeExecutionFailure {
+  const venue = environment === "mainnet" ? "Bybit Mainnet" : "Bybit Demo";
   if (error instanceof BybitDemoTransportError) {
     const extras = {
       ...(error.retCode === undefined ? {} : { exchangeCode: error.retCode }),
@@ -56,7 +61,7 @@ export function normalizeBybitFailure(
         return failure(
           context,
           "authentication",
-          "Bybit Demo credentials were rejected.",
+          `${venue} credentials were rejected.`,
           "never",
           extras,
         );
@@ -65,7 +70,7 @@ export function normalizeBybitFailure(
         return failure(
           context,
           "permission",
-          "Bybit Demo credentials cannot perform this operation.",
+          `${venue} credentials cannot perform this operation.`,
           "never",
           extras,
         );
@@ -73,7 +78,7 @@ export function normalizeBybitFailure(
         return failure(
           context,
           "clock-skew",
-          "Bybit Demo rejected the request because the signing clock is outside the allowed window.",
+          `${venue} rejected the request because the signing clock is outside the allowed window.`,
           "never",
           extras,
         );
@@ -81,7 +86,7 @@ export function normalizeBybitFailure(
         return failure(
           context,
           "configuration",
-          "Bybit Demo rejected the request signature; inspect adapter configuration before retrying.",
+          `${venue} rejected the request signature; inspect adapter configuration before retrying.`,
           "never",
           extras,
         );
@@ -89,7 +94,7 @@ export function normalizeBybitFailure(
         return failure(
           context,
           "rate-limited",
-          "Bybit Demo rate-limited the request; wait before another bounded read.",
+          `${venue} rate-limited the request; wait before another bounded read.`,
           "read-only",
           extras,
         );
@@ -97,7 +102,7 @@ export function normalizeBybitFailure(
         return failure(
           context,
           "ambiguous",
-          "Bybit Demo returned an ambiguous server outcome; reconcile the original identity before retrying.",
+          `${venue} returned an ambiguous server outcome; reconcile the original identity before retrying.`,
           "reconcile",
           extras,
         );
@@ -105,7 +110,7 @@ export function normalizeBybitFailure(
         return failure(
           context,
           "ownership",
-          "Bybit Demo reported an identity or order ownership conflict; reconcile the original identity.",
+          `${venue} reported an identity or order ownership conflict; reconcile the original identity.`,
           "reconcile",
           extras,
         );
@@ -113,7 +118,7 @@ export function normalizeBybitFailure(
         return failure(
           context,
           "precondition",
-          "Bybit Demo rejected the request as invalid for the selected scope.",
+          `${venue} rejected the request as invalid for the selected scope.`,
           "never",
           extras,
         );
@@ -121,7 +126,7 @@ export function normalizeBybitFailure(
         return failure(
           context,
           "configuration",
-          "The Demo adapter rejected an invalid request before exchange evidence was accepted.",
+          `${venue} adapter rejected an invalid request before exchange evidence was accepted.`,
           "never",
           extras,
         );
@@ -129,7 +134,7 @@ export function normalizeBybitFailure(
         return failure(
           context,
           "invalid-response",
-          "Bybit Demo returned a response that could not be validated.",
+          `${venue} returned a response that could not be validated.`,
           "reconcile",
           extras,
         );
@@ -137,7 +142,7 @@ export function normalizeBybitFailure(
         return failure(
           context,
           "transport",
-          "The Bybit Demo request did not complete; reconcile before retrying a write.",
+          `${venue} request did not complete; reconcile before retrying a write.`,
           "reconcile",
           extras,
         );
@@ -149,7 +154,7 @@ export function normalizeBybitFailure(
             context.operation === "fills"
             ? "exchange"
             : "ambiguous",
-          "Bybit Demo returned an unclassified failure; reconcile the original identity before retrying.",
+          `${venue} returned an unclassified failure; reconcile the original identity before retrying.`,
           context.operation === "read" ||
             context.operation === "observe" ||
             context.operation === "fills"
@@ -165,8 +170,8 @@ export function normalizeBybitFailure(
       context,
       error.kind === "precondition" ? "precondition" : "invalid-response",
       error.kind === "precondition"
-        ? "The selected Demo state does not satisfy the required precondition."
-        : "Bybit Demo read evidence failed runtime validation.",
+        ? `The selected ${environment === "mainnet" ? "Mainnet" : "Demo"} state does not satisfy the required precondition.`
+        : `${venue} read evidence failed runtime validation.`,
       "never",
     );
   }
@@ -176,8 +181,8 @@ export function normalizeBybitFailure(
       context,
       error.kind === "precondition" ? "precondition" : "configuration",
       error.kind === "precondition"
-        ? "The Demo order response or ownership state conflicts with the supplied identity."
-        : "The Demo adapter rejected an invalid order request or response.",
+        ? `${venue} order response or ownership state conflicts with the supplied identity.`
+        : `${venue} adapter rejected an invalid order request or response.`,
       error.kind === "precondition" ? "reconcile" : "never",
     );
   }
@@ -185,7 +190,7 @@ export function normalizeBybitFailure(
   return failure(
     context,
     "transport",
-    "The Bybit Demo operation failed without a safe normalized diagnostic; reconcile before retrying a write.",
+    `${venue} operation failed without a safe normalized diagnostic; reconcile before retrying a write.`,
     "reconcile",
   );
 }
