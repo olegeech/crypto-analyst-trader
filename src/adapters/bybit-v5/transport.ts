@@ -13,13 +13,21 @@ export { buildSignaturePayload, hmacSha256 } from "./request-signing.js";
 
 import type { ExchangeCredentials } from "../../ports/credential-provider.js";
 
-export const BYBIT_DEMO_ORIGIN = "https://api-demo.bybit.com";
-export const BYBIT_DEMO_TIME_PATH = "/v5/market/time";
+export const BYBIT_CANONICAL_ORIGINS = Object.freeze({
+  demo: "https://api-demo.bybit.com",
+  testnet: "https://api-testnet.bybit.com",
+  mainnet: "https://api.bybit.com",
+} as const);
+export const BYBIT_DEMO_ORIGIN = BYBIT_CANONICAL_ORIGINS.demo;
+export const BYBIT_MAINNET_ORIGIN = BYBIT_CANONICAL_ORIGINS.mainnet;
+export const BYBIT_TIME_PATH = "/v5/market/time";
+export const BYBIT_DEMO_TIME_PATH = BYBIT_TIME_PATH;
 export const DEFAULT_RECV_WINDOW = "5000";
 export const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
 
 type JsonObject = Record<string, unknown>;
 type HttpMethod = "GET" | "POST";
+export type BybitPrivateEnvironment = "demo" | "mainnet";
 
 export interface BybitResponse {
   readonly retCode: number;
@@ -58,7 +66,10 @@ export class BybitDemoTransportError extends Error {
   }
 }
 
-export interface BybitDemoTransportOptions {
+export { BybitDemoTransportError as BybitPrivateTransportError };
+
+export interface BybitPrivateTransportOptions {
+  readonly environment: BybitPrivateEnvironment;
   readonly credentials: ExchangeCredentials;
   readonly request?: typeof fetch;
   readonly clock?: () => number;
@@ -66,6 +77,11 @@ export interface BybitDemoTransportOptions {
   readonly recvWindow?: string;
   readonly timeoutMs?: number;
 }
+
+export type BybitDemoTransportOptions = Omit<
+  BybitPrivateTransportOptions,
+  "environment"
+>;
 
 function asObject(value: unknown): JsonObject | null {
   return typeof value === "object" && value !== null && !Array.isArray(value)
@@ -127,18 +143,39 @@ function queryString(input: QueryInput | undefined): string {
   return params.toString();
 }
 
-function requestUrl(path: string, query: string): string {
-  if (!path.startsWith("/") || path.includes("//") || path.includes("#")) {
+function environmentLabel(environment: BybitPrivateEnvironment): string {
+  return environment === "demo" ? "Demo" : "Mainnet";
+}
+
+function requestUrl(
+  environment: BybitPrivateEnvironment,
+  path: string,
+  query: string,
+): string {
+  const origin = BYBIT_CANONICAL_ORIGINS[environment];
+  const label = environmentLabel(environment);
+  if (
+    !path.startsWith("/") ||
+    path.includes("//") ||
+    path.includes("#") ||
+    path.includes("?") ||
+    path.includes("\\")
+  ) {
     throw new BybitDemoTransportError(
       "invalid-request",
-      "The Bybit Demo endpoint path is invalid.",
+      `The Bybit ${label} endpoint path is invalid.`,
     );
   }
-  const url = new URL(path, BYBIT_DEMO_ORIGIN);
-  if (url.origin !== BYBIT_DEMO_ORIGIN) {
+  const url = new URL(path, origin);
+  if (
+    url.origin !== origin ||
+    url.pathname !== path ||
+    url.search !== "" ||
+    url.hash !== ""
+  ) {
     throw new BybitDemoTransportError(
       "invalid-request",
-      "The Bybit Demo adapter accepts only its canonical origin.",
+      `The Bybit ${label} adapter accepts only its canonical origin.`,
     );
   }
   if (query) url.search = query;
@@ -167,20 +204,23 @@ function parseServerTime(response: BybitResponse): number {
 
 function errorForResponse(
   response: BybitResponse,
+  environment: BybitPrivateEnvironment,
 ): BybitDemoTransportError | null {
   if (response.retCode === 0) return null;
   const classification = classifyRetCode(response.retCode);
-  return new BybitDemoTransportError(
-    classification.kind,
-    classification.message,
-    {
-      retCode: classification.retCode,
-      recommendReconnect: classification.recommendReconnect,
-    },
-  );
+  const message =
+    environment === "demo"
+      ? classification.message
+      : classification.message.replaceAll("Demo", "Mainnet");
+  return new BybitDemoTransportError(classification.kind, message, {
+    retCode: classification.retCode,
+    recommendReconnect: classification.recommendReconnect,
+  });
 }
 
-export class BybitDemoTransport {
+export class BybitPrivateTransport {
+  readonly #environment: BybitPrivateEnvironment;
+  readonly #origin: string;
   private readonly credentials: ExchangeCredentials;
   private readonly request: typeof fetch;
   private readonly clock: () => number;
@@ -188,7 +228,18 @@ export class BybitDemoTransport {
   private readonly timeoutMs: number;
   private clockOffset: number | undefined;
 
-  constructor(options: BybitDemoTransportOptions) {
+  constructor(options: BybitPrivateTransportOptions) {
+    if (
+      !options ||
+      (options.environment !== "demo" && options.environment !== "mainnet")
+    ) {
+      throw new BybitDemoTransportError(
+        "invalid-request",
+        "The Bybit private adapter accepts only canonical Demo or Mainnet environments.",
+      );
+    }
+    this.#environment = options.environment;
+    this.#origin = BYBIT_CANONICAL_ORIGINS[options.environment];
     this.credentials = options.credentials;
     this.request = options.request ?? fetch;
     this.clock = options.clock ?? Date.now;
@@ -211,13 +262,13 @@ export class BybitDemoTransport {
   }
 
   async getServerTime(): Promise<number> {
-    return parseServerTime(await this.sendUnsigned(BYBIT_DEMO_TIME_PATH));
+    return parseServerTime(await this.sendUnsigned(BYBIT_TIME_PATH));
   }
 
   private async ensureClockOffset(): Promise<number> {
     if (this.clockOffset !== undefined) return this.clockOffset;
     const before = this.clock();
-    const response = await this.sendUnsigned(BYBIT_DEMO_TIME_PATH);
+    const response = await this.sendUnsigned(BYBIT_TIME_PATH);
     const after = this.clock();
     const serverTime = parseServerTime(response);
     this.clockOffset = serverTime - Math.round((before + after) / 2);
@@ -230,7 +281,7 @@ export class BybitDemoTransport {
     query: string,
     body?: string,
   ): Promise<BybitResponse> {
-    const url = requestUrl(path, query);
+    const url = requestUrl(this.#environment, path, query);
     const offset = await this.ensureClockOffset();
     const timestamp = String(Math.trunc(this.clock() + offset));
     const signedBytes = body ?? query;
@@ -261,7 +312,7 @@ export class BybitDemoTransport {
   }
 
   private async sendUnsigned(path: string): Promise<BybitResponse> {
-    return this.fetchValidated(requestUrl(path, ""), {
+    return this.fetchValidated(requestUrl(this.#environment, path, ""), {
       method: "GET",
       headers: { Accept: "application/json" },
       redirect: "error",
@@ -272,6 +323,7 @@ export class BybitDemoTransport {
     url: string,
     init: RequestInit,
   ): Promise<BybitResponse> {
+    const label = environmentLabel(this.#environment);
     let response: Response;
     try {
       response = await this.request(url, {
@@ -281,22 +333,31 @@ export class BybitDemoTransport {
     } catch {
       throw new BybitDemoTransportError(
         "transport-failed",
-        "The Bybit Demo request could not be completed.",
+        `The Bybit ${label} request could not be completed.`,
       );
     }
     const finalUrl = response.url === "" ? url : response.url;
-    if (new URL(finalUrl).origin !== BYBIT_DEMO_ORIGIN) {
+    let finalOrigin: string;
+    try {
+      finalOrigin = new URL(finalUrl).origin;
+    } catch {
       throw new BybitDemoTransportError(
         "invalid-response",
-        "Bybit Demo returned a response from a non-canonical origin.",
+        `Bybit ${label} returned a response with an invalid final origin.`,
+      );
+    }
+    if (finalOrigin !== this.#origin || response.redirected) {
+      throw new BybitDemoTransportError(
+        "invalid-response",
+        `Bybit ${label} returned a response from a non-canonical origin.`,
       );
     }
     if (!response.ok) {
       throw new BybitDemoTransportError(
         response.status === 429 ? "rate-limited" : "transport-failed",
         response.status === 429
-          ? "Bybit Demo rate-limited the request."
-          : `Bybit Demo returned HTTP ${response.status}.`,
+          ? `Bybit ${label} rate-limited the request.`
+          : `Bybit ${label} returned HTTP ${response.status}.`,
         { httpStatus: response.status },
       );
     }
@@ -306,14 +367,26 @@ export class BybitDemoTransport {
     } catch {
       throw new BybitDemoTransportError(
         "invalid-response",
-        "Bybit Demo returned a non-JSON response; no exchange evidence was accepted.",
+        `Bybit ${label} returned a non-JSON response; no exchange evidence was accepted.`,
       );
     }
     const validated = validateBybitResponse(payload);
-    const failure = errorForResponse(validated);
+    const failure = errorForResponse(validated, this.#environment);
     if (failure) throw failure;
     return validated;
   }
+}
+
+export class BybitDemoTransport extends BybitPrivateTransport {
+  constructor(options: BybitDemoTransportOptions) {
+    super({ ...options, environment: "demo" });
+  }
+}
+
+export function createBybitPrivateTransport(
+  options: BybitPrivateTransportOptions,
+): BybitPrivateTransport {
+  return new BybitPrivateTransport(options);
 }
 
 export function createBybitDemoTransport(

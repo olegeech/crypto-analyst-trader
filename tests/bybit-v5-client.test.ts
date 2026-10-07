@@ -17,6 +17,7 @@ import type {
   BybitResponse,
   QueryInput,
 } from "../src/adapters/bybit-v5/transport.js";
+import { BybitDemoTransportError } from "../src/adapters/bybit-v5/transport.js";
 import { BybitReadMappingError } from "../src/adapters/bybit-v5/read-mappers.js";
 
 function response(result: Record<string, unknown>): BybitResponse {
@@ -329,6 +330,43 @@ test("execution client posts equal Demo leverage values and proves the fresh rea
     buyLeverage: "1",
     sellLeverage: "1",
   });
+});
+
+test("execution client does not retry an ambiguous mutation", async () => {
+  let postCalls = 0;
+  const ambiguous = new BybitDemoTransportError(
+    "ambiguous-server",
+    "reconcile the original mutation",
+  );
+  const clock = fixedClock("2026-09-21T10:00:00.000Z");
+  assert.equal(clock.ok, true);
+  if (!clock.ok) return;
+
+  const client = new BybitDemoExecutionClient({
+    expectedAccountId: "demo-account",
+    clock: clock.value,
+    transport: {
+      async get(path) {
+        return defaultResponse(path);
+      },
+      async getServerTime() {
+        return Date.parse("2026-09-21T10:00:00.000Z");
+      },
+      async post() {
+        postCalls += 1;
+        throw ambiguous;
+      },
+    },
+  });
+
+  await assert.rejects(
+    client.setLeverage({
+      instrument: "DOGEUSDT",
+      target: decimalValue("1"),
+    }),
+    (error: unknown) => error === ambiguous,
+  );
+  assert.equal(postCalls, 1);
 });
 
 function decimalValue(value: string): DecimalValue {
