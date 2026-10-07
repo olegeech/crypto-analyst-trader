@@ -59,7 +59,12 @@ src/
 
 - `daily prepare`: refresh evidence, snapshot the account, build a desired
   order plan, evaluate risk and cost, and write review artifacts.
-- `plan approve`: record actor, note, expiry and exact immutable plan hash.
+- `plan approve`: record the automatically derived actor, optional ordinary
+  note, expiry and exact immutable plan hash. A real REVIEW requires a nonblank
+  note, and BLOCK cannot be approved. For released daily decision-only consent,
+  one explicit yes applies to the displayed prepared hash; approval does not
+  recollect, reprice or refresh evidence. A future execution path must
+  independently revalidate required evidence immediately before a write.
 - `daily execute --plan`: validate the approved hash, apply only the owned-order
   diff and persist each attempt before the exchange call.
 - `run reconcile`: resolve asynchronous or ambiguous results using open orders,
@@ -69,6 +74,16 @@ src/
 
 Preparation and execution are separate commands. A scheduler may prepare a plan
 automatically; mainnet execution is not implicitly triggered.
+
+## Operator effort and validation path
+
+Operator-facing safeguards should follow the single-operator, proportionate
+workflow principle in [Product Principles](../product-principles.md#product-intent--reviewed-2026-10-05)
+and the practical diagnostics checklist in
+[Contributing](../../CONTRIBUTING.md#operator-safeguards-and-diagnostics).
+The forward Mainnet path is deterministic/fault/replay evidence, read-only
+readiness checks for the isolated AI Subaccount, then the bounded canary owned
+by issue #31. Testnet or an earlier Mainnet write is not a prerequisite.
 
 ## Daily planning boundary
 

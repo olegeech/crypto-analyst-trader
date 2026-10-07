@@ -74,6 +74,13 @@ smallest slice that best improves:
 Avoid labels for these dimensions unless they drive automation. Record the
 trade-off in the issue's "Why now" section instead.
 
+For operator-facing work, follow the proportionate-safeguards and diagnostics
+guidance in [Product Principles](product-principles.md#product-intent--reviewed-2026-10-05)
+and [Contributing](../CONTRIBUTING.md#operator-safeguards-and-diagnostics).
+Discuss uncertain operator needs with the owner in a short interview before
+adding a new workflow or mandatory step. Evaluate the operator effort and
+diagnostic usefulness against the concrete risk addressed.
+
 ## Definition of Ready
 
 - one measurable outcome;
@@ -87,22 +94,13 @@ trade-off in the issue's "Why now" section instead.
 
 ## Named issue delivery
 
-Use the repository-native `$issue-delivery #<issue>` skill for one named
-eligible delivery issue that produces code, configuration, or canonical
-documentation. It performs the PO/Ready gate, independent issue review,
-development handoff, release checks, and exact-head independent PR review. It
-does not select the next roadmap item; roadmap-selection skills own that
-decision.
-
-The default invocation stops at the skill-only verdict `READY_FOR_MERGE` and
-never merges. An explicit `$issue-delivery #<issue> merge` is required before
-the skill may call `./scripts/merge-pr.sh <PR-number> <reviewed-head-SHA>`.
-The wrapper's exact-reviewed-head guard remains the final merge authority.
-
-Issue and PR reviews are each capped at three total attempts. Unresolved
-blockers, missing Ready evidence, scope growth, ambiguous CI repair, unavailable
-implementation tooling, or a moved reviewed head stop the flow for human
-resolution. Non-blocking review findings do not require stylistic churn.
+The repository-local `issue-delivery` skill is temporarily paused; see its
+deprecation notice in
+[`.agents/skills/issue-delivery/SKILL.md`](../.agents/skills/issue-delivery/SKILL.md).
+Do not invoke it or present it as an available path until its owner removes the
+pause. Use an explicitly requested maintained workflow only when it covers the
+task. If no permitted workflow applies, stop and report the limitation and the
+owner action needed to refresh the paused workflow.
 
 ## Definition of Done
 

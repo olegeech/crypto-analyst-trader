@@ -29,6 +29,40 @@ npm ci && npm run test:release
 This is the single pre-PR verification command. Testnet smoke and dependency
 audit are separate opt-in checks and are not part of the blocking release path.
 
+## Operator safeguards and diagnostics
+
+Follow the proportionate-safeguards principle in
+[Product Principles](docs/product-principles.md#product-intent--reviewed-2026-10-05).
+Prefer automatic validation, ownership checks and reconciliation over repeated
+operator prompts. A new confirmation, required field or manual recovery step
+needs a named failure mode that cannot reasonably be handled automatically.
+
+Operator-facing errors should show the current stage and attempted action, a
+sanitized provider code and explanation, safe actual/expected values where
+available, whether the result is known or ambiguous, and the next safe action.
+Preserve the original cause; never expose secrets or raw private account facts.
+
+Examples based on the [PR #73 balance-precondition feedback](https://github.com/olegeech/crypto-analyst-trader/pull/73#issuecomment-5648679799)
+and [operator KISS feedback](https://github.com/olegeech/crypto-analyst-trader/pull/73#issuecomment-5655333480):
+
+- Balance precondition — replace `PRECONDITION_FAILED: Available Testnet USDT is
+below five times the planned probe notional.` with `Available Testnet USDT is
+1.25; at least 25.449 USDT is required (five times the planned probe notional).
+Add at least 24.199 USDT using the Bybit Testnet faucet, then rerun the
+Testnet capability probe only if its documented bounded write scenarios and
+probe-owned cleanup are intended.`
+- Explicit exchange rejection — preserve `retCode: 10024` and its compliance
+  explanation. Do not turn it into generic “order not found” language or
+  suggest retrying an explicitly rejected request.
+- Exact-plan consent — replace repeated full-digest retyping for each scenario
+  with one explicit `yes` to the displayed exact immutable plan hash. Any future
+  execution must independently perform required fresh revalidation before a
+  write.
+
+An explicit rejection and an ambiguous dispatch outcome are different facts:
+retain the rejection code when known, and reconcile an ambiguous write before
+retrying it.
+
 ## Merge a reviewed pull request
 
 After the PR has been reviewed and its checks are green, run the repository

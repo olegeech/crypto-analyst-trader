@@ -6,21 +6,26 @@ Improve measured net risk-adjusted return after trading fees, funding and
 slippage without exceeding explicit capital, exposure and drawdown limits.
 Profit is an objective, not a guarantee.
 
-## Product intent — reviewed 2026-09-05
+## Product intent — reviewed 2026-10-05
 
-The primary operator is the product owner, assisted by AI coding and review
-assistants. The product should reduce manual exchange work while improving
-decision quality and measured trading performance without weakening the minimum
-safety gates required for live capital.
+This is a single-operator system: the product owner, assisted by AI coding and
+review assistants, uses a dedicated AI account and does not manually trade on
+it. The product should reduce manual exchange work while improving decision
+quality and measured trading performance without weakening the minimum safety
+gates required for live capital. New confirmations, required fields and manual
+recovery steps should address a concrete failure mode that cannot reasonably be
+handled automatically; avoid enterprise-style ceremony without that need.
 
 The canonical daily product boundary is defined in [README.md](../README.md).
 Preparation and execution remain separate as required by
 [invariant 16](architecture/invariants.md), and every production exchange
-write remains bound to an approved exact plan hash by invariant 2. The bounded
-Testnet capability probe is a scoped exception: its explicit invocation
-authorizes only the documented Testnet scenarios and necessary probe-owned
-cleanup, while each write still receives an exact, expiring plan hash and
-final revalidation.
+write remains bound to an approved exact plan hash by invariant 2. A bounded
+Testnet capability probe, when explicitly run, is an opt-in environment-scoped
+check: invocation authorizes only its documented Testnet scenarios and
+necessary probe-owned cleanup, while each write still receives an exact,
+expiring plan hash and final revalidation. Its evidence describes Testnet
+behavior only; Testnet is not part of the current forward release path and does
+not authorize Mainnet writes.
 
 Production decision evidence may include versioned market-regime,
 early-warning-risk, liquidity-stress and trap evidence described by the
@@ -143,10 +148,10 @@ prioritization interview following the discovery recorded in issue #35.
 2. **Fail closed.** Missing, stale, mixed-run or contradictory evidence blocks
    exposure increases.
 3. **Exact approval.** Production execution requires one immutable plan hash,
-   not a strategy name or mutable configuration. The bounded Testnet probe uses
-   explicit invocation as its run-scoped authorization and keeps the exact
-   plan hash as the write-integrity boundary without retyping it for every
-   scenario or cleanup action.
+   not a strategy name or mutable configuration. A bounded, opt-in Testnet
+   probe uses explicit invocation as its run-scoped authorization and keeps
+   the exact plan hash as the write-integrity boundary without retyping it for
+   every scenario or cleanup action.
 4. **Owned orders only.** Manual and unrelated exchange orders are never
    changed.
 5. **Take-profit at entry.** A managed entry is submitted with at least one
@@ -164,3 +169,9 @@ prioritization interview following the discovery recorded in issue #35.
    one symbol/side and a strict capital cap.
 10. **Earn complexity.** Realtime state, grid replenishment, extra exchanges and
     unattended execution require measured need and a new architecture decision.
+11. **Proportionate operator effort.** Prefer automatic validation, ownership
+    checks, bounded actions and reconciliation. Ask for operator input when the
+    approved scope changes or available evidence leaves a concrete decision
+    unresolved. Do not replace removed prompts with equivalent flags or
+    mandatory metadata rituals. Preserve the actionable cause and next step in
+    diagnostics.
