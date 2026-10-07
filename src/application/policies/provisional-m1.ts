@@ -21,6 +21,7 @@ import { fail, ok } from "../../domain/shared/result.js";
 import { closedRecord } from "../../domain/planning/planning-validation.js";
 
 export const PROVISIONAL_M1_POLICY_VERSION = "provisional-m1-v1" as const;
+export const PROVISIONAL_M1_MAX_ACCOUNT_EVIDENCE_AGE_MS = 60_000 as const;
 export const PROVISIONAL_M1_EXTERNAL_AVAILABILITY = deepFreeze(
   (
     [
@@ -244,7 +245,7 @@ export function createProvisionalM1Composition(input: unknown) {
   const riskPolicy = createPortfolioRiskPolicy({
     schemaVersion: "portfolio-risk-policy/v1",
     policyVersion: "m1-v1",
-    maxAccountEvidenceAgeMs: 60000,
+    maxAccountEvidenceAgeMs: PROVISIONAL_M1_MAX_ACCOUNT_EVIDENCE_AGE_MS,
     marginReserveRatio: "0.1",
     maxDerivativesLeverage: "1",
     entryFeeRate: "0.0002",

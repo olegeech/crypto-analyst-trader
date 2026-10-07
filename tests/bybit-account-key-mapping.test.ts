@@ -57,14 +57,22 @@ test("environment identities stay isolated and unknown environment fails", () =>
   );
 });
 
-test("withdrawal permission is rejected while read-only wallet transfer labels grant no mutation", () => {
+test("all wallet transfer permission labels are conservatively treated as write authority", () => {
+  for (const permission of [
+    "AccountTransfer",
+    "SubMemberTransfer",
+    "SubMemberTransferList",
+  ]) {
+    const input = response();
+    input.result.permissions.Wallet = [permission] as never;
+    assert.equal(
+      mapAccountReadIdentity(input, "123", "testnet", at).credentialPosture
+        .permissions.walletTransfer,
+      true,
+      permission,
+    );
+  }
   const input = response();
-  input.result.permissions.Wallet = ["AccountTransfer"] as never;
-  assert.equal(
-    mapAccountReadIdentity(input, "123", "testnet", at).credentialPosture
-      .permissions.walletTransfer,
-    true,
-  );
   input.result.permissions.Wallet = ["Withdraw"] as never;
   assert.throws(
     () => mapAccountReadIdentity(input, "123", "demo", at),
