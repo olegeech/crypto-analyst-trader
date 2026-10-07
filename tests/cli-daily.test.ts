@@ -119,6 +119,66 @@ test("closed CLI surface rejects authority overrides before any dependencies", a
   assert.equal(used, false);
 });
 
+test("prepare prints only the bounded sanitized required-window diagnostics", async () => {
+  const prepared = preparedPlanFixture("blocked");
+  const diagnostics = {
+    marketStatus: "complete",
+    marketObservations: 3416,
+    liquidationStatus: "incomplete",
+    coverageProof: "complete",
+    historyProof: "incomplete",
+    eligibleConstituents: 93,
+    observedHourlyBuckets: 353,
+    requiredLiquidationWindows: [
+      {
+        requestId: "liquidation-12h",
+        asset: "BTC",
+        hours: 12,
+        completeness: "incomplete" as const,
+        observedConstituentBuckets: 11,
+        expectedConstituentBuckets: 12,
+        missingByVenue: [{ venue: "Bybit", missingConstituentBuckets: 1 }],
+        omittedVenueGroupCount: 0,
+        omittedMissingConstituentBuckets: 0,
+      },
+    ],
+    accountPartitionsTraversed: 0,
+    accountPartitionsExpected: 0,
+    exchangeWrites: 0 as const,
+    executionAuthority: "none" as const,
+  };
+  const output: string[] = [];
+  const clock = fixedClock("2026-09-24T14:00:10Z");
+  assert.equal(clock.ok, true);
+  if (!clock.ok) return;
+  const code = await runDailyCommand(
+    [
+      "prepare",
+      "--environment",
+      "mainnet",
+      "--symbol",
+      "BTCUSDT",
+      "--allocation",
+      "100",
+    ],
+    {
+      prepare: async () => ({ kind: "prepared", prepared, diagnostics }),
+      openStore: () => fail(domainError("INVALID_VALUE", "unused")),
+      actor: () => ok("unused"),
+      clock: clock.value,
+      interactive: false,
+      prompt: async () => "",
+      write: (text) => output.push(text),
+    },
+  );
+  assert.equal(code, 5);
+  assert.equal(output[0], JSON.stringify(diagnostics));
+  assert.ok(output[0]?.includes('"observedConstituentBuckets":11'));
+  assert.ok(output[0]?.includes('"expectedConstituentBuckets":12'));
+  assert.equal(output[0]?.includes("apiKey"), false);
+  assert.equal(output[0]?.includes("accountId"), false);
+});
+
 test("offline review/approval renders informational absence, binds derived actor and rejects redirected consent", async () => {
   const prepared = preparedPlanFixture("review");
   const clock = fixedClock("2026-09-24T14:00:10Z");

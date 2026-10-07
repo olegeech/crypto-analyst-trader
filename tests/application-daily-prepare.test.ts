@@ -29,7 +29,7 @@ const input = { environment: "demo", symbol: "BTCUSDT", allocation: "10" };
 
 function setup(
   options: {
-    liquidation?: "complete" | "missing" | "zero";
+    liquidation?: "complete" | "missing" | "zero" | "invalid-response";
     target?: "flat" | "long" | "order" | "absent";
     providerTime?: string;
     preAuth?: boolean;
@@ -200,6 +200,19 @@ test("clean native evidence traverses real planning/risk into replayable READY w
   assert.equal(result.diagnostics.executionAuthority, "none");
   assert.equal(result.diagnostics.eligibleConstituents, 4);
   assert.equal(result.diagnostics.observedHourlyBuckets, 96);
+  assert.deepEqual(result.diagnostics.requiredLiquidationWindows, [
+    {
+      requestId: "liquidation-12h",
+      asset: "BTC",
+      hours: 12,
+      completeness: "complete",
+      observedConstituentBuckets: 12,
+      expectedConstituentBuckets: 12,
+      missingByVenue: [],
+      omittedVenueGroupCount: 0,
+      omittedMissingConstituentBuckets: 0,
+    },
+  ]);
   assert.equal(
     result.diagnostics.accountPartitionsTraversed,
     result.diagnostics.accountPartitionsExpected,
@@ -242,7 +255,7 @@ test("invalid input and caller authority overrides are rejected before any provi
   }
 });
 
-for (const liquidation of ["missing", "zero"] as const)
+for (const liquidation of ["missing", "zero", "invalid-response"] as const)
   test(`${liquidation} liquidation cannot fabricate required imbalance or reach account providers`, async () => {
     const s = setup({ liquidation });
     const result = await s.boundary.prepare(input);
@@ -254,6 +267,22 @@ for (const liquidation of ["missing", "zero"] as const)
       result.diagnostics.observedHourlyBuckets,
       liquidation === "missing" ? 92 : 96,
     );
+    assert.deepEqual(result.diagnostics.requiredLiquidationWindows, [
+      {
+        requestId: "liquidation-12h",
+        asset: "BTC",
+        hours: 12,
+        completeness: liquidation === "zero" ? "complete" : "incomplete",
+        observedConstituentBuckets: liquidation === "missing" ? 11 : 12,
+        expectedConstituentBuckets: 12,
+        missingByVenue:
+          liquidation === "missing"
+            ? [{ venue: "Bybit", missingConstituentBuckets: 1 }]
+            : [],
+        omittedVenueGroupCount: 0,
+        omittedMissingConstituentBuckets: 0,
+      },
+    ]);
   });
 
 test("pre-auth failure creates no prepared artifact or invented account provenance", async () => {
@@ -266,6 +295,26 @@ test("pre-auth failure creates no prepared artifact or invented account provenan
     JSON.stringify(result),
     /accountIdentityHash|synthetic-secret|rawUID/,
   );
+});
+
+test("early liquidation failure keeps required-window counts explicitly unknown", async () => {
+  const s = setup({ throwAt: "liquidation" });
+  const result = await s.boundary.prepare(input);
+  assert.equal(result.kind, "unavailable");
+  assert.deepEqual(result.diagnostics.requiredLiquidationWindows, [
+    {
+      requestId: "liquidation-12h",
+      asset: "BTC",
+      hours: 12,
+      completeness: "unknown",
+      observedConstituentBuckets: null,
+      expectedConstituentBuckets: null,
+      missingByVenue: null,
+      omittedVenueGroupCount: null,
+      omittedMissingConstituentBuckets: null,
+    },
+  ]);
+  assert.ok(!s.events.includes("account"));
 });
 
 for (const target of ["long", "order"] as const)

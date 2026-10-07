@@ -11,9 +11,10 @@ import { domainError } from "../shared/errors.js";
 import { fail, ok, type Result } from "../shared/result.js";
 import {
   isRecord,
-  requireIdentifier,
   requireFiniteInteger,
+  requireIdentifier,
   requireSafeText,
+  requireString,
 } from "../shared/validation.js";
 import {
   QUALITY_REASON_CODES,
@@ -41,6 +42,7 @@ export interface QualityPenalty {
 export interface QualityProfile {
   readonly schemaVersion: "quality-profile/v1";
   readonly profileVersion: string;
+  readonly liquidationHistoryScope?: "requested-feature-windows/v1";
   readonly roles: readonly QualityRolePolicy[];
   readonly metadataSkewMs: number;
   readonly trust: readonly QualityTrustIdentity[];
@@ -51,12 +53,30 @@ const invalid = () =>
   fail(
     domainError("INVALID_VALUE", "quality profile is invalid or unsupported"),
   );
+
+export function parseQualityProfileVersion(value: unknown): Result<string> {
+  const version = requireString(value, "profileVersion");
+  if (!version.ok) return version;
+  const legacyIdentifier = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
+  const explicitVersion = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\/v[1-9][0-9]*$/u;
+  if (
+    version.value.length <= 128 &&
+    (legacyIdentifier.test(version.value) ||
+      explicitVersion.test(version.value))
+  )
+    return version;
+  return fail(
+    domainError("INVALID_IDENTIFIER", "profileVersion is not a safe version"),
+  );
+}
+
 export function createQualityProfile(input: unknown): Result<QualityProfile> {
   if (
     !isRecord(input) ||
     !keys(input, [
       "schemaVersion",
       "profileVersion",
+      "liquidationHistoryScope",
       "roles",
       "metadataSkewMs",
       "trust",
@@ -65,8 +85,12 @@ export function createQualityProfile(input: unknown): Result<QualityProfile> {
     input.schemaVersion !== "quality-profile/v1"
   )
     return invalid();
-  const version = requireIdentifier(input.profileVersion, "profileVersion");
+  const version = parseQualityProfileVersion(input.profileVersion);
   const skew = requireFiniteInteger(input.metadataSkewMs, "metadataSkewMs");
+  const hasLiquidationHistoryScope = Object.hasOwn(
+    input,
+    "liquidationHistoryScope",
+  );
   if (
     !version.ok ||
     !skew.ok ||
@@ -74,6 +98,11 @@ export function createQualityProfile(input: unknown): Result<QualityProfile> {
     input.roles.length === 0 ||
     !Array.isArray(input.trust) ||
     !Array.isArray(input.penalties)
+  )
+    return invalid();
+  if (
+    hasLiquidationHistoryScope &&
+    input.liquidationHistoryScope !== "requested-feature-windows/v1"
   )
     return invalid();
   const roles: QualityRolePolicy[] = [];
@@ -91,6 +120,12 @@ export function createQualityProfile(input: unknown): Result<QualityProfile> {
       return invalid();
     roles.push({ id: id.value, required: row.required, maxAgeMs: age.value });
   }
+  if (
+    hasLiquidationHistoryScope &&
+    (roles.find((role) => role.id === "liquidation")?.required !== true ||
+      !roles.some((role) => role.id.startsWith("analytics:") && role.required))
+  )
+    return invalid();
   const trust: QualityTrustIdentity[] = [];
   for (const row of input.trust) {
     const fields = [
@@ -147,6 +182,9 @@ export function createQualityProfile(input: unknown): Result<QualityProfile> {
     deepFreeze({
       schemaVersion: "quality-profile/v1",
       profileVersion: version.value,
+      ...(hasLiquidationHistoryScope
+        ? { liquidationHistoryScope: "requested-feature-windows/v1" as const }
+        : {}),
       roles: roles.sort((a, b) => textOrder(a.id, b.id)),
       metadataSkewMs: skew.value,
       trust: trust.sort((a, b) =>

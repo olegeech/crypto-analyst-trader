@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createProvisionalM1Composition } from "../src/application/policies/provisional-m1.js";
-import { hashQualityProfile } from "../src/domain/quality/quality-profile.js";
+import {
+  createQualityProfile,
+  hashQualityProfile,
+} from "../src/domain/quality/quality-profile.js";
 import { evaluateDailyDecision } from "../src/domain/planning/daily-decision.js";
 import {
   prepareDailyPlanningInputs,
@@ -17,6 +20,23 @@ function composition(symbol = "BTCUSDT") {
   assert.ok(result.ok, result.ok ? "" : result.error.message);
   return result.value;
 }
+
+test("legacy provisional quality profile hash remains reproducible without v2 scope", () => {
+  const current = composition();
+  const legacyInput: Record<string, unknown> = {
+    ...current.qualityProfile,
+    profileVersion: "provisional-m1-v1",
+  };
+  delete legacyInput.liquidationHistoryScope;
+  const legacy = createQualityProfile(legacyInput);
+  assert.equal(legacy.ok, true);
+  if (!legacy.ok) return;
+  assert.deepEqual(hashQualityProfile(legacy.value), {
+    ok: true,
+    value:
+      "sha256:8c95c25d38e3094d01dcb4f89616df329c948a141598c86ebe6a60f51bdc33f5",
+  });
+});
 
 test("selected-symbol production policies preserve exact requests and identities", () => {
   for (const symbol of ["BTCUSDT", "ETHUSDT", "SOLUSDT", "DOGEUSDT"]) {
@@ -65,6 +85,7 @@ test("selected-symbol production policies preserve exact requests and identities
     assert.equal(c.planningPolicy.atrSelector.required, true);
     assert.equal(c.planningPolicy.atrSelector.requestId, "atr-4h");
     assert.deepEqual(c.analyticsProfile.externalEvidence, []);
+    assert.equal(c.analyticsFeaturesVersion, "analytics-features/v2");
     assert.deepEqual(c.externalAdmissions, []);
     assert.deepEqual(c.qualityProfile.penalties, []);
     assert.deepEqual(c.qualityProfile.trust, []);
@@ -76,7 +97,11 @@ test("selected-symbol production policies preserve exact requests and identities
       ok: true,
       value: c.qualityProfileHash,
     });
-    assert.equal(c.qualityProfile.profileVersion, "provisional-m1-v1");
+    assert.equal(c.qualityProfile.profileVersion, "provisional-m1-quality/v2");
+    assert.equal(
+      c.qualityProfile.liquidationHistoryScope,
+      "requested-feature-windows/v1",
+    );
     assert.equal(c.reviewPolicy.provisionalRequiresReview, false);
     assert.equal(c.reviewPolicy.unconfiguredExternalRequiresReview, false);
     assert.equal(c.approvalPolicy.ttlMs, 900000);

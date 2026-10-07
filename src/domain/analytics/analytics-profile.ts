@@ -21,6 +21,18 @@ import { onlyKeys } from "./analytics-validation.js";
 
 export const ANALYTICS_PROFILE_SCHEMA_VERSION = "analytics-profile/v1" as const;
 export const ANALYTICS_FEATURES_VERSION = "analytics-features/v1" as const;
+export const ANALYTICS_FEATURES_VERSION_V2 = "analytics-features/v2" as const;
+export type AnalyticsFeaturesVersion =
+  typeof ANALYTICS_FEATURES_VERSION | typeof ANALYTICS_FEATURES_VERSION_V2;
+
+export function isAnalyticsFeaturesVersion(
+  value: unknown,
+): value is AnalyticsFeaturesVersion {
+  return (
+    value === ANALYTICS_FEATURES_VERSION ||
+    value === ANALYTICS_FEATURES_VERSION_V2
+  );
+}
 
 export type AnalyticsFeatureKind =
   | "close-return"

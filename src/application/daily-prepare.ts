@@ -31,6 +31,10 @@ import {
   PROVISIONAL_M1_EXTERNAL_AVAILABILITY,
   type ProvisionalM1Composition,
 } from "./policies/provisional-m1.js";
+import {
+  summarizeRequiredLiquidationWindows,
+  type RequiredLiquidationWindowDiagnostic,
+} from "./daily-prepare-diagnostics.js";
 
 export interface DailyPrepareDependencies {
   readonly collectMarket: (
@@ -66,6 +70,7 @@ export interface DailyPrepareDiagnostics {
   readonly historyProof: string;
   readonly eligibleConstituents: number;
   readonly observedHourlyBuckets: number;
+  readonly requiredLiquidationWindows: readonly RequiredLiquidationWindowDiagnostic[];
   readonly accountPartitionsTraversed: number;
   readonly accountPartitionsExpected: number;
   readonly exchangeWrites: 0;
@@ -124,6 +129,8 @@ export function createDailyPrepareBoundary(deps: DailyPrepareDependencies) {
         executionAuthority: "none" as const,
       };
       let composition: ProvisionalM1Composition | undefined = undefined;
+      let requiredLiquidationWindows: readonly RequiredLiquidationWindowDiagnostic[] =
+        Object.freeze([]);
       const failure = (
         kind: "blocked" | "unavailable",
         reasonCodes: readonly string[],
@@ -138,7 +145,10 @@ export function createDailyPrepareBoundary(deps: DailyPrepareDependencies) {
           informationalCodes: composition?.reviewPolicy.informationalCodes ?? [
             "PROVISIONAL_POLICY",
           ],
-          diagnostics: Object.freeze({ ...diagnostics }),
+          diagnostics: Object.freeze({
+            ...diagnostics,
+            requiredLiquidationWindows,
+          }),
         });
       if (
         !closedRecord(input, ["environment", "symbol", "allocation"]) ||
@@ -151,6 +161,9 @@ export function createDailyPrepareBoundary(deps: DailyPrepareDependencies) {
       });
       if (!configured.ok) return failure("unavailable", ["INVALID_INPUT"]);
       composition = configured.value;
+      requiredLiquidationWindows = summarizeRequiredLiquidationWindows(
+        composition.analyticsProfile,
+      );
       const environment = input.environment as AccountEvidenceEnvironment;
       try {
         const runId = deps.newRunId();
@@ -181,6 +194,11 @@ export function createDailyPrepareBoundary(deps: DailyPrepareDependencies) {
         if (!liquidation.ok)
           return failure("unavailable", ["LIQUIDATION_COLLECTION_UNAVAILABLE"]);
         const l = liquidation.value.bundle;
+        requiredLiquidationWindows = summarizeRequiredLiquidationWindows(
+          composition.analyticsProfile,
+          market.value,
+          l,
+        );
         diagnostics.liquidationStatus = l.status;
         diagnostics.coverageProof = l.coverageProof;
         diagnostics.historyProof = l.historyProof;
@@ -195,6 +213,7 @@ export function createDailyPrepareBoundary(deps: DailyPrepareDependencies) {
           market: market.value,
           liquidation: l,
           profile: composition.analyticsProfile,
+          featuresVersion: composition.analyticsFeaturesVersion,
         });
         if (!analytics.ok)
           return failure("blocked", ["ANALYTICS_ADMISSION_FAILED"]);
@@ -305,7 +324,10 @@ export function createDailyPrepareBoundary(deps: DailyPrepareDependencies) {
         return Object.freeze({
           kind: "prepared",
           prepared: prepared.value,
-          diagnostics: Object.freeze({ ...diagnostics }),
+          diagnostics: Object.freeze({
+            ...diagnostics,
+            requiredLiquidationWindows,
+          }),
         });
       } catch {
         return failure("unavailable", [

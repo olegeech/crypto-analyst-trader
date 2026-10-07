@@ -17,10 +17,12 @@ import {
 } from "../shared/validation.js";
 import {
   ANALYTICS_FEATURES_VERSION,
+  isAnalyticsFeaturesVersion,
   createAnalyticsProfile,
   hashAnalyticsProfile,
   isExternalEvidenceFamily,
   type AnalyticsFeatureRequest,
+  type AnalyticsFeaturesVersion,
   type AnalyticsProfile,
   type ExternalEvidenceFamily,
 } from "./analytics-profile.js";
@@ -58,7 +60,7 @@ export const ANALYTICS_EVIDENCE_SCHEMA_VERSION =
 
 export interface AnalyticsEvidenceBundle {
   readonly schemaVersion: typeof ANALYTICS_EVIDENCE_SCHEMA_VERSION;
-  readonly featuresVersion: typeof ANALYTICS_FEATURES_VERSION;
+  readonly featuresVersion: AnalyticsFeaturesVersion;
   readonly inputIdentity: AnalyticsInputIdentity;
   readonly profile: AnalyticsProfile;
   readonly profileHash: PlanHash;
@@ -74,6 +76,7 @@ export interface CreateAnalyticsEvidenceBundleInput {
   readonly market: MarketEvidenceBundle;
   readonly liquidation?: LiquidationEvidenceBundle;
   readonly profile: unknown;
+  readonly featuresVersion?: AnalyticsFeaturesVersion;
   readonly externalEvidence?: unknown;
 }
 
@@ -245,6 +248,7 @@ function outcomeList(
 }
 
 function payloadFromParts(input: {
+  readonly featuresVersion: AnalyticsFeaturesVersion;
   readonly inputIdentity: AnalyticsInputIdentity;
   readonly profile: AnalyticsProfile;
   readonly profileHash: PlanHash;
@@ -256,7 +260,7 @@ function payloadFromParts(input: {
 }): BundlePayload {
   return {
     schemaVersion: ANALYTICS_EVIDENCE_SCHEMA_VERSION,
-    featuresVersion: ANALYTICS_FEATURES_VERSION,
+    featuresVersion: input.featuresVersion,
     inputIdentity: input.inputIdentity,
     profile: input.profile,
     profileHash: input.profileHash,
@@ -285,6 +289,15 @@ function buildSufficiency(
 export function createAnalyticsEvidenceBundle(
   input: CreateAnalyticsEvidenceBundleInput,
 ): Result<AnalyticsEvidenceBundle> {
+  const featuresVersion = input.featuresVersion ?? ANALYTICS_FEATURES_VERSION;
+  if (!isAnalyticsFeaturesVersion(featuresVersion)) {
+    return fail(
+      domainError(
+        "UNSUPPORTED_CONTRACT",
+        "analytics feature version is unsupported",
+      ),
+    );
+  }
   const profile = createAnalyticsProfile(input.profile);
   if (!profile.ok) return profile;
   const identity = createAnalyticsInputIdentity(
@@ -300,6 +313,7 @@ export function createAnalyticsEvidenceBundle(
     input.market,
     input.liquidation,
     profile.value,
+    featuresVersion,
   );
   const external = collectExternalEvidence(
     profile.value,
@@ -318,6 +332,7 @@ export function createAnalyticsEvidenceBundle(
 
   return createBundleFromPayload(
     payloadFromParts({
+      featuresVersion,
       inputIdentity: identity.value,
       profile: profile.value,
       profileHash: profileHash.value,
@@ -524,7 +539,10 @@ function validFeatureWindow(value: unknown): boolean {
   );
 }
 
-function validLiquidationProofs(outcome: Record<string, unknown>): boolean {
+function validLiquidationProofs(
+  outcome: Record<string, unknown>,
+  featuresVersion: AnalyticsFeaturesVersion,
+): boolean {
   const coverageProof = outcome.coverageProof;
   const historyProof = outcome.historyProof;
   const validCoverageProof =
@@ -537,11 +555,18 @@ function validLiquidationProofs(outcome: Record<string, unknown>): boolean {
     historyProof === "incomplete";
   if (!validCoverageProof || !validHistoryProof) return false;
   if (outcome.status !== "complete") return true;
+  if (
+    coverageProof !== "complete" ||
+    !isRecord(outcome.window) ||
+    outcome.window.complete !== true
+  )
+    return false;
+  if (featuresVersion === ANALYTICS_FEATURES_VERSION)
+    return historyProof === "complete";
   return (
-    coverageProof === "complete" &&
-    historyProof === "complete" &&
-    isRecord(outcome.window) &&
-    outcome.window.complete === true
+    (historyProof === "complete" || historyProof === "incomplete") &&
+    Array.isArray(outcome.reasonCodes) &&
+    !outcome.reasonCodes.includes("INCOMPLETE_LIQUIDATION_HISTORY")
   );
 }
 
@@ -651,6 +676,7 @@ function validateOutcome(
 
 function validateFeatureArrays(
   profile: AnalyticsProfile,
+  featuresVersion: AnalyticsFeaturesVersion,
   priceFeatures: unknown,
   derivativeFeatures: unknown,
 ): boolean {
@@ -738,7 +764,8 @@ function validateFeatureArrays(
     const outcome = derivativeFeatures[index];
     if (!isRecord(outcome)) return false;
     const validProofs =
-      request.kind !== "liquidation-window" || validLiquidationProofs(outcome);
+      request.kind !== "liquidation-window" ||
+      validLiquidationProofs(outcome, featuresVersion);
     const validWindow =
       outcome.window === undefined || validFeatureWindow(outcome.window);
     const validValue =
@@ -866,7 +893,7 @@ export function rehydrateAnalyticsEvidenceBundle(
     return invalid("analytics evidence bundle contains unsupported fields");
   if (
     input.schemaVersion !== ANALYTICS_EVIDENCE_SCHEMA_VERSION ||
-    input.featuresVersion !== ANALYTICS_FEATURES_VERSION
+    !isAnalyticsFeaturesVersion(input.featuresVersion)
   ) {
     return fail(
       domainError(
@@ -896,6 +923,7 @@ export function rehydrateAnalyticsEvidenceBundle(
   if (
     !validateFeatureArrays(
       profile.value,
+      input.featuresVersion,
       input.priceFeatures,
       input.derivativeFeatures,
     )
@@ -944,6 +972,7 @@ export function rehydrateAnalyticsEvidenceBundle(
   )
     return invalid("analytics sufficiency does not match its outcomes");
   const payload = payloadFromParts({
+    featuresVersion: input.featuresVersion,
     inputIdentity: identity.value,
     profile: profile.value,
     profileHash: computedProfileHash.value,

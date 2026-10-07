@@ -16,6 +16,7 @@ import {
   type LiquidationTargetAsset,
   type LiquidationWindowEvidence,
 } from "../liquidation/liquidation-evidence-bundle.js";
+import { isCanonicalMissingBucketHistory } from "../liquidation/liquidation-history-classification.js";
 import {
   fundingIntervalMilliseconds,
   marketIntervalMilliseconds,
@@ -31,6 +32,11 @@ import {
   ANALYTICS_FEATURE_ROUNDING,
   analyticsDecimalConstant as decimalConstant,
 } from "./analytics-numeric-policy.js";
+import {
+  ANALYTICS_FEATURES_VERSION,
+  ANALYTICS_FEATURES_VERSION_V2,
+  type AnalyticsFeaturesVersion,
+} from "./analytics-profile.js";
 
 const HUNDRED = decimalConstant("100");
 
@@ -214,12 +220,16 @@ function complete(
 
 function featureReasonForLiquidationProofs(
   bundle: LiquidationEvidenceBundle,
+  featuresVersion: AnalyticsFeaturesVersion,
 ): AnalyticsReasonCode[] {
   const reasons: AnalyticsReasonCode[] = [];
   if (bundle.coverageProof !== "complete") {
     reasons.push("INCOMPLETE_LIQUIDATION_COVERAGE");
   }
-  if (bundle.historyProof !== "complete") {
+  if (
+    bundle.historyProof !== "complete" &&
+    featuresVersion === ANALYTICS_FEATURES_VERSION
+  ) {
     reasons.push("INCOMPLETE_LIQUIDATION_HISTORY");
   }
   return reasons;
@@ -231,10 +241,30 @@ function canJoinLiquidation(
   return inputIdentity?.compatibility === "compatible";
 }
 
+function hasScopedHistoryProof(
+  liquidation: LiquidationEvidenceBundle | undefined,
+  featuresVersion: AnalyticsFeaturesVersion,
+): boolean {
+  return (
+    featuresVersion === ANALYTICS_FEATURES_VERSION_V2 &&
+    liquidation !== undefined &&
+    ((liquidation.status === "complete" &&
+      liquidation.coverageProof === "complete" &&
+      liquidation.historyProof === "complete" &&
+      liquidation.diagnostics.length === 0 &&
+      liquidation.targets.every((target) =>
+        target.windows.every((item) => item.complete),
+      )) ||
+      isCanonicalMissingBucketHistory(liquidation))
+  );
+}
+
 function liquidationFeature(
   request: Extract<DerivativeRequest, { readonly kind: "liquidation-window" }>,
   liquidation: LiquidationEvidenceBundle | undefined,
   inputIdentity: AnalyticsInputIdentity | undefined,
+  featuresVersion: AnalyticsFeaturesVersion,
+  scopedHistoryValid: boolean,
 ): DerivativeFeatureOutcome {
   if (liquidation === undefined) {
     return unavailable(request, ["MISSING_LIQUIDATION_EVIDENCE"]);
@@ -253,7 +283,17 @@ function liquidationFeature(
   const window = target?.windows.find(
     (item) => item.hours === request.windowHours,
   );
-  const proofReasons = featureReasonForLiquidationProofs(liquidation);
+  const proofReasons = featureReasonForLiquidationProofs(
+    liquidation,
+    featuresVersion,
+  );
+  if (
+    featuresVersion === ANALYTICS_FEATURES_VERSION_V2 &&
+    liquidation.historyProof !== "complete" &&
+    !scopedHistoryValid
+  ) {
+    proofReasons.push("INCOMPLETE_LIQUIDATION_HISTORY");
+  }
   if (
     liquidation.status === "failed" ||
     window === undefined ||
@@ -275,6 +315,15 @@ function liquidationFeature(
   ) {
     proofReasons.push("INCOMPLETE_LIQUIDATION_HISTORY");
   }
+  const outcomeComplete =
+    featuresVersion === ANALYTICS_FEATURES_VERSION_V2
+      ? scopedHistoryValid &&
+        proof.coverageProof === "complete" &&
+        window.complete
+      : liquidation.status === "complete" &&
+        proof.coverageProof === "complete" &&
+        proof.historyProof === "complete" &&
+        window.complete;
   if (window.totalUsd.isZero()) {
     const value: DerivativeFeatureValue = {
       type: "liquidation-window",
@@ -283,13 +332,7 @@ function liquidationFeature(
       totalUsd: window.totalUsd,
       unit: "USD",
     };
-    const status =
-      liquidation.status === "complete" &&
-      proof.coverageProof === "complete" &&
-      proof.historyProof === "complete" &&
-      window.complete
-        ? "complete"
-        : "partial";
+    const status = outcomeComplete ? "complete" : "partial";
     return Object.freeze({
       requestId: request.id,
       status,
@@ -328,13 +371,7 @@ function liquidationFeature(
     imbalance: imbalance.value,
     unit: "USD",
   };
-  const status =
-    liquidation.status === "complete" &&
-    proof.coverageProof === "complete" &&
-    proof.historyProof === "complete" &&
-    window.complete
-      ? "complete"
-      : "partial";
+  const status = outcomeComplete ? "complete" : "partial";
   return Object.freeze({
     requestId: request.id,
     status,
@@ -455,6 +492,7 @@ export function computeDerivativeFeatures(
   market: MarketEvidenceBundle,
   liquidation: LiquidationEvidenceBundle | undefined,
   profile: AnalyticsProfile,
+  featuresVersion: AnalyticsFeaturesVersion = ANALYTICS_FEATURES_VERSION,
 ): readonly DerivativeFeatureOutcome[] {
   const hasLiquidationRequest = profile.features.some(
     (request) => request.kind === "liquidation-window",
@@ -464,6 +502,9 @@ export function computeDerivativeFeatures(
       ? createAnalyticsInputIdentity(market, liquidation)
       : undefined;
   const identity = inputIdentity?.ok === true ? inputIdentity.value : undefined;
+  const scopedHistoryValid = hasLiquidationRequest
+    ? hasScopedHistoryProof(liquidation, featuresVersion)
+    : false;
   return Object.freeze(
     profile.features.flatMap((request) => {
       if (!isDerivativeRequest(request)) return [];
@@ -477,7 +518,15 @@ export function computeDerivativeFeatures(
         return [openInterestFeature(market, request)];
       }
       return request.kind === "liquidation-window"
-        ? [liquidationFeature(request, liquidation, identity)]
+        ? [
+            liquidationFeature(
+              request,
+              liquidation,
+              identity,
+              featuresVersion,
+              scopedHistoryValid,
+            ),
+          ]
         : [];
     }),
   );
