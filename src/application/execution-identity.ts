@@ -2,6 +2,7 @@ import { hashCanonical } from "../domain/identity/plan-hash.js";
 import { domainError } from "../domain/shared/errors.js";
 import { fail, ok, type Result } from "../domain/shared/result.js";
 import { requireHash, requireIdentifier } from "../domain/shared/validation.js";
+import { derivePreparedLegClientOrderId } from "../domain/execution/prepared-leg-execution.js";
 
 export const DEMO_CLIENT_ORDER_ID_LENGTH = 36;
 
@@ -39,3 +40,6 @@ export function deriveDemoClientOrderId(
 }
 
 export const deriveClientOrderId = deriveDemoClientOrderId;
+
+/** Source-native M1 identity; approval renewal does not change the order ID. */
+export { derivePreparedLegClientOrderId };

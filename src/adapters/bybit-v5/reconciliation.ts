@@ -5,7 +5,7 @@ import type {
   ExchangeOrderObservation,
   ExchangeResult,
 } from "../../ports/exchange-execution.js";
-import { createExchangeOrder } from "../../domain/execution/exchange-order.js";
+import type { DecimalValue } from "../../domain/shared/decimal.js";
 import {
   exchangeFailure,
   exchangeSuccess,
@@ -16,7 +16,11 @@ import {
   normalizeBybitFailure,
   type BybitFailureContext,
 } from "./error-mapping.js";
-import type { BybitExecutionRecord, BybitOrderRecord } from "./read-mappers.js";
+import {
+  mapOrderObservation,
+  type BybitExecutionRecord,
+  type BybitOrderRecord,
+} from "./read-mappers.js";
 import type { BybitPrivateEnvironment } from "./transport.js";
 
 function context(
@@ -56,35 +60,13 @@ function ownsExecution(
   );
 }
 
-function orderObservation(
-  record: BybitOrderRecord,
-  observedAt: UtcTimestamp,
-  source: string,
-): ExchangeOrderObservation {
-  const observation = createExchangeOrder({
-    exchangeOrderId: record.exchangeOrderId,
-    clientOrderId: record.clientOrderId,
-    instrument: record.instrument,
-    side: record.side,
-    requestedQuantity: record.requestedQuantity.toString(),
-    filledQuantity: record.filledQuantity.toString(),
-    status: record.status,
-    observedAt,
-    source,
-    ...(record.parentOrderLinkId === undefined
-      ? {}
-      : { parentOrderLinkId: record.parentOrderLinkId }),
-    ...(record.averagePrice === undefined
-      ? {}
-      : { averagePrice: record.averagePrice.toString() }),
-    ...(record.protectionType === undefined
-      ? {}
-      : { protectionType: record.protectionType }),
-  });
-  if (!observation.ok) {
-    throw new Error("normalized Bybit order observation is invalid");
-  }
-  return observation.value;
+function sameOptionalPrice(
+  left: DecimalValue | null | undefined,
+  right: DecimalValue | null | undefined,
+): boolean {
+  if (left === undefined || right === undefined) return left === right;
+  if (left === null || right === null) return left === right;
+  return left.compare(right) === 0;
 }
 
 function fillObservation(
@@ -142,6 +124,12 @@ function selectOwnedOrder(
         previous.filledQuantity.compare(record.filledQuantity) !== 0 ||
         previous.parentOrderLinkId !== record.parentOrderLinkId ||
         previous.reduceOnly !== record.reduceOnly ||
+        previous.positionIdx !== record.positionIdx ||
+        previous.category !== record.category ||
+        previous.orderType !== record.orderType ||
+        previous.timeInForce !== record.timeInForce ||
+        !sameOptionalPrice(previous.takeProfit, record.takeProfit) ||
+        !sameOptionalPrice(previous.stopLoss, record.stopLoss) ||
         previous.price?.toString() !== record.price?.toString() ||
         previous.averagePrice?.toString() !== record.averagePrice?.toString() ||
         previous.protectionType !== record.protectionType)
@@ -234,6 +222,18 @@ export async function reconcileOrder(
           existing.record.parentOrderLinkId !==
             selected.value.record.parentOrderLinkId ||
           existing.record.reduceOnly !== selected.value.record.reduceOnly ||
+          existing.record.positionIdx !== selected.value.record.positionIdx ||
+          existing.record.category !== selected.value.record.category ||
+          existing.record.orderType !== selected.value.record.orderType ||
+          existing.record.timeInForce !== selected.value.record.timeInForce ||
+          !sameOptionalPrice(
+            existing.record.takeProfit,
+            selected.value.record.takeProfit,
+          ) ||
+          !sameOptionalPrice(
+            existing.record.stopLoss,
+            selected.value.record.stopLoss,
+          ) ||
           existing.record.price?.toString() !==
             selected.value.record.price?.toString() ||
           existing.record.averagePrice?.toString() !==
@@ -304,7 +304,7 @@ export async function reconcileOrder(
     }
     const selected = [...candidates.values()][0]!;
     return exchangeSuccess(
-      orderObservation(
+      mapOrderObservation(
         selected.record,
         observedAt,
         executions.length === 0

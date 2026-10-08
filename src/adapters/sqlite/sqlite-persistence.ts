@@ -12,6 +12,7 @@ import {
   createSqliteExecutionStore,
   type SqliteExecutionStore,
 } from "./execution-store.js";
+import { createSqlitePreparedLegStore } from "./prepared-leg-store.js";
 import { ok, type Result } from "../../domain/shared/result.js";
 import type { Approval } from "../../domain/execution/approval.js";
 import type { UtcTimestamp } from "../../domain/shared/time.js";
@@ -44,6 +45,7 @@ import type {
   PrepareLineageRequest,
   ReconciliationRecord,
 } from "../../ports/persistence.js";
+import type { PreparedLegPersistencePort } from "../../ports/persistence.js";
 
 export interface SqlitePersistenceOptions extends Omit<
   SqliteConnectionOptions,
@@ -57,15 +59,19 @@ export class SqlitePersistence implements PersistencePort {
   public readonly scope: PersistenceScope;
   private readonly execution: SqliteExecutionStore;
   private readonly accounting: SqliteAccountingStore;
+  /** Available only for a sanitized Mainnet account scope. */
+  public readonly preparedLegExecution: PreparedLegPersistencePort | undefined;
 
   public constructor(
     private readonly connection: SqliteConnection,
     execution: SqliteExecutionStore,
     accounting: SqliteAccountingStore,
+    preparedLegExecution?: PreparedLegPersistencePort,
   ) {
     this.scope = execution.scope;
     this.execution = execution;
     this.accounting = accounting;
+    this.preparedLegExecution = preparedLegExecution;
   }
 
   public diagnostics(): PersistenceDiagnostics {
@@ -246,7 +252,20 @@ export function openSqlitePersistence(
     connection.value.close();
     return accounting;
   }
+  const preparedLegExecution =
+    options.environment === "mainnet"
+      ? createSqlitePreparedLegStore(connection.value, execution.value.scope)
+      : undefined;
+  if (preparedLegExecution && !preparedLegExecution.ok) {
+    connection.value.close();
+    return preparedLegExecution;
+  }
   return ok(
-    new SqlitePersistence(connection.value, execution.value, accounting.value),
+    new SqlitePersistence(
+      connection.value,
+      execution.value,
+      accounting.value,
+      preparedLegExecution?.value,
+    ),
   );
 }

@@ -32,8 +32,13 @@ function order(
     orderStatus: "New",
     positionIdx: 0,
     reduceOnly: false,
+    category: "linear",
+    orderType: "Limit",
+    timeInForce: "GTC",
     price: "0.0887",
     avgPrice: "0",
+    takeProfit: "0",
+    stopLoss: "0",
     ...overrides,
   };
 }
@@ -90,6 +95,13 @@ test("reconciliation prefers realtime and normalizes terminal order state", asyn
     assert.equal(result.value.status, "filled");
     assert.equal(result.value.filledQuantity.toString(), "57");
     assert.equal(result.value.source, "bybit-demo/realtime");
+    assert.equal(result.value.category, "linear");
+    assert.equal(result.value.orderType, "limit");
+    assert.equal(result.value.timeInForce, "GTC");
+    assert.equal(result.value.takeProfit, null);
+    assert.equal(result.value.stopLoss, null);
+    assert.equal(result.value.reduceOnly, false);
+    assert.equal(result.value.positionIdx, 0);
   }
 });
 
@@ -190,6 +202,20 @@ test("realtime, history and execution evidence must identify one consistent orde
   );
   assert.equal(contradictory.ok, false);
   if (!contradictory.ok) assert.equal(contradictory.error.kind, "ambiguous");
+
+  const changedTimeInForce = await reconcileOrder(
+    makeClient((path) => {
+      if (path === "/v5/order/realtime") return response({ list: [order()] });
+      if (path === "/v5/order/history")
+        return response({ list: [order({ timeInForce: "IOC" })] });
+      return response({ list: [] });
+    }),
+    lookup,
+    observedAt,
+  );
+  assert.equal(changedTimeInForce.ok, false);
+  if (!changedTimeInForce.ok)
+    assert.equal(changedTimeInForce.error.kind, "ambiguous");
 
   const mismatchedExecution = await reconcileOrder(
     makeClient((path) => {
