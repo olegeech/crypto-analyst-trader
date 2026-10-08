@@ -1,4 +1,5 @@
-import { responseList, type BybitResponse } from "./transport.js";
+import { responseList } from "./public-response.js";
+import type { BybitPublicResponse as BybitResponse } from "./public-response.js";
 import type {
   ExchangeOrderStatus,
   ExchangeProtectionType,
@@ -118,7 +119,7 @@ function object(value: unknown, label: string): JsonObject {
 }
 
 export function responseRecords(
-  response: BybitResponse,
+  response: Pick<BybitResponse, "result">,
   label: string,
 ): readonly JsonObject[] {
   const list = responseList(response);
@@ -345,7 +346,7 @@ function booleanField(
 }
 
 function matchingRecord(
-  response: BybitResponse,
+  response: Pick<BybitResponse, "result">,
   symbol: string,
   label: string,
 ): JsonObject {
@@ -436,7 +437,7 @@ export function mapAccountKeyMetadata(
 }
 
 export function mapInstrumentInfo(
-  response: BybitResponse,
+  response: Pick<BybitResponse, "result">,
   symbol: string,
 ): BybitInstrumentInfo {
   const item = matchingRecord(response, symbol, "instruments-info");

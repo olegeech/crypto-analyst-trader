@@ -210,3 +210,39 @@ test("realtime, history and execution evidence must identify one consistent orde
   if (!mismatchedExecution.ok)
     assert.equal(mismatchedExecution.error.kind, "ambiguous");
 });
+
+test("Mainnet reconciliation uses Mainnet provenance while retaining identity validation", async () => {
+  const client = makeClient((path) =>
+    path === "/v5/order/realtime"
+      ? response({ list: [order()] })
+      : response({ list: [] }),
+  );
+  const matched = await reconcileOrder(client, lookup, observedAt, "mainnet");
+  assert.equal(matched.ok, true);
+  if (matched.ok) assert.equal(matched.value.source, "bybit-mainnet/realtime");
+
+  const foreign = await reconcileOrder(
+    makeClient((path) =>
+      path === "/v5/order/realtime"
+        ? response({ list: [order({ orderLinkId: "foreign-client" })] })
+        : response({ list: [] }),
+    ),
+    lookup,
+    observedAt,
+    "mainnet",
+  );
+  assert.equal(foreign.ok, false);
+  if (!foreign.ok) assert.equal(foreign.error.kind, "ownership");
+
+  const fills = await listOwnedFills(
+    makeClient((path) =>
+      path === "/v5/execution/list"
+        ? response({ list: [execution()] })
+        : response({ list: [] }),
+    ),
+    lookup,
+    "mainnet",
+  );
+  assert.equal(fills.ok, true);
+  if (fills.ok) assert.equal(fills.value[0]?.source, "bybit-mainnet/execution");
+});

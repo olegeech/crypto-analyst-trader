@@ -17,6 +17,7 @@ import {
   type BybitFailureContext,
 } from "./error-mapping.js";
 import type { BybitExecutionRecord, BybitOrderRecord } from "./read-mappers.js";
+import type { BybitPrivateEnvironment } from "./transport.js";
 
 function context(
   operation: BybitFailureContext["operation"],
@@ -88,6 +89,7 @@ function orderObservation(
 
 function fillObservation(
   record: BybitExecutionRecord,
+  environment: BybitPrivateEnvironment,
 ): ExchangeFillObservation {
   return Object.freeze({
     executionId: record.executionId,
@@ -98,7 +100,7 @@ function fillObservation(
     quantity: record.quantity,
     price: record.price,
     executedAt: record.executedAt,
-    source: "bybit-demo/execution",
+    source: `bybit-${environment}/execution`,
     ...(record.fee === undefined ? {} : { fee: record.fee }),
     ...(record.feeCurrency === undefined
       ? {}
@@ -187,6 +189,7 @@ export async function reconcileOrder(
   client: BybitDemoReadClient,
   request: ExchangeOrderLookup,
   observedAt: UtcTimestamp,
+  environment: BybitPrivateEnvironment = "demo",
 ): Promise<ExchangeResult<ExchangeOrderObservation>> {
   const failureContext = context("observe", request);
   try {
@@ -196,11 +199,11 @@ export async function reconcileOrder(
     const sourceSelections = [
       {
         records: realtime,
-        source: "bybit-demo/realtime",
+        source: `bybit-${environment}/realtime`,
       },
       {
         records: history,
-        source: "bybit-demo/history",
+        source: `bybit-${environment}/history`,
       },
     ] as const;
     const candidates = new Map<
@@ -310,13 +313,16 @@ export async function reconcileOrder(
       ),
     );
   } catch (error) {
-    return exchangeFailure(normalizeBybitFailure(error, failureContext));
+    return exchangeFailure(
+      normalizeBybitFailure(error, failureContext, environment),
+    );
   }
 }
 
 export async function listOwnedFills(
   client: BybitDemoReadClient,
   request: ExchangeFillLookupRequest,
+  environment: BybitPrivateEnvironment = "demo",
 ): Promise<ExchangeResult<readonly ExchangeFillObservation[]>> {
   const failureContext = context("fills", request);
   try {
@@ -336,7 +342,7 @@ export async function listOwnedFills(
     }
     const unique = new Map<string, ExchangeFillObservation>();
     for (const record of records) {
-      const observation = fillObservation(record);
+      const observation = fillObservation(record, environment);
       const previous = unique.get(observation.executionId);
       if (
         previous !== undefined &&
@@ -358,6 +364,8 @@ export async function listOwnedFills(
     }
     return exchangeSuccess([...unique.values()]);
   } catch (error) {
-    return exchangeFailure(normalizeBybitFailure(error, failureContext));
+    return exchangeFailure(
+      normalizeBybitFailure(error, failureContext, environment),
+    );
   }
 }

@@ -3,6 +3,7 @@ import type {
   CredentialEnvironment,
 } from "../../ports/credential-provider.js";
 import { buildSignaturePayload, hmacSha256 } from "./request-signing.js";
+import { BYBIT_CANONICAL_ORIGINS } from "./origins.js";
 import { classifyRetCode } from "./response-errors.js";
 import {
   validateBybitPublicResponse,
@@ -10,11 +11,7 @@ import {
 } from "./public-response.js";
 import type { AccountEvidenceFailureCode } from "../../domain/account/account-evidence-diagnostics.js";
 
-export const ACCOUNT_READ_ORIGINS = Object.freeze({
-  demo: "https://api-demo.bybit.com",
-  testnet: "https://api-testnet.bybit.com",
-  mainnet: "https://api.bybit.com",
-});
+export const ACCOUNT_READ_ORIGINS = BYBIT_CANONICAL_ORIGINS;
 const PUBLIC_PATHS = new Set([
   "/v5/market/time",
   "/v5/market/instruments-info",

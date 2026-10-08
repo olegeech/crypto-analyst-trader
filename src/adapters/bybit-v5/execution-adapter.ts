@@ -25,6 +25,8 @@ import type {
   ExchangeSetLeverageRequest,
   ExchangeSetLeverageResult,
   ExchangeExecutionPort,
+  MainnetExchangeExecutionPort,
+  MainnetExchangeReadState,
   ExchangeFillLookupRequest,
   ExchangeFillObservation,
   ExchangeOrderAcknowledgement,
@@ -52,7 +54,18 @@ import { listOwnedFills, reconcileOrder } from "./reconciliation.js";
 import {
   BYBIT_DEMO_CAPABILITY_PROFILE,
   bybitDemoCapabilityScope,
+  BYBIT_MAINNET_CAPABILITY_PROFILE,
+  bybitMainnetCapabilityScope,
 } from "./capability-profile.js";
+import {
+  BYBIT_DEMO_ORIGIN,
+  BYBIT_MAINNET_ORIGIN,
+  type BybitPrivateTransport,
+} from "./transport.js";
+import {
+  type BybitInstrumentInfo,
+  type BybitOrderRecord,
+} from "./read-mappers.js";
 
 const DEMO_SCOPE = {
   exchange: "bybit",
@@ -290,6 +303,14 @@ export class BybitDemoExecutionAdapter implements ExchangeExecutionPort {
   private readonly clock: Clock;
 
   constructor(options: BybitDemoExecutionAdapterOptions) {
+    if (
+      options.transport.environment !== "demo" ||
+      options.transport.origin !== BYBIT_DEMO_ORIGIN
+    ) {
+      throw new TypeError(
+        "Bybit Demo adapter requires its canonical Demo transport.",
+      );
+    }
     this.client = new BybitDemoExecutionClient({
       ...options,
       expectedAccountId: options.accountId,
@@ -423,6 +444,292 @@ export class BybitDemoExecutionAdapter implements ExchangeExecutionPort {
     } catch (error) {
       return exchangeFailure(
         normalizeBybitFailure(error, context("cancel", request)),
+      );
+    }
+  }
+}
+
+export interface BybitMainnetExecutionAdapterOptions {
+  readonly transport: BybitPrivateTransport;
+  readonly clock?: Clock;
+}
+
+function mainnetMarketSnapshot(
+  instrument: BybitInstrumentInfo,
+  ticker: Awaited<ReturnType<BybitDemoExecutionClient["readTicker"]>>,
+  serverTime: UtcTimestamp,
+): MarketSnapshot {
+  const material = {
+    environment: "mainnet",
+    instrument: instrument.symbol,
+    bid: ticker.bid,
+    ask: ticker.ask,
+    last: ticker.last,
+    constraints: instrument.constraints,
+  };
+  const contentHash = hashMaterial(material);
+  const sourceId = `mainnet-market-${contentHash.slice(-12)}`;
+  const evidenceResult = createEvidenceRef({
+    kind: "market-snapshot",
+    schemaVersion: "bybit-mainnet/v1",
+    producer: BYBIT_MAINNET_CAPABILITY_PROFILE.adapter,
+    sourceId,
+    asOf: serverTime,
+    validForMs: EVIDENCE_VALID_FOR_MS,
+    contentHash,
+  });
+  if (!evidenceResult.ok)
+    throw new Error("Mainnet market evidence metadata is invalid");
+  const constraints: Record<string, unknown> = {
+    instrument: instrument.constraints.instrument,
+    version: instrument.constraints.version,
+    priceTickSize: instrument.constraints.priceTickSize.toString(),
+    quantityStep: instrument.constraints.quantityStep.toString(),
+    minQuantity: instrument.constraints.minQuantity.toString(),
+  };
+  if (instrument.constraints.minNotional !== undefined)
+    constraints.minNotional = instrument.constraints.minNotional.toString();
+  const snapshot = createMarketSnapshot({
+    snapshotId: sourceId,
+    instrument: instrument.symbol,
+    scope: bybitMainnetCapabilityScope(),
+    asOf: serverTime,
+    bid: ticker.bid.toString(),
+    ask: ticker.ask.toString(),
+    last: ticker.last.toString(),
+    constraints,
+    evidence: [evidenceResult.value],
+  });
+  if (!snapshot.ok)
+    throw new Error("normalized Mainnet market snapshot is invalid");
+  return snapshot.value;
+}
+
+function mainnetCapabilities(
+  instrument: string,
+  serverTime: UtcTimestamp,
+): readonly CapabilityObservation[] {
+  return BYBIT_MAINNET_CAPABILITY_PROFILE.capabilities.map((capability) => {
+    const contentHash = hashMaterial({
+      capability,
+      instrument,
+      environment: "mainnet",
+      adapter: BYBIT_MAINNET_CAPABILITY_PROFILE.adapter,
+    });
+    const evidenceResult = createEvidenceRef({
+      kind: "capability-probe",
+      schemaVersion: BYBIT_MAINNET_CAPABILITY_PROFILE.version,
+      producer: BYBIT_MAINNET_CAPABILITY_PROFILE.adapter,
+      sourceId: `mainnet-capability-${capability}-${contentHash.slice(-12)}`,
+      asOf: serverTime,
+      validForMs: EVIDENCE_VALID_FOR_MS,
+      contentHash,
+    });
+    if (!evidenceResult.ok)
+      throw new Error("Mainnet capability evidence metadata is invalid");
+    const observation = createAdapterCapabilityObservation({
+      capability,
+      status: "supported",
+      observedAt: serverTime,
+      source: BYBIT_MAINNET_CAPABILITY_PROFILE.adapter,
+      evidence: evidenceResult.value,
+      scope: bybitMainnetCapabilityScope(),
+    });
+    if (!observation.ok)
+      throw new Error("Mainnet capability observation is invalid");
+    return observation.value;
+  });
+}
+
+function mainnetOrderObservation(
+  record: BybitOrderRecord,
+  observedAt: UtcTimestamp,
+  source: string,
+): ExchangeOrderObservation {
+  const observation = createExchangeOrder({
+    exchangeOrderId: record.exchangeOrderId,
+    clientOrderId: record.clientOrderId,
+    instrument: record.instrument,
+    side: record.side,
+    requestedQuantity: record.requestedQuantity.toString(),
+    filledQuantity: record.filledQuantity.toString(),
+    status: record.status,
+    observedAt,
+    source,
+    ...(record.parentOrderLinkId === undefined
+      ? {}
+      : { parentOrderLinkId: record.parentOrderLinkId }),
+    ...(record.averagePrice === undefined
+      ? {}
+      : { averagePrice: record.averagePrice.toString() }),
+    ...(record.protectionType === undefined
+      ? {}
+      : { protectionType: record.protectionType }),
+  });
+  if (!observation.ok)
+    throw new Error("normalized Mainnet order observation is invalid");
+  return observation.value;
+}
+
+/**
+ * Mainnet exposes the bounded typed order lifecycle, but its read projection
+ * deliberately contains no account snapshot, account scope, UID or IP data.
+ */
+export class BybitMainnetExecutionAdapter implements MainnetExchangeExecutionPort {
+  private readonly client: BybitDemoExecutionClient;
+  private readonly clock: Clock;
+
+  constructor(options: BybitMainnetExecutionAdapterOptions) {
+    if (
+      options.transport.environment !== "mainnet" ||
+      options.transport.origin !== BYBIT_MAINNET_ORIGIN
+    ) {
+      throw new TypeError(
+        "Bybit Mainnet adapter requires its canonical Mainnet transport.",
+      );
+    }
+    this.client = new BybitDemoExecutionClient({
+      transport: options.transport,
+      clock: options.clock ?? systemClock,
+    });
+    this.clock = options.clock ?? systemClock;
+  }
+
+  async readState(
+    request: ExchangeReadStateRequest,
+  ): Promise<ExchangeResult<MainnetExchangeReadState>> {
+    try {
+      // The first signed read establishes the transport clock offset before
+      // concurrent requests use it; avoid duplicate initialization races.
+      const instrument = await this.client.readInstrument(request.instrument);
+      const [serverTime, ticker, position, openOrders] = await Promise.all([
+        this.client.readServerTime(),
+        this.client.readTicker(request.instrument),
+        this.client.readPosition(request.instrument),
+        this.client.readOpenOrders(request.instrument),
+      ]);
+      const normalizedPosition: MainnetExchangeReadState["position"] =
+        Object.freeze({
+          instrument: position.instrument,
+          side: position.side,
+          quantity: position.quantity,
+          leverage: position.leverage,
+          ...(position.entryPrice === undefined
+            ? {}
+            : { entryPrice: position.entryPrice }),
+        });
+      const observedOrders = Object.freeze(
+        openOrders.map((record) =>
+          mainnetOrderObservation(
+            record,
+            serverTime,
+            "bybit-mainnet/order-realtime",
+          ),
+        ),
+      );
+      return exchangeSuccess({
+        serverTime,
+        market: mainnetMarketSnapshot(instrument, ticker, serverTime),
+        position: normalizedPosition,
+        openOrders: observedOrders,
+        leverage: {
+          buy: position.leverage,
+          sell: position.leverage,
+          effective: position.leverage,
+        },
+        capabilities: mainnetCapabilities(instrument.symbol, serverTime),
+      });
+    } catch (error) {
+      return exchangeFailure(
+        normalizeBybitFailure(error, context("read"), "mainnet"),
+      );
+    }
+  }
+
+  async createOrder(
+    request: ExchangeOrderRequest,
+  ): Promise<ExchangeResult<ExchangeOrderAcknowledgement>> {
+    try {
+      return exchangeSuccess(await this.client.createOrder(request));
+    } catch (error) {
+      return exchangeFailure(
+        normalizeBybitFailure(
+          error,
+          context("create", {
+            instrument: request.intent.instrument,
+            clientOrderId: request.clientOrderId,
+          }),
+          "mainnet",
+        ),
+      );
+    }
+  }
+
+  observeOrder(
+    request: ExchangeOrderLookup,
+  ): Promise<ExchangeResult<ExchangeOrderObservation>> {
+    return reconcileOrder(this.client, request, this.clock.now(), "mainnet");
+  }
+
+  async listAttachedProtection(
+    request: ExchangeAttachedProtectionLookup,
+  ): Promise<ExchangeResult<readonly ExchangeOrderObservation[]>> {
+    try {
+      const records = await this.client.readAttachedProtectionOrders(
+        request.instrument,
+        request.parentClientOrderId,
+      );
+      return exchangeSuccess(
+        Object.freeze(
+          records.map((record) =>
+            mainnetOrderObservation(
+              record,
+              this.clock.now(),
+              "bybit-mainnet/protection",
+            ),
+          ),
+        ),
+      );
+    } catch (error) {
+      return exchangeFailure(
+        normalizeBybitFailure(
+          error,
+          context("observe", {
+            instrument: request.instrument,
+            clientOrderId: request.parentClientOrderId,
+          }),
+          "mainnet",
+        ),
+      );
+    }
+  }
+
+  listFills(
+    request: ExchangeFillLookupRequest,
+  ): Promise<ExchangeResult<readonly ExchangeFillObservation[]>> {
+    return listOwnedFills(this.client, request, "mainnet");
+  }
+
+  async setLeverage(
+    request: ExchangeSetLeverageRequest,
+  ): Promise<ExchangeResult<ExchangeSetLeverageResult>> {
+    try {
+      return exchangeSuccess(await this.client.setLeverage(request));
+    } catch (error) {
+      return exchangeFailure(
+        normalizeBybitFailure(error, context("set-leverage"), "mainnet"),
+      );
+    }
+  }
+
+  async cancelOrder(
+    request: ExchangeCancelOrderRequest,
+  ): Promise<ExchangeResult<ExchangeOrderAcknowledgement>> {
+    try {
+      return exchangeSuccess(await this.client.cancelOrder(request));
+    } catch (error) {
+      return exchangeFailure(
+        normalizeBybitFailure(error, context("cancel", request), "mainnet"),
       );
     }
   }

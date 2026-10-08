@@ -50,7 +50,7 @@ export function validateBybitPublicResponse(
 }
 
 export function responseList(
-  response: BybitPublicResponse,
+  response: Pick<BybitPublicResponse, "result">,
 ): readonly JsonObject[] | undefined {
   const list = response.result.list;
   if (!Array.isArray(list)) return undefined;

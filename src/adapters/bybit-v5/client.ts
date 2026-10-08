@@ -12,7 +12,7 @@ import type {
 import {
   type BybitResponse,
   type QueryInput,
-  type BybitDemoTransport,
+  type BybitPrivateTransport,
 } from "./transport.js";
 import {
   CANCEL_ORDER_PATH,
@@ -55,17 +55,21 @@ export const SET_LEVERAGE_PATH = "/v5/position/set-leverage";
 const DEFAULT_PAGE_SIZE = "50";
 const DEFAULT_MAX_PAGES = 20;
 
-export type BybitDemoReadTransport = Pick<
-  BybitDemoTransport,
+export type BybitPrivateReadTransport = Pick<
+  BybitPrivateTransport,
   "get" | "getServerTime"
->;
+> &
+  Partial<Pick<BybitPrivateTransport, "environment" | "origin">>;
 
-export interface BybitDemoWriteTransport extends BybitDemoReadTransport {
+export interface BybitPrivateWriteTransport extends BybitPrivateReadTransport {
   post(
     path: string,
     body: Record<string, unknown> | string,
   ): Promise<BybitResponse>;
 }
+
+export type BybitDemoReadTransport = BybitPrivateReadTransport;
+export type BybitDemoWriteTransport = BybitPrivateWriteTransport;
 
 export interface BybitDemoReadClientOptions {
   readonly transport: BybitDemoReadTransport;
