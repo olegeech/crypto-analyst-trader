@@ -6,6 +6,7 @@ import {
   createAccountEvidenceCollectionResult,
   type AccountEvidenceCollectionResult,
 } from "../src/domain/account/account-evidence-bundle.js";
+import type { AccountEvidenceFailureCode } from "../src/domain/account/account-evidence-diagnostics.js";
 import { createInstrumentConstraints } from "../src/domain/market/instrument-constraints.js";
 import type { BybitInstrumentInfo } from "../src/adapters/bybit-v5/read-mappers.js";
 import {
@@ -48,6 +49,7 @@ function accountResult(
     readonly incompletePartition?: (
       partition: Record<string, unknown>,
     ) => boolean;
+    readonly incompleteReasonCode?: AccountEvidenceFailureCode;
     readonly collectionStatus?: "complete" | "incomplete";
     readonly mutate?: (payload: Record<string, unknown>) => void;
   } = {},
@@ -81,11 +83,12 @@ function accountResult(
       options.incompletePartition!(entry.partition as Record<string, unknown>),
     );
     assert.ok(failed, "fixture must contain the requested coverage partition");
+    const reasonCode = options.incompleteReasonCode ?? "TRANSPORT_FAILED";
     failed.status = "failed";
-    failed.reasonCodes = ["TRANSPORT_FAILED"];
+    failed.reasonCodes = [reasonCode];
     payload.collectionStatus = "incomplete";
     payload.diagnostics = [
-      { code: "TRANSPORT_FAILED", severity: "error", scope: "coverage" },
+      { code: reasonCode, severity: "error", scope: "coverage" },
     ];
   }
   options.mutate?.(payload);
@@ -177,6 +180,26 @@ test("required selected execution partitions and unknown coverage attribution BL
   });
   assert.equal(unknown.verdict, "BLOCKED");
   assert.ok(unknown.reasonCodes.includes("COVERAGE_ATTRIBUTION_UNKNOWN"));
+});
+
+test("post-auth provider diagnostics remain visible on blocked readiness", () => {
+  const result = deriveMainnetExecutionReadiness({
+    accountResult: accountResult({
+      incompletePartition: (partition) =>
+        partition.pass === "A" &&
+        partition.endpoint === "positions" &&
+        partition.category === "linear" &&
+        partition.settleCoin === "USDT",
+      incompleteReasonCode: "RATE_LIMITED",
+    }),
+    symbol,
+    instrument: validInstrument(),
+    evaluatedAt,
+  });
+
+  assert.equal(result.verdict, "BLOCKED");
+  assert.ok(result.reasonCodes.includes("REQUIRED_PARTITION_INCOMPLETE"));
+  assert.deepEqual(result.providerReasonCodes, ["RATE_LIMITED"]);
 });
 
 test("failed and pre-auth collection results never claim readiness or account provenance", () => {

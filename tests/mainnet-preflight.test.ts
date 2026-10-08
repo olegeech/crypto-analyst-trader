@@ -16,6 +16,7 @@ import {
 import { BybitAccountReadError } from "../src/adapters/bybit-v5/account-read-transport.js";
 import { createInstrumentConstraints } from "../src/domain/market/instrument-constraints.js";
 import type { UtcTimestamp } from "../src/domain/shared/time.js";
+import type { AccountEvidenceFailureCode } from "../src/domain/account/account-evidence-diagnostics.js";
 import {
   accountInfoResponse,
   tierResponse,
@@ -37,7 +38,11 @@ const credentials = {
   accountId: "123",
 };
 
-function readyReadiness(): MainnetExecutionReadiness {
+function fixtureReadiness(
+  options: {
+    readonly incompleteRequiredReasonCode?: AccountEvidenceFailureCode;
+  } = {},
+): MainnetExecutionReadiness {
   const payload = fixture() as unknown as Record<string, unknown>;
   payload.accountBinding = {
     ...(payload.accountBinding as Record<string, unknown>),
@@ -57,6 +62,36 @@ function readyReadiness(): MainnetExecutionReadiness {
     expiresAt: null,
     warnings: ["API_KEY_IP_UNBOUND"],
   };
+  if (options.incompleteRequiredReasonCode !== undefined) {
+    const coverage = payload.coverage as {
+      partition: {
+        pass: string;
+        endpoint: string;
+        category: string | null;
+        settleCoin: string | null;
+      };
+      status: string;
+      reasonCodes: string[];
+    }[];
+    const requiredPartition = coverage.find(
+      (entry) =>
+        entry.partition.pass === "A" &&
+        entry.partition.endpoint === "positions" &&
+        entry.partition.category === "linear" &&
+        entry.partition.settleCoin === "USDT",
+    );
+    assert.ok(requiredPartition, "fixture has the required linear partition");
+    requiredPartition.status = "failed";
+    requiredPartition.reasonCodes = [options.incompleteRequiredReasonCode];
+    payload.collectionStatus = "incomplete";
+    payload.diagnostics = [
+      {
+        code: options.incompleteRequiredReasonCode,
+        severity: "error",
+        scope: "coverage",
+      },
+    ];
+  }
   const bundle = createAccountEvidenceBundle(payload);
   assert.equal(bundle.ok, true);
   if (!bundle.ok) throw new Error("invalid account fixture");
@@ -89,7 +124,10 @@ function readyReadiness(): MainnetExecutionReadiness {
     },
     evaluatedAt,
   });
-  assert.equal(readiness.verdict, "READY");
+  assert.equal(
+    readiness.verdict,
+    options.incompleteRequiredReasonCode === undefined ? "READY" : "BLOCKED",
+  );
   return readiness;
 }
 
@@ -287,7 +325,7 @@ test("CLI accepts only the fixed M1 symbol option and rejects authority knobs", 
 });
 
 test("READY renderer is sanitized and states SUPPORTED is not live proof", async () => {
-  const readiness = readyReadiness();
+  const readiness = fixtureReadiness();
   const output: string[] = [];
   const result: MainnetPreflightResult = {
     kind: "assessment",
@@ -310,6 +348,32 @@ test("READY renderer is sanitized and states SUPPORTED is not live proof", async
     rendered,
     /accountIdentityHash|accountEvidenceHash|sha256:|123|synthetic|userID|ips/u,
   );
+});
+
+test("post-auth provider diagnostics render alongside required partition BLOCK", async () => {
+  const readiness = fixtureReadiness({
+    incompleteRequiredReasonCode: "RATE_LIMITED",
+  });
+  assert.ok(readiness.reasonCodes.includes("REQUIRED_PARTITION_INCOMPLETE"));
+
+  const output: string[] = [];
+  const exitCode = await runMainnetPreflightCli(["--symbol", symbol], {
+    output: { write: (text) => output.push(text) },
+    run: async () => ({
+      kind: "assessment",
+      readiness,
+      requestCounts: { exchangeReads: 71, exchangeWrites: 0 },
+    }),
+  });
+
+  assert.equal(exitCode, 4);
+  assert.match(output.join(""), /VERDICT=BLOCKED/u);
+  assert.match(
+    output.join(""),
+    /REASON_CODES=.*REQUIRED_PARTITION_INCOMPLETE/u,
+  );
+  assert.match(output.join(""), /PROVIDER_REASON_CODES=RATE_LIMITED/u);
+  assert.match(output.join(""), /EXCHANGE_WRITES=0/u);
 });
 
 test("invalid CLI input prints usage and performs no composition call", async () => {

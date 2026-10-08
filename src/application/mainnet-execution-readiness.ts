@@ -608,6 +608,9 @@ export function deriveMainnetExecutionReadiness(
     evaluatedAt: evaluatedAt.value,
     reasons,
     warnings,
+    providerReasonCodes: bundle.diagnostics.map(
+      (diagnostic) => diagnostic.code,
+    ),
     internalBinding,
     ...(accountEvidenceAgeMs === undefined ? {} : { accountEvidenceAgeMs }),
     unrelatedCoverageGapCount,
