@@ -85,6 +85,21 @@ test("keeps the released daily boundary and exact approval fail closed in canoni
   assert.match(runbook, /Set `HALT`/);
 });
 
+test("registers the Mainnet preflight command in the operator runbook", async () => {
+  const [runbook, packageJson] = await Promise.all([
+    read("docs/operator-runbook.md"),
+    read("package.json"),
+  ]);
+  const packageConfig = JSON.parse(packageJson) as {
+    scripts: Record<string, string>;
+  };
+  assert.equal(
+    packageConfig.scripts["mainnet:preflight"],
+    "node --import tsx src/cli/mainnet-preflight.ts",
+  );
+  assert.match(runbook, /npm run mainnet:preflight -- --symbol BTCUSDT/u);
+});
+
 test("keeps timing policy versioned instead of hard-coding a market session", async () => {
   const runbook = await read("docs/operator-runbook.md");
 

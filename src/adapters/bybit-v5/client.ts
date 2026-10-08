@@ -58,7 +58,8 @@ const DEFAULT_MAX_PAGES = 20;
 export type BybitPrivateReadTransport = Pick<
   BybitPrivateTransport,
   "get" | "getServerTime"
->;
+> &
+  Partial<Pick<BybitPrivateTransport, "environment" | "origin">>;
 
 export interface BybitPrivateWriteTransport extends BybitPrivateReadTransport {
   post(

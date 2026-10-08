@@ -322,25 +322,7 @@ function checkCoverageDiagnostics(
   symbol: string,
   reasons: Set<MainnetExecutionReadinessReason>,
 ): void {
-  const coverageDiagnostics = bundle.diagnostics.filter(
-    (diagnostic) => diagnostic.scope === "coverage",
-  );
-  for (const diagnostic of bundle.diagnostics) {
-    if (diagnostic.severity !== "error") continue;
-    if (diagnostic.scope !== "coverage") {
-      reasons.add("ACCOUNT_EVIDENCE_INCOMPLETE_UNATTRIBUTED");
-      continue;
-    }
-    const matchingGap = bundle.coverage.some(
-      (entry) =>
-        !isTerminalCoverage(entry) &&
-        entry.reasonCodes.includes(diagnostic.code) &&
-        attributableUnrelatedGap(entry.partition, symbol) &&
-        !requiresExecutionProof(entry.partition, symbol),
-    );
-    if (!matchingGap) reasons.add("ACCOUNT_EVIDENCE_INCOMPLETE_UNATTRIBUTED");
-  }
-  const codesWithUnrelatedGaps = new Set(
+  const unrelatedGapCodes = new Set(
     bundle.coverage
       .filter(
         (entry) =>
@@ -350,9 +332,20 @@ function checkCoverageDiagnostics(
       )
       .flatMap((entry) => entry.reasonCodes),
   );
+  for (const diagnostic of bundle.diagnostics) {
+    if (diagnostic.severity !== "error") continue;
+    if (diagnostic.scope !== "coverage") {
+      reasons.add("ACCOUNT_EVIDENCE_INCOMPLETE_UNATTRIBUTED");
+      continue;
+    }
+    if (!unrelatedGapCodes.has(diagnostic.code))
+      reasons.add("ACCOUNT_EVIDENCE_INCOMPLETE_UNATTRIBUTED");
+  }
   if (
-    coverageDiagnostics.some(
-      (diagnostic) => !codesWithUnrelatedGaps.has(diagnostic.code),
+    bundle.diagnostics.some(
+      (diagnostic) =>
+        diagnostic.scope === "coverage" &&
+        !unrelatedGapCodes.has(diagnostic.code),
     )
   )
     reasons.add("ACCOUNT_EVIDENCE_INCOMPLETE_UNATTRIBUTED");
@@ -436,11 +429,8 @@ function checkAccountFacts(
       )
       .map((asset) => asset.coin),
   );
-  if (
-    [...collateralEligibleCoins].some(
-      (coin) => !bundle.auxiliary.tiers.some((tier) => tier.coin === coin),
-    )
-  )
+  const tierCoins = new Set(bundle.auxiliary.tiers.map((tier) => tier.coin));
+  if ([...collateralEligibleCoins].some((coin) => !tierCoins.has(coin)))
     reasons.add("ACCOUNT_EVIDENCE_INCOMPLETE_UNATTRIBUTED");
 }
 

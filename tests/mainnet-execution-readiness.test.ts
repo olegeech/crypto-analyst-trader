@@ -304,6 +304,20 @@ test("credential, account mode, target mode and instrument gates fail closed", (
       expected: "CONTRACT_ORDER_PERMISSION_MISSING",
     },
     {
+      name: "missing position permission",
+      accountResult: mutateAccount((payload) => {
+        payload.credentialPosture = {
+          ...(payload.credentialPosture as Record<string, unknown>),
+          permissions: {
+            ...((payload.credentialPosture as Record<string, unknown>)
+              .permissions as Record<string, unknown>),
+            contractPosition: false,
+          },
+        };
+      }),
+      expected: "CONTRACT_POSITION_PERMISSION_MISSING",
+    },
+    {
       name: "transfer write authority",
       accountResult: mutateAccount((payload) => {
         payload.credentialPosture = {

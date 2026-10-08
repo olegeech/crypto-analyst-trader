@@ -58,6 +58,7 @@ import {
   bybitMainnetCapabilityScope,
 } from "./capability-profile.js";
 import {
+  BYBIT_DEMO_ORIGIN,
   BYBIT_MAINNET_ORIGIN,
   type BybitPrivateTransport,
 } from "./transport.js";
@@ -302,6 +303,14 @@ export class BybitDemoExecutionAdapter implements ExchangeExecutionPort {
   private readonly clock: Clock;
 
   constructor(options: BybitDemoExecutionAdapterOptions) {
+    if (
+      options.transport.environment !== "demo" ||
+      options.transport.origin !== BYBIT_DEMO_ORIGIN
+    ) {
+      throw new TypeError(
+        "Bybit Demo adapter requires its canonical Demo transport.",
+      );
+    }
     this.client = new BybitDemoExecutionClient({
       ...options,
       expectedAccountId: options.accountId,
@@ -445,13 +454,6 @@ export interface BybitMainnetExecutionAdapterOptions {
   readonly clock?: Clock;
 }
 
-const MAINNET_SCOPE = Object.freeze({
-  exchange: "bybit",
-  environment: "mainnet",
-  category: "linear",
-  positionMode: "one-way" as const,
-});
-
 function mainnetMarketSnapshot(
   instrument: BybitInstrumentInfo,
   ticker: Awaited<ReturnType<BybitDemoExecutionClient["readTicker"]>>,
@@ -490,7 +492,7 @@ function mainnetMarketSnapshot(
   const snapshot = createMarketSnapshot({
     snapshotId: sourceId,
     instrument: instrument.symbol,
-    scope: MAINNET_SCOPE,
+    scope: bybitMainnetCapabilityScope(),
     asOf: serverTime,
     bid: ticker.bid.toString(),
     ask: ticker.ask.toString(),

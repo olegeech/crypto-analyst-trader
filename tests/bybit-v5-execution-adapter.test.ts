@@ -6,6 +6,7 @@ import {
   BybitMainnetExecutionAdapter,
 } from "../src/adapters/bybit-v5/execution-adapter.js";
 import {
+  BYBIT_DEMO_ORIGIN,
   BYBIT_MAINNET_ORIGIN,
   createBybitPrivateTransport,
   type BybitResponse,
@@ -134,6 +135,8 @@ test("execution adapter exposes normalized snapshots and owned lifecycle evidenc
     accountId: "demo-account",
     clock: clock.value,
     transport: {
+      environment: "demo",
+      origin: BYBIT_DEMO_ORIGIN,
       async get(path) {
         return baseResponse(path);
       },
@@ -181,6 +184,32 @@ test("execution adapter exposes normalized snapshots and owned lifecycle evidenc
   });
   assert.equal(observed.ok, false);
   if (!observed.ok) assert.equal(observed.error.kind, "ambiguous");
+});
+
+test("Demo execution adapter rejects a Mainnet transport before any request", () => {
+  let requests = 0;
+  const transport = createBybitPrivateTransport({
+    environment: "mainnet",
+    credentials: {
+      apiKey: "synthetic-mainnet-key",
+      apiSecret: "synthetic-mainnet-secret",
+      accountId: "synthetic-mainnet-account",
+    },
+    request: async () => {
+      requests++;
+      throw new Error("unexpected exchange request");
+    },
+  });
+
+  assert.throws(
+    () =>
+      new BybitDemoExecutionAdapter({
+        accountId: "demo-account",
+        transport,
+      }),
+    /canonical Demo transport/u,
+  );
+  assert.equal(requests, 0);
 });
 
 const mainnetCredentials = {

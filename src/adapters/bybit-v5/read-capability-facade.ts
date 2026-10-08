@@ -47,15 +47,7 @@ export class BybitMainnetReadCapabilityFacade {
       symbol,
     });
     try {
-      return mapInstrumentInfo(
-        {
-          retCode: 0,
-          retMsg: "",
-          result: envelope.result,
-          ...(envelope.time === undefined ? {} : { time: envelope.time }),
-        },
-        symbol,
-      );
+      return mapInstrumentInfo(envelope, symbol);
     } catch (error) {
       if (error instanceof BybitReadMappingError) {
         throw new BybitMainnetReadCapabilityError(

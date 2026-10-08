@@ -81,6 +81,32 @@ do not establish Mainnet readiness or grant Mainnet write authority. Preserve
 each probe's exact-plan, isolation, ownership, bounded-action and reconciliation
 rules.
 
+### Mainnet adapter capability preflight (issue #20)
+
+After the offline release suite is green, run the explicit read-only readiness
+check against the isolated AI Subaccount:
+
+```bash
+npm run mainnet:preflight -- --symbol BTCUSDT
+```
+
+Only a configured M1 symbol is accepted. The command loads the Mainnet Keychain
+credentials, collects fresh #16 account evidence, then performs one bounded
+linear instrument GET and evaluates the sanitized #20 readiness contract. It
+prints only the environment, symbol, READY/BLOCKED verdict, stable reason and
+warning codes, unrelated coverage count, evidence age and measured request
+counts. It never prints account hashes, raw UID/IP, balances, orders, headers,
+credentials or provider payloads. `EXCHANGE_WRITES=0` is required; this command
+has no exchange mutation path.
+
+`CAPABILITY_STATUS=SUPPORTED` means the typed adapter surface exists; it does
+not establish `LIVE_PROVEN` or authorize a Mainnet write. IP-unbound is a
+warning; unsupported account/key posture, stale or incomplete required proof,
+or an unsupported selected instrument blocks readiness. This preflight does
+not evaluate account capacity or risk approval; those belong to #17. Issue #31
+still owns the first deliberately authorized Mainnet write. This live command
+is excluded from default tests, `test:release` and CI.
+
 ## Bybit public market evidence smoke (issue #11)
 
 The public market-evidence boundary uses unsigned Bybit mainnet REST reads and

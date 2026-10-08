@@ -34,6 +34,7 @@
     "probe:bybit:testnet:recover": "node --import tsx scripts/bybit-capability-probe.ts --manual-recover --environment testnet",
     "verify:bybit:demo-adapter": "node --import tsx scripts/bybit-demo-adapter-verification.ts",
     "trader:demo": "node --import tsx src/cli/trader-demo.ts",
+    "mainnet:preflight": "node --import tsx src/cli/mainnet-preflight.ts",
     "daily:prepare": "node --import tsx src/cli/daily.ts prepare",
     "daily:review": "node --import tsx src/cli/daily.ts review",
     "daily:approve": "node --import tsx src/cli/daily.ts approve",
