@@ -3,10 +3,18 @@ import test from "node:test";
 
 import {
   createLiquidationEvidenceBundle,
+  createLiquidationEvidenceBundleV2,
+  createLiquidationEvidenceRef,
   LIQUIDATION_EVIDENCE_ASSETS,
   LIQUIDATION_EVIDENCE_SCHEMA_VERSION,
   LIQUIDATION_EVIDENCE_POLICY_VERSION,
+  LIQUIDATION_EVIDENCE_V2_PROVIDER_SEMANTIC_IDENTITY,
+  LIQUIDATION_EVIDENCE_V2_SCHEMA_VERSION,
   type LiquidationEvidenceBundleInput,
+  type LiquidationEvidenceBundleV2Input,
+  type LiquidationObservationProvenance,
+  type LiquidationObservationV2Input,
+  type LiquidationTargetV2Input,
 } from "../src/domain/liquidation/liquidation-evidence-bundle.js";
 import {
   encodeCanonicalArtifact,
@@ -14,6 +22,10 @@ import {
 } from "../src/domain/identity/canonical-artifact.js";
 import { createEvidenceRef } from "../src/domain/evidence/evidence-ref.js";
 import { DecimalValue } from "../src/domain/shared/decimal.js";
+import {
+  LIQUIDATION_EVIDENCE_V1_GOLDEN_HASH,
+  liquidationEvidenceV1GoldenInput,
+} from "./fixtures/liquidation-evidence-v1-golden.js";
 
 const HOUR_MS = 60 * 60 * 1_000;
 const CUTOFF = "2026-09-24T12:30:00.000Z";
@@ -98,6 +110,56 @@ function input(
     diagnostics: [],
     ...overrides,
   };
+}
+
+function inputV2(
+  overrides: Partial<LiquidationEvidenceBundleV2Input> = {},
+  perAssetCount = 1,
+): LiquidationEvidenceBundleV2Input {
+  const legacy = input({ targets: targets({ perAssetCount }) });
+  return {
+    ...legacy,
+    schemaVersion: LIQUIDATION_EVIDENCE_V2_SCHEMA_VERSION,
+    providerSemanticIdentity:
+      LIQUIDATION_EVIDENCE_V2_PROVIDER_SEMANTIC_IDENTITY,
+    targets: legacy.targets.map((target) => ({
+      ...target,
+      constituents: target.constituents.map((constituent) => ({
+        ...constituent,
+        observations: constituent.observations.map((observation) => ({
+          ...observation,
+          provenance: "provider-explicit" as const,
+        })),
+      })),
+    })),
+    ...overrides,
+  };
+}
+
+function withFirstV2Observation(
+  targets: readonly LiquidationTargetV2Input[],
+  overrides: Partial<LiquidationObservationV2Input>,
+): readonly LiquidationTargetV2Input[] {
+  return targets.map((target, targetIndex) =>
+    targetIndex !== 0
+      ? target
+      : {
+          ...target,
+          constituents: target.constituents.map((constituent, index) =>
+            index !== 0
+              ? constituent
+              : {
+                  ...constituent,
+                  observations: constituent.observations.map(
+                    (observation, observationIndex) =>
+                      observationIndex === 0
+                        ? { ...observation, ...overrides }
+                        : observation,
+                  ),
+                },
+          ),
+        },
+  );
 }
 
 test("complete liquidation evidence validates exact aligned facts and derived windows", () => {
@@ -471,6 +533,230 @@ test("canonical artifact hash is deterministic and rehydrates liquidation eviden
       "liquidation-evidence-bundle",
       corruptedWindowsEnvelope.value,
     ).ok,
+    false,
+  );
+});
+
+test("persisted v1 golden artifact keeps its canonical hash and meaning", () => {
+  const bundle = createLiquidationEvidenceBundle(
+    liquidationEvidenceV1GoldenInput(),
+  );
+  assert.equal(bundle.ok, true);
+  if (!bundle.ok) return;
+
+  const envelope = encodeCanonicalArtifact(
+    "liquidation-evidence-bundle",
+    bundle.value,
+  );
+  assert.equal(envelope.ok, true);
+  if (!envelope.ok) return;
+  assert.equal(envelope.value.schemaVersion, "artifact/v1");
+  assert.equal(
+    envelope.value.canonicalHash,
+    LIQUIDATION_EVIDENCE_V1_GOLDEN_HASH,
+  );
+
+  const rehydrated = rehydrateArtifact(
+    "liquidation-evidence-bundle",
+    envelope.value,
+  );
+  assert.equal(rehydrated.ok, true);
+  if (!rehydrated.ok) return;
+  assert.equal(rehydrated.value.schemaVersion, "liquidation-evidence/v1");
+  assert.equal(rehydrated.value.status, "complete");
+  assert.equal(
+    rehydrated.value.targets[0]?.constituents[0]?.observations[0]?.longUsd.toString(),
+    "1",
+  );
+  const firstObservation =
+    rehydrated.value.targets[0]?.constituents[0]?.observations[0];
+  assert.ok(firstObservation);
+  assert.equal("provenance" in firstObservation, false);
+});
+
+test("v2 provenance is canonical identity and survives deterministic rehydration", () => {
+  const base = inputV2({}, 2);
+  const explicitInput = {
+    ...base,
+    targets: withFirstV2Observation(base.targets, {
+      longUsd: "0",
+      shortUsd: "0",
+      provenance: "provider-explicit",
+    }),
+  };
+  const impliedInput = {
+    ...base,
+    targets: withFirstV2Observation(base.targets, {
+      longUsd: "0",
+      shortUsd: "0",
+      provenance: "provider-implied-zero",
+    }),
+  };
+  const reorderedInput = {
+    ...impliedInput,
+    targets: [...impliedInput.targets].reverse().map((target) => ({
+      ...target,
+      constituents: [...target.constituents].reverse(),
+    })),
+  };
+
+  const explicit = createLiquidationEvidenceBundleV2(explicitInput);
+  const implied = createLiquidationEvidenceBundleV2(impliedInput);
+  const reordered = createLiquidationEvidenceBundleV2(reorderedInput);
+  assert.equal(explicit.ok, true);
+  assert.equal(implied.ok, true);
+  assert.equal(reordered.ok, true);
+  if (!explicit.ok || !implied.ok || !reordered.ok) return;
+
+  const explicitEnvelope = encodeCanonicalArtifact(
+    "liquidation-evidence-bundle",
+    explicit.value,
+  );
+  const impliedEnvelope = encodeCanonicalArtifact(
+    "liquidation-evidence-bundle",
+    implied.value,
+  );
+  const reorderedEnvelope = encodeCanonicalArtifact(
+    "liquidation-evidence-bundle",
+    reordered.value,
+  );
+  assert.equal(explicitEnvelope.ok, true);
+  assert.equal(impliedEnvelope.ok, true);
+  assert.equal(reorderedEnvelope.ok, true);
+  if (!explicitEnvelope.ok || !impliedEnvelope.ok || !reorderedEnvelope.ok) {
+    return;
+  }
+  assert.equal(impliedEnvelope.value.schemaVersion, "artifact/v1");
+  assert.notEqual(
+    explicitEnvelope.value.canonicalHash,
+    impliedEnvelope.value.canonicalHash,
+  );
+  assert.equal(
+    impliedEnvelope.value.canonicalHash,
+    reorderedEnvelope.value.canonicalHash,
+  );
+
+  const rehydrated = rehydrateArtifact(
+    "liquidation-evidence-bundle",
+    impliedEnvelope.value,
+  );
+  assert.equal(rehydrated.ok, true);
+  if (!rehydrated.ok) return;
+  assert.equal(
+    rehydrated.value.schemaVersion,
+    LIQUIDATION_EVIDENCE_V2_SCHEMA_VERSION,
+  );
+  if (
+    rehydrated.value.schemaVersion !== LIQUIDATION_EVIDENCE_V2_SCHEMA_VERSION
+  ) {
+    return;
+  }
+  assert.equal(
+    rehydrated.value.providerSemanticIdentity,
+    LIQUIDATION_EVIDENCE_V2_PROVIDER_SEMANTIC_IDENTITY,
+  );
+  assert.equal(
+    rehydrated.value.targets[0]?.constituents[0]?.observations[0]?.provenance,
+    "provider-implied-zero",
+  );
+  assert.equal(
+    rehydrated.value.targets[0]?.constituents[0]?.observations[0]?.longUsd.toString(),
+    "0",
+  );
+  assert.equal(Object.isFrozen(rehydrated.value), true);
+  assert.equal(
+    Object.isFrozen(
+      rehydrated.value.targets[0]?.constituents[0]?.observations[0],
+    ),
+    true,
+  );
+
+  const reencoded = encodeCanonicalArtifact(
+    "liquidation-evidence-bundle",
+    rehydrated.value,
+  );
+  assert.equal(reencoded.ok, true);
+  if (!reencoded.ok) return;
+  assert.equal(
+    reencoded.value.canonicalJson,
+    impliedEnvelope.value.canonicalJson,
+  );
+  assert.equal(
+    reencoded.value.canonicalHash,
+    impliedEnvelope.value.canonicalHash,
+  );
+
+  const reference = createLiquidationEvidenceRef(
+    rehydrated.value,
+    reencoded.value.canonicalHash,
+    60_000,
+  );
+  assert.equal(reference.ok, true);
+  if (reference.ok) {
+    assert.equal(
+      reference.value.schemaVersion,
+      LIQUIDATION_EVIDENCE_V2_SCHEMA_VERSION,
+    );
+    const referenceEnvelope = encodeCanonicalArtifact(
+      "evidence-ref",
+      reference.value,
+    );
+    assert.equal(referenceEnvelope.ok, true);
+    if (referenceEnvelope.ok) {
+      const decodedReference = rehydrateArtifact(
+        "evidence-ref",
+        referenceEnvelope.value,
+      );
+      assert.equal(decodedReference.ok, true);
+      if (
+        decodedReference.ok &&
+        "kind" in decodedReference.value &&
+        decodedReference.value.kind === "liquidation-evidence-bundle"
+      ) {
+        assert.equal(
+          decodedReference.value.schemaVersion,
+          LIQUIDATION_EVIDENCE_V2_SCHEMA_VERSION,
+        );
+      }
+    }
+  }
+});
+
+test("v2 rejects nonzero implied observations and unknown semantics or provenance", () => {
+  const base = inputV2();
+  const nonzeroImplied = {
+    ...base,
+    targets: withFirstV2Observation(base.targets, {
+      provenance: "provider-implied-zero",
+    }),
+  };
+  assert.equal(createLiquidationEvidenceBundleV2(nonzeroImplied).ok, false);
+
+  assert.equal(
+    createLiquidationEvidenceBundleV2({
+      ...base,
+      providerSemanticIdentity: "coinalyze-sparse-zero/v2",
+    }).ok,
+    false,
+  );
+  assert.equal(
+    encodeCanonicalArtifact("liquidation-evidence-bundle", {
+      ...base,
+      providerSemanticIdentity: "coinalyze-sparse-zero/v2",
+    }).ok,
+    false,
+  );
+
+  const unknownProvenance = {
+    ...base,
+    targets: withFirstV2Observation(base.targets, {
+      provenance: "provider-inferred-zero" as LiquidationObservationProvenance,
+    }),
+  };
+  assert.equal(createLiquidationEvidenceBundleV2(unknownProvenance).ok, false);
+  assert.equal(
+    encodeCanonicalArtifact("liquidation-evidence-bundle", unknownProvenance)
+      .ok,
     false,
   );
 });

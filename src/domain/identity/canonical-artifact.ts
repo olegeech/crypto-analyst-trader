@@ -55,7 +55,11 @@ import {
   type MarketEvidenceBundle,
 } from "../market/market-evidence-bundle.js";
 import {
-  createLiquidationEvidenceBundle,
+  createLiquidationEvidenceBundleV2,
+  LIQUIDATION_EVIDENCE_SCHEMA_VERSION,
+  LIQUIDATION_EVIDENCE_V2_SCHEMA_VERSION,
+  rehydrateLiquidationEvidenceBundle,
+  type LiquidationEvidenceBundleV2,
   type LiquidationEvidenceBundle,
 } from "../liquidation/liquidation-evidence-bundle.js";
 import {
@@ -161,6 +165,7 @@ export type RehydratedArtifact =
   | MarketSnapshot
   | MarketEvidenceBundle
   | LiquidationEvidenceBundle
+  | LiquidationEvidenceBundleV2
   | AnalyticsEvidenceBundle
   | PortfolioRiskPreflight
   | DataQualityAssessment
@@ -185,6 +190,10 @@ type Schema =
   | {
       readonly kind: "validated";
       readonly validate: (value: unknown) => Result<unknown>;
+    }
+  | {
+      readonly kind: "versioned";
+      readonly select: (value: unknown) => Schema | undefined;
     }
   | { readonly kind: "leaf" }
   | { readonly kind: "array"; readonly item?: Schema }
@@ -495,7 +504,7 @@ const liquidationDiagnosticSchema = object(
   ["code", "operation"],
 );
 
-const liquidationEvidenceBundleSchema = object(
+const liquidationEvidenceBundleV1Schema = object(
   [
     "runId",
     "schemaVersion",
@@ -518,6 +527,25 @@ const liquidationEvidenceBundleSchema = object(
     diagnostics: array(liquidationDiagnosticSchema),
   },
 );
+
+const liquidationEvidenceBundleV2ValidationSchema: Schema = {
+  kind: "validated",
+  validate: createLiquidationEvidenceBundleV2,
+};
+
+const liquidationEvidenceBundleSchema: Schema = {
+  kind: "versioned",
+  select(value) {
+    if (!isRecord(value)) return undefined;
+    if (value.schemaVersion === LIQUIDATION_EVIDENCE_SCHEMA_VERSION) {
+      return liquidationEvidenceBundleV1Schema;
+    }
+    if (value.schemaVersion === LIQUIDATION_EVIDENCE_V2_SCHEMA_VERSION) {
+      return liquidationEvidenceBundleV2ValidationSchema;
+    }
+    return undefined;
+  },
+};
 
 const analyticsFeatureOutcomeSchema = object(
   [
@@ -1069,7 +1097,7 @@ const schemas: ReadonlyMap<ArtifactKind, Schema> = new Map([
           {
             market: marketEvidenceBundleSchema,
             analytics: analyticsEvidenceBundleSchema,
-            liquidation: liquidationEvidenceBundleSchema,
+            liquidation: liquidationEvidenceBundleV1Schema,
             assessment: qualityAssessmentSchema,
             decisionPolicy: object([], {}, [], true),
             planningPolicy: object([], {}, [], true),
@@ -1157,6 +1185,10 @@ function validateShape(
     const validated = schema.validate(value);
     return validated.ok ? ok(undefined) : validated;
   }
+  if (schema.kind === "versioned") {
+    const validated = validateArtifactValue(value, schema, path);
+    return validated.ok ? ok(undefined) : fail(validated.error);
+  }
   if (isDecimalValue(value)) {
     return schema.kind === "leaf"
       ? ok(undefined)
@@ -1210,6 +1242,15 @@ function validateArtifactValue(
   path: string,
 ): Result<unknown> {
   if (schema.kind === "validated") return schema.validate(value);
+  if (schema.kind === "versioned") {
+    const selected = schema.select(value);
+    if (selected === undefined) {
+      return unsupportedArtifact(
+        "artifact payload schema version is unsupported",
+      );
+    }
+    return validateArtifactValue(value, selected, path);
+  }
   const shape = validateShape(value, schema, path);
   return shape.ok ? ok(value) : shape;
 }
@@ -1486,7 +1527,7 @@ export function rehydrateArtifact(
 export function rehydrateArtifact(
   artifactKind: "liquidation-evidence-bundle",
   envelope: unknown,
-): Result<LiquidationEvidenceBundle>;
+): Result<LiquidationEvidenceBundle | LiquidationEvidenceBundleV2>;
 export function rehydrateArtifact(
   artifactKind: "analytics-evidence-bundle",
   envelope: unknown,
@@ -1539,7 +1580,7 @@ export function rehydrateArtifact(
     case "market-evidence-bundle":
       return createMarketEvidenceBundle(toConstructorInput(decoded.value));
     case "liquidation-evidence-bundle":
-      return createLiquidationEvidenceBundle(toConstructorInput(decoded.value));
+      return rehydrateLiquidationEvidenceBundle(decoded.value);
     case "analytics-evidence-bundle":
       if (
         isRecord(decoded.value) &&
