@@ -1,9 +1,11 @@
 import { responseList } from "./public-response.js";
 import type { BybitPublicResponse as BybitResponse } from "./public-response.js";
 import type {
+  ExchangeOrderObservation,
   ExchangeOrderStatus,
   ExchangeProtectionType,
 } from "../../domain/execution/exchange-order.js";
+import { createExchangeOrder } from "../../domain/execution/exchange-order.js";
 import {
   createInstrumentConstraints,
   type InstrumentConstraints,
@@ -88,6 +90,57 @@ export interface BybitOrderRecord {
   readonly price?: DecimalValue;
   readonly averagePrice?: DecimalValue;
   readonly protectionType?: ExchangeProtectionType;
+  readonly category?: "linear";
+  readonly orderType?: "limit" | "market";
+  readonly timeInForce?: "GTC" | "IOC" | "FOK" | "PostOnly";
+  /** null means the provider explicitly returned no attached price. */
+  readonly takeProfit?: DecimalValue | null;
+  readonly stopLoss?: DecimalValue | null;
+}
+
+/** Applies one canonical domain projection to every Bybit order read path. */
+export function mapOrderObservation(
+  record: BybitOrderRecord,
+  observedAt: UtcTimestamp,
+  source: string,
+): ExchangeOrderObservation {
+  const observation = createExchangeOrder({
+    exchangeOrderId: record.exchangeOrderId,
+    clientOrderId: record.clientOrderId,
+    instrument: record.instrument,
+    side: record.side,
+    requestedQuantity: record.requestedQuantity.toString(),
+    filledQuantity: record.filledQuantity.toString(),
+    status: record.status,
+    observedAt,
+    source,
+    ...(record.category === undefined ? {} : { category: record.category }),
+    ...(record.orderType === undefined ? {} : { orderType: record.orderType }),
+    ...(record.price === undefined ? {} : { price: record.price.toString() }),
+    ...(record.timeInForce === undefined
+      ? {}
+      : { timeInForce: record.timeInForce }),
+    ...(record.takeProfit === undefined
+      ? {}
+      : { takeProfit: record.takeProfit?.toString() ?? null }),
+    ...(record.stopLoss === undefined
+      ? {}
+      : { stopLoss: record.stopLoss?.toString() ?? null }),
+    reduceOnly: record.reduceOnly,
+    positionIdx: record.positionIdx,
+    ...(record.parentOrderLinkId === undefined
+      ? {}
+      : { parentOrderLinkId: record.parentOrderLinkId }),
+    ...(record.averagePrice === undefined
+      ? {}
+      : { averagePrice: record.averagePrice.toString() }),
+    ...(record.protectionType === undefined
+      ? {}
+      : { protectionType: record.protectionType }),
+  });
+  if (!observation.ok)
+    throw new Error("normalized Bybit order observation is invalid");
+  return observation.value;
 }
 
 export interface BybitExecutionRecord {
@@ -294,6 +347,22 @@ function optionalPositiveDecimal(
     invalid(`Bybit ${label} response has an invalid ${field}.`);
   }
   return parsed.value.isZero() ? undefined : parsed.value;
+}
+
+function optionalOrderProtectionPrice(
+  record: JsonObject,
+  field: "takeProfit" | "stopLoss",
+  label: string,
+): DecimalValue | null | undefined {
+  if (!(field in record) || record[field] === undefined) return undefined;
+  if (record[field] === "") return null;
+  const value = record[field];
+  if (typeof value !== "string")
+    invalid(`Bybit ${label} response has an invalid ${field}.`);
+  const parsed = DecimalValue.fromString(value);
+  if (!parsed.ok || parsed.value.isNegative())
+    invalid(`Bybit ${label} response has an invalid ${field}.`);
+  return parsed.value.isZero() ? null : parsed.value;
 }
 
 function optionalProtectionType(
@@ -604,6 +673,10 @@ export function mapOrderRecords(
   symbol: string,
   label = "order/realtime",
 ): readonly BybitOrderRecord[] {
+  const envelopeCategory = optionalText(response.result, "category", label);
+  if (envelopeCategory !== undefined && envelopeCategory !== "linear") {
+    invalid(`Bybit ${label} response has an unexpected category.`);
+  }
   return responseRecords(response, label).map((record) => {
     if (record.symbol !== symbol) {
       invalid(`Bybit ${label} response ignored the selected-symbol filter.`);
@@ -622,10 +695,47 @@ export function mapOrderRecords(
       invalid(`Bybit ${label} response has an invalid order side.`);
     }
     const reduceOnly = booleanField(record, "reduceOnly", label);
+    const rowCategory = optionalText(record, "category", label);
+    if (
+      rowCategory !== undefined &&
+      envelopeCategory !== undefined &&
+      rowCategory !== envelopeCategory
+    ) {
+      invalid(`Bybit ${label} response has contradictory categories.`);
+    }
+    const rawCategory = rowCategory ?? envelopeCategory;
+    if (rawCategory !== undefined && rawCategory !== "linear") {
+      invalid(`Bybit ${label} response has an unexpected category.`);
+    }
+    const rawOrderType = optionalText(record, "orderType", label);
+    const orderType =
+      rawOrderType === undefined
+        ? undefined
+        : rawOrderType === "Limit"
+          ? "limit"
+          : rawOrderType === "Market"
+            ? "market"
+            : invalid(`Bybit ${label} response has an invalid orderType.`);
+    const rawTimeInForce = optionalText(record, "timeInForce", label);
+    if (
+      rawTimeInForce !== undefined &&
+      rawTimeInForce !== "GTC" &&
+      rawTimeInForce !== "IOC" &&
+      rawTimeInForce !== "FOK" &&
+      rawTimeInForce !== "PostOnly"
+    ) {
+      invalid(`Bybit ${label} response has an invalid timeInForce.`);
+    }
     const parentOrderLinkId = optionalText(record, "parentOrderLinkId", label);
     const status = orderStatus(text(record, "orderStatus", label), label);
     const price = optionalPositiveDecimal(record, "price", label);
     const averagePrice = optionalPositiveDecimal(record, "avgPrice", label);
+    const takeProfit = optionalOrderProtectionPrice(
+      record,
+      "takeProfit",
+      label,
+    );
+    const stopLoss = optionalOrderProtectionPrice(record, "stopLoss", label);
     const protectionType = optionalProtectionType(record, label);
     const clientOrderId =
       record.orderLinkId === "" &&
@@ -646,6 +756,15 @@ export function mapOrderRecords(
       ...(parentOrderLinkId === undefined ? {} : { parentOrderLinkId }),
       ...(price === undefined ? {} : { price }),
       ...(averagePrice === undefined ? {} : { averagePrice }),
+      ...(orderType === undefined ? {} : { orderType }),
+      ...(rawTimeInForce === undefined
+        ? {}
+        : {
+            timeInForce: rawTimeInForce as "GTC" | "IOC" | "FOK" | "PostOnly",
+          }),
+      ...(rawCategory === undefined ? {} : { category: "linear" as const }),
+      ...(takeProfit === undefined ? {} : { takeProfit }),
+      ...(stopLoss === undefined ? {} : { stopLoss }),
       ...(protectionType === undefined ? {} : { protectionType }),
     };
   });

@@ -11,6 +11,9 @@ import { markExchangeOrder } from "./exchange-order-proof.js";
 
 export type ExchangeOrderStatus =
   "open" | "filled" | "partially-filled" | "cancelled" | "rejected";
+export type ExchangeOrderCategory = "linear" | "inverse" | "spot" | "option";
+export type ExchangeOrderType = "limit" | "market";
+export type ExchangeTimeInForce = "GTC" | "IOC" | "FOK" | "PostOnly";
 
 export type ExchangeProtectionType =
   "take-profit" | "stop-loss" | "trailing-stop" | "other";
@@ -28,6 +31,14 @@ export interface ExchangeOrderObservation {
   readonly parentOrderLinkId?: string;
   readonly averagePrice?: DecimalValue;
   readonly protectionType?: ExchangeProtectionType;
+  readonly category?: ExchangeOrderCategory;
+  readonly orderType?: ExchangeOrderType;
+  readonly price?: DecimalValue;
+  readonly timeInForce?: ExchangeTimeInForce;
+  readonly takeProfit?: DecimalValue | null;
+  readonly stopLoss?: DecimalValue | null;
+  readonly reduceOnly?: boolean;
+  readonly positionIdx?: 0 | 1 | 2;
 }
 
 function parseDecimal(value: unknown, field: string): Result<DecimalValue> {
@@ -112,6 +123,44 @@ export function createExchangeOrder(
     }
     protectionType = input.protectionType;
   }
+  const category =
+    input.category === undefined
+      ? undefined
+      : input.category === "linear" ||
+          input.category === "inverse" ||
+          input.category === "spot" ||
+          input.category === "option"
+        ? input.category
+        : null;
+  const orderType =
+    input.orderType === undefined
+      ? undefined
+      : input.orderType === "limit" || input.orderType === "market"
+        ? input.orderType
+        : null;
+  const timeInForce =
+    input.timeInForce === undefined
+      ? undefined
+      : input.timeInForce === "GTC" ||
+          input.timeInForce === "IOC" ||
+          input.timeInForce === "FOK" ||
+          input.timeInForce === "PostOnly"
+        ? input.timeInForce
+        : null;
+  const price =
+    input.price === undefined
+      ? undefined
+      : DecimalValue.fromString(input.price);
+  const takeProfit = parseOptionalProtectionPrice(input, "takeProfit");
+  const stopLoss = parseOptionalProtectionPrice(input, "stopLoss");
+  const positionIdx =
+    input.positionIdx === undefined
+      ? undefined
+      : input.positionIdx === 0 ||
+          input.positionIdx === 1 ||
+          input.positionIdx === 2
+        ? input.positionIdx
+        : null;
   const order: {
     exchangeOrderId: string;
     clientOrderId: string;
@@ -125,6 +174,14 @@ export function createExchangeOrder(
     parentOrderLinkId?: string;
     averagePrice?: DecimalValue;
     protectionType?: ExchangeProtectionType;
+    category?: ExchangeOrderCategory;
+    orderType?: ExchangeOrderType;
+    price?: DecimalValue;
+    timeInForce?: ExchangeTimeInForce;
+    takeProfit?: DecimalValue | null;
+    stopLoss?: DecimalValue | null;
+    reduceOnly?: boolean;
+    positionIdx?: 0 | 1 | 2;
   } = {
     exchangeOrderId: exchangeOrderId.value,
     clientOrderId: clientOrderId.value,
@@ -139,7 +196,41 @@ export function createExchangeOrder(
       ? {}
       : { parentOrderLinkId: parentOrderLinkId.value }),
   };
+  if (
+    category === null ||
+    orderType === null ||
+    timeInForce === null ||
+    (price !== undefined && (!price.ok || !price.value.isPositive())) ||
+    !takeProfit.ok ||
+    !stopLoss.ok ||
+    (input.reduceOnly !== undefined && typeof input.reduceOnly !== "boolean") ||
+    positionIdx === null
+  )
+    return fail(
+      domainError("INVALID_VALUE", "exchange order terms are invalid"),
+    );
   if (averagePrice !== undefined) order.averagePrice = averagePrice;
   if (protectionType !== undefined) order.protectionType = protectionType;
+  if (category !== undefined) order.category = category;
+  if (orderType !== undefined) order.orderType = orderType;
+  if (price !== undefined) order.price = price.value;
+  if (timeInForce !== undefined) order.timeInForce = timeInForce;
+  if (takeProfit.value !== undefined) order.takeProfit = takeProfit.value;
+  if (stopLoss.value !== undefined) order.stopLoss = stopLoss.value;
+  if (input.reduceOnly !== undefined) order.reduceOnly = input.reduceOnly;
+  if (positionIdx !== undefined) order.positionIdx = positionIdx;
   return ok(markExchangeOrder(Object.freeze(order)));
+}
+
+function parseOptionalProtectionPrice(
+  input: Record<string, unknown>,
+  field: "takeProfit" | "stopLoss",
+): Result<DecimalValue | null | undefined> {
+  if (!Object.hasOwn(input, field) || input[field] === undefined)
+    return ok(undefined);
+  if (input[field] === null) return ok(null);
+  const value = DecimalValue.fromString(input[field]);
+  return value.ok && value.value.isPositive()
+    ? value
+    : fail(domainError("INVALID_VALUE", `${field} must be positive or null`));
 }

@@ -8,6 +8,7 @@ import { executionOperationalMigration } from "./migrations/002-execution-operat
 import { accountingCheckpointsMigration } from "./migrations/003-accounting-checkpoints.js";
 import { authorityAccountScopeMigration } from "./migrations/004-authority-account-scope.js";
 import { executionIdentityBindingsMigration } from "./migrations/005-execution-identity-bindings.js";
+import { preparedLegExecutionMigration } from "./migrations/006-prepared-leg-execution.js";
 
 export interface SqliteMigration {
   readonly version: number;
@@ -21,6 +22,7 @@ export const MIGRATIONS: readonly SqliteMigration[] = [
   accountingCheckpointsMigration,
   authorityAccountScopeMigration,
   executionIdentityBindingsMigration,
+  preparedLegExecutionMigration,
 ];
 
 export const CURRENT_SCHEMA_VERSION = MIGRATIONS.at(-1)?.version ?? 0;

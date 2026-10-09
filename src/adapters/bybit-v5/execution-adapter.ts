@@ -2,7 +2,6 @@ import type {
   AccountSnapshot,
   MarketSnapshot,
 } from "../../domain/market/snapshots.js";
-import { createExchangeOrder } from "../../domain/execution/exchange-order.js";
 import {
   createAdapterCapabilityObservation,
   type CapabilityObservation,
@@ -63,8 +62,8 @@ import {
   type BybitPrivateTransport,
 } from "./transport.js";
 import {
+  mapOrderObservation,
   type BybitInstrumentInfo,
-  type BybitOrderRecord,
 } from "./read-mappers.js";
 
 const DEMO_SCOPE = {
@@ -199,31 +198,9 @@ function snapshots(
         : { entryPrice: input.position.entryPrice.toString() }),
     },
   ];
-  const openOrders = input.openOrders.map((order) => {
-    const observation = createExchangeOrder({
-      exchangeOrderId: order.exchangeOrderId,
-      clientOrderId: order.clientOrderId,
-      instrument: order.instrument,
-      side: order.side,
-      requestedQuantity: order.requestedQuantity.toString(),
-      filledQuantity: order.filledQuantity.toString(),
-      status: order.status,
-      observedAt: input.serverTime,
-      source: "bybit-demo/order-realtime",
-      ...(order.parentOrderLinkId === undefined
-        ? {}
-        : { parentOrderLinkId: order.parentOrderLinkId }),
-      ...(order.averagePrice === undefined
-        ? {}
-        : { averagePrice: order.averagePrice.toString() }),
-      ...(order.protectionType === undefined
-        ? {}
-        : { protectionType: order.protectionType }),
-    });
-    if (!observation.ok)
-      throw new Error("normalized Demo open order is invalid");
-    return observation.value;
-  });
+  const openOrders = input.openOrders.map((order) =>
+    mapOrderObservation(order, input.serverTime, "bybit-demo/order-realtime"),
+  );
   const account = createAccountSnapshot({
     snapshotId: `demo-account-${accountHash}`,
     accountScope: accountId,
@@ -380,30 +357,9 @@ export class BybitDemoExecutionAdapter implements ExchangeExecutionPort {
         request.parentClientOrderId,
       );
       const observedAt = this.clock.now();
-      const observations = records.map((record) => {
-        const observation = createExchangeOrder({
-          exchangeOrderId: record.exchangeOrderId,
-          clientOrderId: record.clientOrderId,
-          instrument: record.instrument,
-          side: record.side,
-          requestedQuantity: record.requestedQuantity.toString(),
-          filledQuantity: record.filledQuantity.toString(),
-          status: record.status,
-          observedAt,
-          source: "bybit-demo/protection",
-          parentOrderLinkId: record.parentOrderLinkId,
-          ...(record.averagePrice === undefined
-            ? {}
-            : { averagePrice: record.averagePrice.toString() }),
-          ...(record.protectionType === undefined
-            ? {}
-            : { protectionType: record.protectionType }),
-        });
-        if (!observation.ok) {
-          throw new Error("normalized Demo protection observation is invalid");
-        }
-        return observation.value;
-      });
+      const observations = records.map((record) =>
+        mapOrderObservation(record, observedAt, "bybit-demo/protection"),
+      );
       return exchangeSuccess(Object.freeze(observations));
     } catch (error) {
       return exchangeFailure(
@@ -541,36 +497,6 @@ function mainnetCapabilities(
   });
 }
 
-function mainnetOrderObservation(
-  record: BybitOrderRecord,
-  observedAt: UtcTimestamp,
-  source: string,
-): ExchangeOrderObservation {
-  const observation = createExchangeOrder({
-    exchangeOrderId: record.exchangeOrderId,
-    clientOrderId: record.clientOrderId,
-    instrument: record.instrument,
-    side: record.side,
-    requestedQuantity: record.requestedQuantity.toString(),
-    filledQuantity: record.filledQuantity.toString(),
-    status: record.status,
-    observedAt,
-    source,
-    ...(record.parentOrderLinkId === undefined
-      ? {}
-      : { parentOrderLinkId: record.parentOrderLinkId }),
-    ...(record.averagePrice === undefined
-      ? {}
-      : { averagePrice: record.averagePrice.toString() }),
-    ...(record.protectionType === undefined
-      ? {}
-      : { protectionType: record.protectionType }),
-  });
-  if (!observation.ok)
-    throw new Error("normalized Mainnet order observation is invalid");
-  return observation.value;
-}
-
 /**
  * Mainnet exposes the bounded typed order lifecycle, but its read projection
  * deliberately contains no account snapshot, account scope, UID or IP data.
@@ -620,7 +546,7 @@ export class BybitMainnetExecutionAdapter implements MainnetExchangeExecutionPor
         });
       const observedOrders = Object.freeze(
         openOrders.map((record) =>
-          mainnetOrderObservation(
+          mapOrderObservation(
             record,
             serverTime,
             "bybit-mainnet/order-realtime",
@@ -665,10 +591,17 @@ export class BybitMainnetExecutionAdapter implements MainnetExchangeExecutionPor
     }
   }
 
-  observeOrder(
+  async observeOrder(
     request: ExchangeOrderLookup,
   ): Promise<ExchangeResult<ExchangeOrderObservation>> {
-    return reconcileOrder(this.client, request, this.clock.now(), "mainnet");
+    try {
+      const observedAt = await this.client.readServerTime();
+      return await reconcileOrder(this.client, request, observedAt, "mainnet");
+    } catch (error) {
+      return exchangeFailure(
+        normalizeBybitFailure(error, context("observe", request), "mainnet"),
+      );
+    }
   }
 
   async listAttachedProtection(
@@ -682,7 +615,7 @@ export class BybitMainnetExecutionAdapter implements MainnetExchangeExecutionPor
       return exchangeSuccess(
         Object.freeze(
           records.map((record) =>
-            mainnetOrderObservation(
+            mapOrderObservation(
               record,
               this.clock.now(),
               "bybit-mainnet/protection",

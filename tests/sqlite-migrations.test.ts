@@ -101,6 +101,48 @@ test("identity-binding migration is additive and starts without fabricated bindi
   opened.value.close();
 });
 
+test("prepared-leg v006 migrates a populated v005 journal without changing legacy rows", () => {
+  const { path } = temporaryDatabase();
+  const db = openDatabase(path);
+  assert.equal(applyMigrations(db, MIGRATIONS.slice(0, 5)).ok, true);
+  db.prepare(
+    `INSERT INTO halt_state
+     (exchange, environment, account_id, category, position_mode, active, revision,
+      reason, raised_at, reconciliation_required)
+     VALUES ('bybit', 'mainnet', ?, 'linear', 'one-way', 0, 0, NULL, NULL, 0)`,
+  ).run(`sha256:${"a".repeat(64)}`);
+  db.close();
+
+  const migrated = openSqliteConnection({
+    environment: "mainnet",
+    databasePath: path,
+    runtime: supportedRuntime,
+  });
+  assert.equal(migrated.ok, true);
+  if (!migrated.ok) return;
+  const { db: migratedDb } = migrated.value;
+  assert.equal(
+    migratedDb
+      .prepare("SELECT schema_version FROM schema_meta WHERE singleton = 1")
+      .get()?.schema_version,
+    CURRENT_SCHEMA_VERSION,
+  );
+  assert.equal(
+    migratedDb
+      .prepare("SELECT COUNT(*) AS count FROM prepared_leg_sources")
+      .get()?.count,
+    0,
+  );
+  assert.equal(
+    migratedDb
+      .prepare("SELECT reason FROM halt_state WHERE environment = 'mainnet'")
+      .get()?.reason,
+    null,
+  );
+  assert.deepEqual(migratedDb.prepare("PRAGMA foreign_key_check").all(), []);
+  migrated.value.close();
+});
+
 test("supported older schema migrates forward without losing committed rows", () => {
   const { path } = temporaryDatabase();
   const db = openDatabase(path);

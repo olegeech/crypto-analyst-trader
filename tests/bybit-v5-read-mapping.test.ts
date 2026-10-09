@@ -114,6 +114,39 @@ test("strict read mappers normalize the supported Demo linear one-way scope", ()
   assert.equal(orders[0]?.filledQuantity.toString(), "12");
 });
 
+test("order mapping uses response category and preserves decimal zero protection", () => {
+  const [mapped] = mapOrderRecords(
+    response({
+      category: "linear",
+      list: [order({ takeProfit: "0.00", stopLoss: "0.0000" })],
+    }),
+    "DOGEUSDT",
+  );
+  assert.equal(mapped?.category, "linear");
+  assert.equal(mapped?.takeProfit, null);
+  assert.equal(mapped?.stopLoss, null);
+
+  assert.throws(
+    () =>
+      mapOrderRecords(
+        response({
+          category: "linear",
+          list: [order({ category: "spot" })],
+        }),
+        "DOGEUSDT",
+      ),
+    BybitReadMappingError,
+  );
+  assert.throws(
+    () =>
+      mapOrderRecords(
+        response({ category: "spot", list: [order()] }),
+        "DOGEUSDT",
+      ),
+    BybitReadMappingError,
+  );
+});
+
 test("cancelled order mapping preserves executed quantity", () => {
   const [mapped] = mapOrderRecords(
     response({

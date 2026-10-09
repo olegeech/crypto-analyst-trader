@@ -15,6 +15,8 @@ import type { PlanHash } from "../domain/identity/canonical-serialization.js";
 import type { DomainError } from "../domain/shared/errors.js";
 import type { Result } from "../domain/shared/result.js";
 import type { UtcTimestamp } from "../domain/shared/time.js";
+import type { PreparedLegExecution } from "../domain/execution/prepared-leg-execution.js";
+import type { PreparedLegOrderProof } from "../domain/execution/prepared-leg-order-proof.js";
 
 export type PersistenceEnvironment = "demo" | "testnet" | "mainnet";
 
@@ -215,6 +217,135 @@ export interface PersistenceRunSnapshot {
   readonly reconciliations: readonly ReconciliationRecord[];
   readonly lease?: LeaseState;
   readonly halt: HaltState;
+}
+
+export type PreparedLegOperation = "create" | "cancel";
+export type PreparedLegReconciliationStatus =
+  | "CONFIRMED_OPEN"
+  | "PROTECTION_PENDING"
+  | "CANCELLED"
+  | "REJECTED"
+  | "UNRESOLVED";
+
+export interface PreparedLegLineageRecord {
+  readonly sourceId: string;
+  readonly scope: PersistenceScope;
+  readonly preparedHash: PlanHash;
+  readonly legId: string;
+  readonly clientOrderId: string;
+  readonly selectionCanonicalJson: string;
+  readonly selectionHash: PlanHash;
+  readonly createdAt: UtcTimestamp;
+}
+
+export interface PreparedLegWriteIntentRecord {
+  readonly writeIntentId: string;
+  readonly sourceId: string;
+  readonly operation: PreparedLegOperation;
+  readonly runId: string;
+  readonly leaseEpoch: number;
+  readonly clientOrderId: string;
+  readonly exchangeOrderId?: string;
+  readonly canonicalJson: string;
+  readonly canonicalHash: PlanHash;
+  readonly preparedAt: UtcTimestamp;
+}
+
+export interface PreparedLegAttemptRecord {
+  readonly attemptId: string;
+  readonly writeIntentId: string;
+  readonly operation: PreparedLegOperation;
+  readonly canonicalJson: string;
+  readonly canonicalHash: PlanHash;
+  readonly recordedAt: UtcTimestamp;
+}
+
+export interface PreparedLegReconciliationRecord {
+  readonly reconciliationId: string;
+  readonly sourceId: string;
+  readonly revision: number;
+  readonly status: PreparedLegReconciliationStatus;
+  readonly observedAt: UtcTimestamp;
+  readonly exchangeOrderId?: string;
+  readonly canonicalJson: string;
+  readonly canonicalHash: PlanHash;
+}
+
+export interface PreparedLegRunSnapshot {
+  readonly lineage: PreparedLegLineageRecord;
+  readonly approvalHashes: readonly PlanHash[];
+  readonly createIntent: PreparedLegWriteIntentRecord;
+  readonly cancelIntent?: PreparedLegWriteIntentRecord;
+  readonly createAttempt?: PreparedLegAttemptRecord;
+  readonly cancelAttempt?: PreparedLegAttemptRecord;
+  readonly reconciliations: readonly PreparedLegReconciliationRecord[];
+  readonly halt: HaltState;
+  readonly lease?: LeaseState;
+}
+
+export interface PreparePreparedLegCreateRequest {
+  readonly authority: LeaseAuthority;
+  readonly runId: string;
+  readonly execution: PreparedLegExecution;
+  readonly preparedAt: UtcTimestamp;
+}
+
+export interface PreparePreparedLegCreateResult {
+  readonly snapshot: PreparedLegRunSnapshot;
+  readonly created: boolean;
+  readonly approvalAdded: boolean;
+}
+
+export interface PreparePreparedLegCancelRequest {
+  readonly authority: LeaseAuthority;
+  readonly sourceId: string;
+  readonly runId: string;
+  readonly proof: PreparedLegOrderProof;
+  readonly preparedAt: UtcTimestamp;
+}
+
+export interface PreparePreparedLegCancelResult {
+  readonly snapshot: PreparedLegRunSnapshot;
+  readonly created: boolean;
+}
+
+export interface AppendPreparedLegAttemptRequest {
+  readonly authority: LeaseAuthority;
+  readonly sourceId: string;
+  readonly operation: PreparedLegOperation;
+  readonly attemptId: string;
+  readonly result: PreparedLegAttemptEvidence;
+  readonly recordedAt: UtcTimestamp;
+}
+
+export interface PreparedLegAttemptEvidence {
+  readonly outcome: "accepted" | "rejected" | "ambiguous";
+  readonly exchangeOrderId?: string;
+  readonly providerReasonCode?: string;
+}
+
+export interface PreparedLegFillEvidence {
+  readonly executionId: string;
+  readonly quantity: string;
+  readonly price: string;
+  readonly executedAt: UtcTimestamp;
+  readonly fee?: string;
+  readonly feeCurrency?: string;
+}
+
+export interface PreparedLegReconciliationEvidence {
+  readonly orderProof?: PreparedLegOrderProof;
+  readonly fills?: readonly PreparedLegFillEvidence[];
+  readonly reasonCodes?: readonly string[];
+}
+
+export interface AppendPreparedLegReconciliationRequest {
+  readonly authority: LeaseAuthority;
+  readonly sourceId: string;
+  readonly status: PreparedLegReconciliationStatus;
+  readonly observedAt: UtcTimestamp;
+  readonly exchangeOrderId?: string;
+  readonly result: PreparedLegReconciliationEvidence;
 }
 
 export interface PersistenceScopeSnapshot {
@@ -457,4 +588,27 @@ export interface PersistencePort {
   ): Result<HaltState>;
   readHalt(): Result<HaltState>;
   clearHalt(request: HaltClearRequest): Result<HaltState>;
+}
+
+/** Source-native journal extension; never coerces prepared plans to legacy plans. */
+export interface PreparedLegPersistencePort {
+  readPreparedLegSource(
+    sourceId: string,
+  ): Result<PreparedLegRunSnapshot | undefined>;
+  findPreparedLegSource(
+    preparedHash: string,
+    legId: string,
+  ): Result<PreparedLegRunSnapshot | undefined>;
+  preparePreparedLegCreate(
+    request: PreparePreparedLegCreateRequest,
+  ): Result<PreparePreparedLegCreateResult>;
+  preparePreparedLegCancel(
+    request: PreparePreparedLegCancelRequest,
+  ): Result<PreparePreparedLegCancelResult>;
+  appendPreparedLegAttempt(
+    request: AppendPreparedLegAttemptRequest,
+  ): Result<PreparedLegAttemptRecord>;
+  appendPreparedLegReconciliation(
+    request: AppendPreparedLegReconciliationRequest,
+  ): Result<PreparedLegReconciliationRecord>;
 }
