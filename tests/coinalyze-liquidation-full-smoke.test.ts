@@ -120,6 +120,7 @@ function catalogue(): readonly Record<string, unknown>[] {
 function transportFor(
   batchSizes: number[],
   omitLastBucket = false,
+  emptyHistories = false,
 ): CoinalyzeTransportPort {
   return {
     async getFutureMarkets(apiKey) {
@@ -133,7 +134,9 @@ function transportFor(
         symbol,
         history: Array.from(
           {
-            length: LIQUIDATION_HISTORY_BUCKETS - (omitLastBucket ? 1 : 0),
+            length: emptyHistories
+              ? 0
+              : LIQUIDATION_HISTORY_BUCKETS - (omitLastBucket ? 1 : 0),
           },
           (_, index) => ({
             t: String(request.from + index * 60 * 60),
@@ -206,12 +209,18 @@ test("full live smoke runs all eligible constituents through the canonical colle
   assert.equal(summary.status, "complete", JSON.stringify(summary));
   assert.equal(summary.coverageProof, "complete");
   assert.equal(summary.historyProof, "complete");
+  assert.equal(summary.evidenceSchemaVersion, "liquidation-evidence/v2");
   assert.equal(summary.eligibleConstituents, 24);
-  assert.equal(summary.constituentsWithHistory, 24);
+  assert.equal(summary.constituentsWithProviderRows, 24);
+  assert.equal(summary.constituentsWithResolvedGrid, 24);
   assert.equal(summary.expectedHourlyBuckets, 24 * LIQUIDATION_HISTORY_BUCKETS);
-  assert.equal(summary.observedHourlyBuckets, 24 * LIQUIDATION_HISTORY_BUCKETS);
-  assert.equal(summary.explicitZeroBuckets, 24 * LIQUIDATION_HISTORY_BUCKETS);
-  assert.equal(summary.omittedBuckets, 0);
+  assert.equal(summary.resolvedHourlyBuckets, 24 * LIQUIDATION_HISTORY_BUCKETS);
+  assert.equal(
+    summary.providerExplicitBuckets,
+    24 * LIQUIDATION_HISTORY_BUCKETS,
+  );
+  assert.equal(summary.providerImpliedZeroBuckets, 0);
+  assert.equal(summary.unresolvedRequestedBuckets, 0);
   assert.equal(summary.historyRequestCount, 2);
   assert.equal(summary.historyRequestSymbols, 24);
   assert.equal(summary.maximumSymbolsPerHistoryRequest, 20);
@@ -223,7 +232,7 @@ test("full live smoke runs all eligible constituents through the canonical colle
   assert.equal(JSON.stringify(summary).includes("BTCUSDT"), false);
 });
 
-test("full smoke counts explicit zero buckets separately from omitted hours", async () => {
+test("full smoke reports sparse provider rows and reconstructed zeros by provenance", async () => {
   const batchSizes: number[] = [];
   const summary = await runCoinalyzeLiquidationFullSmoke({
     liveConfirmed: true,
@@ -234,16 +243,42 @@ test("full smoke counts explicit zero buckets separately from omitted hours", as
     clock: smokeClock(),
   });
 
-  assert.equal(summary.status, "incomplete");
+  assert.equal(summary.status, "complete");
   assert.equal(summary.coverageProof, "complete");
-  assert.equal(summary.historyProof, "incomplete");
+  assert.equal(summary.historyProof, "complete");
+  assert.equal(summary.constituentsWithProviderRows, 24);
+  assert.equal(summary.constituentsWithResolvedGrid, 24);
   assert.equal(
-    summary.observedHourlyBuckets,
+    summary.providerExplicitBuckets,
     24 * (LIQUIDATION_HISTORY_BUCKETS - 1),
   );
-  assert.equal(summary.explicitZeroBuckets, summary.observedHourlyBuckets);
-  assert.equal(summary.omittedBuckets, 24);
+  assert.equal(summary.providerImpliedZeroBuckets, 24);
+  assert.equal(summary.resolvedHourlyBuckets, 24 * LIQUIDATION_HISTORY_BUCKETS);
+  assert.equal(summary.unresolvedRequestedBuckets, 0);
   assert.deepEqual(batchSizes, [20, 4]);
+});
+
+test("full smoke distinguishes implied-only constituents from provider-returned rows", async () => {
+  const batchSizes: number[] = [];
+  const summary = await runCoinalyzeLiquidationFullSmoke({
+    liveConfirmed: true,
+    environment: { TRADER_ENV: "public-mainnet" },
+    secrets: secretProvider([0]),
+    marketEvidenceReader: marketEvidenceReader(),
+    coinalyzeTransport: transportFor(batchSizes, false, true),
+    clock: smokeClock(),
+  });
+
+  assert.equal(summary.status, "complete");
+  assert.equal(summary.historyProof, "complete");
+  assert.equal(summary.constituentsWithProviderRows, 0);
+  assert.equal(summary.constituentsWithResolvedGrid, 24);
+  assert.equal(summary.providerExplicitBuckets, 0);
+  assert.equal(
+    summary.providerImpliedZeroBuckets,
+    24 * LIQUIDATION_HISTORY_BUCKETS,
+  );
+  assert.equal(summary.unresolvedRequestedBuckets, 0);
 });
 
 test("early provider failure returns an incomplete sanitized summary", async () => {
@@ -275,6 +310,14 @@ test("early provider failure returns an incomplete sanitized summary", async () 
   assert.equal(summary.historyRequestCount, 1);
   assert.equal(summary.historyRequestSymbols, 20);
   assert.equal(summary.maximumSymbolsPerHistoryRequest, 20);
+  assert.equal(summary.constituentsWithProviderRows, 0);
+  assert.equal(summary.constituentsWithResolvedGrid, 0);
+  assert.equal(summary.providerExplicitBuckets, 0);
+  assert.equal(summary.providerImpliedZeroBuckets, 0);
+  assert.equal(
+    summary.unresolvedRequestedBuckets,
+    24 * LIQUIDATION_HISTORY_BUCKETS,
+  );
   assert.ok(summary.diagnostics.includes("history-unavailable"));
   assert.deepEqual(batchSizes, [20]);
 });

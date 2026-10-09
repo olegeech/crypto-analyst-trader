@@ -48,7 +48,7 @@ import type {
 import type { AccountEvidenceFailureCode } from "../domain/account/account-evidence-diagnostics.js";
 import { hashCanonical } from "../domain/identity/canonical-serialization.js";
 import {
-  createLiquidationEvidenceBundle,
+  rehydrateLiquidationEvidenceBundle,
   createLiquidationEvidenceRef,
 } from "../domain/liquidation/liquidation-evidence-bundle.js";
 import type { QualitySourceInput } from "../domain/quality/quality-inputs.js";
@@ -331,7 +331,7 @@ export function createPortfolioRiskPreflightBoundary(
           { role: "analytics", value: planning.value.analytics },
         ];
         if (plan.value.inputs.liquidation !== undefined) {
-          const liquidation = createLiquidationEvidenceBundle(
+          const liquidation = rehydrateLiquidationEvidenceBundle(
             plan.value.inputs.liquidation,
           );
           if (!liquidation.ok)

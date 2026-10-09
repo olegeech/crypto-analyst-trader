@@ -7,6 +7,13 @@ export function isRecord(value: unknown): value is UnknownRecord {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+export function onlyKeys(
+  value: Record<string, unknown>,
+  allowed: readonly string[],
+): boolean {
+  return Object.keys(value).every((key) => allowed.includes(key));
+}
+
 export function requireString(value: unknown, field: string): Result<string> {
   if (typeof value !== "string") {
     return fail(

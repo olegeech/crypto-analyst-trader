@@ -1,11 +1,11 @@
 import type { AnalyticsProfile } from "../domain/analytics/analytics-profile.js";
 import { createAnalyticsInputIdentity } from "../domain/analytics/analytics-inputs.js";
-import { createLiquidationEvidenceBundle } from "../domain/liquidation/liquidation-evidence-bundle.js";
+import { rehydrateLiquidationEvidenceBundle } from "../domain/liquidation/liquidation-evidence-bundle.js";
 import { isCanonicalMissingBucketHistory } from "../domain/liquidation/liquidation-history-classification.js";
 import { liquidationHistoryWindow } from "../domain/liquidation/liquidation-evidence-windows.js";
 import { createMarketEvidenceBundle } from "../domain/market/market-evidence-bundle.js";
 import { compareAnalyticsText } from "../domain/analytics/analytics-diagnostics.js";
-import type { LiquidationEvidenceBundle } from "../domain/liquidation/liquidation-evidence-bundle.js";
+import type { VersionedLiquidationEvidenceBundle } from "../domain/liquidation/liquidation-evidence-bundle.js";
 import type { MarketEvidenceBundle } from "../domain/market/market-evidence-bundle.js";
 
 export const MAX_REQUIRED_LIQUIDATION_VENUE_GROUPS = 20;
@@ -48,17 +48,17 @@ function unknownWindow(
 
 function admittedSources(
   marketInput: MarketEvidenceBundle | undefined,
-  liquidationInput: LiquidationEvidenceBundle | undefined,
+  liquidationInput: VersionedLiquidationEvidenceBundle | undefined,
 ):
   | {
       readonly market: MarketEvidenceBundle;
-      readonly liquidation: LiquidationEvidenceBundle;
+      readonly liquidation: VersionedLiquidationEvidenceBundle;
     }
   | undefined {
   if (marketInput === undefined || liquidationInput === undefined)
     return undefined;
   const market = createMarketEvidenceBundle(marketInput);
-  const liquidation = createLiquidationEvidenceBundle(liquidationInput);
+  const liquidation = rehydrateLiquidationEvidenceBundle(liquidationInput);
   if (!market.ok || !liquidation.ok) return undefined;
   const identity = createAnalyticsInputIdentity(
     market.value,
@@ -73,7 +73,7 @@ function admittedSources(
 export function summarizeRequiredLiquidationWindows(
   profile: AnalyticsProfile,
   marketInput?: MarketEvidenceBundle,
-  liquidationInput?: LiquidationEvidenceBundle,
+  liquidationInput?: VersionedLiquidationEvidenceBundle,
 ): readonly RequiredLiquidationWindowDiagnostic[] {
   const requests = profile.features.filter(
     (

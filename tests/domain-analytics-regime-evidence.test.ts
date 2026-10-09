@@ -76,7 +76,12 @@ const liquidationRef: ExternalInputEvidenceRef = {
   },
 };
 
-function identity(includeLiquidation = false): AnalyticsInputIdentity {
+function identity(
+  includeLiquidation = false,
+  liquidationSchemaVersion:
+    | "liquidation-evidence/v1"
+    | "liquidation-evidence/v2" = "liquidation-evidence/v1",
+): AnalyticsInputIdentity {
   return {
     runId: "analytics-run-1",
     universeVersion: "m1-universe/v1",
@@ -91,6 +96,9 @@ function identity(includeLiquidation = false): AnalyticsInputIdentity {
             CUTOFF as AnalyticsInputIdentity["bundleCutoff"],
           liquidationMarketContentHash: `sha256:${"d".repeat(64)}`,
           liquidationBundleHash: LIQUIDATION_HASH,
+          ...(liquidationSchemaVersion === "liquidation-evidence/v2"
+            ? { liquidationEvidenceSchemaVersion: liquidationSchemaVersion }
+            : {}),
         }
       : {}),
     compatibility: "compatible",
@@ -320,6 +328,48 @@ test("declared #11/#45 inputs require exact full hash and run context", () => {
       .status,
     "complete",
   );
+
+  const liquidationV2Ref = {
+    ...liquidationRef,
+    schemaVersion: "liquidation-evidence/v2",
+  };
+  const refsV2 = [marketRef, liquidationV2Ref];
+  const v2Lineage = withContentHash(
+    externalScore("early-warning-risk", {
+      inputEvidenceRefs: refsV2,
+      inputManifestHash: manifestHash(refsV2),
+      marketEvidenceHash: MARKET_HASH,
+      liquidationEvidenceHash: LIQUIDATION_HASH,
+    }),
+  );
+  assert.equal(
+    validateExternalRegimeEvidence(
+      v2Lineage,
+      "early-warning-risk",
+      identity(true, "liquidation-evidence/v2"),
+    ).status,
+    "complete",
+  );
+
+  const mismatchedV2Reference = validateExternalRegimeEvidence(
+    v2Lineage,
+    "early-warning-risk",
+    identity(true),
+  );
+  assert.equal(mismatchedV2Reference.status, "unavailable");
+  assert.deepEqual(mismatchedV2Reference.reasonCodes, [
+    "INPUT_IDENTITY_MISMATCH",
+  ]);
+
+  const mismatchedV1Reference = validateExternalRegimeEvidence(
+    valid,
+    "early-warning-risk",
+    identity(true, "liquidation-evidence/v2"),
+  );
+  assert.equal(mismatchedV1Reference.status, "unavailable");
+  assert.deepEqual(mismatchedV1Reference.reasonCodes, [
+    "INPUT_IDENTITY_MISMATCH",
+  ]);
 
   const missingClaim = withContentHash(
     externalScore("early-warning-risk", {

@@ -5,14 +5,21 @@ import {
   rehydrateDailyDecisionPlan,
 } from "../src/domain/planning/daily-decision-plan.js";
 import { dailyDecisionInputFixture } from "./fixtures/daily-planning-policy-fixtures.js";
-import { requireDailyFixture } from "./fixtures/daily-planning-evidence-fixtures.js";
+import {
+  dailyQualityProfileFixture,
+  requireDailyFixture,
+} from "./fixtures/daily-planning-evidence-fixtures.js";
 import {
   encodeCanonicalArtifact,
   rehydrateArtifact,
 } from "../src/domain/identity/canonical-artifact.js";
+import { assessDataQuality } from "../src/domain/quality/assess-data-quality.js";
+import { createQualityProfile } from "../src/domain/quality/quality-profile.js";
 import { createExecutionPlan } from "../src/domain/planning/execution-plan.js";
 import { hashCanonical } from "../src/domain/identity/canonical-serialization.js";
 import { createPlanningPolicy } from "../src/domain/planning/planning-policy.js";
+import { analyticsFixture } from "./fixtures/data-quality-fixtures.js";
+import { dailyPrepareLiquidationV2 } from "./fixtures/daily-prepare-fixtures.js";
 
 test("multilevel canonical artifact replay retains every leg and intent identity", () => {
   const raw = dailyDecisionInputFixture();
@@ -84,6 +91,61 @@ test("daily pre-risk identity is deterministic and canonical artifact roundtrips
     ).ok,
     false,
   );
+});
+
+test("daily decision plan canonical artifact roundtrips nested liquidation v2", () => {
+  const raw = dailyDecisionInputFixture();
+  const liquidationEvidence = dailyPrepareLiquidationV2(raw.market);
+  const liquidation = liquidationEvidence.bundle;
+  const analytics = analyticsFixture(raw.market, {
+    profile: raw.analytics.profile,
+    liquidation,
+  });
+  const qualityProfileInput = dailyQualityProfileFixture();
+  qualityProfileInput.roles = [
+    ...qualityProfileInput.roles,
+    { id: "liquidation", required: true, maxAgeMs: 86_400_000 },
+  ];
+  const profile = requireDailyFixture(
+    createQualityProfile(qualityProfileInput),
+  );
+  const assessment = requireDailyFixture(
+    assessDataQuality({
+      profile,
+      sources: [
+        { role: "market", value: raw.market },
+        { role: "analytics", value: analytics },
+        {
+          role: "liquidation",
+          value: liquidation,
+          evidenceRef: liquidationEvidence.evidence,
+        },
+      ],
+      bundleCutoff: raw.market.bundleCutoff,
+      evaluationTime: raw.market.bundleCutoff,
+    }),
+  );
+  assert.equal(assessment.qualityGate, "OK", JSON.stringify(assessment));
+  const plan = requireDailyFixture(
+    createDailyDecisionPlan({ ...raw, analytics, liquidation, assessment }),
+  );
+  assert.equal(
+    (plan.inputs.liquidation as { readonly schemaVersion: string })
+      .schemaVersion,
+    "liquidation-evidence/v2",
+  );
+
+  const envelope = requireDailyFixture(
+    encodeCanonicalArtifact("daily-decision-plan", plan),
+  );
+  const restored = requireDailyFixture(
+    rehydrateArtifact("daily-decision-plan", envelope),
+  );
+  assert.deepEqual(restored, plan);
+  assert.deepEqual(rehydrateDailyDecisionPlan(restored), {
+    ok: true,
+    value: plan,
+  });
 });
 test("historical rehydration recomputes semantics and identities, not only the outer hash", () => {
   const plan = requireDailyFixture(

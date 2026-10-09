@@ -21,7 +21,7 @@ import {
   dailyPrepareAccount,
   dailyPrepareIdentity,
   dailyPrepareMarket,
-  dailyPrepareLiquidation,
+  dailyPrepareLiquidationV2,
 } from "./fixtures/daily-prepare-fixtures.js";
 
 test("released chain persists READY; fresh-process review and offline consent cannot create execution state", async () => {
@@ -33,7 +33,8 @@ test("released chain persists READY; fresh-process review and offline consent ca
   try {
     const boundary = createDailyPrepareBoundary({
       collectMarket: async (runId) => ok(dailyPrepareMarket(runId)),
-      collectLiquidation: async (market) => ok(dailyPrepareLiquidation(market)),
+      collectLiquidation: async (market) =>
+        ok(dailyPrepareLiquidationV2(market)),
       collectAccount: async (options) => {
         await options.credentialLoader.load(options.environment);
         return {
@@ -69,6 +70,13 @@ test("released chain persists READY; fresh-process review and offline consent ca
     if (result.kind !== "prepared") return;
     const prepared = result.prepared;
     assert.equal(prepared.state, "READY_FOR_APPROVAL");
+    assert.equal(
+      result.diagnostics.liquidationSchemaVersion,
+      "liquidation-evidence/v2",
+    );
+    assert.equal(result.diagnostics.providerExplicitBuckets, 96);
+    assert.equal(result.diagnostics.providerImpliedZeroBuckets, 0);
+    assert.equal(result.diagnostics.unresolvedRequestedBuckets, 0);
     const cli = resolve("src/cli/daily.ts");
     const tsx = resolve("node_modules/tsx/dist/loader.mjs");
     const args = [

@@ -616,6 +616,7 @@ const analyticsInputIdentitySchema = object(
     "liquidationBundleCutoff",
     "liquidationMarketContentHash",
     "liquidationBundleHash",
+    "liquidationEvidenceSchemaVersion",
     "compatibility",
     "reasonCodes",
   ],
@@ -1097,7 +1098,7 @@ const schemas: ReadonlyMap<ArtifactKind, Schema> = new Map([
           {
             market: marketEvidenceBundleSchema,
             analytics: analyticsEvidenceBundleSchema,
-            liquidation: liquidationEvidenceBundleV1Schema,
+            liquidation: liquidationEvidenceBundleSchema,
             assessment: qualityAssessmentSchema,
             decisionPolicy: object([], {}, [], true),
             planningPolicy: object([], {}, [], true),

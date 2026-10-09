@@ -14,7 +14,7 @@ import {
 } from "../planning/daily-decision-plan.js";
 import type { OrderIntent } from "../planning/order-intent.js";
 import {
-  createLiquidationEvidenceBundle,
+  rehydrateLiquidationEvidenceBundle,
   createLiquidationEvidenceRef,
 } from "../liquidation/liquidation-evidence-bundle.js";
 import { admitQualitySource } from "../quality/quality-inputs.js";
@@ -342,7 +342,7 @@ function hasBlockingStaleQualityEvidence(
     admitQualitySource({ role: "analytics", value: planning.value.analytics }),
   ];
   if (dailyPlan.inputs.liquidation !== undefined) {
-    const liquidation = createLiquidationEvidenceBundle(
+    const liquidation = rehydrateLiquidationEvidenceBundle(
       dailyPlan.inputs.liquidation,
     );
     if (!liquidation.ok)

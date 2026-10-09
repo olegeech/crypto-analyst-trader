@@ -8,6 +8,7 @@ import { fail, ok, type Result } from "../shared/result.js";
 import { parseUtcTimestamp, type UtcTimestamp } from "../shared/time.js";
 import {
   isRecord,
+  onlyKeys,
   requireFiniteInteger,
   requireHash,
   requireIdentifier,
@@ -25,6 +26,7 @@ import {
   type LiquidationHourlyAggregate,
   type LiquidationWindowEvidence,
 } from "./liquidation-evidence-windows.js";
+import { liquidationObservationKey } from "./liquidation-observation-key.js";
 
 export {
   createLiquidationEvidenceDiagnostic,
@@ -705,24 +707,13 @@ export function createLiquidationEvidenceBundle(
   );
 }
 
-function hasOnlyKeys(
-  value: Record<string, unknown>,
-  allowed: readonly string[],
-): boolean {
-  return Object.keys(value).every((key) => allowed.includes(key));
-}
-
-function observationKey(providerSymbol: string, timestamp: string): string {
-  return JSON.stringify([providerSymbol, timestamp]);
-}
-
 export function createLiquidationEvidenceBundleV2(
   input: unknown,
 ): Result<LiquidationEvidenceBundleV2> {
   if (!isRecord(input))
     return invalid("liquidation evidence bundle must be an object");
   if (
-    !hasOnlyKeys(input, [
+    !onlyKeys(input, [
       "runId",
       "schemaVersion",
       "providerSemanticIdentity",
@@ -743,7 +734,7 @@ export function createLiquidationEvidenceBundleV2(
     input.providerSemanticIdentity !==
       LIQUIDATION_EVIDENCE_V2_PROVIDER_SEMANTIC_IDENTITY ||
     !isRecord(input.marketEvidence) ||
-    !hasOnlyKeys(input.marketEvidence, [
+    !onlyKeys(input.marketEvidence, [
       "runId",
       "universeVersion",
       "bundleCutoff",
@@ -759,11 +750,12 @@ export function createLiquidationEvidenceBundleV2(
     string,
     LiquidationObservationProvenance
   >();
+  let containsImpliedZero = false;
   const legacyTargets: Record<string, unknown>[] = [];
   for (const target of input.targets) {
     if (
       !isRecord(target) ||
-      !hasOnlyKeys(target, [
+      !onlyKeys(target, [
         "asset",
         "constituents",
         "hourlyAggregates",
@@ -778,7 +770,7 @@ export function createLiquidationEvidenceBundleV2(
     for (const constituent of target.constituents) {
       if (
         !isRecord(constituent) ||
-        !hasOnlyKeys(constituent, [
+        !onlyKeys(constituent, [
           "providerSymbol",
           "exchange",
           "symbolOnExchange",
@@ -804,7 +796,7 @@ export function createLiquidationEvidenceBundleV2(
       for (const observation of constituent.observations) {
         if (
           !isRecord(observation) ||
-          !hasOnlyKeys(observation, [
+          !onlyKeys(observation, [
             "timestamp",
             "longUsd",
             "shortUsd",
@@ -837,9 +829,12 @@ export function createLiquidationEvidenceBundleV2(
           );
         }
         provenanceByObservation.set(
-          observationKey(providerSymbol.value, observedAt.value),
+          liquidationObservationKey(providerSymbol.value, observedAt.value),
           observation.provenance,
         );
+        if (observation.provenance === "provider-implied-zero") {
+          containsImpliedZero = true;
+        }
         legacyObservations.push(
           Object.freeze({
             timestamp: observedAt.value,
@@ -859,7 +854,7 @@ export function createLiquidationEvidenceBundleV2(
   for (const diagnostic of input.diagnostics) {
     if (
       !isRecord(diagnostic) ||
-      !hasOnlyKeys(diagnostic, [
+      !onlyKeys(diagnostic, [
         "code",
         "operation",
         "asset",
@@ -869,6 +864,21 @@ export function createLiquidationEvidenceBundleV2(
     ) {
       return invalid("liquidation v2 diagnostic shape is invalid");
     }
+  }
+
+  if (
+    containsImpliedZero &&
+    (input.coverageProof !== "complete" ||
+      input.historyProof !== "complete" ||
+      input.diagnostics.some(
+        (diagnostic) =>
+          isRecord(diagnostic) &&
+          diagnostic.operation === "fetch-liquidation-history",
+      ))
+  ) {
+    return invalid(
+      "provider-implied-zero requires complete catalogue and valid complete history",
+    );
   }
 
   const legacyInput: Record<string, unknown> = {
@@ -887,7 +897,10 @@ export function createLiquidationEvidenceBundleV2(
       const observations: LiquidationObservationV2[] = [];
       for (const observation of constituent.observations) {
         const provenance = provenanceByObservation.get(
-          observationKey(constituent.providerSymbol, observation.timestamp),
+          liquidationObservationKey(
+            constituent.providerSymbol,
+            observation.timestamp,
+          ),
         );
         if (provenance === undefined) {
           return invalid("liquidation v2 observation provenance is missing");

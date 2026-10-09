@@ -735,6 +735,27 @@ test("v2 rejects nonzero implied observations and unknown semantics or provenanc
   assert.equal(
     createLiquidationEvidenceBundleV2({
       ...base,
+      coverageProof: "incomplete",
+      historyProof: "incomplete",
+      status: "incomplete",
+      diagnostics: [
+        {
+          code: "catalogue-incomplete",
+          operation: "discover-markets",
+        },
+      ],
+      targets: withFirstV2Observation(base.targets, {
+        longUsd: "0",
+        shortUsd: "0",
+        provenance: "provider-implied-zero",
+      }),
+    }).ok,
+    false,
+  );
+
+  assert.equal(
+    createLiquidationEvidenceBundleV2({
+      ...base,
       providerSemanticIdentity: "coinalyze-sparse-zero/v2",
     }).ok,
     false,

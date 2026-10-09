@@ -127,8 +127,13 @@ test("prepare prints only the bounded sanitized required-window diagnostics", as
     liquidationStatus: "incomplete",
     coverageProof: "complete",
     historyProof: "incomplete",
+    liquidationSchemaVersion: "liquidation-evidence/v2",
     eligibleConstituents: 93,
-    observedHourlyBuckets: 353,
+    expectedHourlyBuckets: 93 * 24,
+    resolvedHourlyBuckets: 353,
+    providerExplicitBuckets: 353,
+    providerImpliedZeroBuckets: 0,
+    unresolvedRequestedBuckets: 93 * 24 - 353,
     requiredLiquidationWindows: [
       {
         requestId: "liquidation-12h",
