@@ -13,11 +13,15 @@ import {
   type ExchangeOrderObservation,
 } from "../src/domain/execution/exchange-order.js";
 import { createPreparedLegOrderProof } from "../src/domain/execution/prepared-leg-order-proof.js";
-import { encodeCanonicalArtifact } from "../src/domain/identity/canonical-artifact.js";
+import {
+  encodeCanonicalArtifact,
+  rehydrateArtifact,
+} from "../src/domain/identity/canonical-artifact.js";
 import { hashCanonical } from "../src/domain/identity/canonical-serialization.js";
 import { createMarketSnapshot } from "../src/domain/market/snapshots.js";
 import { DecimalValue } from "../src/domain/shared/decimal.js";
-import { ok, type Result } from "../src/domain/shared/result.js";
+import { domainError } from "../src/domain/shared/errors.js";
+import { fail, ok, type Result } from "../src/domain/shared/result.js";
 import {
   parseUtcTimestamp,
   type UtcTimestamp,
@@ -123,7 +127,7 @@ class FakeMainnetExchange implements MainnetExchangeExecutionPort {
   orderStatus: ExchangeOrderObservation["status"] = "open";
   filledQuantity = "0";
   fills: readonly ExchangeFillObservation[] = [];
-  unownedOrders: readonly ExchangeOrderObservation[] = [];
+  additionalOpenOrders: readonly ExchangeOrderObservation[] = [];
   positionSide: MainnetExchangeReadState["position"]["side"] = "flat";
   positionQuantity = "0";
   leverage = "1";
@@ -212,8 +216,8 @@ class FakeMainnetExchange implements MainnetExchangeExecutionPort {
     const openOrders =
       this.clientOrderId !== undefined &&
       (this.orderStatus === "open" || this.orderStatus === "partially-filled")
-        ? [this.order(now), ...this.unownedOrders]
-        : [...this.unownedOrders];
+        ? [this.order(now), ...this.additionalOpenOrders]
+        : [...this.additionalOpenOrders];
     return {
       serverTime: now,
       market,
@@ -647,7 +651,7 @@ test("changed target state or wrong account identity blocks before durable inten
   }
 });
 
-test("full exact fills enter protection-pending, persist accounting facts, and retain HALT", async () => {
+test("full fills with an active attached TP enter protection-pending and retain attempt-linked accounting", async () => {
   const state = setup();
   try {
     const approvedLeg =
@@ -658,6 +662,29 @@ test("full exact fills enter protection-pending, persist accounting facts, and r
       state.exchange.filledQuantity = approvedLeg.intent.quantity.toString();
       state.exchange.positionSide = "long";
       state.exchange.positionQuantity = approvedLeg.intent.quantity.toString();
+      const clientOrderId = unwrap(
+        derivePreparedLegClientOrderId(
+          state.prepared.contentHash,
+          state.fixture.legId,
+        ),
+      );
+      state.exchange.additionalOpenOrders = [
+        unwrap(
+          createExchangeOrder({
+            exchangeOrderId: "mainnet-tp-child-21",
+            clientOrderId,
+            parentOrderLinkId: clientOrderId,
+            protectionType: "take-profit",
+            instrument: approvedLeg.intent.instrument,
+            side: "sell",
+            requestedQuantity: approvedLeg.intent.quantity.toString(),
+            filledQuantity: "0",
+            status: "open",
+            observedAt: state.currentTime.value,
+            source: "bybit-mainnet/realtime",
+          }),
+        ),
+      ];
       state.exchange.fills = [
         {
           executionId: "exec-mainnet-21",
@@ -716,6 +743,125 @@ test("full exact fills enter protection-pending, persist accounting facts, and r
       facts.filter((fact) => fact.factKind === "ledger-entry").length,
       2,
     );
+    assert.ok(durable?.createAttempt);
+    const fillFact = facts.find((fact) => fact.factKind === "fill");
+    assert.ok(fillFact);
+    const persistedFill = unwrap(
+      rehydrateArtifact("fill", fillFact.artifact.envelope),
+    );
+    assert.ok("attemptId" in persistedFill);
+    assert.equal(persistedFill.attemptId, durable.createAttempt.attemptId);
+  } finally {
+    state.cleanup();
+  }
+});
+
+test("recovery creates one deterministic attempt identity after dispatch-before-attempt interruption", async () => {
+  const state = setup();
+  try {
+    const approvedLeg =
+      state.fixture.approval.replayInputs.prepared.replayInputs.preflight
+        .replayInputs.dailyPlan.candidateLegs![0]!;
+    state.exchange.afterCreate = () => {
+      state.exchange.orderStatus = "filled";
+      state.exchange.filledQuantity = approvedLeg.intent.quantity.toString();
+      state.exchange.positionSide = "long";
+      state.exchange.positionQuantity = approvedLeg.intent.quantity.toString();
+      state.exchange.fills = [
+        {
+          executionId: "exec-recovered-mainnet-21",
+          exchangeOrderId: state.exchange.exchangeOrderId,
+          clientOrderId: unwrap(
+            derivePreparedLegClientOrderId(
+              state.prepared.contentHash,
+              state.fixture.legId,
+            ),
+          ),
+          instrument: approvedLeg.intent.instrument,
+          side: "buy",
+          quantity: approvedLeg.intent.quantity,
+          price: approvedLeg.intent.price,
+          executedAt: state.currentTime.value,
+          source: "bybit-mainnet/execution",
+        },
+      ];
+    };
+    const preparedLegStore = state.dependencies.preparedLegs;
+    const appendAttempt =
+      preparedLegStore.appendPreparedLegAttempt.bind(preparedLegStore);
+    preparedLegStore.appendPreparedLegAttempt = (request) =>
+      request.operation === "create"
+        ? fail(
+            domainError(
+              "PERSISTENCE_INTEGRITY",
+              "simulated interruption after exchange dispatch",
+            ),
+          )
+        : appendAttempt(request);
+
+    const dispatched = await createMainnetPreparedLeg(
+      {
+        approvalHash: state.approval.contentHash,
+        legId: state.fixture.legId,
+        runId: "prepared-leg-recovered-attempt-run",
+      },
+      state.dependencies,
+    );
+    assert.equal(dispatched.ok, false);
+    assert.equal(state.exchange.createRequests.length, 1);
+
+    const sourceId = unwrap(
+      derivePreparedLegSourceId(
+        state.accountHash,
+        state.prepared.contentHash,
+        state.fixture.legId,
+      ),
+    );
+    const interrupted = unwrap(
+      state.dependencies.preparedLegs.readPreparedLegSource(sourceId),
+    );
+    assert.ok(interrupted?.createIntent);
+    assert.equal(interrupted.createAttempt, undefined);
+
+    preparedLegStore.appendPreparedLegAttempt = appendAttempt;
+    const recovered = await recoverMainnetPreparedLegSource(
+      {
+        sourceId,
+        runId: "prepared-leg-recovered-attempt-run",
+      },
+      state.dependencies,
+    );
+    assert.equal(
+      recovered.ok,
+      true,
+      recovered.ok ? "" : `${recovered.error.code}: ${recovered.error.message}`,
+    );
+    if (!recovered.ok) return;
+    assert.equal(recovered.value.status, "PROTECTION_PENDING");
+    assert.equal(state.exchange.createRequests.length, 1);
+
+    const durable = unwrap(
+      state.dependencies.preparedLegs.readPreparedLegSource(sourceId),
+    );
+    assert.ok(durable?.createAttempt);
+    assert.equal(
+      durable.createAttempt.writeIntentId,
+      durable.createIntent.writeIntentId,
+    );
+    assert.match(durable.createAttempt.attemptId, /^recovered-create-/u);
+    assert.notEqual(
+      durable.createAttempt.attemptId,
+      durable.createIntent.writeIntentId,
+    );
+    const fillFact = unwrap(state.persistence.readFacts()).find(
+      (fact) => fact.factKind === "fill",
+    );
+    assert.ok(fillFact);
+    const persistedFill = unwrap(
+      rehydrateArtifact("fill", fillFact.artifact.envelope),
+    );
+    assert.ok("attemptId" in persistedFill);
+    assert.equal(persistedFill.attemptId, durable.createAttempt.attemptId);
   } finally {
     state.cleanup();
   }
@@ -725,7 +871,7 @@ test("a post-create unowned target order makes reconciliation unresolved and pre
   const state = setup();
   try {
     state.exchange.afterCreate = () => {
-      state.exchange.unownedOrders = [
+      state.exchange.additionalOpenOrders = [
         unwrap(
           createExchangeOrder({
             exchangeOrderId: "manual-order-21",

@@ -424,6 +424,9 @@ function targetStateConflict(
   fills: readonly ExchangeFillObservation[],
 ): string | undefined {
   const symbol = execution.leg.intent.instrument;
+  const isAttachedTakeProfitChild = (order: ExchangeOrderObservation) =>
+    order.parentOrderLinkId === execution.clientOrderId &&
+    order.protectionType === "take-profit";
   if (
     state.market.instrument !== symbol ||
     state.market.scope.exchange !== "bybit" ||
@@ -445,12 +448,15 @@ function targetStateConflict(
     state.openOrders.some(
       (order) =>
         order.instrument !== symbol ||
-        order.clientOrderId !== execution.clientOrderId,
+        (order.clientOrderId !== execution.clientOrderId &&
+          !isAttachedTakeProfitChild(order)),
     )
   )
     return "UNOWNED_TARGET_ORDER_PRESENT";
   const ownedOpenOrders = state.openOrders.filter(
-    (order) => order.clientOrderId === execution.clientOrderId,
+    (order) =>
+      order.clientOrderId === execution.clientOrderId &&
+      !isAttachedTakeProfitChild(order),
   );
   if (ownedOpenOrders.length > 1) return "DUPLICATE_OWNED_TARGET_ORDER";
   if (ownedOpenOrders.length === 1) {
@@ -480,6 +486,60 @@ function targetStateConflict(
   return undefined;
 }
 
+function ensurePreparedLegCreateAttempt(
+  dependencies: MainnetPreparedLegDependencies,
+  sourceId: string,
+  authority: { readonly ownerRunId: string; readonly epoch: number },
+  proof: PreparedLegOrderProof,
+): Result<string> {
+  const source = dependencies.preparedLegs.readPreparedLegSource(sourceId);
+  if (!source.ok) return source;
+  if (!source.value)
+    return fail(
+      domainError("PERSISTENCE_INTEGRITY", "fill source is not durable"),
+    );
+  const createIntent = source.value.createIntent;
+  const existing = source.value.createAttempt;
+  if (existing) {
+    if (
+      existing.operation !== "create" ||
+      existing.writeIntentId !== createIntent.writeIntentId
+    )
+      return fail(
+        domainError(
+          "PERSISTENCE_INTEGRITY",
+          "prepared-leg create attempt does not match its durable intent",
+        ),
+      );
+    return ok(existing.attemptId);
+  }
+  const recordedAt = parseUtcTimestamp(dependencies.localClock.now());
+  if (!recordedAt.ok) return recordedAt;
+  const recovered = dependencies.preparedLegs.appendPreparedLegAttempt({
+    authority,
+    sourceId,
+    operation: "create",
+    attemptId: `recovered-create-${createIntent.writeIntentId}`,
+    result: {
+      outcome: proof.status === "rejected" ? "rejected" : "accepted",
+      exchangeOrderId: proof.exchangeOrderId,
+    },
+    recordedAt: recordedAt.value,
+  });
+  if (!recovered.ok) return recovered;
+  if (
+    recovered.value.operation !== "create" ||
+    recovered.value.writeIntentId !== createIntent.writeIntentId
+  )
+    return fail(
+      domainError(
+        "PERSISTENCE_INTEGRITY",
+        "recovered create attempt does not match its durable intent",
+      ),
+    );
+  return ok(recovered.value.attemptId);
+}
+
 function persistEntryAccounting(
   dependencies: MainnetPreparedLegDependencies,
   sourceId: string,
@@ -491,12 +551,24 @@ function persistEntryAccounting(
     return fail(
       domainError("PERSISTENCE_INTEGRITY", "fill source is not durable"),
     );
+  const attempt = source.value.createAttempt;
+  if (
+    !attempt ||
+    attempt.operation !== "create" ||
+    attempt.writeIntentId !== source.value.createIntent.writeIntentId
+  )
+    return fail(
+      domainError(
+        "PERSISTENCE_INTEGRITY",
+        "fill source has no matching durable create attempt",
+      ),
+    );
   for (const fill of fills) {
     const persisted = ingestExchangeFillObservation(
       dependencies.persistence,
       dependencies.persistence.scope,
       fill,
-      source.value.createIntent.writeIntentId,
+      attempt.attemptId,
       {
         eventKey: `${sourceId}:${fill.executionId}`,
         ledgerCurrency: "USDT",
@@ -651,6 +723,16 @@ export async function reconcilePreparedLegSource(
     (expectedOrderId === undefined ||
       proof.value.exchangeOrderId === expectedOrderId) &&
     options.forceUnresolvedReason === undefined;
+  const createAttempt = exactOrder
+    ? ensurePreparedLegCreateAttempt(
+        dependencies,
+        sourceId,
+        authority,
+        proof.value,
+      )
+    : ok<string | undefined>(undefined);
+  const createAttemptMissing =
+    exactOrder && (!createAttempt.ok || createAttempt.value === undefined);
   const stateConflict =
     fills.ok && exactOrder
       ? targetStateConflict(
@@ -670,10 +752,23 @@ export async function reconcilePreparedLegSource(
     (proof.value.status === "cancelled" &&
       filledQuantity.isPositive() &&
       filledQuantity.compare(proof.value.requestedQuantity) < 0);
-  const accounting =
-    exactOrder && fills.ok && exactFillTotal && filledQuantity.isPositive()
-      ? persistEntryAccounting(dependencies, sourceId, fillsResult.value)
-      : ok(undefined);
+  let accounting: Result<void> = ok(undefined);
+  if (exactOrder && fills.ok && exactFillTotal && filledQuantity.isPositive()) {
+    if (!createAttempt.ok) accounting = fail(createAttempt.error);
+    else if (createAttempt.value === undefined)
+      accounting = fail(
+        domainError(
+          "PERSISTENCE_INTEGRITY",
+          "exact order has no durable create attempt identity",
+        ),
+      );
+    else
+      accounting = persistEntryAccounting(
+        dependencies,
+        sourceId,
+        fillsResult.value,
+      );
+  }
   let status: PreparedLegReconciliationStatus;
   let result: {
     orderProof: typeof proof.value;
@@ -691,6 +786,7 @@ export async function reconcilePreparedLegSource(
     !exactOrder ||
     !fills.ok ||
     !exactFillTotal ||
+    createAttemptMissing ||
     stateConflict !== undefined
   ) {
     status = "UNRESOLVED";
@@ -704,7 +800,9 @@ export async function reconcilePreparedLegSource(
             ? "ORDER_TERMS_MISMATCH"
             : !fills.ok
               ? "FILL_IDENTITY_INVALID"
-              : "FILL_TOTAL_MISMATCH"),
+              : !exactFillTotal
+                ? "FILL_TOTAL_MISMATCH"
+                : "CREATE_ATTEMPT_PERSISTENCE_FAILED"),
       ],
     };
   } else if (filledQuantity.isPositive()) {
