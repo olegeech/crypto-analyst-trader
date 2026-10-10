@@ -1,0 +1,44 @@
+# Liquidation market coverage research — 2026-10-10
+
+**Issue:** [#125](https://github.com/olegeech/crypto-analyst-trader/issues/125)
+
+**Result:** **NOT VALIDATED** for venue pruning
+
+**Handoff:** #126 uses all eligible venues for the selected asset; no narrower venue policy is supported by the inspected evidence.
+
+## Conclusion
+
+The inspected non-private workspace sources do not contain an eligible historical reference set for the proposed all-venue versus venue-subset replay. The available public smoke evidence is one incomplete collection, not a set of paired complete windows. No point-in-time historical catalogue snapshots were found in those sources. Therefore no candidate was selected, no holdout was examined, and no claim about the marginal value of a venue can be made.
+
+This is a data-availability result, not a failure of the collector: #124 demonstrated correct fail-closed behavior under a rate limit. It also does not prove that all venues improve a decision. It leaves the already-approved conservative fallback unchanged: discover the complete catalogue, then collect history for every eligible venue of the requested asset only.
+
+## U1 inventory
+
+| Source                                                                                                                 | Observed evidence                                                                                                                                                                                                                                                                            | Research eligibility                                                                                                                                                     |
+| ---------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Tracked repository data and fixtures                                                                                   | No non-private archived Coinalyze hourly series or historical catalogue snapshots found. Existing fixtures are deterministic test examples.                                                                                                                                                  | Not empirical observations.                                                                                                                                              |
+| [PR #124](https://github.com/olegeech/crypto-analyst-trader/pull/124), head `174a9585bceca8312895e4f32fe349393db9e183` | One full-collector smoke: 93 eligible markets, 2,232 expected buckets, 12 resolved/provider-explicit, 0 provider-implied zero; 40 symbol units across two history requests; `coverageProof=complete`, `historyProof=incomplete`, rate-limited. Its aggregate summary has no per-asset split. | Not a complete window, matched history panel, or point-in-time holdout. Canonical smoke hash: `sha256:3718f305c9be77400f649a123c60586043d53d403f6038cf67ac61516691248c`. |
+| Local private execution store                                                                                          | Present but not opened; it may contain account-scoped artifacts and is not part of this non-private inventory.                                                                                                                                                                               | Not assessed; no facts from it are used.                                                                                                                                 |
+| [Coinalyze API documentation](https://api.coinalyze.net/v1/doc/)                                                       | Documents 1,500–2,000 retained intraday datapoints, daily deletion of older points, 40 API calls/minute/key, and a maximum of 20 symbols per history request with each symbol consuming one call.                                                                                            | Provider constraints only, not observations. Sparse event rows mean point counts do not guarantee calendar-history depth.                                                |
+
+The inventory searched tracked source/docs/tests and machine-readable archive formats under `data/`, `docs/analytics/` and `tests/fixtures/`; it excluded `**/private/**`, `**/node_modules/**` and `**/.git/**`. No historical liquidation series or catalogue snapshots were found. The only existing data report was an unrelated Bybit Demo adapter report. Matching files under `local/ce/plans/` were planning documents, not evidence. Search scope and exclusions are recorded in the inventory manifest.
+
+Per asset (BTC, ETH, SOL and DOGE), the inspected non-private sources yielded **zero qualifying complete matched windows, zero historical catalogue snapshots and zero identified stress-period windows**. No per-constituent earliest/latest complete timestamps or historical contract attributes can be reported; the #124 summary is aggregate-only. The private local store was not inspected, so this inventory does not claim that no relevant data exists elsewhere. The inventory and exclusions are pinned in [liquidation-coverage-inventory-v1.json](liquidation-coverage-inventory-v1.json), SHA-256 `f53400df35b888b0581cc04fbebfa511511ce5b27ae7625ef3fb434ddf778247`.
+
+For reproducible #126 selection, contract identity remains `(exchange, symbolOnExchange)`. The current eligibility rule selects supported base assets that are perpetual and not expired at the cutoff; the conservative fallback includes every eligible venue for the requested asset. Unsupported assets, non-perpetual markets and expired contracts are policy exclusions, not missing history or zero liquidation. Bind the policy version/hash to the requested asset, full catalogue identity/proof and as-of, deterministic selected-constituent identity, contract attributes and explicit exclusions. A change to eligibility, identity interpretation, provider catalogue contract, aggregation inputs or policy parameters requires a new policy identity and review; do not silently reuse an old selection. No empirical fixture can be derived from this inventory; existing synthetic fixtures remain test-only.
+
+## Evaluation not performed
+
+U2/U3 stopped at the plan's data-sufficiency gate. Without complete all-venue observations and the corresponding point-in-time eligible-contract universe, a historical baseline would have survivorship and missing-data bias. The single partial smoke cannot support training, validation, or an untouched holdout. No candidate, numerical tolerance, signal-agreement score, or strategy-decision comparison was produced; those results are **NOT EVALUABLE**, not zero or neutral. No holdout was inspected or reused.
+
+If an authorized archive becomes available, the approved protocol remains: pin its manifest and historical catalogue identity; freeze cutoffs, metrics, stress strata and missing/zero treatment; generate candidates from training only; choose at most one candidate per asset on validation; evaluate that frozen candidate once on untouched holdout. Compare both liquidation-signal agreement and, only when canonical inputs permit, actual #12/#13/#15 decision agreement. Unresolved material tolerances return to the PO before any policy change.
+
+## Handoff to #126
+
+- Keep full, validated `future-markets` discovery and its catalogue proof.
+- Scope history requests to the requested decision asset, using all eligible venues for that asset until a narrower policy is empirically validated and explicitly approved.
+- Keep catalogue completeness, selected-set completeness, history completeness and signal adequacy separate. Disclose policy exclusions; never reinterpret them as missing rows or zero liquidation.
+- Preserve #122 v1/v2 provenance and hashes, #99 required-window semantics, #13 quality authority and current fail-closed behavior. This research grants no release or trading authority.
+- Asset scoping does not guarantee selected-history depth or freshness. #126 must retain fail-closed handling for selected-set gaps, provider limits and stale evidence; #30 remains the read-only release gate.
+
+No live Coinalyze request, new download, provider-quota use, account database read, code change or exchange write was performed. The result does not satisfy #30/#31; #126 remains the implementation and verification dependency.
