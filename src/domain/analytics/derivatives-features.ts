@@ -12,7 +12,7 @@ import {
   type AnalyticsInputIdentity,
 } from "./analytics-inputs.js";
 import {
-  type LiquidationEvidenceBundle,
+  type VersionedLiquidationEvidenceBundle,
   type LiquidationTargetAsset,
   type LiquidationWindowEvidence,
 } from "../liquidation/liquidation-evidence-bundle.js";
@@ -174,7 +174,7 @@ function unavailable(
   reasons: readonly AnalyticsReasonCode[],
   details?: {
     readonly proof?: Pick<
-      LiquidationEvidenceBundle,
+      VersionedLiquidationEvidenceBundle,
       "coverageProof" | "historyProof"
     >;
     readonly window?: DerivativeObservationWindow | DerivativeLiquidationWindow;
@@ -219,7 +219,7 @@ function complete(
 }
 
 function featureReasonForLiquidationProofs(
-  bundle: LiquidationEvidenceBundle,
+  bundle: VersionedLiquidationEvidenceBundle,
   featuresVersion: AnalyticsFeaturesVersion,
 ): AnalyticsReasonCode[] {
   const reasons: AnalyticsReasonCode[] = [];
@@ -242,7 +242,7 @@ function canJoinLiquidation(
 }
 
 function hasScopedHistoryProof(
-  liquidation: LiquidationEvidenceBundle | undefined,
+  liquidation: VersionedLiquidationEvidenceBundle | undefined,
   featuresVersion: AnalyticsFeaturesVersion,
 ): boolean {
   return (
@@ -261,7 +261,7 @@ function hasScopedHistoryProof(
 
 function liquidationFeature(
   request: Extract<DerivativeRequest, { readonly kind: "liquidation-window" }>,
-  liquidation: LiquidationEvidenceBundle | undefined,
+  liquidation: VersionedLiquidationEvidenceBundle | undefined,
   inputIdentity: AnalyticsInputIdentity | undefined,
   featuresVersion: AnalyticsFeaturesVersion,
   scopedHistoryValid: boolean,
@@ -490,7 +490,7 @@ function openInterestFeature(
 
 export function computeDerivativeFeatures(
   market: MarketEvidenceBundle,
-  liquidation: LiquidationEvidenceBundle | undefined,
+  liquidation: VersionedLiquidationEvidenceBundle | undefined,
   profile: AnalyticsProfile,
   featuresVersion: AnalyticsFeaturesVersion = ANALYTICS_FEATURES_VERSION,
 ): readonly DerivativeFeatureOutcome[] {

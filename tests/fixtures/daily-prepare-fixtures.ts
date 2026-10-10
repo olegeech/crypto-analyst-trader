@@ -8,7 +8,13 @@ import {
 } from "../../src/domain/account/account-evidence-policy.js";
 import { encodeCanonicalArtifact } from "../../src/domain/identity/canonical-artifact.js";
 import { hashCanonical } from "../../src/domain/identity/canonical-serialization.js";
-import { LIQUIDATION_EVIDENCE_ASSETS } from "../../src/domain/liquidation/liquidation-evidence-bundle.js";
+import {
+  createLiquidationEvidenceBundleV2,
+  createLiquidationEvidenceRef,
+  LIQUIDATION_EVIDENCE_ASSETS,
+  LIQUIDATION_EVIDENCE_V2_PROVIDER_SEMANTIC_IDENTITY,
+  LIQUIDATION_EVIDENCE_V2_SCHEMA_VERSION,
+} from "../../src/domain/liquidation/liquidation-evidence-bundle.js";
 import type { MarketEvidenceBundle } from "../../src/domain/market/market-evidence-bundle.js";
 import { parseUtcTimestamp } from "../../src/domain/shared/time.js";
 import { decimal, withCounts } from "../account-evidence-fixture.js";
@@ -130,6 +136,38 @@ export function dailyPrepareLiquidation(
     ),
     evidence: liquidationFixtureRef(bundle),
   };
+}
+
+/** Complete, provider-explicit v2 evidence for released daily-prepare integration. */
+export function dailyPrepareLiquidationV2(market: MarketEvidenceBundle) {
+  const legacy = dailyPrepareLiquidation(market).bundle;
+  const bundle = value(
+    createLiquidationEvidenceBundleV2({
+      ...legacy,
+      schemaVersion: LIQUIDATION_EVIDENCE_V2_SCHEMA_VERSION,
+      providerSemanticIdentity:
+        LIQUIDATION_EVIDENCE_V2_PROVIDER_SEMANTIC_IDENTITY,
+      targets: legacy.targets.map((target) => ({
+        ...target,
+        constituents: target.constituents.map((constituent) => ({
+          ...constituent,
+          observations: constituent.observations.map((observation) => ({
+            timestamp: observation.timestamp,
+            longUsd: observation.longUsd,
+            shortUsd: observation.shortUsd,
+            provenance: "provider-explicit" as const,
+          })),
+        })),
+      })),
+    }),
+  );
+  const artifact = value(
+    encodeCanonicalArtifact("liquidation-evidence-bundle", bundle),
+  );
+  const evidence = value(
+    createLiquidationEvidenceRef(bundle, artifact.canonicalHash, 86_400_000),
+  );
+  return { bundle, artifact, evidence };
 }
 
 export function dailyPrepareAccount(

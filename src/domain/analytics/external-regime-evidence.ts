@@ -431,7 +431,9 @@ function verifyProjectInputReference(
     identity.liquidationUniverseVersion !== undefined &&
     identity.liquidationBundleCutoff !== undefined &&
     declaredHash === identity.liquidationBundleHash &&
-    reference.schemaVersion === LIQUIDATION_EVIDENCE_SCHEMA_VERSION &&
+    reference.schemaVersion ===
+      (identity.liquidationEvidenceSchemaVersion ??
+        LIQUIDATION_EVIDENCE_SCHEMA_VERSION) &&
     reference.producer === LIQUIDATION_EVIDENCE_PRODUCER &&
     reference.sourceId === identity.liquidationRunId &&
     reference.contentHash === identity.liquidationBundleHash &&

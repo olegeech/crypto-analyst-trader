@@ -4,7 +4,7 @@ import {
   type MarketEvidenceBundle,
   type MarketTickerEvidence,
 } from "../market/market-evidence-bundle.js";
-import { createLiquidationEvidenceBundle } from "../liquidation/liquidation-evidence-bundle.js";
+import { rehydrateLiquidationEvidenceBundle } from "../liquidation/liquidation-evidence-bundle.js";
 import {
   rehydrateAnalyticsEvidenceBundle,
   type AnalyticsEvidenceBundle,
@@ -147,7 +147,7 @@ export function prepareDailyPlanningInputs(
     return invalid("INPUT_IDENTITY_MISMATCH");
   let liquidationBundleHash: string | undefined;
   if (input.liquidation !== undefined) {
-    const liquidation = createLiquidationEvidenceBundle(input.liquidation);
+    const liquidation = rehydrateLiquidationEvidenceBundle(input.liquidation);
     if (!liquidation.ok) return invalid("INPUT_IDENTITY_MISMATCH");
     const hash = hashCanonical(liquidation.value);
     if (

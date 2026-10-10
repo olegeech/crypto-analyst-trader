@@ -2,7 +2,10 @@ import {
   hashCanonical,
   type PlanHash,
 } from "../identity/canonical-serialization.js";
-import type { LiquidationEvidenceBundle } from "../liquidation/liquidation-evidence-bundle.js";
+import {
+  LIQUIDATION_EVIDENCE_V2_SCHEMA_VERSION,
+  type VersionedLiquidationEvidenceBundle,
+} from "../liquidation/liquidation-evidence-bundle.js";
 import type { MarketEvidenceBundle } from "../market/market-evidence-bundle.js";
 import { domainError } from "../shared/errors.js";
 import { isDecimalValue } from "../shared/decimal.js";
@@ -74,7 +77,7 @@ export interface AnalyticsEvidenceBundle {
 
 export interface CreateAnalyticsEvidenceBundleInput {
   readonly market: MarketEvidenceBundle;
-  readonly liquidation?: LiquidationEvidenceBundle;
+  readonly liquidation?: VersionedLiquidationEvidenceBundle;
   readonly profile: unknown;
   readonly featuresVersion?: AnalyticsFeaturesVersion;
   readonly externalEvidence?: unknown;
@@ -372,6 +375,7 @@ function parseIdentity(value: unknown): Result<AnalyticsInputIdentity> {
       "liquidationBundleCutoff",
       "liquidationMarketContentHash",
       "liquidationBundleHash",
+      "liquidationEvidenceSchemaVersion",
       "compatibility",
       "reasonCodes",
     ])
@@ -397,6 +401,7 @@ function parseIdentity(value: unknown): Result<AnalyticsInputIdentity> {
     "liquidationBundleCutoff",
     "liquidationMarketContentHash",
     "liquidationBundleHash",
+    "liquidationEvidenceSchemaVersion",
   ].some((key) => Object.hasOwn(value, key));
   if (
     !runId.ok ||
@@ -430,6 +435,14 @@ function parseIdentity(value: unknown): Result<AnalyticsInputIdentity> {
         reasonCodes: Object.freeze([]),
       }),
     );
+  }
+
+  if (
+    Object.hasOwn(value, "liquidationEvidenceSchemaVersion") &&
+    value.liquidationEvidenceSchemaVersion !==
+      LIQUIDATION_EVIDENCE_V2_SCHEMA_VERSION
+  ) {
+    return invalid("liquidation analytics schema version is invalid");
   }
 
   const liquidationRunId = requireIdentifier(
@@ -486,6 +499,12 @@ function parseIdentity(value: unknown): Result<AnalyticsInputIdentity> {
       liquidationBundleCutoff: liquidationBundleCutoff.value,
       liquidationMarketContentHash: liquidationMarketContentHash.value,
       liquidationBundleHash: liquidationBundleHash.value,
+      ...(Object.hasOwn(value, "liquidationEvidenceSchemaVersion")
+        ? {
+            liquidationEvidenceSchemaVersion:
+              LIQUIDATION_EVIDENCE_V2_SCHEMA_VERSION,
+          }
+        : {}),
       compatibility: compatible ? "compatible" : "incompatible",
       reasonCodes: normalizeAnalyticsReasonCodes(expectedReasons),
     }),

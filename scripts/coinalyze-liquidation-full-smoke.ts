@@ -23,8 +23,12 @@ import {
   createBybitPublicTransport,
   type BybitPublicTransport,
 } from "../src/adapters/bybit-v5/public-transport.js";
-import type { LiquidationEvidenceBundle } from "../src/domain/liquidation/liquidation-evidence-bundle.js";
-import { LIQUIDATION_HISTORY_BUCKETS } from "../src/domain/liquidation/liquidation-evidence-bundle.js";
+import {
+  LIQUIDATION_EVIDENCE_V2_SCHEMA_VERSION,
+  type LiquidationEvidenceBundleV2,
+  type VersionedLiquidationEvidenceBundle,
+} from "../src/domain/liquidation/liquidation-evidence-bundle.js";
+import { summarizeLiquidationEvidenceBuckets } from "../src/domain/liquidation/liquidation-evidence-summary.js";
 import type { MarketEvidenceBundle } from "../src/domain/market/market-evidence-bundle.js";
 import { systemClock, type Clock } from "../src/domain/shared/time.js";
 import type { SecretProvider } from "../src/ports/secret-provider.js";
@@ -51,15 +55,18 @@ export interface CoinalyzeLiquidationFullSmokeSummary {
   readonly provider: "coinalyze";
   readonly mode: "full-collector";
   readonly environment: "public-mainnet";
-  readonly status: LiquidationEvidenceBundle["status"];
-  readonly coverageProof: LiquidationEvidenceBundle["coverageProof"];
-  readonly historyProof: LiquidationEvidenceBundle["historyProof"];
+  readonly evidenceSchemaVersion: typeof LIQUIDATION_EVIDENCE_V2_SCHEMA_VERSION;
+  readonly status: VersionedLiquidationEvidenceBundle["status"];
+  readonly coverageProof: VersionedLiquidationEvidenceBundle["coverageProof"];
+  readonly historyProof: VersionedLiquidationEvidenceBundle["historyProof"];
   readonly eligibleConstituents: number;
-  readonly constituentsWithHistory: number;
+  readonly constituentsWithProviderRows: number;
+  readonly constituentsWithResolvedGrid: number;
   readonly expectedHourlyBuckets: number;
-  readonly observedHourlyBuckets: number;
-  readonly explicitZeroBuckets: number;
-  readonly omittedBuckets: number;
+  readonly resolvedHourlyBuckets: number;
+  readonly providerExplicitBuckets: number;
+  readonly providerImpliedZeroBuckets: number;
+  readonly unresolvedRequestedBuckets: number;
   readonly historyRequestCount: number;
   readonly historyRequestSymbols: number;
   readonly maximumSymbolsPerHistoryRequest: number;
@@ -104,29 +111,11 @@ function observeHistoryBatches(
   });
 }
 
-function counts(bundle: LiquidationEvidenceBundle) {
-  const constituents = bundle.targets.flatMap((target) => target.constituents);
-  return {
-    eligibleConstituents: constituents.length,
-    constituentsWithHistory: constituents.filter(
-      ({ observations }) => observations.length > 0,
-    ).length,
-    observedHourlyBuckets: constituents.reduce(
-      (total, { observations }) => total + observations.length,
-      0,
-    ),
-    explicitZeroBuckets: constituents.reduce(
-      (total, { observations }) =>
-        total +
-        observations.filter(
-          ({ longUsd, shortUsd }) => longUsd.isZero() && shortUsd.isZero(),
-        ).length,
-      0,
-    ),
-  };
+function counts(bundle: LiquidationEvidenceBundleV2) {
+  return summarizeLiquidationEvidenceBuckets(bundle);
 }
 
-function diagnosticCodes(bundle: LiquidationEvidenceBundle): string[] {
+function diagnosticCodes(bundle: VersionedLiquidationEvidenceBundle): string[] {
   return [
     ...new Set(
       bundle.diagnostics.map(({ code }) =>
@@ -201,22 +190,20 @@ export async function runCoinalyzeLiquidationFullSmoke({
   }
 
   const bundle = result.value.bundle;
+  if (bundle.schemaVersion !== LIQUIDATION_EVIDENCE_V2_SCHEMA_VERSION) {
+    throw new Error("Full Coinalyze smoke requires liquidation-evidence/v2.");
+  }
   const bundleCounts = counts(bundle);
   const summary: CoinalyzeLiquidationFullSmokeSummary = Object.freeze({
     provider: "coinalyze",
     mode: "full-collector",
     environment: "public-mainnet",
+    evidenceSchemaVersion: bundle.schemaVersion,
     status: bundle.status,
     coverageProof: bundle.coverageProof,
     historyProof: bundle.historyProof,
     ...bundleCounts,
-    expectedHourlyBuckets:
-      bundleCounts.eligibleConstituents * LIQUIDATION_HISTORY_BUCKETS,
-    observedHourlyBuckets: bundleCounts.observedHourlyBuckets,
-    explicitZeroBuckets: bundleCounts.explicitZeroBuckets,
-    omittedBuckets:
-      bundleCounts.eligibleConstituents * LIQUIDATION_HISTORY_BUCKETS -
-      bundleCounts.observedHourlyBuckets,
+    expectedHourlyBuckets: bundleCounts.expectedHourlyBuckets,
     historyRequestCount: metrics.requestCount,
     historyRequestSymbols: metrics.requestSymbols,
     maximumSymbolsPerHistoryRequest: metrics.maximumSymbolsPerRequest,

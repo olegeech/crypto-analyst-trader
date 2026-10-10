@@ -1,18 +1,20 @@
 import { encodeCanonicalArtifact } from "../domain/identity/canonical-artifact.js";
 import {
-  createLiquidationEvidenceBundle,
+  createLiquidationEvidenceBundleV2,
   createLiquidationEvidenceDiagnostic,
   createLiquidationEvidenceRef,
   LIQUIDATION_EVIDENCE_ASSETS,
   LIQUIDATION_EVIDENCE_POLICY_VERSION,
   LIQUIDATION_EVIDENCE_PRODUCER,
-  LIQUIDATION_EVIDENCE_SCHEMA_VERSION,
+  LIQUIDATION_EVIDENCE_V2_PROVIDER_SEMANTIC_IDENTITY,
+  LIQUIDATION_EVIDENCE_V2_SCHEMA_VERSION,
   LIQUIDATION_HOUR_MS,
   liquidationHistoryWindow,
-  type LiquidationEvidenceBundleInput,
+  type LiquidationEvidenceBundleV2Input,
   type LiquidationEvidenceDiagnosticInput,
   type LiquidationTargetAsset,
 } from "../domain/liquidation/liquidation-evidence-bundle.js";
+import { liquidationObservationKey } from "../domain/liquidation/liquidation-observation-key.js";
 import {
   createMarketEvidenceBundle,
   MARKET_EVIDENCE_PRODUCER,
@@ -374,6 +376,71 @@ function sameHistoryObservation(
   );
 }
 
+function fillProvenSparseHistory(
+  histories: readonly CoinalyzeMarketHistory[],
+  selectedMarkets: readonly SelectedMarket[],
+  buckets: readonly number[],
+  allowed: boolean,
+): {
+  readonly histories: readonly CoinalyzeMarketHistory[];
+  readonly impliedZeroObservations: ReadonlySet<string>;
+} {
+  if (!allowed) {
+    return Object.freeze({
+      histories,
+      impliedZeroObservations: new Set<string>(),
+    });
+  }
+
+  const historyBySymbol = new Map(
+    histories.map((history) => [history.symbol, history] as const),
+  );
+  const impliedZeroObservations = new Set<string>();
+  for (const market of selectedMarkets) {
+    const history = historyBySymbol.get(market.symbol);
+    if (history === undefined) continue;
+    const observed = new Set(
+      history.observations.map(({ timestamp }) => Date.parse(timestamp)),
+    );
+    const observations = [...history.observations];
+    for (const bucket of buckets) {
+      if (observed.has(bucket)) continue;
+      const bucketTimestamp = new Date(bucket).toISOString();
+      observations.push({
+        timestamp: bucketTimestamp,
+        longUsd: "0",
+        shortUsd: "0",
+      });
+      impliedZeroObservations.add(
+        liquidationObservationKey(market.symbol, bucketTimestamp),
+      );
+    }
+    observations.sort(
+      (left, right) => Date.parse(left.timestamp) - Date.parse(right.timestamp),
+    );
+    historyBySymbol.set(
+      market.symbol,
+      Object.freeze({
+        symbol: market.symbol,
+        observations: Object.freeze(observations),
+      }),
+    );
+  }
+  return Object.freeze({
+    histories: Object.freeze(
+      selectedMarkets.map(
+        (market) =>
+          historyBySymbol.get(market.symbol) ??
+          Object.freeze({
+            symbol: market.symbol,
+            observations: Object.freeze([]),
+          }),
+      ),
+    ),
+    impliedZeroObservations,
+  });
+}
+
 function normalizeHistory(
   value: unknown,
   selectedMarkets: readonly SelectedMarket[],
@@ -548,7 +615,6 @@ function normalizeHistory(
 }
 
 function hasExpectedHistory(
-  market: SelectedMarket,
   history: CoinalyzeMarketHistory | undefined,
   buckets: readonly number[],
 ): boolean {
@@ -570,6 +636,7 @@ function buildBundleInput({
   status,
   selectedMarkets,
   histories,
+  impliedZeroObservations,
   diagnostics,
 }: {
   readonly context: CompatibleRunContext;
@@ -580,8 +647,9 @@ function buildBundleInput({
   readonly status: "complete" | "incomplete" | "failed";
   readonly selectedMarkets: readonly SelectedMarket[];
   readonly histories: readonly CoinalyzeMarketHistory[];
+  readonly impliedZeroObservations: ReadonlySet<string>;
   readonly diagnostics: readonly LiquidationEvidenceDiagnosticInput[];
-}): LiquidationEvidenceBundleInput {
+}): LiquidationEvidenceBundleV2Input {
   const historyBySymbol = new Map(
     histories.map((history) => [history.symbol, history] as const),
   );
@@ -594,7 +662,9 @@ function buildBundleInput({
   const cutoff = context.marketEvidence.bundleCutoff;
   return {
     runId: context.marketEvidence.runId,
-    schemaVersion: LIQUIDATION_EVIDENCE_SCHEMA_VERSION,
+    schemaVersion: LIQUIDATION_EVIDENCE_V2_SCHEMA_VERSION,
+    providerSemanticIdentity:
+      LIQUIDATION_EVIDENCE_V2_PROVIDER_SEMANTIC_IDENTITY,
     producer: LIQUIDATION_EVIDENCE_PRODUCER,
     policyVersion: LIQUIDATION_EVIDENCE_POLICY_VERSION,
     provider: "coinalyze",
@@ -628,6 +698,11 @@ function buildBundleInput({
           timestamp: observation.timestamp,
           longUsd: observation.longUsd,
           shortUsd: observation.shortUsd,
+          provenance: impliedZeroObservations.has(
+            liquidationObservationKey(market.symbol, observation.timestamp),
+          )
+            ? ("provider-implied-zero" as const)
+            : ("provider-explicit" as const),
         })),
       })),
     })),
@@ -636,10 +711,10 @@ function buildBundleInput({
 }
 
 function finalizeBundle(
-  input: LiquidationEvidenceBundleInput,
+  input: LiquidationEvidenceBundleV2Input,
   validForMs: number,
 ): Result<LiquidationEvidenceCollectionResult> {
-  const bundle = createLiquidationEvidenceBundle(input);
+  const bundle = createLiquidationEvidenceBundleV2(input);
   if (!bundle.ok) return bundle;
   const artifact = encodeCanonicalArtifact(
     "liquidation-evidence-bundle",
@@ -699,6 +774,7 @@ export async function collectLiquidationEvidence(
   let catalogue = emptyCatalogueResult();
   let selectedMarkets: readonly SelectedMarket[] = Object.freeze([]);
   let histories: readonly CoinalyzeMarketHistory[] = Object.freeze([]);
+  let impliedZeroObservations: ReadonlySet<string> = new Set<string>();
   let coverageComplete = false;
   let historyComplete = false;
 
@@ -786,16 +862,24 @@ export async function collectLiquidationEvidence(
       oldestBucket,
       latestClosedBucket,
     );
-    histories = normalizedHistory.histories;
     diagnostics.push(...normalizedHistory.diagnostics);
     historyComplete = normalizedHistory.responseValid;
+
+    const sparseHistory = fillProvenSparseHistory(
+      normalizedHistory.histories,
+      selectedMarkets,
+      expected,
+      coverageComplete && normalizedHistory.responseValid,
+    );
+    histories = sparseHistory.histories;
+    impliedZeroObservations = sparseHistory.impliedZeroObservations;
 
     const historyBySymbol = new Map(
       histories.map((history) => [history.symbol, history] as const),
     );
     for (const market of selectedMarkets) {
       const history = historyBySymbol.get(market.symbol);
-      if (hasExpectedHistory(market, history, expected)) continue;
+      if (hasExpectedHistory(history, expected)) continue;
       historyComplete = false;
       const observed = new Set(
         (history?.observations ?? []).map(({ timestamp }) =>
@@ -844,6 +928,7 @@ export async function collectLiquidationEvidence(
     status,
     selectedMarkets,
     histories,
+    impliedZeroObservations,
     diagnostics,
   });
   return finalizeBundle(bundleInput, context.value.referenceValidityMs);

@@ -1,5 +1,6 @@
 import type { AccountEvidenceEnvironment } from "../domain/account/account-evidence-bundle.js";
 import { createAnalyticsEvidenceBundle } from "../domain/analytics/analytics-evidence-bundle.js";
+import { summarizeLiquidationEvidenceBuckets } from "../domain/liquidation/liquidation-evidence-summary.js";
 import { closedRecord } from "../domain/planning/planning-validation.js";
 import {
   createPreparedDailyPlan,
@@ -68,14 +69,23 @@ export interface DailyPrepareDiagnostics {
   readonly liquidationStatus: string;
   readonly coverageProof: string;
   readonly historyProof: string;
+  readonly liquidationSchemaVersion: string;
   readonly eligibleConstituents: number;
-  readonly observedHourlyBuckets: number;
+  readonly expectedHourlyBuckets: number;
+  readonly resolvedHourlyBuckets: number;
+  readonly providerExplicitBuckets: number | null;
+  readonly providerImpliedZeroBuckets: number | null;
+  readonly unresolvedRequestedBuckets: number | null;
   readonly requiredLiquidationWindows: readonly RequiredLiquidationWindowDiagnostic[];
   readonly accountPartitionsTraversed: number;
   readonly accountPartitionsExpected: number;
   readonly exchangeWrites: 0;
   readonly executionAuthority: "none";
 }
+type Mutable<T> = { -readonly [Key in keyof T]: T[Key] };
+type MutableDailyPrepareDiagnostics = Mutable<
+  Omit<DailyPrepareDiagnostics, "requiredLiquidationWindows">
+>;
 export type DailyPrepareResult =
   | {
       readonly kind: "prepared";
@@ -115,14 +125,19 @@ export function createDailyPrepareBoundary(deps: DailyPrepareDependencies) {
   return Object.freeze({
     async prepare(input: unknown): Promise<DailyPrepareResult> {
       let stage: DailyPrepareStage = "input";
-      const diagnostics = {
+      const diagnostics: MutableDailyPrepareDiagnostics = {
         marketStatus: "not-collected",
         marketObservations: 0,
         liquidationStatus: "not-collected",
         coverageProof: "not-collected",
         historyProof: "not-collected",
+        liquidationSchemaVersion: "not-collected",
         eligibleConstituents: 0,
-        observedHourlyBuckets: 0,
+        expectedHourlyBuckets: 0,
+        resolvedHourlyBuckets: 0,
+        providerExplicitBuckets: null,
+        providerImpliedZeroBuckets: null,
+        unresolvedRequestedBuckets: null,
         accountPartitionsTraversed: 0,
         accountPartitionsExpected: 0,
         exchangeWrites: 0 as const,
@@ -202,12 +217,19 @@ export function createDailyPrepareBoundary(deps: DailyPrepareDependencies) {
         diagnostics.liquidationStatus = l.status;
         diagnostics.coverageProof = l.coverageProof;
         diagnostics.historyProof = l.historyProof;
-        const constituents = l.targets.flatMap((t) => t.constituents);
-        diagnostics.eligibleConstituents = constituents.length;
-        diagnostics.observedHourlyBuckets = constituents.reduce(
-          (n, c) => n + c.observations.length,
-          0,
-        );
+        diagnostics.liquidationSchemaVersion = l.schemaVersion;
+        const bucketSummary = summarizeLiquidationEvidenceBuckets(l);
+        diagnostics.eligibleConstituents = bucketSummary.eligibleConstituents;
+        diagnostics.expectedHourlyBuckets = bucketSummary.expectedHourlyBuckets;
+        diagnostics.resolvedHourlyBuckets = bucketSummary.resolvedHourlyBuckets;
+        if (bucketSummary.providerExplicitBuckets !== null) {
+          diagnostics.providerExplicitBuckets =
+            bucketSummary.providerExplicitBuckets;
+          diagnostics.providerImpliedZeroBuckets =
+            bucketSummary.providerImpliedZeroBuckets;
+          diagnostics.unresolvedRequestedBuckets =
+            bucketSummary.unresolvedRequestedBuckets;
+        }
         stage = "analytics";
         const analytics = createAnalyticsEvidenceBundle({
           market: market.value,

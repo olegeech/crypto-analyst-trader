@@ -1,10 +1,10 @@
-import type { LiquidationEvidenceBundle } from "./liquidation-evidence-bundle.js";
+import type { VersionedLiquidationEvidenceBundle } from "./liquidation-evidence-bundle.js";
 import { liquidationHistoryWindow } from "./liquidation-evidence-windows.js";
 
 /** True only when canonical rows and scoped diagnostics prove missing buckets
  * are the sole reason a covered catalogue has incomplete history. */
 export function isCanonicalMissingBucketHistory(
-  bundle: LiquidationEvidenceBundle,
+  bundle: VersionedLiquidationEvidenceBundle,
 ): boolean {
   if (
     bundle.status !== "incomplete" ||

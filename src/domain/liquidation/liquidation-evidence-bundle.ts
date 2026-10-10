@@ -8,6 +8,7 @@ import { fail, ok, type Result } from "../shared/result.js";
 import { parseUtcTimestamp, type UtcTimestamp } from "../shared/time.js";
 import {
   isRecord,
+  onlyKeys,
   requireFiniteInteger,
   requireHash,
   requireIdentifier,
@@ -25,6 +26,7 @@ import {
   type LiquidationHourlyAggregate,
   type LiquidationWindowEvidence,
 } from "./liquidation-evidence-windows.js";
+import { liquidationObservationKey } from "./liquidation-observation-key.js";
 
 export {
   createLiquidationEvidenceDiagnostic,
@@ -46,6 +48,10 @@ export {
 
 export const LIQUIDATION_EVIDENCE_SCHEMA_VERSION =
   "liquidation-evidence/v1" as const;
+export const LIQUIDATION_EVIDENCE_V2_SCHEMA_VERSION =
+  "liquidation-evidence/v2" as const;
+export const LIQUIDATION_EVIDENCE_V2_PROVIDER_SEMANTIC_IDENTITY =
+  "coinalyze-sparse-zero/v1" as const;
 export const LIQUIDATION_EVIDENCE_PRODUCER =
   "crypto-analyst-trader/coinalyze-liquidation" as const;
 export const LIQUIDATION_EVIDENCE_POLICY_VERSION =
@@ -157,6 +163,70 @@ export interface LiquidationEvidenceBundleInput {
   readonly targets: readonly LiquidationTargetInput[];
   readonly diagnostics: readonly LiquidationEvidenceDiagnosticInput[];
 }
+
+export type LiquidationObservationProvenance =
+  "provider-explicit" | "provider-implied-zero";
+
+export interface LiquidationObservationV2 {
+  readonly timestamp: UtcTimestamp;
+  readonly longUsd: DecimalValue;
+  readonly shortUsd: DecimalValue;
+  readonly provenance: LiquidationObservationProvenance;
+}
+
+export interface LiquidationConstituentEvidenceV2 extends Omit<
+  LiquidationConstituentEvidence,
+  "observations"
+> {
+  readonly observations: readonly LiquidationObservationV2[];
+}
+
+export interface LiquidationTargetEvidenceV2 extends Omit<
+  LiquidationTargetEvidence,
+  "constituents"
+> {
+  readonly constituents: readonly LiquidationConstituentEvidenceV2[];
+}
+
+export interface LiquidationEvidenceBundleV2 extends Omit<
+  LiquidationEvidenceBundle,
+  "schemaVersion" | "targets"
+> {
+  readonly schemaVersion: typeof LIQUIDATION_EVIDENCE_V2_SCHEMA_VERSION;
+  readonly providerSemanticIdentity: typeof LIQUIDATION_EVIDENCE_V2_PROVIDER_SEMANTIC_IDENTITY;
+  readonly targets: readonly LiquidationTargetEvidenceV2[];
+}
+
+export interface LiquidationObservationV2Input {
+  readonly timestamp: string;
+  readonly longUsd: string;
+  readonly shortUsd: string;
+  readonly provenance: LiquidationObservationProvenance;
+}
+
+export interface LiquidationConstituentV2Input extends Omit<
+  LiquidationConstituentInput,
+  "observations"
+> {
+  readonly observations: readonly LiquidationObservationV2Input[];
+}
+
+export interface LiquidationTargetV2Input {
+  readonly asset: LiquidationTargetAsset;
+  readonly constituents: readonly LiquidationConstituentV2Input[];
+}
+
+export interface LiquidationEvidenceBundleV2Input extends Omit<
+  LiquidationEvidenceBundleInput,
+  "schemaVersion" | "targets"
+> {
+  readonly schemaVersion: typeof LIQUIDATION_EVIDENCE_V2_SCHEMA_VERSION;
+  readonly providerSemanticIdentity: typeof LIQUIDATION_EVIDENCE_V2_PROVIDER_SEMANTIC_IDENTITY;
+  readonly targets: readonly LiquidationTargetV2Input[];
+}
+
+export type VersionedLiquidationEvidenceBundle =
+  LiquidationEvidenceBundle | LiquidationEvidenceBundleV2;
 
 type ProofStatusInput = LiquidationProofStatus;
 
@@ -637,8 +707,250 @@ export function createLiquidationEvidenceBundle(
   );
 }
 
+export function createLiquidationEvidenceBundleV2(
+  input: unknown,
+): Result<LiquidationEvidenceBundleV2> {
+  if (!isRecord(input))
+    return invalid("liquidation evidence bundle must be an object");
+  if (
+    !onlyKeys(input, [
+      "runId",
+      "schemaVersion",
+      "providerSemanticIdentity",
+      "producer",
+      "provider",
+      "policyVersion",
+      "collectionStartedAt",
+      "collectionEndedAt",
+      "bundleCutoff",
+      "marketEvidence",
+      "coverageProof",
+      "historyProof",
+      "status",
+      "targets",
+      "diagnostics",
+    ]) ||
+    input.schemaVersion !== LIQUIDATION_EVIDENCE_V2_SCHEMA_VERSION ||
+    input.providerSemanticIdentity !==
+      LIQUIDATION_EVIDENCE_V2_PROVIDER_SEMANTIC_IDENTITY ||
+    !isRecord(input.marketEvidence) ||
+    !onlyKeys(input.marketEvidence, [
+      "runId",
+      "universeVersion",
+      "bundleCutoff",
+      "contentHash",
+    ]) ||
+    !Array.isArray(input.targets) ||
+    !Array.isArray(input.diagnostics)
+  ) {
+    return invalid("liquidation evidence v2 identity or shape is invalid");
+  }
+
+  const provenanceByObservation = new Map<
+    string,
+    LiquidationObservationProvenance
+  >();
+  let containsImpliedZero = false;
+  const legacyTargets: Record<string, unknown>[] = [];
+  for (const target of input.targets) {
+    if (
+      !isRecord(target) ||
+      !onlyKeys(target, [
+        "asset",
+        "constituents",
+        "hourlyAggregates",
+        "windows",
+      ]) ||
+      !Array.isArray(target.constituents)
+    ) {
+      return invalid("liquidation v2 target shape is invalid");
+    }
+
+    const legacyConstituents: Record<string, unknown>[] = [];
+    for (const constituent of target.constituents) {
+      if (
+        !isRecord(constituent) ||
+        !onlyKeys(constituent, [
+          "providerSymbol",
+          "exchange",
+          "symbolOnExchange",
+          "baseAsset",
+          "quoteAsset",
+          "isPerpetual",
+          "marginType",
+          "expireAt",
+          "notionalDenominatedIn",
+          "observations",
+        ]) ||
+        !Array.isArray(constituent.observations)
+      ) {
+        return invalid("liquidation v2 constituent shape is invalid");
+      }
+      const providerSymbol = requireSafeText(
+        constituent.providerSymbol,
+        "providerSymbol",
+      );
+      if (!providerSymbol.ok) return providerSymbol;
+
+      const legacyObservations: LiquidationObservation[] = [];
+      for (const observation of constituent.observations) {
+        if (
+          !isRecord(observation) ||
+          !onlyKeys(observation, [
+            "timestamp",
+            "longUsd",
+            "shortUsd",
+            "provenance",
+          ])
+        ) {
+          return invalid("liquidation v2 observation shape is invalid");
+        }
+        if (
+          observation.provenance !== "provider-explicit" &&
+          observation.provenance !== "provider-implied-zero"
+        ) {
+          return invalid("liquidation observation provenance is unsupported");
+        }
+        const observedAt = timestamp(
+          observation.timestamp,
+          "observation.timestamp",
+        );
+        const longUsd = decimal(observation.longUsd, "observation.longUsd");
+        const shortUsd = decimal(observation.shortUsd, "observation.shortUsd");
+        if (!observedAt.ok || !longUsd.ok || !shortUsd.ok) {
+          return invalid("liquidation observation contains an invalid field");
+        }
+        if (
+          observation.provenance === "provider-implied-zero" &&
+          (!longUsd.value.isZero() || !shortUsd.value.isZero())
+        ) {
+          return invalid(
+            "provider-implied-zero observations must have exact zero values",
+          );
+        }
+        provenanceByObservation.set(
+          liquidationObservationKey(providerSymbol.value, observedAt.value),
+          observation.provenance,
+        );
+        if (observation.provenance === "provider-implied-zero") {
+          containsImpliedZero = true;
+        }
+        legacyObservations.push(
+          Object.freeze({
+            timestamp: observedAt.value,
+            longUsd: longUsd.value,
+            shortUsd: shortUsd.value,
+          }),
+        );
+      }
+      legacyConstituents.push({
+        ...constituent,
+        observations: legacyObservations,
+      });
+    }
+    legacyTargets.push({ ...target, constituents: legacyConstituents });
+  }
+
+  for (const diagnostic of input.diagnostics) {
+    if (
+      !isRecord(diagnostic) ||
+      !onlyKeys(diagnostic, [
+        "code",
+        "operation",
+        "asset",
+        "providerSymbol",
+        "bucketTimestamp",
+      ])
+    ) {
+      return invalid("liquidation v2 diagnostic shape is invalid");
+    }
+  }
+
+  if (
+    containsImpliedZero &&
+    (input.coverageProof !== "complete" ||
+      input.historyProof !== "complete" ||
+      input.diagnostics.some(
+        (diagnostic) =>
+          isRecord(diagnostic) &&
+          diagnostic.operation === "fetch-liquidation-history",
+      ))
+  ) {
+    return invalid(
+      "provider-implied-zero requires complete catalogue and valid complete history",
+    );
+  }
+
+  const legacyInput: Record<string, unknown> = {
+    ...input,
+    schemaVersion: LIQUIDATION_EVIDENCE_SCHEMA_VERSION,
+    targets: legacyTargets,
+  };
+  delete legacyInput.providerSemanticIdentity;
+  const legacy = createLiquidationEvidenceBundle(legacyInput);
+  if (!legacy.ok) return legacy;
+
+  const targets: LiquidationTargetEvidenceV2[] = [];
+  for (const target of legacy.value.targets) {
+    const constituents: LiquidationConstituentEvidenceV2[] = [];
+    for (const constituent of target.constituents) {
+      const observations: LiquidationObservationV2[] = [];
+      for (const observation of constituent.observations) {
+        const provenance = provenanceByObservation.get(
+          liquidationObservationKey(
+            constituent.providerSymbol,
+            observation.timestamp,
+          ),
+        );
+        if (provenance === undefined) {
+          return invalid("liquidation v2 observation provenance is missing");
+        }
+        observations.push(Object.freeze({ ...observation, provenance }));
+      }
+      constituents.push(
+        Object.freeze({
+          ...constituent,
+          observations: Object.freeze(observations),
+        }),
+      );
+    }
+    targets.push(
+      Object.freeze({ ...target, constituents: Object.freeze(constituents) }),
+    );
+  }
+
+  return ok(
+    Object.freeze({
+      ...legacy.value,
+      schemaVersion: LIQUIDATION_EVIDENCE_V2_SCHEMA_VERSION,
+      providerSemanticIdentity:
+        LIQUIDATION_EVIDENCE_V2_PROVIDER_SEMANTIC_IDENTITY,
+      targets: Object.freeze(targets),
+    }),
+  );
+}
+
+export function rehydrateLiquidationEvidenceBundle(
+  input: unknown,
+): Result<VersionedLiquidationEvidenceBundle> {
+  if (!isRecord(input))
+    return invalid("liquidation evidence bundle must be an object");
+  if (input.schemaVersion === LIQUIDATION_EVIDENCE_SCHEMA_VERSION) {
+    return createLiquidationEvidenceBundle(input);
+  }
+  if (input.schemaVersion === LIQUIDATION_EVIDENCE_V2_SCHEMA_VERSION) {
+    return createLiquidationEvidenceBundleV2(input);
+  }
+  return fail(
+    domainError(
+      "UNSUPPORTED_CONTRACT",
+      "liquidation evidence schema version is unsupported",
+    ),
+  );
+}
+
 export function createLiquidationEvidenceRef(
-  bundle: LiquidationEvidenceBundle,
+  bundle: VersionedLiquidationEvidenceBundle,
   canonicalHash: string,
   validForMs: number,
 ): Result<EvidenceRef> {

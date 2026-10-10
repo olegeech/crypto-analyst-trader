@@ -46,7 +46,9 @@ The fixed `provisional-m1-v1` policy requires native returns, funding, OI,
 liquidation imbalance and ATR. External Regime/CEWS/LSI/Trap absence and provisional
 policy are visible informational metadata, not REVIEW triggers. Real non-blocking
 quality degradation or exceptional warnings produce REVIEW. Missing required native
-data fails closed; Coinalyze omitted hours remain unknown under #99 and can block.
+data fails closed. Under #122, an omitted Coinalyze bucket is a provider-implied zero
+only for a present symbol after a valid history response and complete catalogue proof;
+missing symbols, incomplete coverage, or invalid/partial responses remain unresolved.
 The `daily:prepare` summary keeps global `coverageProof`/`historyProof` separate and
 lists each required liquidation request's asset, window, observed/expected
 constituent-bucket counts, completeness and missing counts by venue (up to 20
@@ -158,12 +160,16 @@ SOL and DOGE; it does **not** prove history completeness for all eligible
 markets.
 
 The sanitized output includes eligible/sample/observation counts,
-`explicitZeroBuckets` (provider rows where both long and short are explicitly
-zero) and `omittedBuckets` (expected sample hours with no returned row). An
-omitted hour remains unknown, never zero. This smoke is the initial check of
-provider zero-bucket behavior; neither one observed zero nor an omitted bucket
-establishes a general provider rule. It emits no symbols, raw payloads, API
-key, account/execution data, report file, or persisted planner evidence, and is
+`explicitZeroBuckets` (returned provider rows where both long and short are
+zero) and `omittedBuckets` (expected sample hours with no returned row). The
+sampled script reports source rows only; it does not materialize canonical
+evidence or infer complete catalogue coverage. Coinalyze support confirmed on
+2026-10-09 that an omitted hourly interval means no liquidation. The full
+collector below applies that provider-specific meaning only after complete
+catalogue proof and all history-response integrity checks, recording each
+reconstructed row as `provider-implied-zero` in liquidation-evidence/v2. The
+characterization command emits no symbols, raw payloads, API key,
+account/execution data, report file, or persisted planner evidence, and is
 excluded from default tests, `test:release`, and CI.
 
 ## Full run-scoped Coinalyze collector smoke (issue #45)
@@ -180,16 +186,19 @@ This command first collects a complete, exchange-cutoff Bybit public #11
 collector against the full supported catalogue and every eligible BTC, ETH,
 SOL and DOGE perpetual constituent. The client batches history requests at no
 more than 20 symbols each. Output includes status, independent coverage and
-history proofs, sanitized constituent/bucket/request counts (including
-explicit zero and omitted hours), and the canonical bundle hash; it does not print symbols, raw responses, credentials,
-or run identity, and does not persist planning evidence. A complete result
-requires both proofs complete and all expected hourly buckets present. Any
-other result exits non-zero and must not be treated as complete planner input.
+history proofs, the v2 schema, provenance-derived provider-explicit and
+provider-implied-zero bucket counts, resolved and unresolved requested bucket
+counts, and the canonical bundle hash. `constituentsWithProviderRows` counts
+symbols with returned rows; `constituentsWithResolvedGrid` counts symbols with
+a complete 24-hour grid, including implied zero rows. It does not print
+symbols, raw responses, credentials, or run identity, and does not persist
+planning evidence. A complete result requires both proofs complete and every
+expected requested bucket resolved. Any other result exits non-zero and must
+not be treated as complete planner input.
 
-This full smoke validates the production-shaped, run-bound collector path. It
-does not characterize whether Coinalyze returns explicit zero-liquidation
-hours consistently; use the separate adapter-characterization smoke above for
-that bounded question.
+This full smoke validates the production-shaped, run-bound collector path.
+It requires no Bybit account credentials; the separate `daily:prepare` path
+also traverses authenticated #16 account reads.
 
 ## Bybit portfolio-risk preflight smoke (issue #17)
 

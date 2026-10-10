@@ -316,6 +316,8 @@ test("partial catalogue preserves every trustworthy constituent and keeps histor
 
   assert.equal(result.ok, true);
   if (!result.ok) return;
+  assert.equal(result.value.bundle.schemaVersion, "liquidation-evidence/v2");
+  if (result.value.bundle.schemaVersion !== "liquidation-evidence/v2") return;
   assert.equal(result.value.bundle.status, "incomplete");
   assert.equal(result.value.bundle.coverageProof, "incomplete");
   assert.equal(result.value.bundle.historyProof, "complete");
@@ -329,7 +331,7 @@ test("partial catalogue preserves every trustworthy constituent and keeps histor
   assert.equal(h.calls[1]?.request?.symbols.length, 19);
 });
 
-test("complete catalogue with one missing history bucket retains the market and never zero-fills", async () => {
+test("complete catalogue with validated sparse history reconstructs omitted buckets as v2 implied zeros", async () => {
   const target = targetMarkets();
   const btcSymbol = target.find(({ baseAsset }) => baseAsset === "BTC")?.symbol;
   assert.ok(btcSymbol);
@@ -349,15 +351,185 @@ test("complete catalogue with one missing history bucket retains the market and 
 
   assert.equal(result.ok, true);
   if (!result.ok) return;
+  assert.equal(result.value.bundle.schemaVersion, "liquidation-evidence/v2");
+  if (result.value.bundle.schemaVersion !== "liquidation-evidence/v2") return;
   assert.equal(result.value.bundle.coverageProof, "complete");
-  assert.equal(result.value.bundle.historyProof, "incomplete");
-  assert.equal(result.value.bundle.status, "incomplete");
+  assert.equal(result.value.bundle.historyProof, "complete");
+  assert.equal(result.value.bundle.status, "complete");
   const bitcoin = result.value.bundle.targets[0];
   assert.equal(bitcoin?.constituents.length, 1);
-  assert.equal(bitcoin?.constituents[0]?.observations.length, 23);
+  assert.equal(bitcoin?.constituents[0]?.observations.length, 24);
   assert.equal(
-    bitcoin?.hourlyAggregates.some(
-      (aggregate) => aggregate.timestamp === timestamp(missing),
+    bitcoin?.constituents[0]?.observations.find(
+      (observation) => observation.timestamp === timestamp(missing),
+    )?.provenance,
+    "provider-implied-zero",
+  );
+  assert.equal(
+    bitcoin?.constituents[0]?.observations.find(
+      (observation) => observation.timestamp !== timestamp(missing),
+    )?.provenance,
+    "provider-explicit",
+  );
+  assert.equal(
+    bitcoin?.hourlyAggregates
+      .find((aggregate) => aggregate.timestamp === timestamp(missing))
+      ?.longUsd.toString(),
+    "0",
+  );
+  assert.equal(result.value.bundle.diagnostics.length, 0);
+});
+
+test("valid empty histories imply a full zero grid while explicit zero rows keep explicit provenance", async () => {
+  const h = harness({
+    histories: (request) => ({
+      histories: request.symbols.map((symbol) => ({
+        symbol,
+        observations: [],
+      })),
+      responseValid: true,
+      diagnostics: [],
+    }),
+  });
+
+  const result = await h.collect();
+
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.equal(result.value.bundle.schemaVersion, "liquidation-evidence/v2");
+  if (result.value.bundle.schemaVersion !== "liquidation-evidence/v2") return;
+  assert.equal(result.value.bundle.status, "complete");
+  assert.ok(
+    result.value.bundle.targets.every((target) =>
+      target.constituents.every(
+        (constituent) =>
+          constituent.observations.length === LIQUIDATION_HISTORY_BUCKETS &&
+          constituent.observations.every(
+            (observation) =>
+              observation.provenance === "provider-implied-zero" &&
+              observation.longUsd.isZero() &&
+              observation.shortUsd.isZero(),
+          ),
+      ),
+    ),
+  );
+  const analytics = createAnalyticsEvidenceBundle({
+    market: marketEvidence(),
+    liquidation: result.value.bundle,
+    featuresVersion: "analytics-features/v2",
+    profile: {
+      schemaVersion: "analytics-profile/v1",
+      features: [
+        {
+          id: "btc-liquidation-12h",
+          kind: "liquidation-window",
+          asset: "BTC",
+          windowHours: 12,
+          required: true,
+        },
+      ],
+      externalEvidence: [],
+    },
+  });
+  assert.equal(analytics.ok, true);
+  if (!analytics.ok) return;
+  const feature = analytics.value.derivativeFeatures[0];
+  assert.equal(feature?.status, "complete");
+  assert.equal(feature?.kind, "liquidation-window");
+  if (feature?.kind !== "liquidation-window") return;
+  assert.equal(feature.value?.type, "liquidation-window");
+  if (feature.value?.type !== "liquidation-window") return;
+  assert.equal(feature.value.longUsd.isZero(), true);
+  assert.equal(feature.value.shortUsd.isZero(), true);
+  assert.equal(feature.value.totalUsd.isZero(), true);
+  assert.equal("imbalance" in feature.value, false);
+
+  const explicitZero = harness();
+  const explicitResult = await explicitZero.collect();
+  assert.equal(explicitResult.ok, true);
+  if (!explicitResult.ok) return;
+  if (explicitResult.value.bundle.schemaVersion !== "liquidation-evidence/v2")
+    return;
+  assert.equal(
+    explicitResult.value.bundle.targets[0]?.constituents[0]?.observations[0]
+      ?.provenance,
+    "provider-explicit",
+  );
+});
+
+test("an absent requested symbol remains unavailable and cannot imply zero buckets", async () => {
+  const target = targetMarkets();
+  const btcSymbol = target.find(({ baseAsset }) => baseAsset === "BTC")?.symbol;
+  assert.ok(btcSymbol);
+  const h = harness({
+    markets: target,
+    histories: (request) => ({
+      histories: completeHistories(
+        request.symbols.filter((symbol) => symbol !== btcSymbol),
+      ),
+      responseValid: true,
+      diagnostics: [],
+    }),
+  });
+
+  const result = await h.collect();
+
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.equal(result.value.bundle.schemaVersion, "liquidation-evidence/v2");
+  if (result.value.bundle.schemaVersion !== "liquidation-evidence/v2") return;
+  assert.equal(result.value.bundle.status, "incomplete");
+  assert.equal(result.value.bundle.historyProof, "incomplete");
+  const bitcoin = result.value.bundle.targets[0]?.constituents[0];
+  assert.equal(bitcoin?.observations.length, 0);
+  assert.equal(
+    bitcoin?.observations.some(
+      (observation) => observation.provenance === "provider-implied-zero",
+    ),
+    false,
+  );
+  assert.ok(
+    result.value.bundle.diagnostics.some(
+      ({ code, providerSymbol }) =>
+        code === "history-unavailable" && providerSymbol === btcSymbol,
+    ),
+  );
+});
+
+test("incomplete catalogue preserves explicit sparse history without implied zeros", async () => {
+  const target = targetMarkets();
+  const btcSymbol = target.find(({ baseAsset }) => baseAsset === "BTC")?.symbol;
+  assert.ok(btcSymbol);
+  const missing = LAST_CLOSED_BUCKET - 8 * LIQUIDATION_HOUR_MS;
+  const h = harness({
+    markets: target,
+    catalogueComplete: false,
+    catalogueDiagnostics: diagnostics(
+      "catalogue-incomplete",
+      "discover-markets",
+    ),
+    histories: (request) => ({
+      histories: completeHistories(request.symbols, {
+        missing: new Map([[btcSymbol, missing]]),
+      }),
+      responseValid: true,
+      diagnostics: [],
+    }),
+  });
+
+  const result = await h.collect();
+
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.equal(result.value.bundle.schemaVersion, "liquidation-evidence/v2");
+  if (result.value.bundle.schemaVersion !== "liquidation-evidence/v2") return;
+  assert.equal(result.value.bundle.coverageProof, "incomplete");
+  assert.equal(result.value.bundle.historyProof, "incomplete");
+  const bitcoin = result.value.bundle.targets[0]?.constituents[0];
+  assert.equal(bitcoin?.observations.length, 23);
+  assert.equal(
+    bitcoin?.observations.some(
+      (observation) => observation.provenance === "provider-implied-zero",
     ),
     false,
   );
@@ -371,7 +543,7 @@ test("complete catalogue with one missing history bucket retains the market and 
   );
 });
 
-test("real collector's single per-constituent diagnostic permits only older gaps outside the required 12h window", async () => {
+test("validated sparse history materializes old zero buckets and leaves the required 12h window complete", async () => {
   const marketBundle = dailyPrepareMarket();
   const expected = liquidationHistoryWindow(
     Date.parse(marketBundle.bundleCutoff),
@@ -397,13 +569,19 @@ test("real collector's single per-constituent diagnostic permits only older gaps
   assert.equal(collected.ok, true);
   if (!collected.ok) return;
   const liquidation = collected.value.bundle;
+  assert.equal(liquidation.schemaVersion, "liquidation-evidence/v2");
+  if (liquidation.schemaVersion !== "liquidation-evidence/v2") return;
   assert.equal(liquidation.coverageProof, "complete");
-  assert.equal(liquidation.historyProof, "incomplete");
-  assert.equal(liquidation.diagnostics.length, 1);
-  assert.equal(liquidation.diagnostics[0]?.code, "missing-bucket");
+  assert.equal(liquidation.historyProof, "complete");
+  assert.equal(liquidation.diagnostics.length, 0);
+  const btc = liquidation.targets[0]?.constituents[0];
+  assert.ok(btc);
   assert.equal(
-    liquidation.diagnostics[0]?.bucketTimestamp,
-    new Date(expected[0]!).toISOString(),
+    btc.observations.find(
+      ({ timestamp: observed }) =>
+        observed === new Date(expected[0]!).toISOString(),
+    )?.provenance,
+    "provider-implied-zero",
   );
 
   const analytics = createAnalyticsEvidenceBundle({
@@ -729,6 +907,8 @@ test("a false history validity flag without adapter diagnostics stays incomplete
 
   assert.equal(result.ok, true);
   if (!result.ok) return;
+  assert.equal(result.value.bundle.schemaVersion, "liquidation-evidence/v2");
+  if (result.value.bundle.schemaVersion !== "liquidation-evidence/v2") return;
   assert.equal(result.value.bundle.status, "incomplete");
   assert.equal(result.value.bundle.historyProof, "incomplete");
   assert.ok(
@@ -736,6 +916,15 @@ test("a false history validity flag without adapter diagnostics stays incomplete
       target.constituents.every(
         (constituent) =>
           constituent.observations.length === LIQUIDATION_HISTORY_BUCKETS,
+      ),
+    ),
+  );
+  assert.ok(
+    result.value.bundle.targets.every((target) =>
+      target.constituents.every((constituent) =>
+        constituent.observations.every(
+          (observation) => observation.provenance === "provider-explicit",
+        ),
       ),
     ),
   );
@@ -831,6 +1020,46 @@ test("a false history validity flag without adapter diagnostics stays incomplete
         finding.role === "liquidation" &&
         finding.reasonCode === "INCOMPLETE_LIQUIDATION_HISTORY" &&
         finding.blocking,
+    ),
+  );
+});
+
+test("an invalid sparse response never reconstructs its omitted buckets", async () => {
+  const target = targetMarkets();
+  const btcSymbol = target.find(({ baseAsset }) => baseAsset === "BTC")?.symbol;
+  assert.ok(btcSymbol);
+  const missing = LAST_CLOSED_BUCKET - 8 * LIQUIDATION_HOUR_MS;
+  const h = harness({
+    histories: (request) => ({
+      histories: completeHistories(request.symbols, {
+        missing: new Map([[btcSymbol, missing]]),
+      }),
+      responseValid: false,
+      diagnostics: [],
+    }),
+  });
+
+  const result = await h.collect();
+
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.equal(result.value.bundle.schemaVersion, "liquidation-evidence/v2");
+  if (result.value.bundle.schemaVersion !== "liquidation-evidence/v2") return;
+  assert.equal(result.value.bundle.coverageProof, "complete");
+  assert.equal(result.value.bundle.historyProof, "incomplete");
+  const bitcoin = result.value.bundle.targets[0]?.constituents[0];
+  assert.equal(bitcoin?.observations.length, 23);
+  assert.equal(
+    bitcoin?.observations.some(
+      (observation) => observation.provenance === "provider-implied-zero",
+    ),
+    false,
+  );
+  assert.ok(
+    result.value.bundle.diagnostics.some(
+      ({ code, operation }) =>
+        code === "history-incomplete" &&
+        operation === "fetch-liquidation-history",
     ),
   );
 });

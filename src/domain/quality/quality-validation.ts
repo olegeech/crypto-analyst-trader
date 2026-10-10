@@ -17,7 +17,7 @@ import {
   marketIntervalMilliseconds,
   fundingIntervalMilliseconds,
 } from "../market/market-evidence-windows.js";
-import type { LiquidationEvidenceBundle } from "../liquidation/liquidation-evidence-bundle.js";
+import type { VersionedLiquidationEvidenceBundle } from "../liquidation/liquidation-evidence-bundle.js";
 import type { UtcTimestamp } from "../shared/time.js";
 import {
   INVARIANT_QUALITY_REASONS,
@@ -30,7 +30,7 @@ import type { QualityProfile } from "./quality-profile.js";
 function analyticsDeclaresVerifiedRequiredWindows(
   analytics: AnalyticsEvidenceBundle,
   market: MarketEvidenceBundle,
-  liquidation: LiquidationEvidenceBundle,
+  liquidation: VersionedLiquidationEvidenceBundle,
   qualityProfile: QualityProfile,
 ): boolean {
   if (analytics.featuresVersion !== ANALYTICS_FEATURES_VERSION_V2) return false;
@@ -200,8 +200,9 @@ export function classifyQualityEvidence(
     .map((r) => r.value as MarketEvidenceBundle);
   const liquidations = records
     .filter((r) => r.role === "liquidation" && r.value !== undefined)
-    .map((r) => r.value as LiquidationEvidenceBundle);
-  const scopedHistoryLiquidations = new Set<LiquidationEvidenceBundle>();
+    .map((r) => r.value as VersionedLiquidationEvidenceBundle);
+  const scopedHistoryLiquidations =
+    new Set<VersionedLiquidationEvidenceBundle>();
   if (profile.liquidationHistoryScope === "requested-feature-windows/v1") {
     for (const liquidation of liquidations) {
       if (!isCanonicalMissingBucketHistory(liquidation)) continue;
@@ -243,7 +244,7 @@ export function classifyQualityEvidence(
       add(record.role, "HASH_MISMATCH");
     if (record.role === "market" || record.role === "liquidation") {
       const value = record.value as
-        MarketEvidenceBundle | LiquidationEvidenceBundle;
+        MarketEvidenceBundle | VersionedLiquidationEvidenceBundle;
       if (value.bundleCutoff !== bundleCutoff)
         add(record.role, "LINEAGE_MISMATCH");
       clocks(record.role, value.bundleCutoff);
@@ -258,7 +259,9 @@ export function classifyQualityEvidence(
         record.role,
         value.diagnostics,
         record.role === "liquidation" &&
-          scopedHistoryLiquidations.has(value as LiquidationEvidenceBundle),
+          scopedHistoryLiquidations.has(
+            value as VersionedLiquidationEvidenceBundle,
+          ),
       );
       const content =
         record.role === "market"
@@ -323,7 +326,7 @@ export function classifyQualityEvidence(
             sourceTime("market", observation.timestamp);
         }
       } else {
-        const liquidation = value as LiquidationEvidenceBundle;
+        const liquidation = value as VersionedLiquidationEvidenceBundle;
         const scopedMissingBuckets = scopedHistoryLiquidations.has(liquidation);
         if (liquidation.coverageProof !== "complete")
           add("liquidation", "INCOMPLETE_LIQUIDATION_COVERAGE");

@@ -2,7 +2,7 @@ import {
   hashCanonical,
   type PlanHash,
 } from "../identity/canonical-serialization.js";
-import { createLiquidationEvidenceBundle } from "../liquidation/liquidation-evidence-bundle.js";
+import { rehydrateLiquidationEvidenceBundle } from "../liquidation/liquidation-evidence-bundle.js";
 import { deepFreeze } from "../shared/deep-freeze.js";
 import { domainError } from "../shared/errors.js";
 import { fail, ok, type Result } from "../shared/result.js";
@@ -95,7 +95,7 @@ export function createDailyDecisionPlan(
   const liquidation =
     input.liquidation === undefined
       ? undefined
-      : createLiquidationEvidenceBundle(input.liquidation);
+      : rehydrateLiquidationEvidenceBundle(input.liquidation);
   if (liquidation && !liquidation.ok) return liquidation;
   const inputs: DailyPlanningInput = {
     market: p.market,

@@ -198,8 +198,16 @@ test("clean native evidence traverses real planning/risk into replayable READY w
   assert.equal(s.loads, 1);
   assert.equal(result.diagnostics.exchangeWrites, 0);
   assert.equal(result.diagnostics.executionAuthority, "none");
+  assert.equal(
+    result.diagnostics.liquidationSchemaVersion,
+    "liquidation-evidence/v1",
+  );
   assert.equal(result.diagnostics.eligibleConstituents, 4);
-  assert.equal(result.diagnostics.observedHourlyBuckets, 96);
+  assert.equal(result.diagnostics.expectedHourlyBuckets, 96);
+  assert.equal(result.diagnostics.resolvedHourlyBuckets, 96);
+  assert.equal(result.diagnostics.providerExplicitBuckets, null);
+  assert.equal(result.diagnostics.providerImpliedZeroBuckets, null);
+  assert.equal(result.diagnostics.unresolvedRequestedBuckets, null);
   assert.deepEqual(result.diagnostics.requiredLiquidationWindows, [
     {
       requestId: "liquidation-12h",
@@ -264,7 +272,7 @@ for (const liquidation of ["missing", "zero", "invalid-response"] as const)
     assert.equal(s.saved.length, 0);
     assert.ok(result.reasonCodes.length > 0);
     assert.equal(
-      result.diagnostics.observedHourlyBuckets,
+      result.diagnostics.resolvedHourlyBuckets,
       liquidation === "missing" ? 92 : 96,
     );
     assert.deepEqual(result.diagnostics.requiredLiquidationWindows, [

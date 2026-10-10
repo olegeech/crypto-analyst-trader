@@ -5,8 +5,8 @@ import {
   type MarketEvidenceBundle,
 } from "../market/market-evidence-bundle.js";
 import {
-  createLiquidationEvidenceBundle,
-  type LiquidationEvidenceBundle,
+  rehydrateLiquidationEvidenceBundle,
+  type VersionedLiquidationEvidenceBundle,
 } from "../liquidation/liquidation-evidence-bundle.js";
 import {
   rehydrateAnalyticsEvidenceBundle,
@@ -30,7 +30,9 @@ export interface QualitySourceInput {
 export interface QualityInputRecord {
   readonly role: QualitySourceInput["role"];
   readonly value?:
-    MarketEvidenceBundle | LiquidationEvidenceBundle | AnalyticsEvidenceBundle;
+    | MarketEvidenceBundle
+    | VersionedLiquidationEvidenceBundle
+    | AnalyticsEvidenceBundle;
   readonly evidenceRef?: EvidenceRef;
   readonly contentHash?: string;
   readonly bundleHash?: string;
@@ -55,7 +57,7 @@ export function admitQualitySource(
     input.role === "market"
       ? createMarketEvidenceBundle(input.value)
       : input.role === "liquidation"
-        ? createLiquidationEvidenceBundle(input.value)
+        ? rehydrateLiquidationEvidenceBundle(input.value)
         : rehydrateAnalyticsEvidenceBundle(input.value);
   if (!parsed.ok) {
     const hashError =
@@ -109,7 +111,7 @@ export function admitQualitySource(
     if (!ref.ok) failures.push("INVALID_EVIDENCE");
     else {
       evidenceRef = ref.value;
-      const liquidation = bundle as LiquidationEvidenceBundle;
+      const liquidation = bundle as VersionedLiquidationEvidenceBundle;
       if (
         ref.value.kind !== "liquidation-evidence-bundle" ||
         ref.value.producer !== liquidation.producer ||
