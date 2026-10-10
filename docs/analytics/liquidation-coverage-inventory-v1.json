@@ -1,0 +1,115 @@
+{
+  "schemaVersion": "liquidation-coverage-inventory/v1",
+  "inventoryDate": "2026-10-10",
+  "repositoryHead": "f3999e9deb21b67e1dc18df7828265ad23be0a03",
+  "result": "NOT_VALIDATED",
+  "scope": "Tracked repository sources and accessible non-private local data paths; no live API calls, new downloads, quota use, or private database reads.",
+  "searchMethod": {
+    "candidateFileRoots": ["data/", "docs/analytics/", "tests/fixtures/"],
+    "candidateFormats": [
+      "JSON",
+      "JSONL/NDJSON",
+      "CSV",
+      "Parquet",
+      "Arrow",
+      "Feather",
+      "SQLite/DB"
+    ],
+    "excludedPaths": ["**/private/**", "**/node_modules/**", "**/.git/**"],
+    "result": "The candidate-file scan found no historical liquidation series or point-in-time catalogue snapshots. Its only data-report candidate was an unrelated Bybit Demo adapter report, not used as market evidence.",
+    "localPlanningRoot": "local/ce/plans/",
+    "localPlanningResult": "Matching local files were planning documents only, not archived market evidence."
+  },
+  "qualifyingReferenceData": {
+    "completePointInTimeAllVenueHistorySetsFoundInInspectedSources": 0,
+    "historicalCatalogueSnapshotsFoundInInspectedSources": 0,
+    "reason": "No non-private multi-window liquidation history plus corresponding historical catalogue snapshots was found in the inspected workspace sources.",
+    "perAsset": [
+      {
+        "asset": "BTC",
+        "qualifyingCompleteWindowsFoundInInspectedSources": 0,
+        "historicalCatalogueSnapshotsFoundInInspectedSources": 0,
+        "stressPeriodWindowsFoundInInspectedSources": 0,
+        "earliestLatestCompleteTimestamps": null,
+        "note": "PR #124 reports aggregate smoke counts only; no per-asset history split is published."
+      },
+      {
+        "asset": "ETH",
+        "qualifyingCompleteWindowsFoundInInspectedSources": 0,
+        "historicalCatalogueSnapshotsFoundInInspectedSources": 0,
+        "stressPeriodWindowsFoundInInspectedSources": 0,
+        "earliestLatestCompleteTimestamps": null,
+        "note": "PR #124 reports aggregate smoke counts only; no per-asset history split is published."
+      },
+      {
+        "asset": "SOL",
+        "qualifyingCompleteWindowsFoundInInspectedSources": 0,
+        "historicalCatalogueSnapshotsFoundInInspectedSources": 0,
+        "stressPeriodWindowsFoundInInspectedSources": 0,
+        "earliestLatestCompleteTimestamps": null,
+        "note": "PR #124 reports aggregate smoke counts only; no per-asset history split is published."
+      },
+      {
+        "asset": "DOGE",
+        "qualifyingCompleteWindowsFoundInInspectedSources": 0,
+        "historicalCatalogueSnapshotsFoundInInspectedSources": 0,
+        "stressPeriodWindowsFoundInInspectedSources": 0,
+        "earliestLatestCompleteTimestamps": null,
+        "note": "PR #124 reports aggregate smoke counts only; no per-asset history split is published."
+      }
+    ]
+  },
+  "sources": [
+    {
+      "id": "coinalyze-api-documentation",
+      "url": "https://api.coinalyze.net/v1/doc/",
+      "kind": "provider-contract-only",
+      "retrievedOn": "2026-10-10",
+      "accessBasis": "Public official documentation; used only to characterize documented limits, not as observations.",
+      "usableAsHistoricalObservations": false
+    },
+    {
+      "id": "crypto-analyst-trader-pr-124",
+      "url": "https://github.com/olegeech/crypto-analyst-trader/pull/124",
+      "headSha": "174a9585bceca8312895e4f32fe349393db9e183",
+      "kind": "single-partial-live-smoke-summary",
+      "status": "incomplete",
+      "coverageProof": "complete",
+      "historyProof": "incomplete",
+      "eligibleMarkets": 93,
+      "expectedConstituentHours": 2232,
+      "resolvedBuckets": 12,
+      "providerImpliedZeroBuckets": 0,
+      "symbolUnits": 40,
+      "historyRequests": 2,
+      "canonicalHash": "sha256:3718f305c9be77400f649a123c60586043d53d403f6038cf67ac61516691248c",
+      "accessBasis": "Sanitized PR evidence from a prior operator-run public-data smoke; no raw payload or credentials used.",
+      "usableAsMatchedHistoricalWindows": false
+    },
+    {
+      "id": "repository-code-and-tests",
+      "kind": "implementation-and-synthetic-fixtures",
+      "paths": [
+        "src/application/liquidation-evidence-collection.ts",
+        "src/application/liquidation-market-selection.ts",
+        "tests/fixtures/liquidation-evidence-v1-golden.ts",
+        "tests/fixtures/daily-planning-evidence-fixtures.ts"
+      ],
+      "accessBasis": "Tracked repository source and deterministic test fixtures; fixtures are synthetic.",
+      "usableAsEmpiricalObservations": false
+    },
+    {
+      "id": "private-environment-execution-store",
+      "kind": "private-local-storage",
+      "read": false,
+      "accessBasis": "Not accessed; this inventory is limited to non-private research sources. Whether the store contains relevant saved public-market bundles remains unknown.",
+      "eligibility": "not assessed; excluded from this inventory"
+    }
+  ],
+  "decision": {
+    "venuePruning": "NOT_VALIDATED",
+    "assetScopedFallback": "all eligible venues for the selected asset",
+    "historicalReplayPerformed": false,
+    "reason": "The only observed Coinalyze smoke is one incomplete collection and cannot establish paired complete windows, point-in-time historical market membership, or an untouched holdout."
+  }
+}
