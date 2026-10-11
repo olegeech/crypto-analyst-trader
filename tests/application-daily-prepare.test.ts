@@ -14,6 +14,7 @@ import { parseUtcTimestamp } from "../src/domain/shared/time.js";
 import type { ExchangeCredentials } from "../src/ports/credential-provider.js";
 import { requireDailyFixture as value } from "./fixtures/daily-planning-evidence-fixtures.js";
 import {
+  dailyPrepareLiquidationV2,
   DAILY_PREPARE_CREDENTIALS,
   DAILY_PREPARE_ORIGINS,
   DAILY_PREPARE_RUN_ID,
@@ -21,15 +22,18 @@ import {
   DAILY_PREPARE_TIME,
   dailyPrepareAccount,
   dailyPrepareIdentity,
-  dailyPrepareLiquidation,
+  dailyPrepareLiquidationV3,
   dailyPrepareMarket,
 } from "./fixtures/daily-prepare-fixtures.js";
+import type { LiquidationTargetAsset } from "../src/domain/liquidation/liquidation-evidence-bundle.js";
 
 const input = { environment: "demo", symbol: "BTCUSDT", allocation: "10" };
 
 function setup(
   options: {
     liquidation?: "complete" | "missing" | "zero" | "invalid-response";
+    liquidationAsset?: LiquidationTargetAsset;
+    liquidationSchema?: "v2" | "v3";
     target?: "flat" | "long" | "order" | "absent";
     providerTime?: string;
     preAuth?: boolean;
@@ -58,11 +62,19 @@ function setup(
       explode("market");
       return ok(dailyPrepareMarket(runId));
     },
-    collectLiquidation: async (market) => {
+    collectLiquidation: async (market, selectedAsset) => {
       events.push("liquidation");
       explode("liquidation");
       wall = DAILY_PREPARE_TIME;
-      return ok(dailyPrepareLiquidation(market, options.liquidation));
+      return ok(
+        options.liquidationSchema === "v2"
+          ? dailyPrepareLiquidationV2(market)
+          : dailyPrepareLiquidationV3(
+              market,
+              options.liquidationAsset ?? selectedAsset,
+              options.liquidation,
+            ),
+      );
     },
     collectAccount: async (opts) => {
       events.push("account");
@@ -200,14 +212,14 @@ test("clean native evidence traverses real planning/risk into replayable READY w
   assert.equal(result.diagnostics.executionAuthority, "none");
   assert.equal(
     result.diagnostics.liquidationSchemaVersion,
-    "liquidation-evidence/v1",
+    "liquidation-evidence/v3",
   );
-  assert.equal(result.diagnostics.eligibleConstituents, 4);
-  assert.equal(result.diagnostics.expectedHourlyBuckets, 96);
-  assert.equal(result.diagnostics.resolvedHourlyBuckets, 96);
-  assert.equal(result.diagnostics.providerExplicitBuckets, null);
-  assert.equal(result.diagnostics.providerImpliedZeroBuckets, null);
-  assert.equal(result.diagnostics.unresolvedRequestedBuckets, null);
+  assert.equal(result.diagnostics.eligibleConstituents, 1);
+  assert.equal(result.diagnostics.expectedHourlyBuckets, 24);
+  assert.equal(result.diagnostics.resolvedHourlyBuckets, 24);
+  assert.equal(result.diagnostics.providerExplicitBuckets, 24);
+  assert.equal(result.diagnostics.providerImpliedZeroBuckets, 0);
+  assert.equal(result.diagnostics.unresolvedRequestedBuckets, 0);
   assert.deepEqual(result.diagnostics.requiredLiquidationWindows, [
     {
       requestId: "liquidation-12h",
@@ -273,7 +285,7 @@ for (const liquidation of ["missing", "zero", "invalid-response"] as const)
     assert.ok(result.reasonCodes.length > 0);
     assert.equal(
       result.diagnostics.resolvedHourlyBuckets,
-      liquidation === "missing" ? 92 : 96,
+      liquidation === "missing" ? 23 : 24,
     );
     assert.deepEqual(result.diagnostics.requiredLiquidationWindows, [
       {
@@ -292,6 +304,23 @@ for (const liquidation of ["missing", "zero", "invalid-response"] as const)
       },
     ]);
   });
+
+test("daily prepare rejects non-v3 or wrong-asset liquidation before private reads", async () => {
+  for (const [options, expectedReason] of [
+    [{ liquidationSchema: "v2" }, "LIQUIDATION_SCHEMA_MISMATCH"],
+    [{ liquidationAsset: "ETH" }, "LIQUIDATION_ASSET_MISMATCH"],
+  ] as const) {
+    const s = setup(options);
+    const result = await s.boundary.prepare(input);
+    assert.equal(result.kind, "blocked", JSON.stringify(result));
+    if (result.kind !== "blocked") continue;
+    assert.equal(result.stage, "liquidation");
+    assert.deepEqual(result.reasonCodes, [expectedReason]);
+    assert.deepEqual(s.events, ["market", "liquidation"]);
+    assert.equal(s.loads, 0);
+    assert.equal(s.saved.length, 0);
+  }
+});
 
 test("pre-auth failure creates no prepared artifact or invented account provenance", async () => {
   const s = setup({ preAuth: true });

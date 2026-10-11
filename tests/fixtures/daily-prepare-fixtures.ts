@@ -9,13 +9,22 @@ import {
 import { encodeCanonicalArtifact } from "../../src/domain/identity/canonical-artifact.js";
 import { hashCanonical } from "../../src/domain/identity/canonical-serialization.js";
 import {
+  createLiquidationEvidenceBundleV3,
+  DECISION_COVERAGE_POLICY_VERSION,
   createLiquidationEvidenceBundleV2,
   createLiquidationEvidenceRef,
   LIQUIDATION_EVIDENCE_ASSETS,
   LIQUIDATION_EVIDENCE_V2_PROVIDER_SEMANTIC_IDENTITY,
   LIQUIDATION_EVIDENCE_V2_SCHEMA_VERSION,
+  LIQUIDATION_EVIDENCE_V3_POLICY_VERSION,
+  LIQUIDATION_EVIDENCE_V3_SCHEMA_VERSION,
+  selectDecisionLiquidationMarkets,
 } from "../../src/domain/liquidation/liquidation-evidence-bundle.js";
-import type { MarketEvidenceBundle } from "../../src/domain/market/market-evidence-bundle.js";
+import { liquidationHistoryWindow } from "../../src/domain/liquidation/liquidation-evidence-windows.js";
+import {
+  marketEvidenceContentHash,
+  type MarketEvidenceBundle,
+} from "../../src/domain/market/market-evidence-bundle.js";
 import { parseUtcTimestamp } from "../../src/domain/shared/time.js";
 import { decimal, withCounts } from "../account-evidence-fixture.js";
 import {
@@ -159,6 +168,135 @@ export function dailyPrepareLiquidationV2(market: MarketEvidenceBundle) {
           })),
         })),
       })),
+    }),
+  );
+  const artifact = value(
+    encodeCanonicalArtifact("liquidation-evidence-bundle", bundle),
+  );
+  const evidence = value(
+    createLiquidationEvidenceRef(bundle, artifact.canonicalHash, 86_400_000),
+  );
+  return { bundle, artifact, evidence };
+}
+
+/** Trusted M1-scoped v3 evidence fixture used by the released daily path. */
+export function dailyPrepareLiquidationV3(
+  market: MarketEvidenceBundle,
+  selectedAsset: (typeof LIQUIDATION_EVIDENCE_ASSETS)[number],
+  mode: "complete" | "zero" | "missing" | "invalid-response" = "complete",
+) {
+  const cutoffMs = Date.parse(market.bundleCutoff);
+  const expireAt = 0;
+  const catalogueMarkets = [
+    {
+      symbol: `${selectedAsset}USDT_PERP.BYBIT`,
+      exchange: "Bybit",
+      symbolOnExchange: `${selectedAsset}USDT`,
+      baseAsset: selectedAsset,
+      quoteAsset: "USDT",
+      isPerpetual: true,
+      marginType: "STABLE",
+      expireAt,
+      notionalDenominatedIn: "USD",
+    },
+  ];
+  const selection = value(
+    selectDecisionLiquidationMarkets({
+      asset: selectedAsset,
+      markets: catalogueMarkets,
+      catalogueComplete: true,
+      cutoffMs,
+    }),
+  );
+  const expected = liquidationHistoryWindow(cutoffMs).epochs;
+  const missingIndex = 20;
+  const missingBucket = expected[missingIndex];
+  const observations = expected
+    .map((epoch, index) => ({ epoch, index }))
+    .filter(({ index }) => mode !== "missing" || index !== missingIndex)
+    .map(({ epoch }) => ({
+      timestamp: new Date(epoch).toISOString(),
+      longUsd: mode === "zero" ? "0" : "10",
+      shortUsd: mode === "zero" ? "0" : "20",
+      provenance: "provider-explicit" as const,
+    }));
+  const diagnostics =
+    mode === "missing"
+      ? [
+          {
+            code: "missing-bucket" as const,
+            operation: "fetch-liquidation-history" as const,
+            asset: selectedAsset,
+            providerSymbol: `${selectedAsset}USDT_PERP.BYBIT`,
+            bucketTimestamp:
+              missingBucket === undefined
+                ? undefined
+                : new Date(missingBucket).toISOString(),
+          },
+        ]
+      : mode === "invalid-response"
+        ? [
+            {
+              code: "rate-limited" as const,
+              operation: "fetch-liquidation-history" as const,
+              asset: selectedAsset,
+              providerSymbol: `${selectedAsset}USDT_PERP.BYBIT`,
+            },
+          ]
+        : [];
+  const historyComplete = mode === "complete" || mode === "zero";
+  const bundle = value(
+    createLiquidationEvidenceBundleV3({
+      runId: market.runId,
+      schemaVersion: LIQUIDATION_EVIDENCE_V3_SCHEMA_VERSION,
+      providerSemanticIdentity:
+        LIQUIDATION_EVIDENCE_V2_PROVIDER_SEMANTIC_IDENTITY,
+      producer: "crypto-analyst-trader/coinalyze-liquidation",
+      provider: "coinalyze",
+      policyVersion: LIQUIDATION_EVIDENCE_V3_POLICY_VERSION,
+      collectionStartedAt: market.collectionStartedAt,
+      collectionEndedAt: market.collectionEndedAt,
+      bundleCutoff: market.bundleCutoff,
+      marketEvidence: {
+        runId: market.runId,
+        universeVersion: market.universeVersion,
+        bundleCutoff: market.bundleCutoff,
+        contentHash: value(marketEvidenceContentHash(market)),
+      },
+      selection: {
+        coveragePolicyVersion: DECISION_COVERAGE_POLICY_VERSION,
+        selectedAsset,
+        cutoff: selection.cutoff,
+        catalogueComplete: selection.catalogueComplete,
+        catalogueMarkets: selection.catalogueMarkets,
+        catalogueHash: selection.catalogueHash,
+        exclusions: selection.exclusions,
+        selectedSetHash: selection.selectedSetHash,
+        reasonCodes: selection.reasonCodes,
+      },
+      coverageProof: selection.coverageProof,
+      historyProof: historyComplete ? "complete" : "incomplete",
+      status: historyComplete ? "complete" : "incomplete",
+      targets: [
+        {
+          asset: selectedAsset,
+          constituents: [
+            {
+              providerSymbol: catalogueMarkets[0]!.symbol,
+              exchange: catalogueMarkets[0]!.exchange,
+              symbolOnExchange: catalogueMarkets[0]!.symbolOnExchange,
+              baseAsset: selectedAsset,
+              quoteAsset: catalogueMarkets[0]!.quoteAsset,
+              isPerpetual: true,
+              marginType: catalogueMarkets[0]!.marginType,
+              expireAt: catalogueMarkets[0]!.expireAt,
+              notionalDenominatedIn: catalogueMarkets[0]!.notionalDenominatedIn,
+              observations,
+            },
+          ],
+        },
+      ],
+      diagnostics,
     }),
   );
   const artifact = value(

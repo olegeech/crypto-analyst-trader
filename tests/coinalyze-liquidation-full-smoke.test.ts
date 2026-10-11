@@ -210,6 +210,7 @@ test("full live smoke runs all eligible constituents through the canonical colle
   assert.equal(summary.coverageProof, "complete");
   assert.equal(summary.historyProof, "complete");
   assert.equal(summary.evidenceSchemaVersion, "liquidation-evidence/v2");
+  assert.equal(summary.mode, "legacy-full-diagnostic");
   assert.equal(summary.eligibleConstituents, 24);
   assert.equal(summary.constituentsWithProviderRows, 24);
   assert.equal(summary.constituentsWithResolvedGrid, 24);
@@ -220,6 +221,10 @@ test("full live smoke runs all eligible constituents through the canonical colle
     24 * LIQUIDATION_HISTORY_BUCKETS,
   );
   assert.equal(summary.providerImpliedZeroBuckets, 0);
+  assert.equal(
+    summary.providerExplicitZeroBuckets,
+    24 * LIQUIDATION_HISTORY_BUCKETS,
+  );
   assert.equal(summary.unresolvedRequestedBuckets, 0);
   assert.equal(summary.historyRequestCount, 2);
   assert.equal(summary.historyRequestSymbols, 24);

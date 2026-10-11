@@ -153,6 +153,7 @@ export {
 export {
   createLiquidationEvidenceBundle,
   createLiquidationEvidenceBundleV2,
+  createLiquidationEvidenceBundleV3,
   createLiquidationEvidenceDiagnostic,
   createLiquidationEvidenceRef,
   rehydrateLiquidationEvidenceBundle,
@@ -161,6 +162,10 @@ export {
   LIQUIDATION_EVIDENCE_PRODUCER,
   LIQUIDATION_EVIDENCE_SCHEMA_VERSION,
   LIQUIDATION_EVIDENCE_V2_PROVIDER_SEMANTIC_IDENTITY,
+  LIQUIDATION_EVIDENCE_V3_POLICY_VERSION,
+  LIQUIDATION_EVIDENCE_V3_SCHEMA_VERSION,
+  DECISION_COVERAGE_POLICY_VERSION,
+  selectDecisionLiquidationMarkets,
   LIQUIDATION_EVIDENCE_V2_SCHEMA_VERSION,
   LIQUIDATION_HISTORY_BUCKETS,
   LIQUIDATION_HOUR_MS,
@@ -172,6 +177,8 @@ export {
   type LiquidationEvidenceBundleInput,
   type LiquidationEvidenceBundleV2,
   type LiquidationEvidenceBundleV2Input,
+  type LiquidationEvidenceBundleV3,
+  type LiquidationEvidenceBundleV3Input,
   type LiquidationEvidenceDiagnostic,
   type LiquidationEvidenceDiagnosticCode,
   type LiquidationEvidenceDiagnosticInput,
@@ -195,6 +202,11 @@ export {
   type VersionedLiquidationEvidenceBundle,
   type LiquidationWindowEvidence,
   type LiquidationWindowHours,
+  type DecisionLiquidationMarketSelection,
+  type DecisionLiquidationMarketSelectionEvidence,
+  type LiquidationCatalogueMarket,
+  type LiquidationMarketExclusion,
+  type LiquidationMarketExclusionReason,
 } from "./liquidation/liquidation-evidence-bundle.js";
 export { isCanonicalMissingBucketHistory } from "./liquidation/liquidation-history-classification.js";
 export {

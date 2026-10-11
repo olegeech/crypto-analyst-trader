@@ -172,7 +172,7 @@ characterization command emits no symbols, raw payloads, API key,
 account/execution data, report file, or persisted planner evidence, and is
 excluded from default tests, `test:release`, and CI.
 
-## Full run-scoped Coinalyze collector smoke (issue #45)
+## Legacy full-universe Coinalyze diagnostic (issue #45)
 
 After the offline release suite passes and the Coinalyze key is configured in
 Keychain, run the full read-only collector path:
@@ -181,24 +181,44 @@ Keychain, run the full read-only collector path:
 npm run coinalyze:liquidation:full-smoke -- --live
 ```
 
-This command first collects a complete, exchange-cutoff Bybit public #11
-`MarketEvidenceBundle`, then runs the production Coinalyze liquidation
-collector against the full supported catalogue and every eligible BTC, ETH,
-SOL and DOGE perpetual constituent. The client batches history requests at no
-more than 20 symbols each. Output includes status, independent coverage and
-history proofs, the v2 schema, provenance-derived provider-explicit and
-provider-implied-zero bucket counts, resolved and unresolved requested bucket
-counts, and the canonical bundle hash. `constituentsWithProviderRows` counts
-symbols with returned rows; `constituentsWithResolvedGrid` counts symbols with
-a complete 24-hour grid, including implied zero rows. It does not print
-symbols, raw responses, credentials, or run identity, and does not persist
-planning evidence. A complete result requires both proofs complete and every
-expected requested bucket resolved. Any other result exits non-zero and must
-not be treated as complete planner input.
+This compatibility diagnostic first collects a complete, exchange-cutoff
+Bybit public #11 `MarketEvidenceBundle`, then collects all eligible BTC, ETH,
+SOL and DOGE perpetual histories and writes a v2 artifact. Its output mode is
+`legacy-full-diagnostic`; it does **not** verify the v3 decision-scoped path.
+The client batches history requests at no more than 20 symbols each. Output
+includes status, independent proofs, provider-explicit (including explicit
+0/0), provider-implied-zero and unresolved bucket counts, and the canonical
+bundle hash. `constituentsWithProviderRows` means at least one provider-explicit
+row; `constituentsWithResolvedGrid` includes reconstructed zeros. It prints no
+symbols, raw responses, credentials or run identity, and persists no planning
+evidence.
 
-This full smoke validates the production-shaped, run-bound collector path.
-It requires no Bybit account credentials; the separate `daily:prepare` path
-also traverses authenticated #16 account reads.
+Use it only to inspect the historical four-asset v2 diagnostic path. A
+complete result must not be presented as proof of v3 selected-asset coverage.
+
+## Decision-scoped Coinalyze v3 verification (issue #126)
+
+After offline release checks pass, this explicit live-only diagnostic verifies
+the new production-shaped v3 collector using a fixed BTC M1 composition:
+
+```text
+npm run coinalyze:liquidation:decision-smoke -- --live
+```
+
+It collects public exchange-cutoff #11 market evidence, derives BTC from the
+trusted `BTCUSDT` M1 composition (no asset/policy CLI override), validates the
+full Coinalyze catalogue, and requests history only for every eligible BTC
+perpetual. Output includes v3/policy identity, selected and excluded counts,
+independent proof states, catalogue/selected-set/canonical hashes, explicit
+0/0, all explicit, implied-zero and unresolved bucket counts, and bounded
+request metrics. Symbols, raw payloads, API keys, account data and write
+authority are not emitted or used. This smoke requires no Bybit account
+credentials; released `daily:prepare` additionally traverses authenticated
+#16 account reads and uses the asset derived from its selected M1 symbol.
+
+Only a `complete` result proves this fixed BTC collector path for that live
+run. The script is excluded from default tests, release checks and CI; use
+fixtures for the other supported assets and failure scenarios.
 
 ## Bybit portfolio-risk preflight smoke (issue #17)
 

@@ -44,6 +44,7 @@ test("maps the complete unpaginated catalogue without requiring a liquidation ca
 
   assert.equal(mapped.complete, true);
   assert.equal(mapped.markets.length, 3);
+  assert.equal(mapped.catalogueSnapshot?.length, 3);
   assert.equal(mapped.diagnostics.length, 0);
   const binance = mapped.markets.find(
     ({ symbol }) => symbol === "BTCUSDT_PERP.BINANCE",
@@ -81,6 +82,7 @@ test("invalid rows make coverage incomplete while preserving every trustworthy r
     mapped.markets.map(({ symbol }) => symbol),
     ["BTCUSDT_PERP.BINANCE", "ETHUSDT_PERP.BINANCE"],
   );
+  assert.equal(mapped.catalogueSnapshot?.length, 2);
   assert.equal(mapped.diagnostics[0]?.code, "invalid-catalogue");
 });
 
@@ -88,6 +90,7 @@ test("duplicate identities never become complete and contradictory identities ar
   const identical = mapCoinalyzeFutureMarkets([market(), market()]);
   assert.equal(identical.complete, false);
   assert.equal(identical.markets.length, 1);
+  assert.equal(identical.catalogueSnapshot?.length, 2);
   assert.equal(identical.diagnostics[0]?.code, "duplicate-market");
 
   const contradictory = mapCoinalyzeFutureMarkets([
@@ -115,6 +118,7 @@ test("duplicate identities never become complete and contradictory identities ar
   ]);
   assert.equal(conflictingMetadata.complete, false);
   assert.deepEqual(conflictingMetadata.markets, []);
+  assert.equal(conflictingMetadata.catalogueSnapshot?.length, 2);
   assert.equal(conflictingMetadata.diagnostics[0]?.code, "duplicate-market");
 });
 

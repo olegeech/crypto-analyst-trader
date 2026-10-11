@@ -137,6 +137,7 @@ export class CoinalyzeClient implements CoinalyzeLiquidationDataPort {
       const transportError = typedTransportError(error);
       return Object.freeze({
         markets: Object.freeze([]),
+        catalogueSnapshot: Object.freeze([]),
         complete: false,
         diagnostics: Object.freeze([
           catalogueFailureDiagnostic(transportError),

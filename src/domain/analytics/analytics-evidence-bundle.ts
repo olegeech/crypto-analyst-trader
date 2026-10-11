@@ -4,6 +4,7 @@ import {
 } from "../identity/canonical-serialization.js";
 import {
   LIQUIDATION_EVIDENCE_V2_SCHEMA_VERSION,
+  LIQUIDATION_EVIDENCE_V3_SCHEMA_VERSION,
   type VersionedLiquidationEvidenceBundle,
 } from "../liquidation/liquidation-evidence-bundle.js";
 import type { MarketEvidenceBundle } from "../market/market-evidence-bundle.js";
@@ -440,7 +441,9 @@ function parseIdentity(value: unknown): Result<AnalyticsInputIdentity> {
   if (
     Object.hasOwn(value, "liquidationEvidenceSchemaVersion") &&
     value.liquidationEvidenceSchemaVersion !==
-      LIQUIDATION_EVIDENCE_V2_SCHEMA_VERSION
+      LIQUIDATION_EVIDENCE_V2_SCHEMA_VERSION &&
+    value.liquidationEvidenceSchemaVersion !==
+      LIQUIDATION_EVIDENCE_V3_SCHEMA_VERSION
   ) {
     return invalid("liquidation analytics schema version is invalid");
   }
@@ -502,7 +505,10 @@ function parseIdentity(value: unknown): Result<AnalyticsInputIdentity> {
       ...(Object.hasOwn(value, "liquidationEvidenceSchemaVersion")
         ? {
             liquidationEvidenceSchemaVersion:
-              LIQUIDATION_EVIDENCE_V2_SCHEMA_VERSION,
+              value.liquidationEvidenceSchemaVersion ===
+              LIQUIDATION_EVIDENCE_V3_SCHEMA_VERSION
+                ? LIQUIDATION_EVIDENCE_V3_SCHEMA_VERSION
+                : LIQUIDATION_EVIDENCE_V2_SCHEMA_VERSION,
           }
         : {}),
       compatibility: compatible ? "compatible" : "incompatible",

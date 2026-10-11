@@ -1,6 +1,7 @@
 import { encodeCanonicalArtifact } from "../domain/identity/canonical-artifact.js";
 import {
   createLiquidationEvidenceBundleV2,
+  createLiquidationEvidenceBundleV3,
   createLiquidationEvidenceDiagnostic,
   createLiquidationEvidenceRef,
   LIQUIDATION_EVIDENCE_ASSETS,
@@ -8,11 +9,15 @@ import {
   LIQUIDATION_EVIDENCE_PRODUCER,
   LIQUIDATION_EVIDENCE_V2_PROVIDER_SEMANTIC_IDENTITY,
   LIQUIDATION_EVIDENCE_V2_SCHEMA_VERSION,
+  LIQUIDATION_EVIDENCE_V3_POLICY_VERSION,
+  LIQUIDATION_EVIDENCE_V3_SCHEMA_VERSION,
   LIQUIDATION_HOUR_MS,
   liquidationHistoryWindow,
   type LiquidationEvidenceBundleV2Input,
+  type LiquidationEvidenceBundleV3Input,
   type LiquidationEvidenceDiagnosticInput,
   type LiquidationTargetAsset,
+  type VersionedLiquidationEvidenceBundle,
 } from "../domain/liquidation/liquidation-evidence-bundle.js";
 import { liquidationObservationKey } from "../domain/liquidation/liquidation-observation-key.js";
 import {
@@ -47,6 +52,8 @@ import type {
 } from "../ports/liquidation-evidence.js";
 import type { SecretProvider } from "../ports/secret-provider.js";
 import { selectEligibleLiquidationMarkets } from "./liquidation-market-selection.js";
+import { selectDecisionLiquidationMarkets } from "../domain/liquidation/liquidation-evidence-v3.js";
+import type { DecisionLiquidationMarketSelection } from "../domain/liquidation/liquidation-evidence-v3.js";
 
 const COINALYZE_SECRET_IDENTITY = Object.freeze({
   provider: "coinalyze",
@@ -71,6 +78,7 @@ interface SelectedMarket extends CoinalyzeMarket {
 
 interface NormalizedCatalogue {
   readonly markets: readonly CoinalyzeMarket[];
+  readonly snapshotMarkets: readonly CoinalyzeMarket[];
   readonly coverageComplete: boolean;
   readonly diagnostics: readonly LiquidationEvidenceDiagnosticInput[];
 }
@@ -249,7 +257,10 @@ function appendProviderDiagnostics(
   return valid;
 }
 
-function normalizeCatalogue(value: unknown): NormalizedCatalogue {
+function normalizeCatalogue(
+  value: unknown,
+  decisionScoped: boolean,
+): NormalizedCatalogue {
   const diagnostics: LiquidationEvidenceDiagnosticInput[] = [];
   if (
     !isRecord(value) ||
@@ -259,6 +270,7 @@ function normalizeCatalogue(value: unknown): NormalizedCatalogue {
   ) {
     return Object.freeze({
       markets: Object.freeze([]),
+      snapshotMarkets: Object.freeze([]),
       coverageComplete: false,
       diagnostics: Object.freeze([
         makeDiagnostic("invalid-catalogue", "discover-markets"),
@@ -267,6 +279,16 @@ function normalizeCatalogue(value: unknown): NormalizedCatalogue {
   }
 
   let coverageComplete = value.complete;
+  const snapshotProvided = Array.isArray(value.catalogueSnapshot);
+  const catalogueRows: readonly unknown[] =
+    decisionScoped && Array.isArray(value.catalogueSnapshot)
+      ? value.catalogueSnapshot
+      : value.markets;
+  const snapshotMarkets: CoinalyzeMarket[] = [];
+  if (decisionScoped && !snapshotProvided) {
+    coverageComplete = false;
+    diagnostics.push(makeDiagnostic("invalid-catalogue", "discover-markets"));
+  }
   const diagnosticsValid = appendProviderDiagnostics(
     diagnostics,
     value.diagnostics,
@@ -278,13 +300,14 @@ function normalizeCatalogue(value: unknown): NormalizedCatalogue {
   const byContract = new Map<string, CoinalyzeMarket>();
   const blockedSymbols = new Set<string>();
   const blockedContracts = new Set<string>();
-  for (const rawMarket of value.markets) {
+  for (const rawMarket of catalogueRows) {
     const market = parseMarket(rawMarket);
     if (market === undefined) {
       coverageComplete = false;
       diagnostics.push(makeDiagnostic("invalid-catalogue", "discover-markets"));
       continue;
     }
+    snapshotMarkets.push(market);
     const key = marketContractKey(market);
     if (blockedSymbols.has(market.symbol) || blockedContracts.has(key)) {
       coverageComplete = false;
@@ -326,6 +349,7 @@ function normalizeCatalogue(value: unknown): NormalizedCatalogue {
   );
   return Object.freeze({
     markets: Object.freeze(markets),
+    snapshotMarkets: Object.freeze(snapshotMarkets),
     coverageComplete,
     diagnostics: Object.freeze(diagnostics),
   });
@@ -711,10 +735,9 @@ function buildBundleInput({
 }
 
 function finalizeBundle(
-  input: LiquidationEvidenceBundleV2Input,
+  bundle: Result<VersionedLiquidationEvidenceBundle>,
   validForMs: number,
 ): Result<LiquidationEvidenceCollectionResult> {
-  const bundle = createLiquidationEvidenceBundleV2(input);
   if (!bundle.ok) return bundle;
   const artifact = encodeCanonicalArtifact(
     "liquidation-evidence-bundle",
@@ -736,9 +759,102 @@ function finalizeBundle(
   );
 }
 
+function buildBundleInputV3({
+  context,
+  startedAt,
+  endedAt,
+  selection,
+  coverageProof,
+  historyProof,
+  status,
+  selectedMarkets,
+  histories,
+  impliedZeroObservations,
+  diagnostics,
+}: {
+  readonly context: CompatibleRunContext;
+  readonly startedAt: UtcTimestamp;
+  readonly endedAt: UtcTimestamp;
+  readonly selection: DecisionLiquidationMarketSelection;
+  readonly coverageProof: "complete" | "incomplete";
+  readonly historyProof: "complete" | "incomplete";
+  readonly status: "complete" | "incomplete" | "failed";
+  readonly selectedMarkets: readonly SelectedMarket[];
+  readonly histories: readonly CoinalyzeMarketHistory[];
+  readonly impliedZeroObservations: ReadonlySet<string>;
+  readonly diagnostics: readonly LiquidationEvidenceDiagnosticInput[];
+}): LiquidationEvidenceBundleV3Input {
+  const historyBySymbol = new Map(
+    histories.map((history) => [history.symbol, history] as const),
+  );
+  const cutoff = context.marketEvidence.bundleCutoff;
+  return {
+    runId: context.marketEvidence.runId,
+    schemaVersion: LIQUIDATION_EVIDENCE_V3_SCHEMA_VERSION,
+    providerSemanticIdentity:
+      LIQUIDATION_EVIDENCE_V2_PROVIDER_SEMANTIC_IDENTITY,
+    producer: LIQUIDATION_EVIDENCE_PRODUCER,
+    provider: "coinalyze",
+    policyVersion: LIQUIDATION_EVIDENCE_V3_POLICY_VERSION,
+    collectionStartedAt: startedAt,
+    collectionEndedAt: endedAt,
+    bundleCutoff: cutoff,
+    marketEvidence: {
+      runId: context.marketEvidence.runId,
+      universeVersion: context.marketEvidence.universeVersion,
+      bundleCutoff: cutoff,
+      contentHash: context.marketEvidenceHash,
+    },
+    selection: {
+      coveragePolicyVersion: selection.coveragePolicyVersion,
+      selectedAsset: selection.selectedAsset,
+      cutoff: selection.cutoff,
+      catalogueComplete: selection.catalogueComplete,
+      catalogueMarkets: selection.catalogueMarkets,
+      catalogueHash: selection.catalogueHash,
+      exclusions: selection.exclusions,
+      selectedSetHash: selection.selectedSetHash,
+      reasonCodes: selection.reasonCodes,
+    },
+    coverageProof,
+    historyProof,
+    status,
+    targets: [
+      {
+        asset: selection.selectedAsset,
+        constituents: selectedMarkets.map((market) => ({
+          providerSymbol: market.symbol,
+          exchange: market.exchange,
+          symbolOnExchange: market.symbolOnExchange,
+          baseAsset: market.baseAsset as LiquidationTargetAsset,
+          quoteAsset: market.quoteAsset,
+          isPerpetual: true as const,
+          marginType: market.marginType,
+          expireAt: market.expireAt,
+          notionalDenominatedIn: market.notionalDenominatedIn,
+          observations: (
+            historyBySymbol.get(market.symbol)?.observations ?? []
+          ).map((observation) => ({
+            timestamp: observation.timestamp,
+            longUsd: observation.longUsd,
+            shortUsd: observation.shortUsd,
+            provenance: impliedZeroObservations.has(
+              liquidationObservationKey(market.symbol, observation.timestamp),
+            )
+              ? ("provider-implied-zero" as const)
+              : ("provider-explicit" as const),
+          })),
+        })),
+      },
+    ],
+    diagnostics,
+  };
+}
+
 function emptyCatalogueResult(): CoinalyzeCatalogueResult {
   return Object.freeze({
     markets: Object.freeze([]),
+    catalogueSnapshot: Object.freeze([]),
     complete: false,
     diagnostics: Object.freeze([
       makeDiagnostic("catalogue-unavailable", "discover-markets"),
@@ -768,6 +884,7 @@ export async function collectLiquidationEvidence(
 ): Promise<Result<LiquidationEvidenceCollectionResult>> {
   const context = compatibleRunContext(request.marketEvidence);
   if (!context.ok) return context;
+  const decisionScoped = request.scope === "decision";
   const clock = options.clock ?? systemClock;
   const startedAt = clock.now();
   const diagnostics: LiquidationEvidenceDiagnosticInput[] = [];
@@ -806,20 +923,38 @@ export async function collectLiquidationEvidence(
     }
   }
 
-  const normalizedCatalogue = normalizeCatalogue(catalogue);
+  const normalizedCatalogue = normalizeCatalogue(catalogue, decisionScoped);
   diagnostics.push(...normalizedCatalogue.diagnostics);
   coverageComplete = normalizedCatalogue.coverageComplete;
-  selectedMarkets = selectEligibleLiquidationMarkets(
-    normalizedCatalogue.markets,
-    Date.parse(context.value.marketEvidence.bundleCutoff),
-  );
+  const decisionSelection = decisionScoped
+    ? selectDecisionLiquidationMarkets({
+        asset: request.selectedAsset,
+        markets: normalizedCatalogue.snapshotMarkets,
+        catalogueComplete: normalizedCatalogue.coverageComplete,
+        cutoffMs: Date.parse(context.value.marketEvidence.bundleCutoff),
+      })
+    : undefined;
+  if (decisionSelection !== undefined && !decisionSelection.ok) {
+    return decisionSelection;
+  }
+  const selection =
+    decisionSelection?.ok === true ? decisionSelection.value : undefined;
+  selectedMarkets = decisionScoped
+    ? (selection?.selectedMarkets ?? Object.freeze([]))
+    : selectEligibleLiquidationMarkets(
+        normalizedCatalogue.markets,
+        Date.parse(context.value.marketEvidence.bundleCutoff),
+      );
 
   const marketsByAsset = new Map<LiquidationTargetAsset, SelectedMarket[]>(
     LIQUIDATION_EVIDENCE_ASSETS.map((asset) => [asset, []]),
   );
   for (const market of selectedMarkets)
     marketsByAsset.get(market.asset)?.push(market);
-  for (const asset of LIQUIDATION_EVIDENCE_ASSETS) {
+  const targetAssets = decisionScoped
+    ? [request.selectedAsset]
+    : LIQUIDATION_EVIDENCE_ASSETS;
+  for (const asset of targetAssets) {
     if ((marketsByAsset.get(asset)?.length ?? 0) > 0) continue;
     if (coverageComplete) {
       diagnostics.push(
@@ -869,7 +1004,9 @@ export async function collectLiquidationEvidence(
       normalizedHistory.histories,
       selectedMarkets,
       expected,
-      coverageComplete && normalizedHistory.responseValid,
+      (selection?.coverageProof === "complete" ||
+        (!decisionScoped && coverageComplete)) &&
+        normalizedHistory.responseValid,
     );
     histories = sparseHistory.histories;
     impliedZeroObservations = sparseHistory.impliedZeroObservations;
@@ -915,10 +1052,44 @@ export async function collectLiquidationEvidence(
   const status =
     selectedMarkets.length === 0
       ? "failed"
-      : coverageComplete && historyComplete && diagnostics.length === 0
+      : (selection?.coverageProof === "complete" ||
+            (!decisionScoped && coverageComplete)) &&
+          historyComplete &&
+          diagnostics.length === 0
         ? "complete"
         : "incomplete";
   const endedAt = clock.now();
+  if (decisionScoped && selection !== undefined) {
+    const decisionCoverageProof = selection.coverageProof;
+    if (selectedMarkets.length === 0 && diagnostics.length === 0) {
+      diagnostics.push(
+        makeDiagnostic("no-eligible-markets", "discover-markets", {
+          asset: request.selectedAsset,
+        }),
+      );
+    }
+    return finalizeBundle(
+      createLiquidationEvidenceBundleV3(
+        buildBundleInputV3({
+          context: context.value,
+          startedAt,
+          endedAt,
+          selection,
+          coverageProof: decisionCoverageProof,
+          historyProof:
+            selectedMarkets.length > 0 && historyComplete
+              ? "complete"
+              : "incomplete",
+          status,
+          selectedMarkets,
+          histories,
+          impliedZeroObservations,
+          diagnostics,
+        }),
+      ),
+      context.value.referenceValidityMs,
+    );
+  }
   const bundleInput = buildBundleInput({
     context: context.value,
     startedAt,
@@ -931,5 +1102,8 @@ export async function collectLiquidationEvidence(
     impliedZeroObservations,
     diagnostics,
   });
-  return finalizeBundle(bundleInput, context.value.referenceValidityMs);
+  return finalizeBundle(
+    createLiquidationEvidenceBundleV2(bundleInput),
+    context.value.referenceValidityMs,
+  );
 }

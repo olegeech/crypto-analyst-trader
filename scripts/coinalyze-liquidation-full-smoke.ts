@@ -53,7 +53,7 @@ const SAFE_DIAGNOSTICS = new Set([
 
 export interface CoinalyzeLiquidationFullSmokeSummary {
   readonly provider: "coinalyze";
-  readonly mode: "full-collector";
+  readonly mode: "legacy-full-diagnostic";
   readonly environment: "public-mainnet";
   readonly evidenceSchemaVersion: typeof LIQUIDATION_EVIDENCE_V2_SCHEMA_VERSION;
   readonly status: VersionedLiquidationEvidenceBundle["status"];
@@ -65,6 +65,7 @@ export interface CoinalyzeLiquidationFullSmokeSummary {
   readonly expectedHourlyBuckets: number;
   readonly resolvedHourlyBuckets: number;
   readonly providerExplicitBuckets: number;
+  readonly providerExplicitZeroBuckets: number;
   readonly providerImpliedZeroBuckets: number;
   readonly unresolvedRequestedBuckets: number;
   readonly historyRequestCount: number;
@@ -196,7 +197,7 @@ export async function runCoinalyzeLiquidationFullSmoke({
   const bundleCounts = counts(bundle);
   const summary: CoinalyzeLiquidationFullSmokeSummary = Object.freeze({
     provider: "coinalyze",
-    mode: "full-collector",
+    mode: "legacy-full-diagnostic",
     environment: "public-mainnet",
     evidenceSchemaVersion: bundle.schemaVersion,
     status: bundle.status,

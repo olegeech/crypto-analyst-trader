@@ -17,7 +17,10 @@ import {
   marketIntervalMilliseconds,
   fundingIntervalMilliseconds,
 } from "../market/market-evidence-windows.js";
-import type { VersionedLiquidationEvidenceBundle } from "../liquidation/liquidation-evidence-bundle.js";
+import {
+  LIQUIDATION_EVIDENCE_V3_SCHEMA_VERSION,
+  type VersionedLiquidationEvidenceBundle,
+} from "../liquidation/liquidation-evidence-bundle.js";
 import type { UtcTimestamp } from "../shared/time.js";
 import {
   INVARIANT_QUALITY_REASONS,
@@ -393,9 +396,16 @@ export function classifyQualityEvidence(
       if (identity.liquidationBundleHash !== undefined)
         for (const liquidation of liquidations) {
           const hash = sourceHash(liquidation);
+          const schemaClaim = identity.liquidationEvidenceSchemaVersion;
+          const schemaMismatch =
+            schemaClaim === undefined
+              ? liquidation.schemaVersion ===
+                LIQUIDATION_EVIDENCE_V3_SCHEMA_VERSION
+              : schemaClaim !== liquidation.schemaVersion;
           if (
             !hash.ok ||
             identity.liquidationBundleHash !== hash.value ||
+            schemaMismatch ||
             identity.liquidationRunId !== liquidation.runId ||
             identity.liquidationUniverseVersion !==
               liquidation.marketEvidence.universeVersion ||

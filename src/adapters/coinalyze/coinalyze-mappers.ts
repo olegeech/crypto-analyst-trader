@@ -124,6 +124,7 @@ export function mapCoinalyzeFutureMarkets(
   if (!Array.isArray(payload)) {
     return Object.freeze({
       markets: Object.freeze([]),
+      catalogueSnapshot: Object.freeze([]),
       complete: false,
       diagnostics: Object.freeze([
         diagnostic("invalid-catalogue", "discover-markets"),
@@ -134,6 +135,7 @@ export function mapCoinalyzeFutureMarkets(
   let complete = true;
   const bySymbol = new Map<string, CoinalyzeMarket>();
   const byContract = new Map<string, CoinalyzeMarket>();
+  const catalogueSnapshot: CoinalyzeMarket[] = [];
   const blockedSymbols = new Set<string>();
   const blockedContracts = new Set<string>();
 
@@ -144,6 +146,7 @@ export function mapCoinalyzeFutureMarkets(
       diagnostics.push(diagnostic("invalid-catalogue", "discover-markets"));
       continue;
     }
+    catalogueSnapshot.push(market);
     const key = contractKey(market);
     if (blockedSymbols.has(market.symbol) || blockedContracts.has(key)) {
       complete = false;
@@ -184,6 +187,7 @@ export function mapCoinalyzeFutureMarkets(
   );
   return Object.freeze({
     markets: Object.freeze(markets),
+    catalogueSnapshot: Object.freeze(catalogueSnapshot),
     complete,
     diagnostics: Object.freeze(diagnostics),
   });

@@ -80,7 +80,8 @@ function identity(
   includeLiquidation = false,
   liquidationSchemaVersion:
     | "liquidation-evidence/v1"
-    | "liquidation-evidence/v2" = "liquidation-evidence/v1",
+    | "liquidation-evidence/v2"
+    | "liquidation-evidence/v3" = "liquidation-evidence/v1",
 ): AnalyticsInputIdentity {
   return {
     runId: "analytics-run-1",
@@ -96,9 +97,9 @@ function identity(
             CUTOFF as AnalyticsInputIdentity["bundleCutoff"],
           liquidationMarketContentHash: `sha256:${"d".repeat(64)}`,
           liquidationBundleHash: LIQUIDATION_HASH,
-          ...(liquidationSchemaVersion === "liquidation-evidence/v2"
-            ? { liquidationEvidenceSchemaVersion: liquidationSchemaVersion }
-            : {}),
+          ...(liquidationSchemaVersion === "liquidation-evidence/v1"
+            ? {}
+            : { liquidationEvidenceSchemaVersion: liquidationSchemaVersion }),
         }
       : {}),
     compatibility: "compatible",
@@ -350,6 +351,38 @@ test("declared #11/#45 inputs require exact full hash and run context", () => {
     ).status,
     "complete",
   );
+
+  const liquidationV3Ref = {
+    ...liquidationRef,
+    schemaVersion: "liquidation-evidence/v3",
+  };
+  const refsV3 = [marketRef, liquidationV3Ref];
+  const v3Lineage = withContentHash(
+    externalScore("early-warning-risk", {
+      inputEvidenceRefs: refsV3,
+      inputManifestHash: manifestHash(refsV3),
+      marketEvidenceHash: MARKET_HASH,
+      liquidationEvidenceHash: LIQUIDATION_HASH,
+    }),
+  );
+  assert.equal(
+    validateExternalRegimeEvidence(
+      v3Lineage,
+      "early-warning-risk",
+      identity(true, "liquidation-evidence/v3"),
+    ).status,
+    "complete",
+  );
+
+  const mismatchedV3Reference = validateExternalRegimeEvidence(
+    v3Lineage,
+    "early-warning-risk",
+    identity(true, "liquidation-evidence/v2"),
+  );
+  assert.equal(mismatchedV3Reference.status, "unavailable");
+  assert.deepEqual(mismatchedV3Reference.reasonCodes, [
+    "INPUT_IDENTITY_MISMATCH",
+  ]);
 
   const mismatchedV2Reference = validateExternalRegimeEvidence(
     v2Lineage,
