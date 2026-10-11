@@ -180,7 +180,7 @@ export async function runCoinalyzeLiquidationFullSmoke({
     clock,
   };
   const result = await collectLiquidationEvidence(
-    { marketEvidence },
+    { scope: "legacy-diagnostic", marketEvidence },
     collectionOptions,
   );
   if (!result.ok) {

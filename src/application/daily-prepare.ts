@@ -18,6 +18,7 @@ import type {
   ExchangeCredentials,
 } from "../ports/credential-provider.js";
 import type { LiquidationEvidenceCollectionResult } from "../ports/liquidation-evidence.js";
+import type { LiquidationTargetAsset } from "../domain/liquidation/liquidation-evidence-bundle.js";
 import type { PortfolioRiskEvidenceReaderFactory } from "../ports/portfolio-risk-evidence.js";
 import type { PreparedArtifactStore } from "../ports/prepared-artifact-store.js";
 import type {
@@ -43,6 +44,7 @@ export interface DailyPrepareDependencies {
   ) => Promise<Result<MarketEvidenceBundle>>;
   readonly collectLiquidation: (
     market: MarketEvidenceBundle,
+    selectedAsset: LiquidationTargetAsset,
   ) => Promise<Result<LiquidationEvidenceCollectionResult>>;
   readonly collectAccount: typeof collectAccountEvidence;
   readonly credentialLoader: Pick<CredentialProvider, "load">;
@@ -205,7 +207,10 @@ export function createDailyPrepareBoundary(deps: DailyPrepareDependencies) {
         if (market.value.status !== "complete")
           return failure("blocked", ["MARKET_EVIDENCE_INCOMPLETE"]);
         stage = "liquidation";
-        const liquidation = await deps.collectLiquidation(market.value);
+        const liquidation = await deps.collectLiquidation(
+          market.value,
+          composition.selectedAsset,
+        );
         if (!liquidation.ok)
           return failure("unavailable", ["LIQUIDATION_COLLECTION_UNAVAILABLE"]);
         const l = liquidation.value.bundle;

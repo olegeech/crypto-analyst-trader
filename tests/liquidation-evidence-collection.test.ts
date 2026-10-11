@@ -224,7 +224,10 @@ function harness(
     calls,
     async collect() {
       return collectLiquidationEvidence(
-        { marketEvidence: options.evidence ?? marketEvidence() },
+        {
+          scope: "legacy-diagnostic",
+          marketEvidence: options.evidence ?? marketEvidence(),
+        },
         { marketData: data, secrets: secret, clock: clock.value },
       );
     },
