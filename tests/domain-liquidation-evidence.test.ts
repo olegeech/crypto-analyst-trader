@@ -26,6 +26,10 @@ import {
   LIQUIDATION_EVIDENCE_V1_GOLDEN_HASH,
   liquidationEvidenceV1GoldenInput,
 } from "./fixtures/liquidation-evidence-v1-golden.js";
+import {
+  LIQUIDATION_EVIDENCE_V2_GOLDEN_HASH,
+  liquidationEvidenceV2GoldenInput,
+} from "./fixtures/liquidation-evidence-v2-golden.js";
 
 const HOUR_MS = 60 * 60 * 1_000;
 const CUTOFF = "2026-09-24T12:30:00.000Z";
@@ -572,6 +576,44 @@ test("persisted v1 golden artifact keeps its canonical hash and meaning", () => 
     rehydrated.value.targets[0]?.constituents[0]?.observations[0];
   assert.ok(firstObservation);
   assert.equal("provenance" in firstObservation, false);
+});
+
+test("persisted v2 golden artifact keeps its canonical hash and meaning", () => {
+  const bundle = createLiquidationEvidenceBundleV2(
+    liquidationEvidenceV2GoldenInput(),
+  );
+  assert.equal(bundle.ok, true);
+  if (!bundle.ok) return;
+  const envelope = encodeCanonicalArtifact(
+    "liquidation-evidence-bundle",
+    bundle.value,
+  );
+  assert.equal(envelope.ok, true);
+  if (!envelope.ok) return;
+  assert.equal(
+    envelope.value.canonicalHash,
+    LIQUIDATION_EVIDENCE_V2_GOLDEN_HASH,
+  );
+  const rehydrated = rehydrateArtifact(
+    "liquidation-evidence-bundle",
+    envelope.value,
+  );
+  assert.equal(rehydrated.ok, true);
+  if (!rehydrated.ok) return;
+  assert.equal(
+    rehydrated.value.schemaVersion,
+    LIQUIDATION_EVIDENCE_V2_SCHEMA_VERSION,
+  );
+  const reencoded = encodeCanonicalArtifact(
+    "liquidation-evidence-bundle",
+    rehydrated.value,
+  );
+  assert.equal(reencoded.ok, true);
+  if (!reencoded.ok) return;
+  assert.equal(
+    reencoded.value.canonicalHash,
+    LIQUIDATION_EVIDENCE_V2_GOLDEN_HASH,
+  );
 });
 
 test("v2 provenance is canonical identity and survives deterministic rehydration", () => {
