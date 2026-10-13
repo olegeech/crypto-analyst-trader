@@ -7,14 +7,10 @@ import {
   validatePreparedLegGridShape,
 } from "../src/domain/execution/prepared-leg-execution.js";
 import { createPreparedPlanApproval } from "../src/domain/review/prepared-plan-approval.js";
-import { preparedLegExecutionFixture } from "./fixtures/prepared-leg-execution-fixtures.js";
-
-const FOUR_LEVELS = [
-  { atrOffset: "0", allocationWeight: "0.25", takeProfitAtrDistance: "1" },
-  { atrOffset: "0.5", allocationWeight: "0.25", takeProfitAtrDistance: "1" },
-  { atrOffset: "1", allocationWeight: "0.25", takeProfitAtrDistance: "1" },
-  { atrOffset: "1.5", allocationWeight: "0.25", takeProfitAtrDistance: "1" },
-] as const;
+import {
+  PREPARED_LEG_FOUR_LEVELS,
+  preparedLegExecutionFixture,
+} from "./fixtures/prepared-leg-execution-fixtures.js";
 
 test("an exact unexpired approval selects only its immutable ADD leg", () => {
   const source = preparedLegExecutionFixture();
@@ -56,7 +52,9 @@ test("approval hash, expiry, plan state and selected leg fail closed", () => {
 });
 
 test("an exact approval admits the whole canonical grid in index order", () => {
-  const source = preparedLegExecutionFixture({ planningLevels: FOUR_LEVELS });
+  const source = preparedLegExecutionFixture({
+    planningLevels: PREPARED_LEG_FOUR_LEVELS,
+  });
   const result = createPreparedLegGridExecution({
     approval: source.approval,
     approvalHash: source.approval.contentHash,
@@ -94,7 +92,9 @@ test("an exact approval admits the whole canonical grid in index order", () => {
 });
 
 test("grid admission rejects expired or caller-selected subsets of approval", () => {
-  const source = preparedLegExecutionFixture({ planningLevels: FOUR_LEVELS });
+  const source = preparedLegExecutionFixture({
+    planningLevels: PREPARED_LEG_FOUR_LEVELS,
+  });
   const valid = {
     approval: source.approval,
     approvalHash: source.approval.contentHash,
@@ -147,7 +147,9 @@ test("grid admission rejects expired or caller-selected subsets of approval", ()
 });
 
 test("grid shape requires unique identities and consecutive bounded indices", () => {
-  const source = preparedLegExecutionFixture({ planningLevels: FOUR_LEVELS });
+  const source = preparedLegExecutionFixture({
+    planningLevels: PREPARED_LEG_FOUR_LEVELS,
+  });
   const legs =
     source.prepared.replayInputs.preflight.replayInputs.dailyPlan
       .candidateLegs!;

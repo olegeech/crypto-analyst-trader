@@ -19,6 +19,7 @@ import { deepFreeze } from "../shared/deep-freeze.js";
 import { DecimalValue } from "../shared/decimal.js";
 import { domainError } from "../shared/errors.js";
 import { fail, ok, type Result } from "../shared/result.js";
+import { closedRecord } from "../planning/planning-validation.js";
 import {
   parseUtcTimestamp,
   timestampToEpochMs,
@@ -652,6 +653,7 @@ function amount(value: DecimalValue): PortfolioRiskProjectionFact {
 
 function buildProjection(
   input: PortfolioRiskProjectionInput,
+  selectedLegId?: string,
 ): Result<PortfolioRiskProjection> {
   if (
     !isRecord(input) ||
@@ -778,7 +780,13 @@ function buildProjection(
     projectOrders(bundle, p.market, p.symbol, totals);
     if (!Array.isArray(plan.value.candidateLegs))
       return invalid("ADD plan is missing candidate legs");
-    projectPlannedOrders(plan.value.candidateLegs, totals);
+    const plannedLegs =
+      selectedLegId === undefined
+        ? plan.value.candidateLegs
+        : plan.value.candidateLegs.filter((leg) => leg.legId === selectedLegId);
+    if (selectedLegId !== undefined && plannedLegs.length !== 1)
+      return invalid("selected approved leg is missing or ambiguous");
+    projectPlannedOrders(plannedLegs, totals);
     projectWallet(bundle, totals);
     const normalizedReasons = createPortfolioRiskBlockReasonCodes([
       ...totals.reasonCodes,
@@ -837,4 +845,23 @@ export function createPortfolioRiskProjection(
   input: PortfolioRiskProjectionInput,
 ): Result<PortfolioRiskProjection> {
   return buildProjection(input);
+}
+
+export interface PortfolioRiskApprovedLegProjectionInput extends PortfolioRiskProjectionInput {
+  readonly legId: unknown;
+}
+
+/** Projects one leg from the exact immutable plan while retaining its original identity. */
+export function createPortfolioRiskProjectionForApprovedLeg(
+  input: PortfolioRiskApprovedLegProjectionInput,
+): Result<PortfolioRiskProjection> {
+  const fields = ["dailyPlan", "account", "policy", "evaluationTime", "legId"];
+  if (
+    !closedRecord(input, fields) ||
+    Reflect.ownKeys(input).length !== fields.length ||
+    typeof input.legId !== "string"
+  )
+    return invalid("approved-leg projection input is invalid");
+  const { legId, ...projectionInput } = input;
+  return buildProjection(projectionInput, legId);
 }

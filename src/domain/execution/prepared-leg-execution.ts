@@ -105,26 +105,6 @@ export function derivePreparedLegSourceId(
   return ok(`prepared-leg:${digest.value.slice(7, 47)}`);
 }
 
-export interface CreatePreparedLegExecutionInput {
-  readonly approval: unknown;
-  readonly approvalHash: unknown;
-  readonly legId: unknown;
-  readonly now: unknown;
-}
-
-export interface DerivePreparedLegExecutionIdentityInput {
-  readonly approval: unknown;
-  readonly approvalHash: unknown;
-  readonly legId: unknown;
-}
-
-export interface DerivePreparedLegSourceIdentityInput {
-  readonly prepared: unknown;
-  readonly preparedHash: unknown;
-  readonly legId: unknown;
-  readonly accountIdentityHash: unknown;
-}
-
 function executionIdentityFromApproval(
   approval: PreparedPlanApproval,
   approvalHash: PlanHash,
@@ -174,8 +154,7 @@ export function derivePreparedLegSourceIdentity(
   const keys = ["prepared", "preparedHash", "legId", "accountIdentityHash"];
   if (
     !closedRecord(input, keys) ||
-    Reflect.ownKeys(input).length !== keys.length ||
-    !keys.every((key) => Object.hasOwn(input, key))
+    Reflect.ownKeys(input).length !== keys.length
   )
     return invalid("durable prepared-leg source identity is invalid");
   const preparedHash = requireHash(input.preparedHash, "preparedHash");
@@ -220,10 +199,7 @@ export function derivePreparedLegExecutionIdentity(
 ): Result<PreparedLegExecution> {
   if (
     !closedRecord(input, ["approval", "approvalHash", "legId"]) ||
-    Reflect.ownKeys(input).length !== 3 ||
-    !["approval", "approvalHash", "legId"].every((key) =>
-      Object.hasOwn(input, key),
-    )
+    Reflect.ownKeys(input).length !== 3
   )
     return invalid();
 
@@ -245,10 +221,7 @@ export function createPreparedLegExecution(
 ): Result<PreparedLegExecution> {
   if (
     !closedRecord(input, ["approval", "approvalHash", "legId", "now"]) ||
-    Reflect.ownKeys(input).length !== 4 ||
-    !["approval", "approvalHash", "legId", "now"].every((key) =>
-      Object.hasOwn(input, key),
-    )
+    Reflect.ownKeys(input).length !== 4
   )
     return invalid();
 
@@ -316,8 +289,7 @@ export function createPreparedLegGridExecution(
   const keys = ["approval", "approvalHash", "now"];
   if (
     !closedRecord(input, keys) ||
-    Reflect.ownKeys(input).length !== keys.length ||
-    !keys.every((key) => Object.hasOwn(input, key))
+    Reflect.ownKeys(input).length !== keys.length
   )
     return invalid();
 
