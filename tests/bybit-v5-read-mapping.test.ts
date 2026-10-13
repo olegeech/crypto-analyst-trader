@@ -328,6 +328,13 @@ test("order mapping preserves an exact attached-protection parent link", () => {
           parentOrderLinkId: "entry-client",
           stopOrderType: "TakeProfit",
           orderStatus: "Untriggered",
+          category: "linear",
+          side: "Sell",
+          orderType: "Market",
+          qty: "57",
+          triggerPrice: "0.0912",
+          reduceOnly: true,
+          positionIdx: 0,
         }),
       ],
     }),
@@ -337,6 +344,8 @@ test("order mapping preserves an exact attached-protection parent link", () => {
   assert.equal(mapped?.parentOrderLinkId, "entry-client");
   assert.equal(mapped?.protectionType, "take-profit");
   assert.equal(mapped?.status, "open");
+  assert.equal(mapped?.orderType, "market");
+  assert.equal(mapped?.triggerPrice?.toString(), "0.0912");
 });
 
 test("ordinary orders with an empty client identity still fail closed", () => {

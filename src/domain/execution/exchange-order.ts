@@ -35,6 +35,7 @@ export interface ExchangeOrderObservation {
   readonly orderType?: ExchangeOrderType;
   readonly price?: DecimalValue;
   readonly timeInForce?: ExchangeTimeInForce;
+  readonly triggerPrice?: DecimalValue;
   readonly takeProfit?: DecimalValue | null;
   readonly stopLoss?: DecimalValue | null;
   readonly reduceOnly?: boolean;
@@ -151,6 +152,10 @@ export function createExchangeOrder(
     input.price === undefined
       ? undefined
       : DecimalValue.fromString(input.price);
+  const triggerPrice =
+    input.triggerPrice === undefined
+      ? undefined
+      : DecimalValue.fromString(input.triggerPrice);
   const takeProfit = parseOptionalProtectionPrice(input, "takeProfit");
   const stopLoss = parseOptionalProtectionPrice(input, "stopLoss");
   const positionIdx =
@@ -178,6 +183,7 @@ export function createExchangeOrder(
     orderType?: ExchangeOrderType;
     price?: DecimalValue;
     timeInForce?: ExchangeTimeInForce;
+    triggerPrice?: DecimalValue;
     takeProfit?: DecimalValue | null;
     stopLoss?: DecimalValue | null;
     reduceOnly?: boolean;
@@ -201,6 +207,8 @@ export function createExchangeOrder(
     orderType === null ||
     timeInForce === null ||
     (price !== undefined && (!price.ok || !price.value.isPositive())) ||
+    (triggerPrice !== undefined &&
+      (!triggerPrice.ok || !triggerPrice.value.isPositive())) ||
     !takeProfit.ok ||
     !stopLoss.ok ||
     (input.reduceOnly !== undefined && typeof input.reduceOnly !== "boolean") ||
@@ -215,6 +223,7 @@ export function createExchangeOrder(
   if (orderType !== undefined) order.orderType = orderType;
   if (price !== undefined) order.price = price.value;
   if (timeInForce !== undefined) order.timeInForce = timeInForce;
+  if (triggerPrice !== undefined) order.triggerPrice = triggerPrice.value;
   if (takeProfit.value !== undefined) order.takeProfit = takeProfit.value;
   if (stopLoss.value !== undefined) order.stopLoss = stopLoss.value;
   if (input.reduceOnly !== undefined) order.reduceOnly = input.reduceOnly;

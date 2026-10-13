@@ -179,9 +179,39 @@ function accountOrderFor(
   };
 }
 
+function accountTakeProfitChildFor(
+  execution: ReturnType<typeof setup>["admitted"]["legs"][number]["execution"],
+  exchangeOrderId: string,
+) {
+  return {
+    ...accountOrder(),
+    category: "linear",
+    symbol: execution.leg.intent.instrument,
+    orderId: exchangeOrderId,
+    orderLinkId: null,
+    status: "Untriggered",
+    side: "Sell",
+    orderType: "Market",
+    qty: accountDecimal(execution.leg.intent.quantity.toString(), "contracts"),
+    cumExecQty: accountDecimal("0", "contracts"),
+    leavesQty: accountDecimal(
+      execution.leg.intent.quantity.toString(),
+      "contracts",
+    ),
+    positionIdx: accountKnown(0),
+    reduceOnly: accountKnown(true),
+    triggerPrice: accountDecimal(
+      execution.leg.intent.protection!.takeProfit!.toString(),
+      "price",
+    ),
+    stopOrderType: accountKnown("TakeProfit"),
+    tpslMode: accountKnown("Full"),
+  };
+}
+
 function accountWithOrders(
   account: ReturnType<typeof setup>["account"],
-  rows: readonly ReturnType<typeof accountOrderFor>[],
+  rows: readonly { readonly category: string }[],
 ) {
   const { consistency: _consistency, ...payload } = account;
   void _consistency;
@@ -302,32 +332,36 @@ test("a confirmed zero-fill prefix permits the exact next leg and projects each 
   const base = setup();
   const prefix = base.admitted.legs[0]!;
   const parent = restOrder(prefix.execution);
-  const child = {
-    exchangeOrderId: "tp-child-0",
-    clientOrderId: prefix.execution.clientOrderId,
-    instrument: "BTCUSDT",
-    side: "sell",
-    requestedQuantity: prefix.execution.leg.intent.quantity,
-    filledQuantity: decimal("0"),
-    status: "open",
-    orderType: "limit",
-    price: prefix.execution.leg.intent.protection!.takeProfit!,
-    timeInForce: "GTC",
-    takeProfit: null,
-    stopLoss: null,
-    reduceOnly: true,
-    positionIdx: 0,
-    observedAt: serverTime,
-    source: "Bybit REST",
-    parentOrderLinkId: prefix.execution.clientOrderId,
-    protectionType: "take-profit",
-  };
+  const createChild = (overrides: Record<string, unknown> = {}) =>
+    requireDailyFixture(
+      createExchangeOrder({
+        exchangeOrderId: "tp-child-0",
+        clientOrderId: prefix.execution.clientOrderId,
+        parentOrderLinkId: prefix.execution.clientOrderId,
+        instrument: "BTCUSDT",
+        category: "linear",
+        side: "sell",
+        requestedQuantity: prefix.execution.leg.intent.quantity.toString(),
+        filledQuantity: "0",
+        status: "open",
+        orderType: "market",
+        triggerPrice:
+          prefix.execution.leg.intent.protection!.takeProfit!.toString(),
+        reduceOnly: true,
+        positionIdx: 0,
+        observedAt: serverTime,
+        source: "Bybit REST",
+        protectionType: "take-profit",
+        ...overrides,
+      }),
+    );
+  const child = createChild();
   const account = accountWithOrders(base.account, [
     accountOrderFor(prefix.execution),
   ]);
   const liveEvidence = boundEvidence(account, {
     ...base.liveEvidence,
-    state: { ...base.liveEvidence.state, openOrders: [parent, child] },
+    state: { ...base.liveEvidence.state, openOrders: [parent] },
   });
   const result = createPreparedGridCapacity({
     ...base.input,
@@ -418,6 +452,82 @@ test("a confirmed zero-fill prefix permits the exact next leg and projects each 
     inputWithCallerBudgetOverride,
   );
   assert.equal(callerBudgetOverride.ok, false);
+
+  const accountWithProtection = accountWithOrders(base.account, [
+    accountOrderFor(prefix.execution),
+    accountTakeProfitChildFor(prefix.execution, "tp-child-0"),
+  ]);
+  const exactChildEvidence = boundEvidence(accountWithProtection, {
+    ...base.liveEvidence,
+    state: { ...base.liveEvidence.state, openOrders: [parent, child] },
+  });
+  const childAssessment = createPreparedGridCapacity({
+    ...base.input,
+    account: accountWithProtection,
+    liveEvidence: exactChildEvidence,
+    nextLegIndex: 1,
+  });
+  assert.equal(childAssessment.ok, true);
+  if (childAssessment.ok) {
+    assert.equal(childAssessment.value.status, "block");
+    assert.ok(
+      childAssessment.value.reasonCodes.includes("CURRENT_STATE_UNVALUABLE"),
+    );
+    assert.ok(
+      !childAssessment.value.reasonCodes.includes(
+        "ATTACHED_PROTECTION_CONTRADICTS_APPROVAL",
+      ),
+      childAssessment.value.reasonCodes.join(","),
+    );
+    assert.ok(
+      !childAssessment.value.reasonCodes.includes(
+        "PREFIX_RECONCILIATION_MISMATCH",
+      ),
+    );
+  }
+
+  const invalidChildCases = [
+    { label: "wrong side", child: createChild({ side: "buy" }) },
+    {
+      label: "wrong quantity",
+      child: createChild({ requestedQuantity: "999" }),
+    },
+    {
+      label: "filled child",
+      child: createChild({
+        filledQuantity: prefix.execution.leg.intent.quantity
+          .multiply(decimal("0.5"))
+          .toString(),
+      }),
+    },
+    {
+      label: "wrong trigger",
+      child: createChild({ triggerPrice: "999" }),
+    },
+    { label: "not reduce-only", child: createChild({ reduceOnly: false }) },
+  ];
+  for (const item of invalidChildCases) {
+    const evidence = boundEvidence(account, {
+      ...base.liveEvidence,
+      state: { ...base.liveEvidence.state, openOrders: [parent, item.child] },
+    });
+    const blocked = createPreparedGridCapacity({
+      ...base.input,
+      account,
+      liveEvidence: evidence,
+      nextLegIndex: 1,
+    });
+    assert.equal(blocked.ok, true, item.label);
+    if (blocked.ok) {
+      assert.equal(blocked.value.status, "block", item.label);
+      assert.ok(
+        blocked.value.reasonCodes.includes(
+          "ATTACHED_PROTECTION_CONTRADICTS_APPROVAL",
+        ),
+        item.label,
+      );
+    }
+  }
 });
 
 test("prefix must be a bijective REST-proven zero-fill prefix with exact account rows", () => {

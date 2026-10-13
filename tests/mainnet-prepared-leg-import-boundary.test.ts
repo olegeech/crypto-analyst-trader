@@ -13,6 +13,7 @@ const authorizationPort = resolve(
 const mainnetWriters = [
   resolve(repositoryRoot, "src/application/mainnet-prepared-leg-boundary.ts"),
   resolve(repositoryRoot, "src/application/mainnet-prepared-leg-cancel.ts"),
+  resolve(repositoryRoot, "src/application/mainnet-prepared-grid-boundary.ts"),
 ];
 
 async function sourceFiles(directory: string): Promise<string[]> {

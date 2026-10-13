@@ -19,6 +19,10 @@ import {
 } from "../src/domain/identity/canonical-artifact.js";
 import { hashCanonical } from "../src/domain/identity/canonical-serialization.js";
 import { createMarketSnapshot } from "../src/domain/market/snapshots.js";
+import {
+  accountEvidenceContentHash,
+  createAccountEvidenceBundle,
+} from "../src/domain/account/account-evidence-bundle.js";
 import { DecimalValue } from "../src/domain/shared/decimal.js";
 import { domainError } from "../src/domain/shared/errors.js";
 import { fail, ok, type Result } from "../src/domain/shared/result.js";
@@ -377,6 +381,12 @@ function setup(
   const fixture = preparedLegExecutionFixture();
   const prepared = fixture.prepared;
   const approval = fixture.approval;
+  const rawAccount = prepared.replayInputs.preflight.replayInputs
+    .account as Record<string, unknown>;
+  const { consistency: _consistency, ...accountPayload } = rawAccount;
+  void _consistency;
+  const account = unwrap(createAccountEvidenceBundle(accountPayload));
+  const accountHashEvidence = unwrap(accountEvidenceContentHash(account));
   const symbol = fixture.approval.replayInputs.prepared.summary.symbol;
   const dailyPlan = prepared.replayInputs.preflight.replayInputs.dailyPlan;
   const marketData = dailyPlan.inputs.market as {
@@ -470,7 +480,7 @@ function setup(
       },
       internalBinding: {
         accountIdentityHash: options.readinessAccountHash ?? accountHash,
-        accountEvidenceHash: `sha256:${"a".repeat(64)}`,
+        accountEvidenceHash: accountHashEvidence,
       },
       accountEvidenceAgeMs: options.accountEvidenceAgeMs ?? 0,
       unrelatedCoverageGapCount: 0,
@@ -478,7 +488,7 @@ function setup(
       providerReasonCodes: [],
       warningCodes: [],
     };
-    return { readiness, state };
+    return { account, readiness, state };
   };
   const dependencies = {
     artifacts,
@@ -676,10 +686,15 @@ test("full fills with an active attached TP enter protection-pending and retain 
             parentOrderLinkId: clientOrderId,
             protectionType: "take-profit",
             instrument: approvedLeg.intent.instrument,
+            category: "linear",
             side: "sell",
+            orderType: "market",
             requestedQuantity: approvedLeg.intent.quantity.toString(),
             filledQuantity: "0",
             status: "open",
+            triggerPrice: approvedLeg.intent.protection!.takeProfit!.toString(),
+            reduceOnly: true,
+            positionIdx: 0,
             observedAt: state.currentTime.value,
             source: "bybit-mainnet/realtime",
           }),

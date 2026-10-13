@@ -43,6 +43,7 @@ import {
 } from "./prepared-leg-execution.js";
 import {
   createPreparedLegOrderProof,
+  matchesPreparedLegTakeProfitChild,
   matchesPreparedLegOrder,
   type PreparedLegOrderProof,
 } from "./prepared-leg-order-proof.js";
@@ -316,9 +317,54 @@ function projectedTargetPositionIsFlat(
   );
 }
 
+function isAccountTakeProfitChild(order: AccountOrderEvidence): boolean {
+  return (
+    order.orderLinkId === null &&
+    isKnown(order.stopOrderType) &&
+    order.stopOrderType.value === "TakeProfit"
+  );
+}
+
 function isActiveAccountOrder(order: AccountOrderEvidence): boolean {
   return (
     order.leavesQty.state !== "known" || order.leavesQty.value.isPositive()
+  );
+}
+
+function matchesAccountTakeProfitChild(
+  order: AccountOrderEvidence,
+  restOrder: ExchangeOrderObservation,
+  execution: PreparedLegExecution,
+): boolean {
+  const takeProfit = execution.leg.intent.protection?.takeProfit;
+  return (
+    takeProfit !== undefined &&
+    matchesPreparedLegTakeProfitChild(restOrder, execution) &&
+    isAccountTakeProfitChild(order) &&
+    order.category === "linear" &&
+    order.symbol === execution.leg.intent.instrument &&
+    order.orderId === restOrder.exchangeOrderId &&
+    (order.status === "New" || order.status === "Untriggered") &&
+    order.side === "Sell" &&
+    order.orderType === "Market" &&
+    isKnown(order.positionIdx) &&
+    order.positionIdx.value === 0 &&
+    isKnown(order.reduceOnly) &&
+    order.reduceOnly.value &&
+    isKnown(order.qty) &&
+    order.qty.unit === "contracts" &&
+    order.qty.value.compare(execution.leg.intent.quantity) === 0 &&
+    isKnown(order.cumExecQty) &&
+    order.cumExecQty.unit === "contracts" &&
+    order.cumExecQty.value.isZero() &&
+    isKnown(order.leavesQty) &&
+    order.leavesQty.unit === "contracts" &&
+    order.leavesQty.value.compare(execution.leg.intent.quantity) === 0 &&
+    isKnown(order.triggerPrice) &&
+    order.triggerPrice.unit === "price" &&
+    order.triggerPrice.value.compare(takeProfit) === 0 &&
+    isKnown(order.tpslMode) &&
+    order.tpslMode.value === "Full"
   );
 }
 
@@ -386,7 +432,7 @@ function checkTargetOrders(input: {
     prefix.map(({ execution }) => [execution.clientOrderId, execution]),
   );
   const restParents = new Map<string, PreparedLegOrderProof>();
-  const protectionChildren = new Set<string>();
+  const protectionChildren = new Map<string, ExchangeOrderObservation>();
 
   for (const order of input.state.openOrders) {
     if (order.instrument !== input.symbol) {
@@ -399,11 +445,17 @@ function checkTargetOrders(input: {
         parentId !== undefined &&
         order.clientOrderId === parentId &&
         order.protectionType === "take-profit" &&
-        prefixByClientId.has(parentId)
+        prefixByClientId.has(parentId) &&
+        matchesPreparedLegTakeProfitChild(
+          order,
+          prefixByClientId.get(parentId)!,
+        )
       ) {
-        if (protectionChildren.has(parentId))
+        if (protectionChildren.has(parentId)) {
           codes.add("ATTACHED_PROTECTION_CONTRADICTS_APPROVAL");
-        protectionChildren.add(parentId);
+        } else {
+          protectionChildren.set(parentId, order);
+        }
       } else {
         codes.add("ATTACHED_PROTECTION_CONTRADICTS_APPROVAL");
       }
@@ -437,12 +489,34 @@ function checkTargetOrders(input: {
   if (restParents.size !== input.prefixLength)
     codes.add("PREFIX_RECONCILIATION_MISMATCH");
 
-  const activeAccountOrders =
+  const targetAccountOrders =
     input.account.criticalPasses.B?.orders.filter(
       (order) => order.symbol === input.symbol && isActiveAccountOrder(order),
     ) ?? [];
+  const accountProtectionChildren = targetAccountOrders.filter(
+    isAccountTakeProfitChild,
+  );
+  const activeAccountOrders = targetAccountOrders.filter(
+    (order) => !isAccountTakeProfitChild(order),
+  );
   if (activeAccountOrders.length !== input.prefixLength)
     codes.add("PREFIX_RECONCILIATION_MISMATCH");
+  if (accountProtectionChildren.length !== protectionChildren.size)
+    codes.add("ATTACHED_PROTECTION_CONTRADICTS_APPROVAL");
+  for (const order of accountProtectionChildren) {
+    const restOrder = [...protectionChildren.values()].find(
+      (candidate) => candidate.exchangeOrderId === order.orderId,
+    );
+    const execution = restOrder
+      ? prefixByClientId.get(restOrder.clientOrderId)
+      : undefined;
+    if (
+      !restOrder ||
+      !execution ||
+      !matchesAccountTakeProfitChild(order, restOrder, execution)
+    )
+      codes.add("ATTACHED_PROTECTION_CONTRADICTS_APPROVAL");
+  }
   const accountOrderIds = new Set<string>();
   for (const order of activeAccountOrders) {
     const execution = prefixByClientId.get(order.orderLinkId ?? "");

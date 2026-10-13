@@ -109,16 +109,19 @@ not evaluate account capacity or risk approval; those belong to #17. Issue #31
 still owns the first deliberately authorized Mainnet write. This live command
 is excluded from default tests, `test:release` and CI.
 
-### Internal prepared-leg execution boundary (issue #21)
+### Internal prepared execution boundaries (issues #21 and #46)
 
-Issue #21 adds an application-level boundary for one exact approved Mainnet
-leg, but releases no operator command and no production authorization issuer
-or composition. The test-only authority fixture is not part of any operator
-entry point. `daily:approve` remains decision-only; a typed Mainnet writer in
-source is not operator authority or `LIVE_PROVEN` evidence. Do not invoke or
-synthesize write authority outside the #31-owned bounded canary. #31 remains
-the first deliberately authorized Mainnet write after the #30 release gate
-and applicable live-risk gate pass. #21 requires no live write or Testnet step.
+Issues #21 and #46 add application-level boundaries for one exact approved
+Mainnet leg and a bounded sequential approved grid. They release no operator
+command, production authorization issuer or composition. The grid boundary
+executes the exact approval in order under one lease and stops on a non-open,
+filled, ambiguous or otherwise unproven result; it is not an operator workflow.
+The test-only authority fixture is not part of any operator entry point.
+`daily:approve` remains decision-only; a typed Mainnet writer in source is not
+operator authority or `LIVE_PROVEN` evidence. Do not invoke or synthesize write
+authority outside the #31-owned bounded canary. #31 remains the first
+deliberately authorized Mainnet write after the #30 release gate and applicable
+live-risk gate pass. #21/#46 require no live write or Testnet step.
 
 ## Bybit public market evidence smoke (issue #11)
 

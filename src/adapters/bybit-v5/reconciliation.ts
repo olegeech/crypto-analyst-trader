@@ -130,6 +130,7 @@ function selectOwnedOrder(
         previous.timeInForce !== record.timeInForce ||
         !sameOptionalPrice(previous.takeProfit, record.takeProfit) ||
         !sameOptionalPrice(previous.stopLoss, record.stopLoss) ||
+        !sameOptionalPrice(previous.triggerPrice, record.triggerPrice) ||
         previous.price?.toString() !== record.price?.toString() ||
         previous.averagePrice?.toString() !== record.averagePrice?.toString() ||
         previous.protectionType !== record.protectionType)
@@ -233,6 +234,10 @@ export async function reconcileOrder(
           !sameOptionalPrice(
             existing.record.stopLoss,
             selected.value.record.stopLoss,
+          ) ||
+          !sameOptionalPrice(
+            existing.record.triggerPrice,
+            selected.value.record.triggerPrice,
           ) ||
           existing.record.price?.toString() !==
             selected.value.record.price?.toString() ||

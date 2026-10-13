@@ -93,6 +93,7 @@ export interface BybitOrderRecord {
   readonly category?: "linear";
   readonly orderType?: "limit" | "market";
   readonly timeInForce?: "GTC" | "IOC" | "FOK" | "PostOnly";
+  readonly triggerPrice?: DecimalValue;
   /** null means the provider explicitly returned no attached price. */
   readonly takeProfit?: DecimalValue | null;
   readonly stopLoss?: DecimalValue | null;
@@ -120,6 +121,9 @@ export function mapOrderObservation(
     ...(record.timeInForce === undefined
       ? {}
       : { timeInForce: record.timeInForce }),
+    ...(record.triggerPrice === undefined
+      ? {}
+      : { triggerPrice: record.triggerPrice.toString() }),
     ...(record.takeProfit === undefined
       ? {}
       : { takeProfit: record.takeProfit?.toString() ?? null }),
@@ -729,6 +733,7 @@ export function mapOrderRecords(
     const parentOrderLinkId = optionalText(record, "parentOrderLinkId", label);
     const status = orderStatus(text(record, "orderStatus", label), label);
     const price = optionalPositiveDecimal(record, "price", label);
+    const triggerPrice = optionalPositiveDecimal(record, "triggerPrice", label);
     const averagePrice = optionalPositiveDecimal(record, "avgPrice", label);
     const takeProfit = optionalOrderProtectionPrice(
       record,
@@ -755,6 +760,7 @@ export function mapOrderRecords(
       reduceOnly,
       ...(parentOrderLinkId === undefined ? {} : { parentOrderLinkId }),
       ...(price === undefined ? {} : { price }),
+      ...(triggerPrice === undefined ? {} : { triggerPrice }),
       ...(averagePrice === undefined ? {} : { averagePrice }),
       ...(orderType === undefined ? {} : { orderType }),
       ...(rawTimeInForce === undefined

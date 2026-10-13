@@ -260,7 +260,6 @@ export function validatePreparedLegGridShape(input: unknown): Result<true> {
     if (
       !closedRecord(candidate, legKeys) ||
       Reflect.ownKeys(candidate).length !== legKeys.length ||
-      !legKeys.every((key) => Object.hasOwn(candidate, key)) ||
       candidate.timeInForce !== "GTC" ||
       candidate.allocation === undefined ||
       !isRecord(candidate.intent)
@@ -389,16 +388,21 @@ function selectApprovedLeg(
     !prepared.summary.targetGate.relevantCoverageComplete
   )
     return invalid("prepared plan is not an approvable create-only ADD plan");
-  const matches = dailyPlan.candidateLegs.filter((leg) => leg.legId === legId);
-  if (
-    matches.length !== 1 ||
-    dailyPlan.candidateLegs.some(
-      (leg, index, all) =>
-        all.findIndex((candidate) => candidate.legId === leg.legId) !== index,
-    )
-  )
+  const seen = new Set<string>();
+  let selected: DailyCandidateLeg | undefined;
+  let selectedCount = 0;
+  let duplicateId = false;
+  for (const leg of dailyPlan.candidateLegs) {
+    if (seen.has(leg.legId)) duplicateId = true;
+    else seen.add(leg.legId);
+    if (leg.legId === legId) {
+      selected = leg;
+      selectedCount += 1;
+    }
+  }
+  if (selectedCount !== 1 || duplicateId)
     return invalid("selected leg is missing or ambiguous in the approved grid");
-  const leg = matches[0]!;
+  const leg = selected!;
   if (
     leg.intent.instrument !== prepared.summary.symbol ||
     leg.intent.orderType !== "limit" ||
