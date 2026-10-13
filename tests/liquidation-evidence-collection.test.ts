@@ -786,6 +786,60 @@ test("decision v3 requires a full catalogue snapshot", async () => {
   );
 });
 
+test("decision v3 rejects inconsistent complete catalogue projections without reconstructing sparse zeros", async () => {
+  const binance = market("BTC", "BINANCE");
+  const bybit = market("BTC", "BYBIT");
+  const missingBucket = LAST_CLOSED_BUCKET - 8 * LIQUIDATION_HOUR_MS;
+  const result = await harness({
+    markets: [binance, bybit],
+    catalogueSnapshot: [binance],
+    histories: (request) => ({
+      histories: completeHistories(request.symbols, {
+        missing: new Map([[binance.symbol, missingBucket]]),
+      }),
+      responseValid: true,
+      diagnostics: [],
+    }),
+  }).collect("decision", "BTC");
+
+  assert.equal(result.ok, true);
+  if (
+    !result.ok ||
+    result.value.bundle.schemaVersion !== "liquidation-evidence/v3"
+  )
+    return;
+
+  const constituent = result.value.bundle.targets[0]?.constituents[0];
+  assert.equal(result.value.bundle.status, "incomplete");
+  assert.equal(result.value.bundle.coverageProof, "incomplete");
+  assert.equal(result.value.bundle.historyProof, "incomplete");
+  assert.deepEqual(
+    result.value.bundle.targets[0]?.constituents.map(
+      ({ exchange }) => exchange,
+    ),
+    ["BINANCE"],
+  );
+  assert.equal(
+    result.value.bundle.diagnostics.some(
+      ({ code, operation }) =>
+        code === "invalid-catalogue" && operation === "discover-markets",
+    ),
+    true,
+  );
+  assert.equal(
+    constituent?.observations.some(
+      ({ timestamp: observedAt }) => observedAt === timestamp(missingBucket),
+    ),
+    false,
+  );
+  assert.equal(
+    constituent?.observations.some(
+      ({ provenance }) => provenance === "provider-implied-zero",
+    ),
+    false,
+  );
+});
+
 test("complete catalogue with validated sparse history reconstructs omitted buckets as v2 implied zeros", async () => {
   const target = targetMarkets();
   const btcSymbol = target.find(({ baseAsset }) => baseAsset === "BTC")?.symbol;

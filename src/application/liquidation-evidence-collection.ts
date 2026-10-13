@@ -237,6 +237,46 @@ function sameMarket(left: CoinalyzeMarket, right: CoinalyzeMarket): boolean {
   );
 }
 
+function completeCatalogueProjectionsMatch(
+  marketsValue: unknown,
+  snapshotValue: unknown,
+): boolean {
+  if (!Array.isArray(marketsValue) || !Array.isArray(snapshotValue))
+    return false;
+
+  const uniqueMarkets = (
+    rows: readonly unknown[],
+  ): Map<string, CoinalyzeMarket> | undefined => {
+    const byContract = new Map<string, CoinalyzeMarket>();
+    for (const rawMarket of rows) {
+      const market = parseMarket(rawMarket);
+      if (market === undefined) return undefined;
+      const key = marketContractKey(market);
+      const previous = byContract.get(key);
+      if (previous !== undefined && !sameMarket(previous, market))
+        return undefined;
+      byContract.set(key, market);
+    }
+    return byContract;
+  };
+
+  const markets = uniqueMarkets(marketsValue);
+  const snapshot = uniqueMarkets(snapshotValue);
+  if (
+    markets === undefined ||
+    snapshot === undefined ||
+    markets.size !== snapshot.size
+  ) {
+    return false;
+  }
+  for (const [key, market] of markets) {
+    const snapshotMarket = snapshot.get(key);
+    if (snapshotMarket === undefined || !sameMarket(market, snapshotMarket))
+      return false;
+  }
+  return true;
+}
+
 function appendProviderDiagnostics(
   diagnostics: LiquidationEvidenceDiagnosticInput[],
   input: unknown,
@@ -280,15 +320,23 @@ function normalizeCatalogue(
 
   let coverageComplete = value.complete;
   const snapshotProvided = Array.isArray(value.catalogueSnapshot);
+  if (
+    decisionScoped &&
+    (!snapshotProvided ||
+      (value.complete &&
+        !completeCatalogueProjectionsMatch(
+          value.markets,
+          value.catalogueSnapshot,
+        )))
+  ) {
+    coverageComplete = false;
+    diagnostics.push(makeDiagnostic("invalid-catalogue", "discover-markets"));
+  }
   const catalogueRows: readonly unknown[] =
     decisionScoped && Array.isArray(value.catalogueSnapshot)
       ? value.catalogueSnapshot
       : value.markets;
   const snapshotMarkets: CoinalyzeMarket[] = [];
-  if (decisionScoped && !snapshotProvided) {
-    coverageComplete = false;
-    diagnostics.push(makeDiagnostic("invalid-catalogue", "discover-markets"));
-  }
   const diagnosticsValid = appendProviderDiagnostics(
     diagnostics,
     value.diagnostics,
