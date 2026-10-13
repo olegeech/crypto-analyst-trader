@@ -16,10 +16,21 @@ import { requireDailyFixture as value } from "./daily-planning-evidence-fixtures
 
 const EVALUATION_TIME = "2026-09-24T14:00:02.000Z";
 
-export function preparedLegExecutionFixture() {
+export function preparedLegExecutionFixture(
+  options: {
+    readonly planningLevels?: readonly {
+      readonly atrOffset: string;
+      readonly allocationWeight: string;
+      readonly takeProfitAtrDistance: string;
+    }[];
+  } = {},
+) {
   const planning = portfolioRiskPlanningFixture({
     recommendation: "ADD_LONG",
     fundingRate: "0",
+    ...(options.planningLevels === undefined
+      ? {}
+      : { planningLevels: options.planningLevels }),
   });
   const composition = value(
     createProvisionalM1Composition({ symbol: "BTCUSDT", allocation: "10" }),
