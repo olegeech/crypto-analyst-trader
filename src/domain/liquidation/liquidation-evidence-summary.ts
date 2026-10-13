@@ -1,7 +1,8 @@
 import {
-  LIQUIDATION_EVIDENCE_V2_SCHEMA_VERSION,
+  LIQUIDATION_EVIDENCE_SCHEMA_VERSION,
   type LiquidationEvidenceBundle as LiquidationEvidenceBundleV1,
   type LiquidationEvidenceBundleV2,
+  type LiquidationEvidenceBundleV3,
   type VersionedLiquidationEvidenceBundle,
 } from "./liquidation-evidence-bundle.js";
 import { LIQUIDATION_HISTORY_BUCKETS } from "./liquidation-evidence-windows.js";
@@ -17,14 +18,19 @@ interface LiquidationEvidenceBucketSummaryBase {
 export interface LiquidationEvidenceBucketSummaryV1 extends LiquidationEvidenceBucketSummaryBase {
   readonly constituentsWithProviderRows: null;
   readonly providerExplicitBuckets: null;
+  readonly providerExplicitZeroBuckets: null;
   readonly providerImpliedZeroBuckets: null;
 }
 
 export interface LiquidationEvidenceBucketSummaryV2 extends LiquidationEvidenceBucketSummaryBase {
+  /** Constituents with at least one provider-explicit row, not reconstructed rows. */
   readonly constituentsWithProviderRows: number;
   readonly providerExplicitBuckets: number;
+  readonly providerExplicitZeroBuckets: number;
   readonly providerImpliedZeroBuckets: number;
 }
+export type LiquidationEvidenceBucketSummaryV3 =
+  LiquidationEvidenceBucketSummaryV2;
 
 export function summarizeLiquidationEvidenceBuckets(
   bundle: LiquidationEvidenceBundleV1,
@@ -33,16 +39,26 @@ export function summarizeLiquidationEvidenceBuckets(
   bundle: LiquidationEvidenceBundleV2,
 ): LiquidationEvidenceBucketSummaryV2;
 export function summarizeLiquidationEvidenceBuckets(
-  bundle: VersionedLiquidationEvidenceBundle,
-): LiquidationEvidenceBucketSummaryV1 | LiquidationEvidenceBucketSummaryV2;
+  bundle: LiquidationEvidenceBundleV3,
+): LiquidationEvidenceBucketSummaryV3;
 export function summarizeLiquidationEvidenceBuckets(
   bundle: VersionedLiquidationEvidenceBundle,
-): LiquidationEvidenceBucketSummaryV1 | LiquidationEvidenceBucketSummaryV2 {
+):
+  | LiquidationEvidenceBucketSummaryV1
+  | LiquidationEvidenceBucketSummaryV2
+  | LiquidationEvidenceBucketSummaryV3;
+export function summarizeLiquidationEvidenceBuckets(
+  bundle: VersionedLiquidationEvidenceBundle,
+):
+  | LiquidationEvidenceBucketSummaryV1
+  | LiquidationEvidenceBucketSummaryV2
+  | LiquidationEvidenceBucketSummaryV3 {
   let eligibleConstituents = 0;
   let constituentsWithResolvedGrid = 0;
   let resolvedHourlyBuckets = 0;
   let constituentsWithProviderRows = 0;
   let providerExplicitBuckets = 0;
+  let providerExplicitZeroBuckets = 0;
   let providerImpliedZeroBuckets = 0;
 
   for (const target of bundle.targets) {
@@ -58,6 +74,9 @@ export function summarizeLiquidationEvidenceBuckets(
           if (observation.provenance === "provider-explicit") {
             providerExplicitBuckets += 1;
             hasProviderRows = true;
+            if (observation.longUsd.isZero() && observation.shortUsd.isZero()) {
+              providerExplicitZeroBuckets += 1;
+            }
           } else {
             providerImpliedZeroBuckets += 1;
           }
@@ -80,11 +99,12 @@ export function summarizeLiquidationEvidenceBuckets(
     ),
   };
 
-  if (bundle.schemaVersion === LIQUIDATION_EVIDENCE_V2_SCHEMA_VERSION) {
+  if (bundle.schemaVersion !== LIQUIDATION_EVIDENCE_SCHEMA_VERSION) {
     return Object.freeze({
       ...base,
       constituentsWithProviderRows,
       providerExplicitBuckets,
+      providerExplicitZeroBuckets,
       providerImpliedZeroBuckets,
     });
   }
@@ -93,6 +113,7 @@ export function summarizeLiquidationEvidenceBuckets(
     ...base,
     constituentsWithProviderRows: null,
     providerExplicitBuckets: null,
+    providerExplicitZeroBuckets: null,
     providerImpliedZeroBuckets: null,
   });
 }

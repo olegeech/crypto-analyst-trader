@@ -56,10 +56,13 @@ import {
 } from "../market/market-evidence-bundle.js";
 import {
   createLiquidationEvidenceBundleV2,
+  createLiquidationEvidenceBundleV3,
   LIQUIDATION_EVIDENCE_SCHEMA_VERSION,
   LIQUIDATION_EVIDENCE_V2_SCHEMA_VERSION,
+  LIQUIDATION_EVIDENCE_V3_SCHEMA_VERSION,
   rehydrateLiquidationEvidenceBundle,
   type LiquidationEvidenceBundleV2,
+  type LiquidationEvidenceBundleV3,
   type LiquidationEvidenceBundle,
 } from "../liquidation/liquidation-evidence-bundle.js";
 import {
@@ -166,6 +169,7 @@ export type RehydratedArtifact =
   | MarketEvidenceBundle
   | LiquidationEvidenceBundle
   | LiquidationEvidenceBundleV2
+  | LiquidationEvidenceBundleV3
   | AnalyticsEvidenceBundle
   | PortfolioRiskPreflight
   | DataQualityAssessment
@@ -532,6 +536,10 @@ const liquidationEvidenceBundleV2ValidationSchema: Schema = {
   kind: "validated",
   validate: createLiquidationEvidenceBundleV2,
 };
+const liquidationEvidenceBundleV3ValidationSchema: Schema = {
+  kind: "validated",
+  validate: createLiquidationEvidenceBundleV3,
+};
 
 const liquidationEvidenceBundleSchema: Schema = {
   kind: "versioned",
@@ -542,6 +550,9 @@ const liquidationEvidenceBundleSchema: Schema = {
     }
     if (value.schemaVersion === LIQUIDATION_EVIDENCE_V2_SCHEMA_VERSION) {
       return liquidationEvidenceBundleV2ValidationSchema;
+    }
+    if (value.schemaVersion === LIQUIDATION_EVIDENCE_V3_SCHEMA_VERSION) {
+      return liquidationEvidenceBundleV3ValidationSchema;
     }
     return undefined;
   },
@@ -1528,7 +1539,11 @@ export function rehydrateArtifact(
 export function rehydrateArtifact(
   artifactKind: "liquidation-evidence-bundle",
   envelope: unknown,
-): Result<LiquidationEvidenceBundle | LiquidationEvidenceBundleV2>;
+): Result<
+  | LiquidationEvidenceBundle
+  | LiquidationEvidenceBundleV2
+  | LiquidationEvidenceBundleV3
+>;
 export function rehydrateArtifact(
   artifactKind: "analytics-evidence-bundle",
   envelope: unknown,

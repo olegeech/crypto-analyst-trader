@@ -27,6 +27,38 @@ import {
   type LiquidationWindowEvidence,
 } from "./liquidation-evidence-windows.js";
 import { liquidationObservationKey } from "./liquidation-observation-key.js";
+import {
+  LIQUIDATION_EVIDENCE_ASSETS,
+  isLiquidationTargetAsset,
+  LIQUIDATION_EVIDENCE_V2_PROVIDER_SEMANTIC_IDENTITY,
+  type LiquidationTargetAsset,
+} from "./liquidation-evidence-contracts.js";
+import {
+  createLiquidationEvidenceBundleV3,
+  LIQUIDATION_EVIDENCE_V3_SCHEMA_VERSION,
+  type LiquidationEvidenceBundleV3,
+} from "./liquidation-evidence-v3.js";
+
+export {
+  LIQUIDATION_EVIDENCE_ASSETS,
+  LIQUIDATION_EVIDENCE_PRODUCER,
+  LIQUIDATION_EVIDENCE_V2_PROVIDER_SEMANTIC_IDENTITY,
+  type LiquidationTargetAsset,
+} from "./liquidation-evidence-contracts.js";
+export {
+  createLiquidationEvidenceBundleV3,
+  DECISION_COVERAGE_POLICY_VERSION,
+  LIQUIDATION_EVIDENCE_V3_POLICY_VERSION,
+  LIQUIDATION_EVIDENCE_V3_SCHEMA_VERSION,
+  selectDecisionLiquidationMarkets,
+  type DecisionLiquidationMarketSelection,
+  type DecisionLiquidationMarketSelectionEvidence,
+  type LiquidationCatalogueMarket,
+  type LiquidationEvidenceBundleV3,
+  type LiquidationEvidenceBundleV3Input,
+  type LiquidationMarketExclusion,
+  type LiquidationMarketExclusionReason,
+} from "./liquidation-evidence-v3.js";
 
 export {
   createLiquidationEvidenceDiagnostic,
@@ -50,21 +82,8 @@ export const LIQUIDATION_EVIDENCE_SCHEMA_VERSION =
   "liquidation-evidence/v1" as const;
 export const LIQUIDATION_EVIDENCE_V2_SCHEMA_VERSION =
   "liquidation-evidence/v2" as const;
-export const LIQUIDATION_EVIDENCE_V2_PROVIDER_SEMANTIC_IDENTITY =
-  "coinalyze-sparse-zero/v1" as const;
-export const LIQUIDATION_EVIDENCE_PRODUCER =
-  "crypto-analyst-trader/coinalyze-liquidation" as const;
 export const LIQUIDATION_EVIDENCE_POLICY_VERSION =
   "liquidation-market-aggregate/v1" as const;
-export const LIQUIDATION_EVIDENCE_ASSETS = Object.freeze([
-  "BTC",
-  "ETH",
-  "SOL",
-  "DOGE",
-] as const);
-
-export type LiquidationTargetAsset =
-  (typeof LIQUIDATION_EVIDENCE_ASSETS)[number];
 export type LiquidationProofStatus = "complete" | "incomplete";
 export type LiquidationEvidenceStatus = "complete" | "incomplete" | "failed";
 
@@ -226,7 +245,9 @@ export interface LiquidationEvidenceBundleV2Input extends Omit<
 }
 
 export type VersionedLiquidationEvidenceBundle =
-  LiquidationEvidenceBundle | LiquidationEvidenceBundleV2;
+  | LiquidationEvidenceBundle
+  | LiquidationEvidenceBundleV2
+  | LiquidationEvidenceBundleV3;
 
 type ProofStatusInput = LiquidationProofStatus;
 
@@ -258,13 +279,6 @@ function decimal(value: unknown, field: string): Result<DecimalValue> {
     );
   }
   return parsed;
-}
-
-function isTargetAsset(value: unknown): value is LiquidationTargetAsset {
-  return (
-    typeof value === "string" &&
-    LIQUIDATION_EVIDENCE_ASSETS.some((asset) => asset === value)
-  );
 }
 
 function parseMarketEvidenceIdentity(
@@ -352,7 +366,7 @@ function parseConstituent(
     !expireAt.ok ||
     !notionalDenominatedIn.ok ||
     value.baseAsset !== asset ||
-    !isTargetAsset(value.baseAsset) ||
+    !isLiquidationTargetAsset(value.baseAsset) ||
     value.isPerpetual !== true ||
     !Array.isArray(value.observations)
   ) {
@@ -494,7 +508,7 @@ function parseTarget(
   value: unknown,
   bundleCutoff: UtcTimestamp,
 ): Result<LiquidationTargetEvidence> {
-  if (!isRecord(value) || !isTargetAsset(value.asset)) {
+  if (!isRecord(value) || !isLiquidationTargetAsset(value.asset)) {
     return invalid("liquidation target asset is invalid");
   }
   if (!Array.isArray(value.constituents)) {
@@ -940,6 +954,9 @@ export function rehydrateLiquidationEvidenceBundle(
   }
   if (input.schemaVersion === LIQUIDATION_EVIDENCE_V2_SCHEMA_VERSION) {
     return createLiquidationEvidenceBundleV2(input);
+  }
+  if (input.schemaVersion === LIQUIDATION_EVIDENCE_V3_SCHEMA_VERSION) {
+    return createLiquidationEvidenceBundleV3(input);
   }
   return fail(
     domainError(

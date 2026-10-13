@@ -18,6 +18,10 @@ import type {
   ExchangeCredentials,
 } from "../ports/credential-provider.js";
 import type { LiquidationEvidenceCollectionResult } from "../ports/liquidation-evidence.js";
+import {
+  LIQUIDATION_EVIDENCE_V3_SCHEMA_VERSION,
+  type LiquidationTargetAsset,
+} from "../domain/liquidation/liquidation-evidence-bundle.js";
 import type { PortfolioRiskEvidenceReaderFactory } from "../ports/portfolio-risk-evidence.js";
 import type { PreparedArtifactStore } from "../ports/prepared-artifact-store.js";
 import type {
@@ -43,6 +47,7 @@ export interface DailyPrepareDependencies {
   ) => Promise<Result<MarketEvidenceBundle>>;
   readonly collectLiquidation: (
     market: MarketEvidenceBundle,
+    selectedAsset: LiquidationTargetAsset,
   ) => Promise<Result<LiquidationEvidenceCollectionResult>>;
   readonly collectAccount: typeof collectAccountEvidence;
   readonly credentialLoader: Pick<CredentialProvider, "load">;
@@ -70,10 +75,18 @@ export interface DailyPrepareDiagnostics {
   readonly coverageProof: string;
   readonly historyProof: string;
   readonly liquidationSchemaVersion: string;
+  readonly liquidationPolicyVersion: string | null;
+  readonly liquidationSelectedAsset: string | null;
+  readonly liquidationCatalogueMarketCount: number | null;
+  readonly liquidationExcludedMarketCount: number | null;
+  readonly liquidationCatalogueHash: string | null;
+  readonly liquidationSelectedSetHash: string | null;
+  readonly liquidationEvidenceHash: string | null;
   readonly eligibleConstituents: number;
   readonly expectedHourlyBuckets: number;
   readonly resolvedHourlyBuckets: number;
   readonly providerExplicitBuckets: number | null;
+  readonly providerExplicitZeroBuckets: number | null;
   readonly providerImpliedZeroBuckets: number | null;
   readonly unresolvedRequestedBuckets: number | null;
   readonly requiredLiquidationWindows: readonly RequiredLiquidationWindowDiagnostic[];
@@ -132,10 +145,18 @@ export function createDailyPrepareBoundary(deps: DailyPrepareDependencies) {
         coverageProof: "not-collected",
         historyProof: "not-collected",
         liquidationSchemaVersion: "not-collected",
+        liquidationPolicyVersion: null,
+        liquidationSelectedAsset: null,
+        liquidationCatalogueMarketCount: null,
+        liquidationExcludedMarketCount: null,
+        liquidationCatalogueHash: null,
+        liquidationSelectedSetHash: null,
+        liquidationEvidenceHash: null,
         eligibleConstituents: 0,
         expectedHourlyBuckets: 0,
         resolvedHourlyBuckets: 0,
         providerExplicitBuckets: null,
+        providerExplicitZeroBuckets: null,
         providerImpliedZeroBuckets: null,
         unresolvedRequestedBuckets: null,
         accountPartitionsTraversed: 0,
@@ -205,10 +226,17 @@ export function createDailyPrepareBoundary(deps: DailyPrepareDependencies) {
         if (market.value.status !== "complete")
           return failure("blocked", ["MARKET_EVIDENCE_INCOMPLETE"]);
         stage = "liquidation";
-        const liquidation = await deps.collectLiquidation(market.value);
+        const liquidation = await deps.collectLiquidation(
+          market.value,
+          composition.selectedAsset,
+        );
         if (!liquidation.ok)
           return failure("unavailable", ["LIQUIDATION_COLLECTION_UNAVAILABLE"]);
         const l = liquidation.value.bundle;
+        if (l.schemaVersion !== LIQUIDATION_EVIDENCE_V3_SCHEMA_VERSION)
+          return failure("blocked", ["LIQUIDATION_SCHEMA_MISMATCH"]);
+        if (l.selection.selectedAsset !== composition.selectedAsset)
+          return failure("blocked", ["LIQUIDATION_ASSET_MISMATCH"]);
         requiredLiquidationWindows = summarizeRequiredLiquidationWindows(
           composition.analyticsProfile,
           market.value,
@@ -218,6 +246,18 @@ export function createDailyPrepareBoundary(deps: DailyPrepareDependencies) {
         diagnostics.coverageProof = l.coverageProof;
         diagnostics.historyProof = l.historyProof;
         diagnostics.liquidationSchemaVersion = l.schemaVersion;
+        diagnostics.liquidationEvidenceHash =
+          liquidation.value.artifact.canonicalHash;
+        diagnostics.liquidationPolicyVersion = l.policyVersion;
+        if (l.schemaVersion === LIQUIDATION_EVIDENCE_V3_SCHEMA_VERSION) {
+          diagnostics.liquidationSelectedAsset = l.selection.selectedAsset;
+          diagnostics.liquidationCatalogueMarketCount =
+            l.selection.catalogueMarkets.length;
+          diagnostics.liquidationExcludedMarketCount =
+            l.selection.exclusions.length;
+          diagnostics.liquidationCatalogueHash = l.selection.catalogueHash;
+          diagnostics.liquidationSelectedSetHash = l.selection.selectedSetHash;
+        }
         const bucketSummary = summarizeLiquidationEvidenceBuckets(l);
         diagnostics.eligibleConstituents = bucketSummary.eligibleConstituents;
         diagnostics.expectedHourlyBuckets = bucketSummary.expectedHourlyBuckets;
@@ -225,6 +265,8 @@ export function createDailyPrepareBoundary(deps: DailyPrepareDependencies) {
         if (bucketSummary.providerExplicitBuckets !== null) {
           diagnostics.providerExplicitBuckets =
             bucketSummary.providerExplicitBuckets;
+          diagnostics.providerExplicitZeroBuckets =
+            bucketSummary.providerExplicitZeroBuckets;
           diagnostics.providerImpliedZeroBuckets =
             bucketSummary.providerImpliedZeroBuckets;
           diagnostics.unresolvedRequestedBuckets =

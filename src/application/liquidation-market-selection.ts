@@ -3,6 +3,16 @@ import {
   type LiquidationTargetAsset,
 } from "../domain/liquidation/liquidation-evidence-bundle.js";
 import type { CoinalyzeMarket } from "../ports/coinalyze-liquidation-data.js";
+import { type LiquidationCatalogueMarket } from "../domain/liquidation/liquidation-evidence-v3.js";
+
+export {
+  DECISION_COVERAGE_POLICY_VERSION,
+  selectDecisionLiquidationMarkets,
+  type DecisionLiquidationMarketSelection,
+  type DecisionLiquidationMarketSelectionEvidence,
+  type LiquidationMarketExclusion,
+  type LiquidationMarketExclusionReason,
+} from "../domain/liquidation/liquidation-evidence-v3.js";
 
 export interface SelectedLiquidationMarket extends CoinalyzeMarket {
   readonly asset: LiquidationTargetAsset;
@@ -50,3 +60,5 @@ export function sampleLiquidationMarkets(
     }),
   );
 }
+
+export type { LiquidationCatalogueMarket };

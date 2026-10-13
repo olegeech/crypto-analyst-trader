@@ -19,6 +19,14 @@ import { deepFreeze } from "../../domain/shared/deep-freeze.js";
 import { domainError } from "../../domain/shared/errors.js";
 import { fail, ok } from "../../domain/shared/result.js";
 import { closedRecord } from "../../domain/planning/planning-validation.js";
+import type { LiquidationTargetAsset } from "../../domain/liquidation/liquidation-evidence-bundle.js";
+
+const M1_ASSET_BY_SYMBOL = Object.freeze({
+  BTCUSDT: "BTC",
+  ETHUSDT: "ETH",
+  SOLUSDT: "SOL",
+  DOGEUSDT: "DOGE",
+} as const satisfies Record<string, LiquidationTargetAsset>);
 
 export const PROVISIONAL_M1_POLICY_VERSION = "provisional-m1-v1" as const;
 export const PROVISIONAL_M1_MAX_ACCOUNT_EVIDENCE_AGE_MS = 60_000 as const;
@@ -58,12 +66,7 @@ export function createProvisionalM1Composition(input: unknown) {
     );
   }
   const symbol = input.symbol;
-  const asset = {
-    BTCUSDT: "BTC",
-    ETHUSDT: "ETH",
-    SOLUSDT: "SOL",
-    DOGEUSDT: "DOGE",
-  }[symbol];
+  const asset = M1_ASSET_BY_SYMBOL[symbol];
   const version = PROVISIONAL_M1_POLICY_VERSION;
   const analyticsProfile = createAnalyticsProfile({
     schemaVersion: "analytics-profile/v1",
@@ -258,6 +261,7 @@ export function createProvisionalM1Composition(input: unknown) {
     deepFreeze({
       policyVersion: version,
       symbol,
+      selectedAsset: asset,
       allocation: allocation.value,
       analyticsProfile: analyticsProfile.value,
       analyticsFeaturesVersion: ANALYTICS_FEATURES_VERSION_V2,

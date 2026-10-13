@@ -1,6 +1,7 @@
 import { hashCanonical } from "../identity/canonical-serialization.js";
 import {
   LIQUIDATION_EVIDENCE_V2_SCHEMA_VERSION,
+  LIQUIDATION_EVIDENCE_V3_SCHEMA_VERSION,
   type VersionedLiquidationEvidenceBundle,
 } from "../liquidation/liquidation-evidence-bundle.js";
 import {
@@ -23,8 +24,10 @@ export interface AnalyticsInputIdentity {
   readonly liquidationBundleCutoff?: UtcTimestamp;
   readonly liquidationMarketContentHash?: string;
   readonly liquidationBundleHash?: string;
-  /** Present only when the source uses the v2 provider-semantic contract. */
-  readonly liquidationEvidenceSchemaVersion?: typeof LIQUIDATION_EVIDENCE_V2_SCHEMA_VERSION;
+  /** Omitted for historical v1 inputs; version-bound for v2/v3 sources. */
+  readonly liquidationEvidenceSchemaVersion?:
+    | typeof LIQUIDATION_EVIDENCE_V2_SCHEMA_VERSION
+    | typeof LIQUIDATION_EVIDENCE_V3_SCHEMA_VERSION;
   readonly compatibility: "compatible" | "incompatible";
   readonly reasonCodes: readonly AnalyticsReasonCode[];
 }
@@ -75,7 +78,9 @@ export function createAnalyticsInputIdentity(
       liquidationBundleCutoff: liquidation.bundleCutoff,
       liquidationMarketContentHash: liquidation.marketEvidence.contentHash,
       liquidationBundleHash: liquidationBundleHash.value,
-      ...(liquidation.schemaVersion === LIQUIDATION_EVIDENCE_V2_SCHEMA_VERSION
+      ...(liquidation.schemaVersion ===
+        LIQUIDATION_EVIDENCE_V2_SCHEMA_VERSION ||
+      liquidation.schemaVersion === LIQUIDATION_EVIDENCE_V3_SCHEMA_VERSION
         ? { liquidationEvidenceSchemaVersion: liquidation.schemaVersion }
         : {}),
       compatibility: compatible ? "compatible" : "incompatible",

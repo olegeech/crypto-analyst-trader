@@ -10,6 +10,11 @@ import {
 } from "../src/domain/quality/quality-profile.js";
 import { parseUtcTimestamp } from "../src/domain/shared/time.js";
 import {
+  dailyPrepareLiquidationV2,
+  dailyPrepareLiquidationV3,
+  dailyPrepareMarket,
+} from "./fixtures/daily-prepare-fixtures.js";
+import {
   marketFixture,
   liquidationFixture,
   liquidationFixtureRef,
@@ -434,6 +439,106 @@ test("analytics uses existing market full-bundle and content links", () => {
   assert.deepEqual(
     classifyQualityEvidence(records, profile(), time(), time()),
     classifyQualityEvidence([...records].reverse(), profile(), time(), time()),
+  );
+});
+
+test("quality rejects analytics liquidation-schema claims that mismatch v3 source", () => {
+  const market = dailyPrepareMarket();
+  const liquidation = dailyPrepareLiquidationV3(market, "BTC").bundle;
+  const analytics = analyticsFixture(market, { liquidation });
+  const liquidationRecord = admitQualitySource({
+    role: "liquidation",
+    value: liquidation,
+  });
+
+  const mismatchedIdentity = {
+    ...analytics.inputIdentity,
+    liquidationEvidenceSchemaVersion: "liquidation-evidence/v2" as const,
+  };
+  const { contentHash: ignoredHash, ...payload } = analytics;
+  assert.ok(ignoredHash);
+  const mismatchedPayload = {
+    ...payload,
+    inputIdentity: mismatchedIdentity,
+  };
+  const mismatchedAnalytics = {
+    ...mismatchedPayload,
+    contentHash: fixtureCanonicalHash(mismatchedPayload),
+  };
+
+  const omittedIdentity = {
+    ...analytics.inputIdentity,
+  };
+  delete (omittedIdentity as { liquidationEvidenceSchemaVersion?: string })
+    .liquidationEvidenceSchemaVersion;
+  const omittedPayload = {
+    ...payload,
+    inputIdentity: omittedIdentity,
+  };
+  const omittedAnalytics = {
+    ...omittedPayload,
+    contentHash: fixtureCanonicalHash(omittedPayload),
+  };
+
+  for (const value of [mismatchedAnalytics, omittedAnalytics]) {
+    const findings = classifyQualityEvidence(
+      [
+        admitQualitySource({ role: "market", value: market }),
+        liquidationRecord,
+        admitQualitySource({ role: "analytics", value }),
+      ],
+      profile(),
+      market.bundleCutoff,
+      market.bundleCutoff,
+    );
+    assert.ok(
+      findings.some(
+        (finding) =>
+          finding.role === "analytics" &&
+          finding.reasonCode === "LINEAGE_MISMATCH" &&
+          finding.blocking,
+      ),
+    );
+  }
+
+  const legacyLiquidation = dailyPrepareLiquidationV2(market).bundle;
+  const legacyAnalytics = analyticsFixture(market, {
+    liquidation: legacyLiquidation,
+  });
+  const { contentHash: legacyHash, ...legacyPayload } = legacyAnalytics;
+  assert.ok(legacyHash);
+  const {
+    liquidationEvidenceSchemaVersion: omittedVersion,
+    ...legacyIdentity
+  } = legacyAnalytics.inputIdentity;
+  assert.ok(omittedVersion);
+  const legacyPayloadWithoutVersion = {
+    ...legacyPayload,
+    inputIdentity: legacyIdentity,
+  };
+  const legacyAnalyticsWithoutVersion = {
+    ...legacyPayloadWithoutVersion,
+    contentHash: fixtureCanonicalHash(legacyPayloadWithoutVersion),
+  };
+  const legacyFindings = classifyQualityEvidence(
+    [
+      admitQualitySource({ role: "market", value: market }),
+      admitQualitySource({ role: "liquidation", value: legacyLiquidation }),
+      admitQualitySource({
+        role: "analytics",
+        value: legacyAnalyticsWithoutVersion,
+      }),
+    ],
+    profile(),
+    market.bundleCutoff,
+    market.bundleCutoff,
+  );
+  assert.ok(
+    !legacyFindings.some(
+      (finding) =>
+        finding.role === "analytics" &&
+        finding.reasonCode === "LINEAGE_MISMATCH",
+    ),
   );
 });
 

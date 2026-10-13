@@ -10,6 +10,9 @@ import {
   LIQUIDATION_EVIDENCE_POLICY_VERSION,
   LIQUIDATION_EVIDENCE_V2_PROVIDER_SEMANTIC_IDENTITY,
   LIQUIDATION_EVIDENCE_V2_SCHEMA_VERSION,
+  createLiquidationEvidenceBundleV3,
+  LIQUIDATION_EVIDENCE_V3_SCHEMA_VERSION,
+  LIQUIDATION_HISTORY_BUCKETS,
   type LiquidationEvidenceBundleInput,
   type LiquidationEvidenceBundleV2Input,
   type LiquidationObservationProvenance,
@@ -22,10 +25,16 @@ import {
 } from "../src/domain/identity/canonical-artifact.js";
 import { createEvidenceRef } from "../src/domain/evidence/evidence-ref.js";
 import { DecimalValue } from "../src/domain/shared/decimal.js";
+import { selectDecisionLiquidationMarkets } from "../src/application/liquidation-market-selection.js";
+import type { LiquidationCatalogueMarket } from "../src/domain/liquidation/liquidation-evidence-v3.js";
 import {
   LIQUIDATION_EVIDENCE_V1_GOLDEN_HASH,
   liquidationEvidenceV1GoldenInput,
 } from "./fixtures/liquidation-evidence-v1-golden.js";
+import {
+  LIQUIDATION_EVIDENCE_V2_GOLDEN_HASH,
+  liquidationEvidenceV2GoldenInput,
+} from "./fixtures/liquidation-evidence-v2-golden.js";
 
 const HOUR_MS = 60 * 60 * 1_000;
 const CUTOFF = "2026-09-24T12:30:00.000Z";
@@ -132,6 +141,80 @@ function inputV2(
         })),
       })),
     })),
+    ...overrides,
+  };
+}
+
+function inputV3(overrides: Record<string, unknown> = {}) {
+  const selectedCatalogueMarket = {
+    symbol: "BTCUSDT_PERP.BYBIT",
+    exchange: "bybit",
+    symbolOnExchange: "BTCUSDT",
+    baseAsset: "BTC",
+    quoteAsset: "USDT",
+    isPerpetual: true,
+    marginType: "STABLE",
+    expireAt: 0,
+    notionalDenominatedIn: "USD",
+  };
+  const selected = selectDecisionLiquidationMarkets({
+    asset: "BTC",
+    markets: [selectedCatalogueMarket],
+    catalogueComplete: true,
+    cutoffMs: Date.parse(CUTOFF),
+  });
+  assert.equal(selected.ok, true);
+  if (!selected.ok) throw new Error("invalid v3 selection fixture");
+  const selectedMarket = market("BTC", "bybit");
+  const selectedSet = [
+    {
+      providerSymbol: selectedMarket.providerSymbol,
+      exchange: selectedMarket.exchange,
+      symbolOnExchange: selectedMarket.symbolOnExchange,
+      baseAsset: selectedMarket.baseAsset,
+      quoteAsset: selectedMarket.quoteAsset,
+      isPerpetual: selectedMarket.isPerpetual,
+      marginType: selectedMarket.marginType,
+      expireAt: selectedMarket.expireAt,
+      notionalDenominatedIn: selectedMarket.notionalDenominatedIn,
+      observations: history().map((observation) => ({
+        ...observation,
+        provenance: "provider-explicit" as const,
+      })),
+    },
+  ];
+  return {
+    runId: "run-45-1",
+    schemaVersion: LIQUIDATION_EVIDENCE_V3_SCHEMA_VERSION,
+    providerSemanticIdentity: "coinalyze-sparse-zero/v1",
+    producer: "crypto-analyst-trader/coinalyze-liquidation",
+    provider: "coinalyze",
+    policyVersion: "liquidation-market-aggregate/v2",
+    collectionStartedAt: "2026-09-24T12:00:00.000Z",
+    collectionEndedAt: "2026-09-24T12:01:00.000Z",
+    bundleCutoff: CUTOFF,
+    marketEvidence: {
+      runId: "run-45-1",
+      universeVersion: "m1-universe/v1",
+      bundleCutoff: CUTOFF,
+      contentHash: MARKET_HASH,
+    },
+    selection: {
+      coveragePolicyVersion: selected.value.coveragePolicyVersion,
+      selectedAsset: selected.value.selectedAsset,
+      cutoff: selected.value.cutoff,
+      catalogueComplete: selected.value.catalogueComplete,
+      catalogueMarkets: selected.value.catalogueMarkets,
+      catalogueHash: selected.value.catalogueHash,
+      exclusions: selected.value.exclusions,
+      selectedSetHash: selected.value.selectedSetHash,
+      reasonCodes: selected.value.reasonCodes,
+    },
+    coverageProof: selected.value.coverageProof,
+    historyProof: "complete",
+    status: "complete",
+    targets: [{ asset: "BTC", constituents: selectedSet }],
+    diagnostics: [],
     ...overrides,
   };
 }
@@ -368,6 +451,92 @@ test("a full catalogue with no eligible target market can fail with coverage sti
   }
 });
 
+test("v3 rejects discovery-failure diagnostics alongside complete catalogue proofs", () => {
+  const complete = createLiquidationEvidenceBundleV3(inputV3());
+  assert.equal(complete.ok, true);
+  if (!complete.ok) return;
+  const constituent = complete.value.targets[0]?.constituents[0];
+  assert.ok(constituent);
+  if (constituent === undefined) return;
+
+  const contradictory = {
+    ...complete.value,
+    status: "incomplete" as const,
+    diagnostics: [
+      {
+        code: "catalogue-incomplete" as const,
+        operation: "discover-markets" as const,
+      },
+    ],
+    targets: [
+      {
+        asset: "BTC" as const,
+        constituents: [
+          {
+            ...constituent,
+            observations: constituent.observations.map((observation, index) =>
+              index === 0
+                ? {
+                    ...observation,
+                    longUsd: "0",
+                    shortUsd: "0",
+                    provenance: "provider-implied-zero" as const,
+                  }
+                : observation,
+            ),
+          },
+        ],
+      },
+    ],
+  };
+
+  assert.equal(createLiquidationEvidenceBundleV3(contradictory).ok, false);
+  assert.equal(
+    encodeCanonicalArtifact("liquidation-evidence-bundle", contradictory).ok,
+    false,
+  );
+});
+
+test("v3 rejects unknown fields in supplied derived rows", () => {
+  const valid = createLiquidationEvidenceBundleV3(inputV3());
+  assert.equal(valid.ok, true);
+  if (!valid.ok) return;
+  const target = valid.value.targets[0];
+  assert.ok(target);
+  if (target === undefined) return;
+
+  const aggregateWithUnknown = {
+    ...valid.value,
+    targets: [
+      {
+        ...target,
+        hourlyAggregates: target.hourlyAggregates.map((row, index) =>
+          index === 0 ? { ...row, unexpectedProof: true } : row,
+        ),
+      },
+    ],
+  };
+  const windowWithUnknown = {
+    ...valid.value,
+    targets: [
+      {
+        ...target,
+        windows: target.windows.map((row, index) =>
+          index === 0 ? { ...row, unexpectedProof: true } : row,
+        ),
+      },
+    ],
+  };
+
+  for (const malformed of [aggregateWithUnknown, windowWithUnknown]) {
+    assert.equal(createLiquidationEvidenceBundleV3(malformed).ok, false);
+    assert.equal(
+      encodeCanonicalArtifact("liquidation-evidence-bundle", malformed).ok,
+      false,
+    );
+  }
+});
+
 test("bundle rejects post-cutoff observations, duplicate market identities and fabricated zero fill", () => {
   const afterCutoff = targets();
   const firstMarket = afterCutoff[0]?.constituents[0];
@@ -572,6 +741,285 @@ test("persisted v1 golden artifact keeps its canonical hash and meaning", () => 
     rehydrated.value.targets[0]?.constituents[0]?.observations[0];
   assert.ok(firstObservation);
   assert.equal("provenance" in firstObservation, false);
+});
+
+test("persisted v2 golden artifact keeps its canonical hash and meaning", () => {
+  const bundle = createLiquidationEvidenceBundleV2(
+    liquidationEvidenceV2GoldenInput(),
+  );
+  assert.equal(bundle.ok, true);
+  if (!bundle.ok) return;
+  const envelope = encodeCanonicalArtifact(
+    "liquidation-evidence-bundle",
+    bundle.value,
+  );
+  assert.equal(envelope.ok, true);
+  if (!envelope.ok) return;
+  assert.equal(
+    envelope.value.canonicalHash,
+    LIQUIDATION_EVIDENCE_V2_GOLDEN_HASH,
+  );
+  const rehydrated = rehydrateArtifact(
+    "liquidation-evidence-bundle",
+    envelope.value,
+  );
+  assert.equal(rehydrated.ok, true);
+  if (!rehydrated.ok) return;
+  assert.equal(
+    rehydrated.value.schemaVersion,
+    LIQUIDATION_EVIDENCE_V2_SCHEMA_VERSION,
+  );
+  const reencoded = encodeCanonicalArtifact(
+    "liquidation-evidence-bundle",
+    rehydrated.value,
+  );
+  assert.equal(reencoded.ok, true);
+  if (!reencoded.ok) return;
+  assert.equal(
+    reencoded.value.canonicalHash,
+    LIQUIDATION_EVIDENCE_V2_GOLDEN_HASH,
+  );
+});
+
+test("v3 has one selected-asset target and rehydrates through its exact schema", () => {
+  const bundle = createLiquidationEvidenceBundleV3(inputV3());
+  assert.equal(bundle.ok, true);
+  if (!bundle.ok) return;
+  assert.equal(
+    bundle.value.schemaVersion,
+    LIQUIDATION_EVIDENCE_V3_SCHEMA_VERSION,
+  );
+  assert.equal(bundle.value.policyVersion, "liquidation-market-aggregate/v2");
+  assert.equal(bundle.value.targets.length, 1);
+  assert.equal(bundle.value.targets[0]?.asset, "BTC");
+  assert.equal(bundle.value.targets[0]?.constituents.length, 1);
+  const envelope = encodeCanonicalArtifact(
+    "liquidation-evidence-bundle",
+    bundle.value,
+  );
+  assert.equal(envelope.ok, true);
+  if (!envelope.ok) return;
+  const rehydrated = rehydrateArtifact(
+    "liquidation-evidence-bundle",
+    envelope.value,
+  );
+  assert.equal(rehydrated.ok, true);
+  if (!rehydrated.ok) return;
+  assert.equal(
+    rehydrated.value.schemaVersion,
+    LIQUIDATION_EVIDENCE_V3_SCHEMA_VERSION,
+  );
+  const reencoded = encodeCanonicalArtifact(
+    "liquidation-evidence-bundle",
+    rehydrated.value,
+  );
+  assert.equal(reencoded.ok, true);
+  if (!reencoded.ok) return;
+  assert.equal(reencoded.value.canonicalHash, envelope.value.canonicalHash);
+});
+
+test("catalogue membership and expiry changes recompute v3 selection identity", () => {
+  const cutoffMs = Date.parse(CUTOFF);
+  const expiringMarket: LiquidationCatalogueMarket = {
+    symbol: "BTCUSDT_PERP.BYBIT",
+    exchange: "bybit",
+    symbolOnExchange: "BTCUSDT",
+    baseAsset: "BTC",
+    quoteAsset: "USDT",
+    isPerpetual: true,
+    marginType: "STABLE",
+    expireAt: Math.floor(cutoffMs / 1_000) + 3_600,
+    notionalDenominatedIn: "USD",
+  };
+  const initial = selectDecisionLiquidationMarkets({
+    asset: "BTC",
+    markets: [expiringMarket],
+    catalogueComplete: true,
+    cutoffMs,
+  });
+  const expanded = selectDecisionLiquidationMarkets({
+    asset: "BTC",
+    markets: [
+      expiringMarket,
+      {
+        ...expiringMarket,
+        symbol: "BTCUSDT_PERP.BINANCE",
+        exchange: "binance",
+        symbolOnExchange: "BTCUSDT",
+        expireAt: 0,
+      },
+    ],
+    catalogueComplete: true,
+    cutoffMs,
+  });
+  const afterExpiry = selectDecisionLiquidationMarkets({
+    asset: "BTC",
+    markets: [expiringMarket],
+    catalogueComplete: true,
+    cutoffMs: cutoffMs + 3_600_000,
+  });
+
+  assert.equal(initial.ok, true);
+  assert.equal(expanded.ok, true);
+  assert.equal(afterExpiry.ok, true);
+  if (!initial.ok || !expanded.ok || !afterExpiry.ok) return;
+  assert.equal(initial.value.coveragePolicyVersion, "decision-coverage/v1");
+  assert.equal(expanded.value.coveragePolicyVersion, "decision-coverage/v1");
+  assert.notEqual(initial.value.catalogueHash, expanded.value.catalogueHash);
+  assert.notEqual(
+    initial.value.selectedSetHash,
+    expanded.value.selectedSetHash,
+  );
+  assert.equal(afterExpiry.value.selectedMarkets.length, 0);
+  assert.equal(afterExpiry.value.exclusions[0]?.reason, "expired");
+  assert.notEqual(
+    initial.value.selectedSetHash,
+    afterExpiry.value.selectedSetHash,
+  );
+});
+
+test("failed v3 with an empty selected set carries negative proofs, never vacuous completeness", () => {
+  const emptySelection = selectDecisionLiquidationMarkets({
+    asset: "BTC",
+    markets: [],
+    catalogueComplete: false,
+    cutoffMs: Date.parse(CUTOFF),
+  });
+  assert.equal(emptySelection.ok, true);
+  if (!emptySelection.ok) return;
+  const input = inputV3({
+    selection: {
+      coveragePolicyVersion: emptySelection.value.coveragePolicyVersion,
+      selectedAsset: emptySelection.value.selectedAsset,
+      cutoff: emptySelection.value.cutoff,
+      catalogueComplete: emptySelection.value.catalogueComplete,
+      catalogueMarkets: emptySelection.value.catalogueMarkets,
+      catalogueHash: emptySelection.value.catalogueHash,
+      exclusions: emptySelection.value.exclusions,
+      selectedSetHash: emptySelection.value.selectedSetHash,
+      reasonCodes: emptySelection.value.reasonCodes,
+    },
+    coverageProof: "incomplete",
+    historyProof: "incomplete",
+    status: "failed",
+    targets: [{ asset: "BTC", constituents: [] }],
+    diagnostics: [
+      { code: "catalogue-unavailable", operation: "discover-markets" },
+    ],
+  });
+  const bundle = createLiquidationEvidenceBundleV3(input);
+  assert.equal(bundle.ok, true);
+  if (bundle.ok) {
+    assert.equal(bundle.value.status, "failed");
+    assert.equal(bundle.value.coverageProof, "incomplete");
+    assert.equal(bundle.value.historyProof, "incomplete");
+    assert.equal(bundle.value.targets.length, 1);
+    assert.equal(bundle.value.targets[0]?.constituents.length, 0);
+  }
+  assert.equal(
+    createLiquidationEvidenceBundleV3({
+      ...input,
+      coverageProof: "complete",
+      historyProof: "complete",
+      status: "complete",
+      diagnostics: [],
+    }).ok,
+    false,
+  );
+});
+
+test("v3 does not infer catalogue completeness from a matching digest or full history counts", () => {
+  const complete = inputV3();
+  const completeSelection = complete.selection as {
+    readonly catalogueMarkets: readonly LiquidationCatalogueMarket[];
+    readonly catalogueHash: string;
+  };
+  const incompleteSelection = selectDecisionLiquidationMarkets({
+    asset: "BTC",
+    markets: completeSelection.catalogueMarkets,
+    catalogueComplete: false,
+    cutoffMs: Date.parse(CUTOFF),
+  });
+  assert.equal(incompleteSelection.ok, true);
+  if (!incompleteSelection.ok) return;
+  assert.equal(
+    incompleteSelection.value.catalogueHash,
+    completeSelection.catalogueHash,
+  );
+  const completeConstituent = complete.targets[0]?.constituents[0];
+  assert.ok(completeConstituent);
+  if (completeConstituent === undefined) return;
+  const tamperedClaim = {
+    ...complete,
+    selection: {
+      coveragePolicyVersion: incompleteSelection.value.coveragePolicyVersion,
+      selectedAsset: incompleteSelection.value.selectedAsset,
+      cutoff: incompleteSelection.value.cutoff,
+      catalogueComplete: incompleteSelection.value.catalogueComplete,
+      catalogueMarkets: incompleteSelection.value.catalogueMarkets,
+      catalogueHash: incompleteSelection.value.catalogueHash,
+      exclusions: incompleteSelection.value.exclusions,
+      selectedSetHash: incompleteSelection.value.selectedSetHash,
+      reasonCodes: incompleteSelection.value.reasonCodes,
+    },
+    coverageProof: "complete",
+  };
+  assert.equal(createLiquidationEvidenceBundleV3(tamperedClaim).ok, false);
+
+  const impliedUnderIncompleteCatalogue = {
+    ...complete,
+    selection: tamperedClaim.selection,
+    coverageProof: "incomplete",
+    historyProof: "complete",
+    status: "incomplete",
+    diagnostics: [
+      { code: "catalogue-incomplete", operation: "discover-markets" },
+    ],
+    targets: [
+      {
+        asset: "BTC",
+        constituents: [
+          {
+            ...completeConstituent,
+            observations: completeConstituent.observations.map(
+              (observation, index) =>
+                index === 0
+                  ? {
+                      ...observation,
+                      longUsd: "0",
+                      shortUsd: "0",
+                      provenance: "provider-implied-zero",
+                    }
+                  : observation,
+            ),
+          },
+        ],
+      },
+    ],
+  };
+  assert.equal(
+    createLiquidationEvidenceBundleV3(impliedUnderIncompleteCatalogue).ok,
+    false,
+  );
+
+  const malformedProvider = createLiquidationEvidenceBundleV3(
+    inputV3({
+      historyProof: "incomplete",
+      status: "incomplete",
+      diagnostics: [
+        { code: "invalid-observation", operation: "fetch-liquidation-history" },
+      ],
+    }),
+  );
+  assert.equal(malformedProvider.ok, true);
+  if (malformedProvider.ok) {
+    assert.equal(malformedProvider.value.status, "incomplete");
+    assert.equal(malformedProvider.value.historyProof, "incomplete");
+    assert.equal(
+      malformedProvider.value.targets[0]?.constituents[0]?.observations.length,
+      LIQUIDATION_HISTORY_BUCKETS,
+    );
+  }
 });
 
 test("v2 provenance is canonical identity and survives deterministic rehydration", () => {

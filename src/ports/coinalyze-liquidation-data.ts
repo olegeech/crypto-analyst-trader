@@ -1,16 +1,7 @@
 import type { LiquidationEvidenceDiagnosticInput } from "../domain/liquidation/liquidation-evidence-bundle.js";
+import type { LiquidationCatalogueMarket } from "../domain/liquidation/liquidation-evidence-v3.js";
 
-export interface CoinalyzeMarket {
-  readonly symbol: string;
-  readonly exchange: string;
-  readonly symbolOnExchange: string;
-  readonly baseAsset: string;
-  readonly quoteAsset: string;
-  readonly isPerpetual: boolean;
-  readonly marginType: string;
-  readonly expireAt: number;
-  readonly notionalDenominatedIn: string;
-}
+export type CoinalyzeMarket = LiquidationCatalogueMarket;
 
 export interface CoinalyzeLiquidationObservation {
   readonly timestamp: string;
@@ -24,7 +15,13 @@ export interface CoinalyzeMarketHistory {
 }
 
 export interface CoinalyzeCatalogueResult {
+  /** Safe unique rows for legacy consumers. */
   readonly markets: readonly CoinalyzeMarket[];
+  /**
+   * All individually valid normalized rows, including duplicate identities.
+   * Decision v3 hashes this snapshot and independently excludes ambiguity.
+   */
+  readonly catalogueSnapshot?: readonly CoinalyzeMarket[];
   readonly complete: boolean;
   readonly diagnostics: readonly LiquidationEvidenceDiagnosticInput[];
 }

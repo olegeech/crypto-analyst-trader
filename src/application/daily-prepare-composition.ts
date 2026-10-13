@@ -25,9 +25,9 @@ export function createDailyPrepareComposition() {
   return createDailyPrepareBoundary({
     collectMarket: (runId) =>
       collectMarketEvidence({ runId }, { reader, clock: systemClock }),
-    collectLiquidation: (marketEvidence) =>
+    collectLiquidation: (marketEvidence, selectedAsset) =>
       collectLiquidationEvidence(
-        { marketEvidence },
+        { scope: "decision", selectedAsset, marketEvidence },
         { marketData, secrets, clock: systemClock },
       ),
     collectAccount: collectAccountEvidence,

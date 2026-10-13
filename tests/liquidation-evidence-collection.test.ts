@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { createAnalyticsEvidenceBundle } from "../src/domain/analytics/analytics-evidence-bundle.js";
+import {
+  createAnalyticsEvidenceBundle,
+  rehydrateAnalyticsEvidenceBundle,
+} from "../src/domain/analytics/analytics-evidence-bundle.js";
 import { qualityRoleForOutcome } from "../src/domain/quality/quality-inputs.js";
 import { assessDataQuality } from "../src/domain/quality/assess-data-quality.js";
 import { createQualityProfile } from "../src/domain/quality/quality-profile.js";
@@ -12,6 +15,7 @@ import {
   LIQUIDATION_HISTORY_BUCKETS,
   LIQUIDATION_HOUR_MS,
 } from "../src/domain/liquidation/liquidation-evidence-bundle.js";
+import type { LiquidationTargetAsset } from "../src/domain/liquidation/liquidation-evidence-bundle.js";
 import { liquidationHistoryWindow } from "../src/domain/liquidation/liquidation-evidence-windows.js";
 import { hashCanonical } from "../src/domain/identity/canonical-serialization.js";
 import {
@@ -173,6 +177,7 @@ function diagnostics(
 function harness(
   options: {
     readonly markets?: readonly CoinalyzeMarket[];
+    readonly catalogueSnapshot?: readonly CoinalyzeMarket[] | null;
     readonly catalogueComplete?: boolean;
     readonly catalogueDiagnostics?: CoinalyzeCatalogueResult["diagnostics"];
     readonly histories?: (
@@ -194,6 +199,11 @@ function harness(
       calls.push({ kind: "catalogue", apiKey });
       return {
         markets: selectedMarkets,
+        ...(options.catalogueSnapshot === null
+          ? {}
+          : {
+              catalogueSnapshot: options.catalogueSnapshot ?? selectedMarkets,
+            }),
         complete: options.catalogueComplete ?? true,
         diagnostics: options.catalogueDiagnostics ?? [],
       };
@@ -222,14 +232,385 @@ function harness(
   if (!clock.ok) throw new Error("invalid application test clock");
   return {
     calls,
-    async collect() {
-      return collectLiquidationEvidence(
-        { marketEvidence: options.evidence ?? marketEvidence() },
-        { marketData: data, secrets: secret, clock: clock.value },
-      );
+    async collect(
+      scope: "legacy-diagnostic" | "decision" = "legacy-diagnostic",
+      selectedAsset: LiquidationTargetAsset = "BTC",
+    ) {
+      const marketBundle = options.evidence ?? marketEvidence();
+      const request =
+        scope === "decision"
+          ? { scope, selectedAsset, marketEvidence: marketBundle }
+          : { scope, marketEvidence: marketBundle };
+      return collectLiquidationEvidence(request, {
+        marketData: data,
+        secrets: secret,
+        clock: clock.value,
+      });
     },
   };
 }
+
+test("decision collection emits one v3 target and requests only the selected asset", async () => {
+  const target = targetMarkets(25);
+  const h = harness({ markets: target });
+
+  const result = await h.collect("decision", "BTC");
+
+  assert.equal(result.ok, true);
+  if (
+    !result.ok ||
+    result.value.bundle.schemaVersion !== "liquidation-evidence/v3"
+  )
+    return;
+  assert.equal(result.value.bundle.status, "complete");
+  assert.equal(result.value.bundle.coverageProof, "complete");
+  assert.equal(result.value.bundle.historyProof, "complete");
+  assert.equal(result.value.bundle.targets.length, 1);
+  assert.equal(result.value.bundle.targets[0]?.asset, "BTC");
+  assert.equal(result.value.bundle.targets[0]?.constituents.length, 25);
+  assert.deepEqual(
+    h.calls[1]?.request?.symbols,
+    target
+      .filter(({ baseAsset }) => baseAsset === "BTC")
+      .map(({ symbol }) => symbol)
+      .sort(),
+  );
+  assert.equal(h.calls[1]?.request?.symbols.length, 25);
+  assert.equal(result.value.artifact.canonicalJson.includes(API_KEY), false);
+  const analytics = createAnalyticsEvidenceBundle({
+    market: marketEvidence(),
+    liquidation: result.value.bundle,
+    featuresVersion: "analytics-features/v2",
+    profile: {
+      schemaVersion: "analytics-profile/v1",
+      features: [
+        {
+          id: "btc-liquidation-12h",
+          kind: "liquidation-window",
+          asset: "BTC",
+          windowHours: 12,
+          required: true,
+        },
+      ],
+      externalEvidence: [],
+    },
+  });
+  assert.equal(analytics.ok, true);
+  if (analytics.ok) {
+    assert.equal(
+      analytics.value.inputIdentity.liquidationEvidenceSchemaVersion,
+      "liquidation-evidence/v3",
+    );
+    assert.equal(rehydrateAnalyticsEvidenceBundle(analytics.value).ok, true);
+  }
+});
+
+test("decision collection isolates each supported asset", async () => {
+  const markets = targetMarkets(2);
+  for (const asset of LIQUIDATION_EVIDENCE_ASSETS) {
+    const h = harness({ markets });
+    const result = await h.collect("decision", asset);
+    assert.equal(result.ok, true);
+    if (
+      !result.ok ||
+      result.value.bundle.schemaVersion !== "liquidation-evidence/v3"
+    )
+      continue;
+    assert.equal(result.value.bundle.targets.length, 1);
+    assert.equal(result.value.bundle.targets[0]?.asset, asset);
+    assert.deepEqual(
+      result.value.bundle.targets[0]?.constituents.map(
+        ({ baseAsset }) => baseAsset,
+      ),
+      [asset, asset],
+    );
+    assert.deepEqual(
+      h.calls[1]?.request?.symbols,
+      markets
+        .filter(({ baseAsset }) => baseAsset === asset)
+        .map(({ symbol }) => symbol)
+        .sort(),
+    );
+  }
+});
+
+test("decision v3 reconstructs sparse zeros only after complete selected history", async () => {
+  const h = harness({
+    histories: (request) => ({
+      histories: request.symbols.map((symbol) => ({
+        symbol,
+        observations: [],
+      })),
+      responseValid: true,
+      diagnostics: [],
+    }),
+  });
+
+  const result = await h.collect("decision", "ETH");
+
+  assert.equal(result.ok, true);
+  if (
+    !result.ok ||
+    result.value.bundle.schemaVersion !== "liquidation-evidence/v3"
+  )
+    return;
+  const target = result.value.bundle.targets[0];
+  assert.equal(result.value.bundle.status, "complete");
+  assert.equal(target?.asset, "ETH");
+  assert.equal(target?.constituents.length, 1);
+  assert.ok(
+    target?.constituents[0]?.observations.every(
+      ({ longUsd, shortUsd, provenance }) =>
+        longUsd.isZero() &&
+        shortUsd.isZero() &&
+        provenance === "provider-implied-zero",
+    ),
+  );
+});
+
+test("decision v3 keeps explicit history proof separate from incomplete catalogue proof", async () => {
+  const h = harness({
+    markets: targetMarkets(),
+    catalogueComplete: false,
+    catalogueDiagnostics: diagnostics(
+      "catalogue-incomplete",
+      "discover-markets",
+    ),
+  });
+
+  const result = await h.collect("decision", "BTC");
+
+  assert.equal(result.ok, true);
+  if (
+    !result.ok ||
+    result.value.bundle.schemaVersion !== "liquidation-evidence/v3"
+  )
+    return;
+  assert.equal(result.value.bundle.status, "incomplete");
+  assert.equal(result.value.bundle.coverageProof, "incomplete");
+  assert.equal(result.value.bundle.historyProof, "complete");
+  assert.equal(
+    result.value.bundle.targets[0]?.constituents[0]?.observations.length,
+    LIQUIDATION_HISTORY_BUCKETS,
+  );
+  assert.equal(
+    result.value.bundle.targets[0]?.constituents[0]?.observations.some(
+      ({ provenance }) => provenance === "provider-implied-zero",
+    ),
+    false,
+  );
+});
+
+test("decision v3 failure preserves one negative-proof target for an empty selection", async () => {
+  const h = harness({ markets: [market("ETH", "ETH-ONLY")] });
+
+  const result = await h.collect("decision", "BTC");
+
+  assert.equal(result.ok, true);
+  if (
+    !result.ok ||
+    result.value.bundle.schemaVersion !== "liquidation-evidence/v3"
+  )
+    return;
+  assert.equal(result.value.bundle.status, "failed");
+  assert.equal(result.value.bundle.coverageProof, "incomplete");
+  assert.equal(result.value.bundle.historyProof, "incomplete");
+  assert.deepEqual(
+    result.value.bundle.targets.map(({ asset, constituents }) => [
+      asset,
+      constituents.length,
+    ]),
+    [["BTC", 0]],
+  );
+  assert.equal(
+    h.calls.some(({ kind }) => kind === "history"),
+    false,
+  );
+});
+
+test("v3 catalogue hash retains conflicting valid rows while excluding them from history aggregation", async () => {
+  const conflictA = market("BTC", "BYBIT");
+  const conflictB = market("BTC", "BYBIT", {
+    symbol: "BTCUSDT_PERP.BYBIT_ALT",
+    marginType: "COIN",
+    expireAt: Math.floor(Date.parse(BUNDLE_CUTOFF) / 1_000) + 86_400,
+  });
+  const safe = market("BTC", "BINANCE");
+  const h = harness({ markets: [conflictA, conflictB, safe] });
+
+  const result = await h.collect("decision", "BTC");
+
+  assert.equal(result.ok, true);
+  if (
+    !result.ok ||
+    result.value.bundle.schemaVersion !== "liquidation-evidence/v3"
+  )
+    return;
+  assert.equal(result.value.bundle.status, "incomplete");
+  assert.equal(result.value.bundle.coverageProof, "incomplete");
+  assert.equal(result.value.bundle.selection.catalogueMarkets.length, 3);
+  assert.equal(result.value.bundle.selection.exclusions.length, 2);
+  assert.deepEqual(
+    result.value.bundle.targets[0]?.constituents.map(
+      ({ exchange }) => exchange,
+    ),
+    ["BINANCE"],
+  );
+  assert.deepEqual(h.calls[1]?.request?.symbols, [safe.symbol]);
+  assert.ok(
+    result.value.bundle.diagnostics.some(
+      ({ code }) => code === "duplicate-market",
+    ),
+  );
+});
+
+test("invalid decision history never creates implied zeros even with apparent bucket gaps", async () => {
+  const target = targetMarkets();
+  const btcSymbol = target.find(({ baseAsset }) => baseAsset === "BTC")?.symbol;
+  assert.ok(btcSymbol);
+  const missing = LAST_CLOSED_BUCKET - 8 * LIQUIDATION_HOUR_MS;
+  const h = harness({
+    histories: (request) => ({
+      histories: completeHistories(request.symbols, {
+        missing: new Map([[btcSymbol, missing]]),
+      }),
+      responseValid: false,
+      diagnostics: diagnostics("rate-limited", "fetch-liquidation-history"),
+    }),
+  });
+
+  const result = await h.collect("decision", "BTC");
+
+  assert.equal(result.ok, true);
+  if (
+    !result.ok ||
+    result.value.bundle.schemaVersion !== "liquidation-evidence/v3"
+  )
+    return;
+  assert.equal(result.value.bundle.status, "incomplete");
+  assert.equal(result.value.bundle.historyProof, "incomplete");
+  const observations =
+    result.value.bundle.targets[0]?.constituents[0]?.observations;
+  assert.equal(observations?.length, LIQUIDATION_HISTORY_BUCKETS - 1);
+  assert.equal(
+    observations?.some(
+      ({ provenance }) => provenance === "provider-implied-zero",
+    ),
+    false,
+  );
+  assert.ok(
+    result.value.bundle.diagnostics.some(({ code }) => code === "rate-limited"),
+  );
+});
+
+test("provider failure remains quality-blocking even when v3 contains full 12h rows", async () => {
+  const marketBundle = dailyPrepareMarket();
+  const target = targetMarkets();
+  const lastClosedBucket = liquidationHistoryWindow(
+    Date.parse(marketBundle.bundleCutoff),
+  ).epochs.at(-1);
+  assert.ok(lastClosedBucket);
+  const h = harness({
+    evidence: marketBundle,
+    markets: target,
+    histories: (request) => ({
+      histories: completeHistories(request.symbols, { lastClosedBucket }),
+      responseValid: false,
+      diagnostics: diagnostics("rate-limited", "fetch-liquidation-history"),
+    }),
+  });
+  const collected = await h.collect("decision", "BTC");
+  assert.equal(collected.ok, true);
+  if (
+    !collected.ok ||
+    collected.value.bundle.schemaVersion !== "liquidation-evidence/v3"
+  )
+    return;
+  assert.equal(collected.value.bundle.status, "incomplete");
+  assert.equal(collected.value.bundle.historyProof, "incomplete");
+  assert.equal(
+    collected.value.bundle.targets[0]?.windows.find(({ hours }) => hours === 12)
+      ?.complete,
+    true,
+  );
+  const analytics = createAnalyticsEvidenceBundle({
+    market: marketBundle,
+    liquidation: collected.value.bundle,
+    featuresVersion: "analytics-features/v2",
+    profile: {
+      schemaVersion: "analytics-profile/v1",
+      features: [
+        {
+          id: "btc-liquidation-12h",
+          kind: "liquidation-window",
+          asset: "BTC",
+          windowHours: 12,
+          required: true,
+        },
+      ],
+      externalEvidence: [],
+    },
+  });
+  assert.equal(analytics.ok, true);
+  if (!analytics.ok) return;
+  assert.notEqual(analytics.value.derivativeFeatures[0]?.status, "complete");
+
+  const profile = createQualityProfile({
+    schemaVersion: "quality-profile/v1",
+    profileVersion: "v3-invalid-provider-fixture",
+    liquidationHistoryScope: "requested-feature-windows/v1",
+    roles: [
+      { id: "market", required: false, maxAgeMs: 86_400_000 },
+      { id: "liquidation", required: true, maxAgeMs: 86_400_000 },
+      {
+        id: qualityRoleForOutcome("btc-liquidation-12h"),
+        required: true,
+        maxAgeMs: 86_400_000,
+      },
+    ],
+    metadataSkewMs: 1000,
+    trust: [],
+    penalties: [],
+  });
+  assert.equal(profile.ok, true);
+  if (!profile.ok) return;
+  const hash = hashCanonical(collected.value.bundle);
+  assert.equal(hash.ok, true);
+  if (!hash.ok) return;
+  const ref = createLiquidationEvidenceRef(
+    collected.value.bundle,
+    hash.value,
+    86_400_000,
+  );
+  assert.equal(ref.ok, true);
+  if (!ref.ok) return;
+  const quality = assessDataQuality({
+    profile: profile.value,
+    sources: [
+      { role: "market", value: marketBundle },
+      {
+        role: "liquidation",
+        value: collected.value.bundle,
+        evidenceRef: ref.value,
+      },
+      { role: "analytics", value: analytics.value },
+    ],
+    bundleCutoff: marketBundle.bundleCutoff,
+    evaluationTime: "2026-09-24T14:00:00.000Z",
+  });
+  assert.equal(quality.ok, true);
+  if (quality.ok) {
+    assert.equal(quality.value.qualityGate, "BLOCK");
+    assert.ok(
+      quality.value.findings.some(
+        ({ role, reasonCode, blocking }) =>
+          role === "liquidation" &&
+          reasonCode === "INCOMPLETE_LIQUIDATION_HISTORY" &&
+          blocking,
+      ),
+    );
+  }
+});
 
 test("collects and hashes exact run-bound evidence from a coherent #11 identity", async () => {
   const target = targetMarkets();
@@ -329,6 +710,134 @@ test("partial catalogue preserves every trustworthy constituent and keeps histor
     19,
   );
   assert.equal(h.calls[1]?.request?.symbols.length, 19);
+});
+
+test("legacy v2 collection preserves optional catalogue-snapshot behavior", async () => {
+  const markets = targetMarkets();
+  const withSnapshot = await harness({ markets }).collect();
+  const withoutSnapshot = await harness({
+    markets,
+    catalogueSnapshot: null,
+  }).collect();
+
+  assert.equal(withSnapshot.ok, true);
+  assert.equal(withoutSnapshot.ok, true);
+  if (!withSnapshot.ok || !withoutSnapshot.ok) return;
+  assert.equal(withSnapshot.value.bundle.status, "complete");
+  assert.equal(withoutSnapshot.value.bundle.status, "complete");
+  assert.equal(
+    withSnapshot.value.artifact.canonicalHash,
+    withoutSnapshot.value.artifact.canonicalHash,
+  );
+
+  const bitcoin = markets.find(({ baseAsset }) => baseAsset === "BTC");
+  assert.ok(bitcoin);
+  const duplicateDiagnostic = [
+    {
+      code: "duplicate-market" as const,
+      operation: "discover-markets" as const,
+      providerSymbol: bitcoin.symbol,
+    },
+  ];
+  const deduplicated = await harness({
+    markets,
+    catalogueComplete: false,
+    catalogueDiagnostics: duplicateDiagnostic,
+  }).collect();
+  const snapshotWithDuplicate = await harness({
+    markets,
+    catalogueComplete: false,
+    catalogueDiagnostics: duplicateDiagnostic,
+    catalogueSnapshot: [...markets, bitcoin],
+  }).collect();
+
+  assert.equal(deduplicated.ok, true);
+  assert.equal(snapshotWithDuplicate.ok, true);
+  if (!deduplicated.ok || !snapshotWithDuplicate.ok) return;
+  assert.deepEqual(
+    deduplicated.value.bundle.diagnostics,
+    snapshotWithDuplicate.value.bundle.diagnostics,
+  );
+  assert.equal(
+    deduplicated.value.artifact.canonicalHash,
+    snapshotWithDuplicate.value.artifact.canonicalHash,
+  );
+});
+
+test("decision v3 requires a full catalogue snapshot", async () => {
+  const result = await harness({
+    markets: targetMarkets(),
+    catalogueSnapshot: null,
+  }).collect("decision", "BTC");
+
+  assert.equal(result.ok, true);
+  if (
+    !result.ok ||
+    result.value.bundle.schemaVersion !== "liquidation-evidence/v3"
+  )
+    return;
+  assert.equal(result.value.bundle.status, "incomplete");
+  assert.equal(result.value.bundle.coverageProof, "incomplete");
+  assert.equal(
+    result.value.bundle.targets[0]?.constituents[0]?.observations.some(
+      ({ provenance }) => provenance === "provider-implied-zero",
+    ),
+    false,
+  );
+});
+
+test("decision v3 rejects inconsistent complete catalogue projections without reconstructing sparse zeros", async () => {
+  const binance = market("BTC", "BINANCE");
+  const bybit = market("BTC", "BYBIT");
+  const missingBucket = LAST_CLOSED_BUCKET - 8 * LIQUIDATION_HOUR_MS;
+  const result = await harness({
+    markets: [binance, bybit],
+    catalogueSnapshot: [binance],
+    histories: (request) => ({
+      histories: completeHistories(request.symbols, {
+        missing: new Map([[binance.symbol, missingBucket]]),
+      }),
+      responseValid: true,
+      diagnostics: [],
+    }),
+  }).collect("decision", "BTC");
+
+  assert.equal(result.ok, true);
+  if (
+    !result.ok ||
+    result.value.bundle.schemaVersion !== "liquidation-evidence/v3"
+  )
+    return;
+
+  const constituent = result.value.bundle.targets[0]?.constituents[0];
+  assert.equal(result.value.bundle.status, "incomplete");
+  assert.equal(result.value.bundle.coverageProof, "incomplete");
+  assert.equal(result.value.bundle.historyProof, "incomplete");
+  assert.deepEqual(
+    result.value.bundle.targets[0]?.constituents.map(
+      ({ exchange }) => exchange,
+    ),
+    ["BINANCE"],
+  );
+  assert.equal(
+    result.value.bundle.diagnostics.some(
+      ({ code, operation }) =>
+        code === "invalid-catalogue" && operation === "discover-markets",
+    ),
+    true,
+  );
+  assert.equal(
+    constituent?.observations.some(
+      ({ timestamp: observedAt }) => observedAt === timestamp(missingBucket),
+    ),
+    false,
+  );
+  assert.equal(
+    constituent?.observations.some(
+      ({ provenance }) => provenance === "provider-implied-zero",
+    ),
+    false,
+  );
 });
 
 test("complete catalogue with validated sparse history reconstructs omitted buckets as v2 implied zeros", async () => {
