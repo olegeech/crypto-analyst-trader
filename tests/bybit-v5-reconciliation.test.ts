@@ -217,6 +217,41 @@ test("realtime, history and execution evidence must identify one consistent orde
   if (!changedTimeInForce.ok)
     assert.equal(changedTimeInForce.error.kind, "ambiguous");
 
+  const changedProtectionTrigger = await reconcileOrder(
+    makeClient((path) => {
+      if (path === "/v5/order/realtime")
+        return response({
+          list: [
+            order({
+              orderLinkId: "",
+              parentOrderLinkId: "owned-client",
+              stopOrderType: "TakeProfit",
+              orderStatus: "Untriggered",
+              triggerPrice: "0.1",
+            }),
+          ],
+        });
+      if (path === "/v5/order/history")
+        return response({
+          list: [
+            order({
+              orderLinkId: "",
+              parentOrderLinkId: "owned-client",
+              stopOrderType: "TakeProfit",
+              orderStatus: "Untriggered",
+              triggerPrice: "0.2",
+            }),
+          ],
+        });
+      return response({ list: [] });
+    }),
+    lookup,
+    observedAt,
+  );
+  assert.equal(changedProtectionTrigger.ok, false);
+  if (!changedProtectionTrigger.ok)
+    assert.equal(changedProtectionTrigger.error.kind, "ambiguous");
+
   const mismatchedExecution = await reconcileOrder(
     makeClient((path) => {
       if (path === "/v5/order/realtime") {

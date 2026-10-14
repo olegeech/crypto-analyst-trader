@@ -1,7 +1,8 @@
 import type { PlanHash } from "../identity/canonical-serialization.js";
 import { hashCanonical } from "../identity/canonical-serialization.js";
 import type { DailyCandidateLeg } from "../planning/daily-entry-grid.js";
-import { closedRecord } from "../planning/planning-validation.js";
+import { MAX_PLANNING_LEVELS } from "../planning/planning-policy.js";
+import { boundedList, closedRecord } from "../planning/planning-validation.js";
 import {
   rehydratePreparedPlanApproval,
   validatePreparedPlanApproval,
@@ -15,7 +16,12 @@ import { deepFreeze } from "../shared/deep-freeze.js";
 import { domainError } from "../shared/errors.js";
 import { fail, ok, type Result } from "../shared/result.js";
 import { parseUtcTimestamp, type UtcTimestamp } from "../shared/time.js";
-import { requireHash, requireIdentifier } from "../shared/validation.js";
+import {
+  isRecord,
+  requireFiniteInteger,
+  requireHash,
+  requireIdentifier,
+} from "../shared/validation.js";
 
 export const PREPARED_LEG_EXECUTION_VERSION =
   "prepared-leg-execution/v1" as const;
@@ -33,6 +39,15 @@ export interface PreparedLegExecution extends PreparedLegSourceIdentity {
   readonly approvalHash: PlanHash;
   readonly approvedAt: UtcTimestamp;
   readonly expiresAt: UtcTimestamp;
+}
+
+export interface PreparedLegGridExecution {
+  readonly approvalHash: PlanHash;
+  readonly preparedHash: PlanHash;
+  readonly legs: readonly {
+    readonly execution: PreparedLegExecution;
+    readonly sourceId: string;
+  }[];
 }
 
 const CLIENT_ID_PREFIX = "m1-";
@@ -90,26 +105,6 @@ export function derivePreparedLegSourceId(
   return ok(`prepared-leg:${digest.value.slice(7, 47)}`);
 }
 
-export interface CreatePreparedLegExecutionInput {
-  readonly approval: unknown;
-  readonly approvalHash: unknown;
-  readonly legId: unknown;
-  readonly now: unknown;
-}
-
-export interface DerivePreparedLegExecutionIdentityInput {
-  readonly approval: unknown;
-  readonly approvalHash: unknown;
-  readonly legId: unknown;
-}
-
-export interface DerivePreparedLegSourceIdentityInput {
-  readonly prepared: unknown;
-  readonly preparedHash: unknown;
-  readonly legId: unknown;
-  readonly accountIdentityHash: unknown;
-}
-
 function executionIdentityFromApproval(
   approval: PreparedPlanApproval,
   approvalHash: PlanHash,
@@ -159,8 +154,7 @@ export function derivePreparedLegSourceIdentity(
   const keys = ["prepared", "preparedHash", "legId", "accountIdentityHash"];
   if (
     !closedRecord(input, keys) ||
-    Reflect.ownKeys(input).length !== keys.length ||
-    !keys.every((key) => Object.hasOwn(input, key))
+    Reflect.ownKeys(input).length !== keys.length
   )
     return invalid("durable prepared-leg source identity is invalid");
   const preparedHash = requireHash(input.preparedHash, "preparedHash");
@@ -205,10 +199,7 @@ export function derivePreparedLegExecutionIdentity(
 ): Result<PreparedLegExecution> {
   if (
     !closedRecord(input, ["approval", "approvalHash", "legId"]) ||
-    Reflect.ownKeys(input).length !== 3 ||
-    !["approval", "approvalHash", "legId"].every((key) =>
-      Object.hasOwn(input, key),
-    )
+    Reflect.ownKeys(input).length !== 3
   )
     return invalid();
 
@@ -230,10 +221,7 @@ export function createPreparedLegExecution(
 ): Result<PreparedLegExecution> {
   if (
     !closedRecord(input, ["approval", "approvalHash", "legId", "now"]) ||
-    Reflect.ownKeys(input).length !== 4 ||
-    !["approval", "approvalHash", "legId", "now"].every((key) =>
-      Object.hasOwn(input, key),
-    )
+    Reflect.ownKeys(input).length !== 4
   )
     return invalid();
 
@@ -260,6 +248,128 @@ export function createPreparedLegExecution(
   return derived;
 }
 
+/** Validates the approved grid's complete, canonical index and leg identity shape. */
+export function validatePreparedLegGridShape(input: unknown): Result<true> {
+  if (!boundedList(input, MAX_PLANNING_LEVELS))
+    return invalid("approved grid length is outside the supported range");
+
+  const legIds = new Set<string>();
+  const legKeys = ["legId", "index", "allocation", "timeInForce", "intent"];
+  for (let index = 0; index < input.length; index += 1) {
+    const candidate = input[index];
+    if (
+      !closedRecord(candidate, legKeys) ||
+      Reflect.ownKeys(candidate).length !== legKeys.length ||
+      candidate.timeInForce !== "GTC" ||
+      candidate.allocation === undefined ||
+      !isRecord(candidate.intent)
+    )
+      return invalid("approved grid contains a malformed leg");
+
+    const legId = requireIdentifier(candidate.legId, "legId");
+    const legIndex = requireFiniteInteger(candidate.index, "index");
+    if (
+      !legId.ok ||
+      !legIndex.ok ||
+      legIndex.value !== index ||
+      legIds.has(legId.value)
+    )
+      return invalid("approved grid leg identities or indices are invalid");
+    legIds.add(legId.value);
+  }
+
+  return ok(true);
+}
+
+/** Admits every leg from the exact, currently valid approval in plan order. */
+export function createPreparedLegGridExecution(
+  input: unknown,
+): Result<PreparedLegGridExecution> {
+  const keys = ["approval", "approvalHash", "now"];
+  if (
+    !closedRecord(input, keys) ||
+    Reflect.ownKeys(input).length !== keys.length
+  )
+    return invalid();
+
+  const now = parseUtcTimestamp(input.now);
+  const approvalHash = requireHash(input.approvalHash, "approvalHash");
+  const parsedApproval = rehydratePreparedPlanApproval(input.approval);
+  if (!now.ok || !approvalHash.ok || !parsedApproval.ok)
+    return invalid("exact approval identity is required");
+
+  const approval = parsedApproval.value;
+  const prepared = approval.replayInputs.prepared;
+  if (approval.contentHash !== approvalHash.value)
+    return invalid("exact approval identity is required");
+  const validApproval = validatePreparedPlanApproval(
+    approval,
+    prepared,
+    now.value,
+  );
+  if (!validApproval.ok) return validApproval;
+
+  const candidateLegs =
+    prepared.replayInputs.preflight.replayInputs.dailyPlan.candidateLegs;
+  if (candidateLegs === undefined)
+    return invalid("approved plan does not contain a candidate grid");
+  const shape = validatePreparedLegGridShape(candidateLegs);
+  if (!shape.ok) return shape;
+
+  const preparedHash = requireHash(prepared.contentHash, "preparedHash");
+  const accountIdentityHash = requireHash(
+    prepared.inputIdentity.accountIdentityHash,
+    "accountIdentityHash",
+  );
+  if (
+    !preparedHash.ok ||
+    !accountIdentityHash.ok ||
+    approval.preparedHash !== preparedHash.value
+  )
+    return invalid("approval is not bound to its prepared plan");
+
+  const admittedLegs: {
+    execution: PreparedLegExecution;
+    sourceId: string;
+  }[] = [];
+  const clientOrderIds = new Set<string>();
+  const sourceIds = new Set<string>();
+  for (const leg of candidateLegs) {
+    const execution = executionIdentityFromApproval(
+      approval,
+      approvalHash.value as PlanHash,
+      leg.legId,
+    );
+    if (!execution.ok) return execution;
+    const sourceId = derivePreparedLegSourceId(
+      accountIdentityHash.value,
+      preparedHash.value,
+      leg.legId,
+    );
+    if (!sourceId.ok) return sourceId;
+    if (
+      clientOrderIds.has(execution.value.clientOrderId) ||
+      sourceIds.has(sourceId.value)
+    )
+      return invalid("approved grid contains duplicate execution identities");
+
+    clientOrderIds.add(execution.value.clientOrderId);
+    sourceIds.add(sourceId.value);
+    admittedLegs.push({
+      execution: execution.value,
+      sourceId: sourceId.value,
+    });
+  }
+
+  return ok(
+    deepFreeze({
+      approvalHash: approvalHash.value as PlanHash,
+      preparedHash: preparedHash.value as PlanHash,
+      legs: admittedLegs,
+    }),
+  );
+}
+
 function selectApprovedLeg(
   prepared: PreparedDailyPlan,
   legId: string,
@@ -278,16 +388,21 @@ function selectApprovedLeg(
     !prepared.summary.targetGate.relevantCoverageComplete
   )
     return invalid("prepared plan is not an approvable create-only ADD plan");
-  const matches = dailyPlan.candidateLegs.filter((leg) => leg.legId === legId);
-  if (
-    matches.length !== 1 ||
-    dailyPlan.candidateLegs.some(
-      (leg, index, all) =>
-        all.findIndex((candidate) => candidate.legId === leg.legId) !== index,
-    )
-  )
+  const seen = new Set<string>();
+  let selected: DailyCandidateLeg | undefined;
+  let selectedCount = 0;
+  let duplicateId = false;
+  for (const leg of dailyPlan.candidateLegs) {
+    if (seen.has(leg.legId)) duplicateId = true;
+    else seen.add(leg.legId);
+    if (leg.legId === legId) {
+      selected = leg;
+      selectedCount += 1;
+    }
+  }
+  if (selectedCount !== 1 || duplicateId)
     return invalid("selected leg is missing or ambiguous in the approved grid");
-  const leg = matches[0]!;
+  const leg = selected!;
   if (
     leg.intent.instrument !== prepared.summary.symbol ||
     leg.intent.orderType !== "limit" ||

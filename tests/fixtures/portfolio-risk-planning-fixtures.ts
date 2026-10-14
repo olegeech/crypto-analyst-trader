@@ -21,6 +21,7 @@ export function portfolioRiskPlanningFixture(
     readonly tickerObservedAt?: string;
     readonly marketMaxAgeMs?: number;
     readonly marketValidForMs?: number;
+    readonly allocation?: string;
     readonly planningLevels?: readonly {
       readonly atrOffset: string;
       readonly allocationWeight: string;
@@ -30,6 +31,7 @@ export function portfolioRiskPlanningFixture(
 ) {
   const recommendation = options.recommendation ?? "ADD_LONG";
   const raw = dailyDecisionInputFixture();
+  if (options.allocation !== undefined) raw.allocation = options.allocation;
   if (options.planningLevels !== undefined)
     raw.planningPolicy = {
       ...raw.planningPolicy,

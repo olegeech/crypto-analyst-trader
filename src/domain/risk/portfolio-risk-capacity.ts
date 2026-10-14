@@ -204,19 +204,53 @@ function relevantSymbols(
   return [...symbols].sort();
 }
 
-function deriveLeverageChecks(input: {
+export interface PortfolioRiskLeverageAssessmentInput {
   readonly account: AccountEvidenceBundle;
   readonly projection: PortfolioRiskProjection;
   readonly policy: PortfolioRiskPolicy;
   readonly evaluationTime: UtcTimestamp;
-  readonly targetSymbol: string;
-  readonly symbols: readonly string[];
   readonly supplementalEvidence: unknown;
-}): {
+}
+
+export interface PortfolioRiskLeverageAssessment {
   readonly checks: readonly PortfolioRiskLeverageCheck[];
   readonly reasonCodes: readonly PortfolioRiskBlockReasonCode[];
   readonly status: PortfolioRiskGateStatus;
-} {
+}
+
+export interface PortfolioRiskIncrementalCapacity {
+  readonly reserve: DecimalValue;
+  readonly incrementalCapacity: DecimalValue;
+  readonly withinCapacity: boolean;
+}
+
+/** Uses the versioned risk-policy reserve for one incremental approved leg. */
+export function calculatePortfolioRiskIncrementalCapacity(input: {
+  readonly availableBalance: DecimalValue;
+  readonly requestedNotional: DecimalValue;
+  readonly marginReserveRatio: DecimalValue;
+}): Result<PortfolioRiskIncrementalCapacity> {
+  const zero = DecimalValue.fromString("0");
+  if (!zero.ok) return invalid();
+  const nonNegativeAvailable =
+    input.availableBalance.compare(zero.value) > 0
+      ? input.availableBalance
+      : zero.value;
+  const reserve = nonNegativeAvailable.multiply(input.marginReserveRatio);
+  const rawCapacity = input.availableBalance.subtract(reserve);
+  const incrementalCapacity =
+    rawCapacity.compare(zero.value) > 0 ? rawCapacity : zero.value;
+  return ok({
+    reserve,
+    incrementalCapacity,
+    withinCapacity: input.requestedNotional.compare(incrementalCapacity) <= 0,
+  });
+}
+
+/** Shared M1 leverage admission for whole-plan and sequential-leg projections. */
+export function assessPortfolioRiskLeverage(
+  input: PortfolioRiskLeverageAssessmentInput,
+): PortfolioRiskLeverageAssessment {
   const reasons = new Set<PortfolioRiskBlockReasonCode>();
   const passB = input.account.criticalPasses.B;
   if (!passB) {
@@ -226,13 +260,14 @@ function deriveLeverageChecks(input: {
 
   const rawEvidence = input.supplementalEvidence;
   const evidenceSet = createPortfolioRiskEvidenceSet(rawEvidence);
+  const targetSymbol = input.projection.targetSymbol;
   let supplementalLeverage: DecimalValue | null = null;
   if (!evidenceSet.ok) {
     reasons.add("SUPPLEMENTAL_EVIDENCE_INVALID");
   } else if (evidenceSet.value.length > 0) {
     if (
       evidenceSet.value.length !== 1 ||
-      evidenceSet.value[0]?.symbol !== input.targetSymbol
+      evidenceSet.value[0]?.symbol !== targetSymbol
     ) {
       reasons.add("SUPPLEMENTAL_EVIDENCE_INVALID");
     } else {
@@ -240,7 +275,7 @@ function deriveLeverageChecks(input: {
         evidenceSet.value[0],
         input.account,
         {
-          expectedSymbol: input.targetSymbol,
+          expectedSymbol: targetSymbol,
           evaluationTime: input.evaluationTime,
           policy: input.policy,
         },
@@ -255,7 +290,7 @@ function deriveLeverageChecks(input: {
 
   const checks: PortfolioRiskLeverageCheck[] = [];
   const limit = input.policy.maxDerivativesLeverage;
-  for (const symbol of input.symbols) {
+  for (const symbol of relevantSymbols(input.account, input.projection)) {
     const rows = passB.positions.filter(
       (position) =>
         position.category === "linear" && position.symbol === symbol,
@@ -265,7 +300,7 @@ function deriveLeverageChecks(input: {
       symbol,
     );
     const relevantRows = rows.filter(isRelevantPosition);
-    const target = symbol === input.targetSymbol;
+    const target = symbol === targetSymbol;
     const rowsToCheck =
       relevantRows.length > 0 || target || ordersNeedSymbol ? rows : [];
 
@@ -466,17 +501,13 @@ function buildCapacity(
       withinCapacity: null,
     };
   } else {
-    const zero = DecimalValue.fromString("0");
-    if (!zero.ok) return invalid();
-    const nonNegativeAvailable =
-      available.value.compare(zero.value) > 0 ? available.value : zero.value;
-    const reserve = nonNegativeAvailable.multiply(
-      policy.value.marginReserveRatio,
-    );
-    const rawCapacity = available.value.subtract(reserve);
-    const incrementalCapacity =
-      rawCapacity.compare(zero.value) > 0 ? rawCapacity : zero.value;
-    const withinCapacity = requested.value.compare(incrementalCapacity) <= 0;
+    const assessment = calculatePortfolioRiskIncrementalCapacity({
+      availableBalance: available.value,
+      requestedNotional: requested.value,
+      marginReserveRatio: policy.value.marginReserveRatio,
+    });
+    if (!assessment.ok) return assessment;
+    const { reserve, incrementalCapacity, withinCapacity } = assessment.value;
     if (!withinCapacity) reasons.add("CAPACITY_EXCEEDED");
     capacity = {
       status: withinCapacity ? "pass" : "block",
@@ -488,13 +519,11 @@ function buildCapacity(
     };
   }
 
-  const leverage = deriveLeverageChecks({
+  const leverage = assessPortfolioRiskLeverage({
     account: account.value,
     projection: projection.value,
     policy: policy.value,
     evaluationTime: evaluationTime.value,
-    targetSymbol: projection.value.targetSymbol,
-    symbols: relevantSymbols(account.value, projection.value),
     supplementalEvidence,
   });
   for (const code of leverage.reasonCodes) reasons.add(code);

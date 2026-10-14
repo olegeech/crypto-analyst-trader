@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 import {
   requireTrustedCapability,
@@ -8,12 +8,22 @@ import {
   derivePreparedLegExecutionIdentity,
   derivePreparedLegSourceIdentity,
   createPreparedLegExecution,
+  createPreparedLegGridExecution,
   derivePreparedLegSourceId,
   type PreparedLegExecution,
+  type PreparedLegGridExecution,
   type PreparedLegSourceIdentity,
 } from "../domain/execution/prepared-leg-execution.js";
+import { createPreparedGridCapacity } from "../domain/execution/prepared-grid-capacity.js";
+import { hashCanonical } from "../domain/identity/canonical-serialization.js";
+import {
+  accountEvidenceContentHash,
+  createAccountEvidenceBundle,
+  type AccountEvidenceBundle,
+} from "../domain/account/account-evidence-bundle.js";
 import {
   createPreparedLegOrderProof,
+  matchesPreparedLegTakeProfitChild,
   matchesPreparedLegOrder,
 } from "../domain/execution/prepared-leg-order-proof.js";
 import type { PreparedLegOrderProof } from "../domain/execution/prepared-leg-order-proof.js";
@@ -56,8 +66,26 @@ import type { MainnetExecutionReadiness } from "./mainnet-execution-readiness.js
 const LEASE_TTL_MS = 60_000;
 
 export interface MainnetPreparedLegFreshEvidence {
+  readonly account: AccountEvidenceBundle;
   readonly readiness: MainnetExecutionReadiness;
   readonly state: MainnetExchangeReadState;
+}
+
+export interface MainnetPreparedGridReconciliationContext {
+  readonly grid: PreparedLegGridExecution;
+  readonly allowedLegIndexes: readonly number[];
+  readonly currentLegIndex: number;
+}
+
+interface StoredGridSiblingEvidence {
+  readonly status: PreparedLegReconciliationStatus;
+  readonly proof?: PreparedLegOrderProof;
+  readonly fillQuantities: readonly DecimalValue[];
+}
+
+export interface MainnetPreparedGridCreateContext {
+  readonly grid: PreparedLegGridExecution;
+  readonly currentLegIndex: number;
 }
 
 export interface MainnetPreparedLegEvidencePort {
@@ -85,6 +113,7 @@ export interface MainnetPreparedLegOutcome {
   readonly clientOrderId: string;
   readonly status: PreparedLegReconciliationStatus;
   readonly reconciliationRevision: number;
+  readonly reasonCodes: readonly string[];
 }
 
 function blocked(code: string) {
@@ -103,7 +132,13 @@ export function acquireOrReuseMainnetLease(
     existing?.ownerRunId === runId &&
     timestampToEpochMs(now) < timestampToEpochMs(existing.expiresAt)
   )
-    return ok(existing);
+    return persistence.renewLease({
+      scope: persistence.scope,
+      ownerRunId: runId,
+      now,
+      ttlMs: LEASE_TTL_MS,
+      authority: { ownerRunId: existing.ownerRunId, epoch: existing.epoch },
+    });
   return persistence.acquireLease({
     scope: persistence.scope,
     ownerRunId: runId,
@@ -112,7 +147,7 @@ export function acquireOrReuseMainnetLease(
   });
 }
 
-function matchesScope(
+export function matchesScope(
   persistence: PersistencePort,
   execution: PreparedLegSourceIdentity,
 ): boolean {
@@ -123,6 +158,43 @@ function matchesScope(
     persistence.scope.category === "linear" &&
     persistence.scope.positionMode === "one-way"
   );
+}
+
+function validateGridJournalPosition(
+  dependencies: MainnetPreparedLegDependencies,
+  context: MainnetPreparedGridCreateContext,
+  runId: string,
+  leaseEpoch: number,
+): Result<void> {
+  for (const row of context.grid.legs) {
+    const index = row.execution.leg.index;
+    // The coordinator checked the full journal under this lease; the current
+    // source is checked by the caller. Re-read only the durable prefix here.
+    if (index >= context.currentLegIndex) break;
+    const source = dependencies.preparedLegs.readPreparedLegSource(
+      row.sourceId,
+    );
+    if (!source.ok) return source;
+    const snapshot = source.value;
+    const latest = snapshot?.reconciliations.at(-1);
+    if (
+      !snapshot ||
+      snapshot.lineage.preparedHash !== context.grid.preparedHash ||
+      snapshot.lineage.legId !== row.execution.leg.legId ||
+      snapshot.lineage.clientOrderId !== row.execution.clientOrderId ||
+      snapshot.createIntent.operation !== "create" ||
+      snapshot.createIntent.runId !== runId ||
+      snapshot.createIntent.leaseEpoch !== leaseEpoch ||
+      snapshot.createIntent.clientOrderId !== row.execution.clientOrderId ||
+      snapshot.createAttempt?.operation !== "create" ||
+      snapshot.createAttempt.writeIntentId !==
+        snapshot.createIntent.writeIntentId ||
+      snapshot.cancelIntent !== undefined ||
+      latest?.status !== "CONFIRMED_OPEN"
+    )
+      return blocked("GRID_PREFIX_JOURNAL_NOT_CONFIRMED");
+  }
+  return ok(undefined);
 }
 
 export async function verifyCurrentAccountBinding(
@@ -138,15 +210,29 @@ export async function verifyCurrentAccountBinding(
     return blocked("CURRENT_ACCOUNT_IDENTITY_UNAVAILABLE");
   }
   const { readiness, state } = evidence;
+  const parsedAccount = createAccountEvidenceBundle(evidence.account);
+  const accountHash = parsedAccount.ok
+    ? accountEvidenceContentHash(parsedAccount.value)
+    : parsedAccount;
   const evaluatedAt = parseUtcTimestamp(readiness.evaluatedAt);
   const serverTime = parseUtcTimestamp(state.serverTime);
   if (
+    !parsedAccount.ok ||
+    !accountHash.ok ||
     !evaluatedAt.ok ||
     !serverTime.ok ||
     readiness.environment !== "mainnet" ||
     readiness.symbol !== identity.leg.intent.instrument ||
     readiness.internalBinding?.accountIdentityHash !==
       identity.accountIdentityHash ||
+    readiness.internalBinding?.accountEvidenceHash !== accountHash.value ||
+    parsedAccount.value.collectionStatus !== "complete" ||
+    parsedAccount.value.accountBinding.environment !== "mainnet" ||
+    parsedAccount.value.accountBinding.origin !== "https://api.bybit.com" ||
+    !parsedAccount.value.accountBinding.identityVerified ||
+    parsedAccount.value.accountBinding.accountIdentityHash !==
+      identity.accountIdentityHash ||
+    parsedAccount.value.collectionEndedAt === null ||
     readiness.accountEvidenceAgeMs === undefined ||
     readiness.accountEvidenceAgeMs < 0 ||
     readiness.accountEvidenceAgeMs >
@@ -155,6 +241,11 @@ export async function verifyCurrentAccountBinding(
       timestampToEpochMs(evaluatedAt.value) ||
     timestampToEpochMs(serverTime.value) -
       timestampToEpochMs(evaluatedAt.value) >
+      PROVISIONAL_M1_MAX_ACCOUNT_EVIDENCE_AGE_MS ||
+    timestampToEpochMs(parsedAccount.value.collectionEndedAt) >
+      timestampToEpochMs(evaluatedAt.value) ||
+    timestampToEpochMs(serverTime.value) -
+      timestampToEpochMs(parsedAccount.value.collectionEndedAt) >
       PROVISIONAL_M1_MAX_ACCOUNT_EVIDENCE_AGE_MS ||
     state.market.instrument !== identity.leg.intent.instrument ||
     state.market.scope.exchange !== "bybit" ||
@@ -169,15 +260,41 @@ export async function verifyCurrentAccountBinding(
 function validateCurrentEvidence(
   evidence: MainnetPreparedLegFreshEvidence,
   execution: PreparedLegExecution,
+  gridContext?: MainnetPreparedGridCreateContext,
 ): Result<void> {
   const { readiness, state } = evidence;
+  const allowApprovedPrefix = gridContext !== undefined;
   const one = DecimalValue.fromString("1");
   const evaluatedAt = parseUtcTimestamp(readiness.evaluatedAt);
   const serverTime = parseUtcTimestamp(state.serverTime);
   if (!one.ok) return blocked("INVALID_LEVERAGE_CONSTANT");
+  if (!evaluatedAt.ok || !serverTime.ok)
+    return blocked("CREATE_READINESS_OR_TARGET_STATE_BLOCKED");
+  if (!allowApprovedPrefix) {
+    const parsedAccount = createAccountEvidenceBundle(evidence.account);
+    const accountHash = parsedAccount.ok
+      ? accountEvidenceContentHash(parsedAccount.value)
+      : parsedAccount;
+    if (
+      !parsedAccount.ok ||
+      !accountHash.ok ||
+      readiness.internalBinding?.accountEvidenceHash !== accountHash.value ||
+      parsedAccount.value.collectionStatus !== "complete" ||
+      parsedAccount.value.accountBinding.environment !== "mainnet" ||
+      parsedAccount.value.accountBinding.origin !== "https://api.bybit.com" ||
+      !parsedAccount.value.accountBinding.identityVerified ||
+      parsedAccount.value.accountBinding.accountIdentityHash !==
+        execution.accountIdentityHash ||
+      parsedAccount.value.collectionEndedAt === null ||
+      timestampToEpochMs(parsedAccount.value.collectionEndedAt) >
+        timestampToEpochMs(evaluatedAt.value) ||
+      timestampToEpochMs(serverTime.value) -
+        timestampToEpochMs(parsedAccount.value.collectionEndedAt) >
+        PROVISIONAL_M1_MAX_ACCOUNT_EVIDENCE_AGE_MS
+    )
+      return blocked("CREATE_ACCOUNT_EVIDENCE_MISMATCH");
+  }
   if (
-    !evaluatedAt.ok ||
-    !serverTime.ok ||
     readiness.environment !== "mainnet" ||
     readiness.verdict !== "READY" ||
     readiness.symbol !== execution.leg.intent.instrument ||
@@ -200,7 +317,7 @@ function validateCurrentEvidence(
     state.position.instrument !== execution.leg.intent.instrument ||
     state.position.side !== "flat" ||
     !state.position.quantity.isZero() ||
-    state.openOrders.length !== 0 ||
+    (!allowApprovedPrefix && state.openOrders.length !== 0) ||
     state.leverage.buy.compare(one.value) !== 0 ||
     state.leverage.sell.compare(one.value) !== 0 ||
     state.leverage.effective.compare(one.value) !== 0
@@ -417,23 +534,17 @@ function fillEvidence(
   return ok(result);
 }
 
-function targetStateConflict(
+function sharedReadStateScopeAndLeverageConflict(
   state: MainnetExchangeReadState,
-  execution: PreparedLegSourceIdentity,
-  proof: PreparedLegOrderProof,
-  fills: readonly ExchangeFillObservation[],
+  instrument: string,
 ): string | undefined {
-  const symbol = execution.leg.intent.instrument;
-  const isAttachedTakeProfitChild = (order: ExchangeOrderObservation) =>
-    order.parentOrderLinkId === execution.clientOrderId &&
-    order.protectionType === "take-profit";
   if (
-    state.market.instrument !== symbol ||
+    state.market.instrument !== instrument ||
     state.market.scope.exchange !== "bybit" ||
     state.market.scope.environment !== "mainnet" ||
     state.market.scope.category !== "linear" ||
     state.market.scope.positionMode !== "one-way" ||
-    state.position.instrument !== symbol
+    state.position.instrument !== instrument
   )
     return "READ_STATE_SCOPE_MISMATCH";
   const one = DecimalValue.fromString("1");
@@ -444,6 +555,57 @@ function targetStateConflict(
     state.leverage.sell.compare(one.value) !== 0
   )
     return "POST_CREATE_LEVERAGE_CHANGED";
+  return undefined;
+}
+
+function exactFillPositionConflict(
+  state: MainnetExchangeReadState,
+  fills: readonly ExchangeFillObservation[],
+  siblingFillQuantities: readonly DecimalValue[] = [],
+): string | undefined {
+  const zero = DecimalValue.fromString("0");
+  if (!zero.ok) return "INVALID_FILL_TOTAL";
+  let total = zero.value;
+  for (const fill of fills) total = total.add(fill.quantity);
+  for (const quantity of siblingFillQuantities) total = total.add(quantity);
+  if (total.isZero()) {
+    if (state.position.side !== "flat" || !state.position.quantity.isZero())
+      return "UNOWNED_TARGET_POSITION_PRESENT";
+  } else if (
+    state.position.side !== "long" ||
+    state.position.quantity.compare(total) !== 0
+  ) {
+    return "TARGET_POSITION_CONTRADICTS_EXACT_FILLS";
+  }
+  return undefined;
+}
+
+function targetStateConflict(
+  dependencies: MainnetPreparedLegDependencies,
+  state: MainnetExchangeReadState,
+  execution: PreparedLegSourceIdentity,
+  proof: PreparedLegOrderProof,
+  fills: readonly ExchangeFillObservation[],
+  gridContext?: MainnetPreparedGridReconciliationContext,
+): string | undefined {
+  const symbol = execution.leg.intent.instrument;
+  if (gridContext)
+    return gridTargetStateConflict(
+      dependencies,
+      state,
+      execution,
+      proof,
+      fills,
+      gridContext,
+    );
+  const isAttachedTakeProfitChild = (order: ExchangeOrderObservation) =>
+    order.parentOrderLinkId === execution.clientOrderId &&
+    order.protectionType === "take-profit";
+  const scopeAndLeverageConflict = sharedReadStateScopeAndLeverageConflict(
+    state,
+    symbol,
+  );
+  if (scopeAndLeverageConflict) return scopeAndLeverageConflict;
   if (
     state.openOrders.some(
       (order) =>
@@ -470,20 +632,306 @@ function targetStateConflict(
     )
       return "READ_STATE_ORDER_CONTRADICTS_RECONCILIATION";
   }
-  const parsedZero = DecimalValue.fromString("0");
-  if (!parsedZero.ok) return "INVALID_FILL_TOTAL";
-  let total = parsedZero.value;
-  for (const fill of fills) total = total.add(fill.quantity);
-  if (total.isZero()) {
-    if (state.position.side !== "flat" || !state.position.quantity.isZero())
-      return "UNOWNED_TARGET_POSITION_PRESENT";
-  } else if (
-    state.position.side !== "long" ||
-    state.position.quantity.compare(total) !== 0
-  ) {
-    return "TARGET_POSITION_CONTRADICTS_EXACT_FILLS";
+  return exactFillPositionConflict(state, fills);
+}
+
+function gridTargetStateConflict(
+  dependencies: MainnetPreparedLegDependencies,
+  state: MainnetExchangeReadState,
+  execution: PreparedLegSourceIdentity,
+  proof: PreparedLegOrderProof,
+  fills: readonly ExchangeFillObservation[],
+  context: MainnetPreparedGridReconciliationContext,
+): string | undefined {
+  const symbol = execution.leg.intent.instrument;
+  const scopeAndLeverageConflict = sharedReadStateScopeAndLeverageConflict(
+    state,
+    symbol,
+  );
+  if (scopeAndLeverageConflict) return scopeAndLeverageConflict;
+
+  const allowed = new Map<number, PreparedLegExecution>();
+  for (const index of context.allowedLegIndexes) {
+    const row = context.grid.legs[index];
+    if (!row || allowed.has(index)) return "GRID_PREFIX_IDENTITY_INVALID";
+    allowed.set(index, row.execution);
   }
-  return undefined;
+  const currentRow =
+    context.currentLegIndex === undefined
+      ? undefined
+      : context.grid.legs[context.currentLegIndex];
+  if (
+    context.currentLegIndex !== undefined &&
+    (!currentRow ||
+      currentRow.execution.clientOrderId !== execution.clientOrderId)
+  )
+    return "GRID_CURRENT_LEG_IDENTITY_MISMATCH";
+
+  const byClientId = new Map(
+    [...allowed.values()].map((row) => [row.clientOrderId, row]),
+  );
+  const siblingEvidence = new Map<number, StoredGridSiblingEvidence>();
+  for (const index of context.allowedLegIndexes) {
+    if (index === context.currentLegIndex) continue;
+    const row = context.grid.legs[index];
+    if (!row) return "GRID_PREFIX_IDENTITY_INVALID";
+    const evidence = readStoredGridSiblingEvidence(
+      dependencies,
+      row.sourceId,
+      row.execution,
+    );
+    if (!evidence.ok) return "GRID_SIBLING_EVIDENCE_INVALID";
+    siblingEvidence.set(index, evidence.value);
+  }
+  const parentOrders = new Map<string, ExchangeOrderObservation>();
+  const protectionParents = new Set<string>();
+  for (const order of state.openOrders) {
+    if (order.instrument !== symbol) return "READ_STATE_SCOPE_MISMATCH";
+    if (
+      order.parentOrderLinkId !== undefined ||
+      order.protectionType !== undefined
+    ) {
+      const parentId = order.parentOrderLinkId;
+      if (
+        parentId === undefined ||
+        order.clientOrderId !== parentId ||
+        order.protectionType !== "take-profit" ||
+        !byClientId.has(parentId) ||
+        !matchesPreparedLegTakeProfitChild(order, byClientId.get(parentId)!) ||
+        protectionParents.has(parentId)
+      )
+        return "ATTACHED_PROTECTION_CONTRADICTS_APPROVAL";
+      protectionParents.add(parentId);
+      continue;
+    }
+    const approved = byClientId.get(order.clientOrderId);
+    if (!approved) return "UNOWNED_TARGET_ORDER_PRESENT";
+    if (parentOrders.has(order.clientOrderId))
+      return "DUPLICATE_OWNED_TARGET_ORDER";
+    const observed = createPreparedLegOrderProof(order);
+    if (!observed.ok || !matchesPreparedLegOrder(observed.value, approved))
+      return "READ_STATE_ORDER_CONTRADICTS_RECONCILIATION";
+    if (approved.leg.index !== context.currentLegIndex) {
+      const prior = siblingEvidence.get(approved.leg.index);
+      if (!prior?.proof || !sameOrderObservation(observed.value, prior.proof))
+        return "PREFIX_ORDER_NOT_ZERO_FILL";
+    } else if (
+      observed.value.exchangeOrderId !== proof.exchangeOrderId ||
+      observed.value.status !== proof.status ||
+      observed.value.filledQuantity.compare(proof.filledQuantity) !== 0
+    ) {
+      return "READ_STATE_ORDER_CONTRADICTS_RECONCILIATION";
+    }
+    parentOrders.set(order.clientOrderId, order);
+  }
+
+  for (const [index, approved] of allowed) {
+    const parent = parentOrders.get(approved.clientOrderId);
+    const currentIsTerminalOrFilled =
+      index === context.currentLegIndex &&
+      (proof.status !== "open" || proof.filledQuantity.isPositive());
+    if (!parent) {
+      const sibling = siblingEvidence.get(index);
+      const siblingIsDurablyTerminalFill =
+        (sibling?.status === "PROTECTION_PENDING" ||
+          sibling?.status === "UNRESOLVED") &&
+        sibling.proof !== undefined &&
+        (sibling.proof.status === "filled" ||
+          sibling.proof.status === "cancelled") &&
+        sibling.proof.filledQuantity.isPositive();
+      if (!currentIsTerminalOrFilled && !siblingIsDurablyTerminalFill)
+        return "PREFIX_ORDER_NOT_VISIBLE_IN_READ_STATE";
+      continue;
+    }
+  }
+
+  const siblingFillQuantities = [...siblingEvidence.values()].flatMap(
+    (evidence) => evidence.fillQuantities,
+  );
+  return exactFillPositionConflict(state, fills, siblingFillQuantities);
+}
+
+function sameOrderObservation(
+  left: PreparedLegOrderProof,
+  right: PreparedLegOrderProof,
+): boolean {
+  return (
+    left.exchangeOrderId === right.exchangeOrderId &&
+    left.clientOrderId === right.clientOrderId &&
+    left.status === right.status &&
+    left.filledQuantity.compare(right.filledQuantity) === 0
+  );
+}
+
+function reviveCanonicalDecimals(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(reviveCanonicalDecimals);
+  if (typeof value !== "object" || value === null) return value;
+  const record = value as Record<string, unknown>;
+  if (Object.keys(record).length === 1 && typeof record.$decimal === "string")
+    return record.$decimal;
+  return Object.fromEntries(
+    Object.entries(record).map(([key, item]) => [
+      key,
+      reviveCanonicalDecimals(item),
+    ]),
+  );
+}
+
+function readStoredGridSiblingEvidence(
+  dependencies: MainnetPreparedLegDependencies,
+  sourceId: string,
+  execution: PreparedLegExecution,
+): Result<StoredGridSiblingEvidence> {
+  const source = dependencies.preparedLegs.readPreparedLegSource(sourceId);
+  if (!source.ok) return source;
+  const snapshot = source.value;
+  const reconciliation = snapshot?.reconciliations.at(-1);
+  if (
+    !snapshot ||
+    snapshot.lineage.sourceId !== sourceId ||
+    snapshot.lineage.preparedHash !== execution.preparedHash ||
+    snapshot.lineage.legId !== execution.leg.legId ||
+    snapshot.lineage.clientOrderId !== execution.clientOrderId ||
+    !reconciliation
+  )
+    return fail(
+      domainError("PERSISTENCE_INTEGRITY", "grid sibling source is incomplete"),
+    );
+  const rawHash =
+    "sha256:" +
+    createHash("sha256")
+      .update(reconciliation.canonicalJson, "utf8")
+      .digest("hex");
+  if (rawHash !== reconciliation.canonicalHash)
+    return fail(
+      domainError("PERSISTENCE_INTEGRITY", "grid sibling hash is invalid"),
+    );
+  let raw: unknown;
+  try {
+    raw = JSON.parse(reconciliation.canonicalJson) as unknown;
+  } catch {
+    return fail(
+      domainError("PERSISTENCE_INTEGRITY", "grid sibling record is invalid"),
+    );
+  }
+  const record = reviveCanonicalDecimals(raw);
+  if (
+    !closedRecord(record, [
+      "schemaVersion",
+      "sourceId",
+      "revision",
+      "status",
+      "observedAt",
+      "exchangeOrderId",
+      "result",
+    ]) ||
+    record.schemaVersion !== "prepared-leg-reconciliation/v1" ||
+    record.sourceId !== sourceId ||
+    record.revision !== reconciliation.revision ||
+    record.status !== reconciliation.status ||
+    record.observedAt !== reconciliation.observedAt ||
+    record.exchangeOrderId !== reconciliation.exchangeOrderId ||
+    !closedRecord(record.result, ["orderProof", "fills", "reasonCodes"])
+  )
+    return fail(
+      domainError("PERSISTENCE_INTEGRITY", "grid sibling record mismatches"),
+    );
+
+  if (
+    record.status !== "CONFIRMED_OPEN" &&
+    record.status !== "PROTECTION_PENDING" &&
+    record.status !== "UNRESOLVED"
+  )
+    return fail(
+      domainError("PERSISTENCE_INTEGRITY", "grid sibling is unresolved"),
+    );
+  const proofResult = createPreparedLegOrderProof(record.result.orderProof);
+  if (
+    !proofResult.ok ||
+    !matchesPreparedLegOrder(proofResult.value, execution) ||
+    proofResult.value.exchangeOrderId !== reconciliation.exchangeOrderId
+  )
+    return fail(
+      domainError(
+        "PERSISTENCE_INTEGRITY",
+        "grid sibling order proof is invalid",
+      ),
+    );
+  const proof = proofResult.value;
+  const rawFills = record.result.fills ?? [];
+  if (!Array.isArray(rawFills))
+    return fail(
+      domainError("PERSISTENCE_INTEGRITY", "grid sibling fills are invalid"),
+    );
+  const quantities: DecimalValue[] = [];
+  const executionIds = new Set<string>();
+  for (const fill of rawFills) {
+    if (
+      !closedRecord(fill, [
+        "executionId",
+        "quantity",
+        "price",
+        "executedAt",
+        "fee",
+        "feeCurrency",
+      ]) ||
+      typeof fill.executionId !== "string" ||
+      executionIds.has(fill.executionId) ||
+      !parseUtcTimestamp(fill.executedAt).ok
+    )
+      return fail(
+        domainError("PERSISTENCE_INTEGRITY", "grid sibling fill is invalid"),
+      );
+    const quantity = DecimalValue.fromString(fill.quantity);
+    const price = DecimalValue.fromString(fill.price);
+    if (
+      !quantity.ok ||
+      !quantity.value.isPositive() ||
+      !price.ok ||
+      !price.value.isPositive()
+    )
+      return fail(
+        domainError("PERSISTENCE_INTEGRITY", "grid sibling fill is invalid"),
+      );
+    executionIds.add(fill.executionId);
+    quantities.push(quantity.value);
+  }
+  const fillTotal = DecimalValue.fromString("0");
+  if (!fillTotal.ok) return fillTotal;
+  const total = quantities.reduce(
+    (sum, quantity) => sum.add(quantity),
+    fillTotal.value,
+  );
+  const fillStatusConsistent =
+    (proof.filledQuantity.isZero() &&
+      quantities.length === 0 &&
+      (proof.status === "open" ||
+        proof.status === "cancelled" ||
+        proof.status === "rejected")) ||
+    (proof.filledQuantity.isPositive() &&
+      total.compare(proof.filledQuantity) === 0 &&
+      ((proof.status === "partially-filled" &&
+        proof.filledQuantity.compare(proof.requestedQuantity) < 0) ||
+        (proof.status === "filled" &&
+          proof.filledQuantity.compare(proof.requestedQuantity) === 0) ||
+        (proof.status === "cancelled" &&
+          proof.filledQuantity.compare(proof.requestedQuantity) < 0)));
+  if (
+    (record.status === "CONFIRMED_OPEN" &&
+      (proof.status !== "open" ||
+        !proof.filledQuantity.isZero() ||
+        quantities.length > 0)) ||
+    (record.status === "PROTECTION_PENDING" &&
+      (!proof.filledQuantity.isPositive() || !fillStatusConsistent)) ||
+    (record.status === "UNRESOLVED" && !fillStatusConsistent)
+  )
+    return fail(
+      domainError(
+        "PERSISTENCE_INTEGRITY",
+        "grid sibling fills do not reconcile",
+      ),
+    );
+  return ok({ status: record.status, proof, fillQuantities: quantities });
 }
 
 function ensurePreparedLegCreateAttempt(
@@ -589,6 +1037,7 @@ export async function reconcilePreparedLegSource(
     readonly expectedOrderId?: string;
     readonly cancelPending?: boolean;
     readonly forceUnresolvedReason?: string;
+    readonly gridContext?: MainnetPreparedGridReconciliationContext;
   } = {},
 ): Promise<Result<MainnetPreparedLegOutcome>> {
   const sourceSnapshot =
@@ -651,7 +1100,9 @@ export async function reconcilePreparedLegSource(
       result: { reasonCodes: [safeProviderReason(observed)] },
     });
     if (!saved.ok) return saved;
-    return outcome(kind, execution, sourceId, saved.value);
+    return outcome(kind, execution, sourceId, saved.value, [
+      safeProviderReason(observed),
+    ]);
   }
   const proof = createPreparedLegOrderProof(observed.value);
   if (!proof.ok) {
@@ -664,7 +1115,9 @@ export async function reconcilePreparedLegSource(
       result: { reasonCodes: ["ORDER_TERMS_INCOMPLETE"] },
     });
     if (!saved.ok) return saved;
-    return outcome(kind, execution, sourceId, saved.value);
+    return outcome(kind, execution, sourceId, saved.value, [
+      "ORDER_TERMS_INCOMPLETE",
+    ]);
   }
   const proofObservedAt = proof.value.observedAt;
   const matches = matchesPreparedLegOrder(proof.value, execution);
@@ -691,7 +1144,9 @@ export async function reconcilePreparedLegSource(
       },
     });
     if (!saved.ok) return saved;
-    return outcome(kind, execution, sourceId, saved.value);
+    return outcome(kind, execution, sourceId, saved.value, [
+      safeProviderReason(fillsResult),
+    ]);
   }
   const fills = fillEvidence(
     fillsResult.value,
@@ -736,10 +1191,12 @@ export async function reconcilePreparedLegSource(
   const stateConflict =
     fills.ok && exactOrder
       ? targetStateConflict(
+          dependencies,
           readState.value,
           execution,
           proof.value,
           fillsResult.value,
+          options.gridContext,
         )
       : undefined;
   const filledQuantity = proof.value.filledQuantity;
@@ -848,11 +1305,18 @@ export async function reconcilePreparedLegSource(
     result,
   });
   if (!saved.ok) return saved;
-  const final = outcome(kind, execution, sourceId, saved.value);
+  const final = outcome(
+    kind,
+    execution,
+    sourceId,
+    saved.value,
+    result.reasonCodes ?? [],
+  );
   if (
-    status === "CONFIRMED_OPEN" ||
-    status === "CANCELLED" ||
-    status === "REJECTED"
+    options.gridContext === undefined &&
+    (status === "CONFIRMED_OPEN" ||
+      status === "CANCELLED" ||
+      status === "REJECTED")
   )
     dependencies.persistence.releaseLease(authority);
   return final;
@@ -866,6 +1330,7 @@ function outcome(
     readonly status: PreparedLegReconciliationStatus;
     readonly revision: number;
   },
+  reasonCodes: readonly string[] = [],
 ): Result<MainnetPreparedLegOutcome> {
   return ok({
     kind,
@@ -873,13 +1338,15 @@ function outcome(
     clientOrderId: execution.clientOrderId,
     status: reconciliation.status,
     reconciliationRevision: reconciliation.revision,
+    reasonCodes,
   });
 }
 
 /** Executes only the exact unexpired approval leg; recovery is a separate read-only API. */
-export async function createMainnetPreparedLeg(
+async function createMainnetPreparedLegInternal(
   input: unknown,
   dependencies: MainnetPreparedLegCreateDependencies,
+  gridContext?: MainnetPreparedGridCreateContext,
 ): Promise<Result<MainnetPreparedLegOutcome>> {
   if (
     !closedRecord(input, ["approvalHash", "legId", "runId"]) ||
@@ -908,6 +1375,25 @@ export async function createMainnetPreparedLeg(
     legId: legId.value,
   });
   if (!identity.ok) return identity;
+  if (gridContext) {
+    const selected = gridContext.grid.legs[gridContext.currentLegIndex];
+    const expectedSourceId = derivePreparedLegSourceId(
+      identity.value.accountIdentityHash,
+      identity.value.preparedHash,
+      identity.value.leg.legId,
+    );
+    if (
+      !expectedSourceId.ok ||
+      !selected ||
+      gridContext.grid.approvalHash !== approvalHash.value ||
+      gridContext.grid.preparedHash !== identity.value.preparedHash ||
+      selected.execution.approvalHash !== approvalHash.value ||
+      selected.execution.leg.legId !== legId.value ||
+      selected.execution.clientOrderId !== identity.value.clientOrderId ||
+      selected.sourceId !== expectedSourceId.value
+    )
+      return blocked("GRID_CREATE_IDENTITY_MISMATCH");
+  }
   if (!matchesScope(dependencies.persistence, identity.value))
     return fail(
       domainError(
@@ -949,6 +1435,15 @@ export async function createMainnetPreparedLeg(
     return fail(
       domainError("UNRESOLVED_STATE", "lease takeover is reconciliation-only"),
     );
+  if (gridContext) {
+    const journalPosition = validateGridJournalPosition(
+      dependencies,
+      gridContext,
+      runId.value,
+      lease.value.epoch,
+    );
+    if (!journalPosition.ok) return journalPosition;
+  }
   const halt = dependencies.persistence.readHalt();
   if (!halt.ok) return halt;
   if (halt.value.active)
@@ -976,8 +1471,65 @@ export async function createMainnetPreparedLeg(
     now: evidence.state.serverTime,
   });
   if (!execution.ok) return execution;
-  const eligible = validateCurrentEvidence(evidence, execution.value);
+  if (gridContext) {
+    const canonicalGrid = createPreparedLegGridExecution({
+      approval: loaded.value,
+      approvalHash: approvalHash.value,
+      now: evidence.state.serverTime,
+    });
+    const expectedHash = canonicalGrid.ok
+      ? hashCanonical(canonicalGrid.value)
+      : canonicalGrid;
+    const providedHash = hashCanonical(gridContext.grid);
+    if (
+      !canonicalGrid.ok ||
+      !expectedHash.ok ||
+      !providedHash.ok ||
+      expectedHash.value !== providedHash.value
+    )
+      return blocked("GRID_CREATE_IDENTITY_MISMATCH");
+  }
+  const eligible = validateCurrentEvidence(
+    evidence,
+    execution.value,
+    gridContext,
+  );
   if (!eligible.ok) return eligible;
+  if (gridContext) {
+    const liveEvidence = {
+      readiness: evidence.readiness,
+      state: {
+        serverTime: evidence.state.serverTime,
+        symbol: evidence.state.market.instrument,
+        position: evidence.state.position,
+        leverage: evidence.state.leverage,
+        market: evidence.state.market,
+        openOrders: evidence.state.openOrders,
+      },
+    };
+    const capacity = createPreparedGridCapacity({
+      approval: loaded.value,
+      approvalHash: approvalHash.value,
+      account: evidence.account,
+      liveEvidence,
+      nextLegIndex: gridContext.currentLegIndex,
+      supplementalEvidence: [],
+      evaluationTime: evidence.state.serverTime,
+    });
+    if (
+      !capacity.ok ||
+      capacity.value.status !== "pass" ||
+      capacity.value.execution.clientOrderId !==
+        execution.value.clientOrderId ||
+      capacity.value.accountEvidenceHash !==
+        evidence.readiness.internalBinding?.accountEvidenceHash
+    )
+      return blocked(
+        capacity.ok
+          ? `GRID_CAPACITY_BLOCKED:${capacity.value.reasonCodes.join(",")}`
+          : "GRID_CAPACITY_EVIDENCE_INVALID",
+      );
+  }
   const initialAccountEvidenceAgeMs = evidence.readiness.accountEvidenceAgeMs;
   if (initialAccountEvidenceAgeMs === undefined)
     return blocked("FRESH_MAINNET_EVIDENCE_UNAVAILABLE");
@@ -1176,14 +1728,63 @@ export async function createMainnetPreparedLeg(
       ...(!parsedAttemptAt.ok
         ? { forceUnresolvedReason: "ATTEMPT_TIMESTAMP_UNAVAILABLE" }
         : {}),
+      ...(gridContext === undefined
+        ? {}
+        : {
+            gridContext: {
+              grid: gridContext.grid,
+              allowedLegIndexes: gridContext.grid.legs
+                .slice(0, gridContext.currentLegIndex + 1)
+                .map((row) => row.execution.leg.index),
+              currentLegIndex: gridContext.currentLegIndex,
+            },
+          }),
     },
   );
+}
+
+/** Standalone #21 entry point: one exact approved leg, clean target only. */
+export async function createMainnetPreparedLeg(
+  input: unknown,
+  dependencies: MainnetPreparedLegCreateDependencies,
+): Promise<Result<MainnetPreparedLegOutcome>> {
+  return createMainnetPreparedLegInternal(input, dependencies);
+}
+
+/** Internal #46 seam; only the grid coordinator supplies its checked prefix. */
+export async function createMainnetPreparedLegForGrid(
+  input: unknown,
+  dependencies: MainnetPreparedLegCreateDependencies,
+  context: MainnetPreparedGridCreateContext,
+): Promise<Result<MainnetPreparedLegOutcome>> {
+  return createMainnetPreparedLegInternal(input, dependencies, context);
 }
 
 /** Read-only recovery resolves source identity without a current approval lookup. */
 export async function recoverMainnetPreparedLegSource(
   input: unknown,
   dependencies: MainnetPreparedLegCreateDependencies,
+): Promise<Result<MainnetPreparedLegOutcome>> {
+  return recoverMainnetPreparedLegSourceInternal(input, dependencies);
+}
+
+/** Internal recovery seam for a source already admitted by the grid journal. */
+export async function recoverMainnetPreparedLegSourceForGrid(
+  input: unknown,
+  dependencies: MainnetPreparedLegCreateDependencies,
+  gridContext: MainnetPreparedGridReconciliationContext,
+): Promise<Result<MainnetPreparedLegOutcome>> {
+  return recoverMainnetPreparedLegSourceInternal(
+    input,
+    dependencies,
+    gridContext,
+  );
+}
+
+async function recoverMainnetPreparedLegSourceInternal(
+  input: unknown,
+  dependencies: MainnetPreparedLegCreateDependencies,
+  gridContext?: MainnetPreparedGridReconciliationContext,
 ): Promise<Result<MainnetPreparedLegOutcome>> {
   if (
     !closedRecord(input, ["sourceId", "runId"]) ||
@@ -1261,6 +1862,7 @@ export async function recoverMainnetPreparedLegSource(
               source.value.reconciliations.at(-1)!.exchangeOrderId,
           }),
       cancelPending: source.value.cancelIntent !== undefined,
+      ...(gridContext === undefined ? {} : { gridContext }),
     },
   );
 }

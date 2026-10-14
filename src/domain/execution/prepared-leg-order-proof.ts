@@ -36,6 +36,7 @@ const ORDER_KEYS = [
   "status",
   "orderType",
   "price",
+  "triggerPrice",
   "timeInForce",
   "takeProfit",
   "stopLoss",
@@ -136,5 +137,35 @@ export function matchesPreparedLegOrder(
     proof.stopLoss === null &&
     proof.reduceOnly === false &&
     proof.positionIdx === 0
+  );
+}
+
+/** Proves the active attached full-position TP child against its approved leg. */
+export function matchesPreparedLegTakeProfitChild(
+  order: ExchangeOrderObservation,
+  execution: PreparedLegSourceIdentity,
+): boolean {
+  const observed = isProducedExchangeOrder(order)
+    ? ok(order)
+    : createExchangeOrder(order);
+  if (!observed.ok) return false;
+  const child = observed.value;
+  const intent = execution.leg.intent;
+  const takeProfit = intent.protection?.takeProfit;
+  return (
+    takeProfit !== undefined &&
+    child.clientOrderId === execution.clientOrderId &&
+    child.parentOrderLinkId === execution.clientOrderId &&
+    child.instrument === intent.instrument &&
+    child.category === "linear" &&
+    child.protectionType === "take-profit" &&
+    child.side === "sell" &&
+    child.requestedQuantity.compare(intent.quantity) === 0 &&
+    child.filledQuantity.isZero() &&
+    child.status === "open" &&
+    child.orderType === "market" &&
+    child.triggerPrice?.compare(takeProfit) === 0 &&
+    child.reduceOnly === true &&
+    child.positionIdx === 0
   );
 }
