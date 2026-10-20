@@ -160,6 +160,10 @@ class FakeGridExchange implements MainnetExchangeExecutionPort {
           order.request.intent.protection?.takeProfit?.toString() ??
           null,
         stopLoss: order.request.intent.protection?.stopLoss?.toString() ?? null,
+        providerTpslMode:
+          order.request.intent.protection?.takeProfitPolicy?.tpslMode,
+        takeProfitTriggerBy:
+          order.request.intent.protection?.takeProfitPolicy?.triggerBy,
         reduceOnly: order.request.reduceOnly,
         positionIdx: 0,
         observedAt: this.clock.value,

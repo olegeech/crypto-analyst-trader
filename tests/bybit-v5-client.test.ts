@@ -129,6 +129,88 @@ function makeClient(
   return { client, requests };
 }
 
+test("attached TP reads retain raw parent attribution and deduplicate realtime/history", async () => {
+  const providerChild = order({
+    orderId: "tp-child-1",
+    orderLinkId: "",
+    parentOrderLinkId: "parent-client",
+    side: "Sell",
+    qty: "0.5",
+    cumExecQty: "0",
+    orderStatus: "Untriggered",
+    orderType: "Market",
+    stopOrderType: "PartialTakeProfit",
+    tpslMode: "Partial",
+    tpTriggerBy: "LastPrice",
+    triggerBy: "MarkPrice",
+    triggerPrice: "0.1",
+    reduceOnly: true,
+    createdTime: "1789984800000",
+    updatedTime: "1789984801000",
+  });
+  const { client, requests } = makeClient((path) => {
+    if (path === ORDER_REALTIME_PATH || path === ORDER_HISTORY_PATH)
+      return response({ list: [providerChild] });
+    return defaultResponse(path);
+  });
+
+  const children = await client.readAttachedProtectionOrders(
+    "DOGEUSDT",
+    "parent-client",
+  );
+
+  assert.equal(children.length, 1);
+  assert.equal(children[0]?.exchangeOrderId, "tp-child-1");
+  assert.equal(children[0]?.clientOrderId, "parent-client");
+  assert.equal(children[0]?.providerOrderLinkId, undefined);
+  assert.equal(children[0]?.parentOrderLinkId, "parent-client");
+  assert.equal(children[0]?.providerStopOrderType, "PartialTakeProfit");
+  assert.equal(children[0]?.providerTpslMode, "Partial");
+  assert.equal(children[0]?.takeProfitTriggerBy, "LastPrice");
+  assert.equal(children[0]?.triggerBy, "MarkPrice");
+  assert.equal(
+    children[0]?.readSource,
+    "order/realtime",
+    "the realtime snapshot is authoritative for an active child",
+  );
+  assert.deepEqual(
+    requests.map((request) => request.path),
+    [ORDER_REALTIME_PATH, ORDER_HISTORY_PATH],
+  );
+});
+
+test("attached TP read fails closed when realtime and history disagree", async () => {
+  const base = order({
+    orderId: "tp-child-conflict",
+    orderLinkId: "child-client",
+    parentOrderLinkId: "parent-client",
+    side: "Sell",
+    qty: "0.5",
+    orderType: "Market",
+    stopOrderType: "PartialTakeProfit",
+    tpslMode: "Partial",
+    tpTriggerBy: "LastPrice",
+    triggerPrice: "0.1",
+    reduceOnly: true,
+    createdTime: "1789984800000",
+    updatedTime: "1789984801000",
+  });
+  const { client } = makeClient((path) => {
+    if (path === ORDER_REALTIME_PATH) return response({ list: [base] });
+    if (path === ORDER_HISTORY_PATH)
+      return response({
+        list: [{ ...base, orderStatus: "Cancelled", cumExecQty: "0.1" }],
+      });
+    return defaultResponse(path);
+  });
+
+  await assert.rejects(
+    client.readAttachedProtectionOrders("DOGEUSDT", "parent-client"),
+    (error: unknown) =>
+      error instanceof BybitReadMappingError && error.kind === "precondition",
+  );
+});
+
 test("read client exhausts active-order pagination and preserves exact query filters", async () => {
   const { client, requests } = makeClient((path, query) => {
     if (path === ORDER_REALTIME_PATH) {

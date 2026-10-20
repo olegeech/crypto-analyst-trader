@@ -271,14 +271,36 @@ export class BybitDemoReadClient {
       if (
         previous !== undefined &&
         (previous.parentOrderLinkId !== record.parentOrderLinkId ||
+          previous.providerOrderLinkId !== record.providerOrderLinkId ||
+          previous.providerStopOrderType !== record.providerStopOrderType ||
+          previous.providerTpslMode !== record.providerTpslMode ||
+          previous.triggerBy !== record.triggerBy ||
+          previous.takeProfitTriggerBy !== record.takeProfitTriggerBy ||
+          previous.instrument !== record.instrument ||
+          previous.side !== record.side ||
+          previous.requestedQuantity.compare(record.requestedQuantity) !== 0 ||
           previous.status !== record.status ||
-          previous.filledQuantity.compare(record.filledQuantity) !== 0)
+          previous.filledQuantity.compare(record.filledQuantity) !== 0 ||
+          previous.orderType !== record.orderType ||
+          previous.protectionType !== record.protectionType ||
+          previous.triggerPrice?.toString() !==
+            record.triggerPrice?.toString() ||
+          previous.reduceOnly !== record.reduceOnly ||
+          previous.positionIdx !== record.positionIdx ||
+          previous.providerCreatedAt !== record.providerCreatedAt ||
+          previous.providerUpdatedAt !== record.providerUpdatedAt)
       ) {
         precondition(
           "Bybit attached-protection reads returned contradictory order evidence.",
         );
       }
-      byExchangeId.set(record.exchangeOrderId, record);
+      if (
+        previous === undefined ||
+        (previous.readSource === "order/history" &&
+          record.readSource === "order/realtime")
+      ) {
+        byExchangeId.set(record.exchangeOrderId, record);
+      }
     }
     return [...byExchangeId.values()].filter(
       (record) => record.parentOrderLinkId === parentClientOrderId,

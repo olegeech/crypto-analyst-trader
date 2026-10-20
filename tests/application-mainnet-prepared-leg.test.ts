@@ -260,6 +260,9 @@ class FakeMainnetExchange implements MainnetExchangeExecutionPort {
         timeInForce: request.timeInForce,
         takeProfit: request.intent.protection?.takeProfit?.toString() ?? null,
         stopLoss: request.intent.protection?.stopLoss?.toString() ?? null,
+        providerTpslMode: request.intent.protection?.takeProfitPolicy?.tpslMode,
+        takeProfitTriggerBy:
+          request.intent.protection?.takeProfitPolicy?.triggerBy,
         reduceOnly: request.reduceOnly,
         positionIdx: 0,
         observedAt,

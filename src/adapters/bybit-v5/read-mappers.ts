@@ -4,6 +4,7 @@ import type {
   ExchangeOrderObservation,
   ExchangeOrderStatus,
   ExchangeProtectionType,
+  ExchangeTriggerBy,
 } from "../../domain/execution/exchange-order.js";
 import { createExchangeOrder } from "../../domain/execution/exchange-order.js";
 import {
@@ -87,6 +88,14 @@ export interface BybitOrderRecord {
   readonly positionIdx: 0;
   readonly reduceOnly: boolean;
   readonly parentOrderLinkId?: string;
+  readonly providerOrderLinkId?: string;
+  readonly providerStopOrderType?: string;
+  readonly providerTpslMode?: string;
+  readonly triggerBy?: ExchangeTriggerBy;
+  readonly takeProfitTriggerBy?: ExchangeTriggerBy;
+  readonly providerCreatedAt?: UtcTimestamp;
+  readonly providerUpdatedAt?: UtcTimestamp;
+  readonly readSource?: string;
   readonly price?: DecimalValue;
   readonly averagePrice?: DecimalValue;
   readonly protectionType?: ExchangeProtectionType;
@@ -105,6 +114,10 @@ export function mapOrderObservation(
   observedAt: UtcTimestamp,
   source: string,
 ): ExchangeOrderObservation {
+  const observationSource =
+    record.protectionType !== undefined && record.readSource !== undefined
+      ? `${source}/${record.readSource}`
+      : source;
   const observation = createExchangeOrder({
     exchangeOrderId: record.exchangeOrderId,
     clientOrderId: record.clientOrderId,
@@ -114,7 +127,7 @@ export function mapOrderObservation(
     filledQuantity: record.filledQuantity.toString(),
     status: record.status,
     observedAt,
-    source,
+    source: observationSource,
     ...(record.category === undefined ? {} : { category: record.category }),
     ...(record.orderType === undefined ? {} : { orderType: record.orderType }),
     ...(record.price === undefined ? {} : { price: record.price.toString() }),
@@ -135,6 +148,25 @@ export function mapOrderObservation(
     ...(record.parentOrderLinkId === undefined
       ? {}
       : { parentOrderLinkId: record.parentOrderLinkId }),
+    ...(record.providerOrderLinkId === undefined
+      ? {}
+      : { providerOrderLinkId: record.providerOrderLinkId }),
+    ...(record.providerStopOrderType === undefined
+      ? {}
+      : { providerStopOrderType: record.providerStopOrderType }),
+    ...(record.providerTpslMode === undefined
+      ? {}
+      : { providerTpslMode: record.providerTpslMode }),
+    ...(record.triggerBy === undefined ? {} : { triggerBy: record.triggerBy }),
+    ...(record.takeProfitTriggerBy === undefined
+      ? {}
+      : { takeProfitTriggerBy: record.takeProfitTriggerBy }),
+    ...(record.providerCreatedAt === undefined
+      ? {}
+      : { providerCreatedAt: record.providerCreatedAt }),
+    ...(record.providerUpdatedAt === undefined
+      ? {}
+      : { providerUpdatedAt: record.providerUpdatedAt }),
     ...(record.averagePrice === undefined
       ? {}
       : { averagePrice: record.averagePrice.toString() }),
@@ -380,6 +412,7 @@ function optionalProtectionType(
   }
   switch (value) {
     case "TakeProfit":
+    case "PartialTakeProfit":
       return "take-profit";
     case "StopLoss":
       return "stop-loss";
@@ -388,6 +421,29 @@ function optionalProtectionType(
     default:
       return "other";
   }
+}
+
+function optionalProviderTime(
+  record: JsonObject,
+  field: string,
+  label: string,
+): UtcTimestamp | undefined {
+  if (!(field in record) || record[field] === undefined || record[field] === "")
+    return undefined;
+  return epochMilliseconds(record, field, label);
+}
+
+function optionalTriggerBy(
+  record: JsonObject,
+  field: "triggerBy" | "tpTriggerBy",
+  label: string,
+): ExchangeTriggerBy | undefined {
+  const value = optionalText(record, field, label);
+  if (value === undefined) return undefined;
+  if (field === "triggerBy" && value === "UNKNOWN") return undefined;
+  if (value === "LastPrice" || value === "MarkPrice" || value === "IndexPrice")
+    return value;
+  invalid(`Bybit ${label} response has an unsupported ${field}.`);
 }
 
 function positionIndex(record: JsonObject, label: string): 0 {
@@ -731,6 +787,7 @@ export function mapOrderRecords(
       invalid(`Bybit ${label} response has an invalid timeInForce.`);
     }
     const parentOrderLinkId = optionalText(record, "parentOrderLinkId", label);
+    const providerOrderLinkId = optionalText(record, "orderLinkId", label);
     const status = orderStatus(text(record, "orderStatus", label), label);
     const price = optionalPositiveDecimal(record, "price", label);
     const triggerPrice = optionalPositiveDecimal(record, "triggerPrice", label);
@@ -742,12 +799,26 @@ export function mapOrderRecords(
     );
     const stopLoss = optionalOrderProtectionPrice(record, "stopLoss", label);
     const protectionType = optionalProtectionType(record, label);
+    const providerStopOrderType = optionalText(record, "stopOrderType", label);
+    const providerTpslMode = optionalText(record, "tpslMode", label);
+    const triggerBy = optionalTriggerBy(record, "triggerBy", label);
+    const takeProfitTriggerBy = optionalTriggerBy(record, "tpTriggerBy", label);
+    const providerCreatedAt = optionalProviderTime(
+      record,
+      "createdTime",
+      label,
+    );
+    const providerUpdatedAt = optionalProviderTime(
+      record,
+      "updatedTime",
+      label,
+    );
     const clientOrderId =
-      record.orderLinkId === "" &&
+      providerOrderLinkId === undefined &&
       parentOrderLinkId !== undefined &&
       protectionType !== undefined
         ? parentOrderLinkId
-        : text(record, "orderLinkId", label);
+        : (providerOrderLinkId ?? text(record, "orderLinkId", label));
     return {
       exchangeOrderId,
       clientOrderId,
@@ -758,7 +829,15 @@ export function mapOrderRecords(
       status,
       positionIdx,
       reduceOnly,
+      readSource: label,
       ...(parentOrderLinkId === undefined ? {} : { parentOrderLinkId }),
+      ...(providerOrderLinkId === undefined ? {} : { providerOrderLinkId }),
+      ...(providerStopOrderType === undefined ? {} : { providerStopOrderType }),
+      ...(providerTpslMode === undefined ? {} : { providerTpslMode }),
+      ...(triggerBy === undefined ? {} : { triggerBy }),
+      ...(takeProfitTriggerBy === undefined ? {} : { takeProfitTriggerBy }),
+      ...(providerCreatedAt === undefined ? {} : { providerCreatedAt }),
+      ...(providerUpdatedAt === undefined ? {} : { providerUpdatedAt }),
       ...(price === undefined ? {} : { price }),
       ...(triggerPrice === undefined ? {} : { triggerPrice }),
       ...(averagePrice === undefined ? {} : { averagePrice }),
@@ -809,7 +888,7 @@ export function mapExecutionRecords(
     }
     const executionId = text(record, "execId", label);
     const exchangeOrderId = text(record, "orderId", label);
-    const clientOrderId = text(record, "orderLinkId", label);
+    const clientOrderId = text(record, "orderLinkId", label, true);
     const side = text(record, "side", label);
     if (side !== "Buy" && side !== "Sell") {
       invalid(`Bybit ${label} response has an invalid execution side.`);

@@ -17,6 +17,7 @@ export type ExchangeTimeInForce = "GTC" | "IOC" | "FOK" | "PostOnly";
 
 export type ExchangeProtectionType =
   "take-profit" | "stop-loss" | "trailing-stop" | "other";
+export type ExchangeTriggerBy = "LastPrice" | "MarkPrice" | "IndexPrice";
 
 export interface ExchangeOrderObservation {
   readonly exchangeOrderId: string;
@@ -29,6 +30,16 @@ export interface ExchangeOrderObservation {
   readonly observedAt: UtcTimestamp;
   readonly source: string;
   readonly parentOrderLinkId?: string;
+  /** The provider's child orderLinkId, excluding mapper-created aliases. */
+  readonly providerOrderLinkId?: string;
+  /** Raw Bybit stopOrderType, retained so child proof checks the exact value. */
+  readonly providerStopOrderType?: string;
+  /** Raw Bybit tpslMode, never inferred from the approved create request. */
+  readonly providerTpslMode?: string;
+  readonly triggerBy?: ExchangeTriggerBy;
+  readonly takeProfitTriggerBy?: ExchangeTriggerBy;
+  readonly providerCreatedAt?: UtcTimestamp;
+  readonly providerUpdatedAt?: UtcTimestamp;
   readonly averagePrice?: DecimalValue;
   readonly protectionType?: ExchangeProtectionType;
   readonly category?: ExchangeOrderCategory;
@@ -73,6 +84,26 @@ export function createExchangeOrder(
     input.parentOrderLinkId === undefined
       ? { ok: true as const, value: undefined }
       : requireIdentifier(input.parentOrderLinkId, "parentOrderLinkId");
+  const providerOrderLinkId =
+    input.providerOrderLinkId === undefined
+      ? { ok: true as const, value: undefined }
+      : requireIdentifier(input.providerOrderLinkId, "providerOrderLinkId");
+  const providerStopOrderType =
+    input.providerStopOrderType === undefined
+      ? { ok: true as const, value: undefined }
+      : requireSafeText(input.providerStopOrderType, "providerStopOrderType");
+  const providerTpslMode =
+    input.providerTpslMode === undefined
+      ? { ok: true as const, value: undefined }
+      : requireSafeText(input.providerTpslMode, "providerTpslMode");
+  const providerCreatedAt =
+    input.providerCreatedAt === undefined
+      ? { ok: true as const, value: undefined }
+      : parseUtcTimestamp(input.providerCreatedAt);
+  const providerUpdatedAt =
+    input.providerUpdatedAt === undefined
+      ? { ok: true as const, value: undefined }
+      : parseUtcTimestamp(input.providerUpdatedAt);
   const requestedQuantity = DecimalValue.fromString(input.requestedQuantity);
   const filledQuantity = parseDecimal(input.filledQuantity, "filledQuantity");
   if (
@@ -82,6 +113,11 @@ export function createExchangeOrder(
     !source.ok ||
     !observedAt.ok ||
     !parentOrderLinkId.ok ||
+    !providerOrderLinkId.ok ||
+    !providerStopOrderType.ok ||
+    !providerTpslMode.ok ||
+    !providerCreatedAt.ok ||
+    !providerUpdatedAt.ok ||
     !requestedQuantity.ok ||
     !filledQuantity.ok ||
     !requestedQuantity.value.isPositive() ||
@@ -166,6 +202,22 @@ export function createExchangeOrder(
           input.positionIdx === 2
         ? input.positionIdx
         : null;
+  const triggerBy =
+    input.triggerBy === undefined
+      ? undefined
+      : input.triggerBy === "LastPrice" ||
+          input.triggerBy === "MarkPrice" ||
+          input.triggerBy === "IndexPrice"
+        ? input.triggerBy
+        : null;
+  const takeProfitTriggerBy =
+    input.takeProfitTriggerBy === undefined
+      ? undefined
+      : input.takeProfitTriggerBy === "LastPrice" ||
+          input.takeProfitTriggerBy === "MarkPrice" ||
+          input.takeProfitTriggerBy === "IndexPrice"
+        ? input.takeProfitTriggerBy
+        : null;
   const order: {
     exchangeOrderId: string;
     clientOrderId: string;
@@ -177,6 +229,13 @@ export function createExchangeOrder(
     observedAt: UtcTimestamp;
     source: string;
     parentOrderLinkId?: string;
+    providerOrderLinkId?: string;
+    providerStopOrderType?: string;
+    providerTpslMode?: string;
+    triggerBy?: ExchangeTriggerBy;
+    takeProfitTriggerBy?: ExchangeTriggerBy;
+    providerCreatedAt?: UtcTimestamp;
+    providerUpdatedAt?: UtcTimestamp;
     averagePrice?: DecimalValue;
     protectionType?: ExchangeProtectionType;
     category?: ExchangeOrderCategory;
@@ -212,12 +271,27 @@ export function createExchangeOrder(
     !takeProfit.ok ||
     !stopLoss.ok ||
     (input.reduceOnly !== undefined && typeof input.reduceOnly !== "boolean") ||
-    positionIdx === null
+    positionIdx === null ||
+    triggerBy === null ||
+    takeProfitTriggerBy === null
   )
     return fail(
       domainError("INVALID_VALUE", "exchange order terms are invalid"),
     );
   if (averagePrice !== undefined) order.averagePrice = averagePrice;
+  if (providerOrderLinkId.value !== undefined)
+    order.providerOrderLinkId = providerOrderLinkId.value;
+  if (providerStopOrderType.value !== undefined)
+    order.providerStopOrderType = providerStopOrderType.value;
+  if (providerTpslMode.value !== undefined)
+    order.providerTpslMode = providerTpslMode.value;
+  if (triggerBy !== undefined) order.triggerBy = triggerBy;
+  if (takeProfitTriggerBy !== undefined)
+    order.takeProfitTriggerBy = takeProfitTriggerBy;
+  if (providerCreatedAt.value !== undefined)
+    order.providerCreatedAt = providerCreatedAt.value;
+  if (providerUpdatedAt.value !== undefined)
+    order.providerUpdatedAt = providerUpdatedAt.value;
   if (protectionType !== undefined) order.protectionType = protectionType;
   if (category !== undefined) order.category = category;
   if (orderType !== undefined) order.orderType = orderType;
