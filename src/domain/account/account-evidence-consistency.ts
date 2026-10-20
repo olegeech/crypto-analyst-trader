@@ -142,16 +142,18 @@ function structuralEstablished(pass: AccountCriticalPass): boolean {
       return false;
   for (const position of pass.positions)
     if (!known(position.size) || !known(position.avgPrice)) return false;
-  for (const order of pass.orders)
+  for (const order of pass.orders) {
+    const marketPriceIsNotApplicable =
+      order.orderType === "Market" && order.price.state === "not-applicable";
     if (
-      ![order.price, order.qty, order.cumExecQty, order.leavesQty].every(
-        known,
-      ) ||
+      (!known(order.price) && !marketPriceIsNotApplicable) ||
+      ![order.qty, order.cumExecQty, order.leavesQty].every(known) ||
       [order.qty, order.cumExecQty, order.leavesQty].some(
         (fact) => fact.unit === "unknown",
       )
     )
       return false;
+  }
   return true;
 }
 

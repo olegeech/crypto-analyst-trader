@@ -105,6 +105,32 @@ test("spot order amount preserves base/quote market units independently of fills
   );
 });
 
+test("market order price is N/A only when Bybit omits the ignored price", () => {
+  const mapped = mapAccountOrders(
+    rows([{ ...manualOrder, orderType: "Market", price: "" }]),
+  )[0]!;
+  assert.deepEqual(json(mapped.price), {
+    state: "not-applicable",
+    unit: "price",
+  });
+
+  const explicit = mapAccountOrders(
+    rows([{ ...manualOrder, orderType: "Market", price: "10" }]),
+  )[0]!;
+  assert.deepEqual(json(explicit.price), {
+    state: "known",
+    value: "10",
+    unit: "price",
+  });
+
+  const limit = mapAccountOrders(rows([{ ...manualOrder, price: "" }]))[0]!;
+  assert.deepEqual(json(limit.price), {
+    state: "unavailable",
+    reason: "not-returned",
+    unit: "price",
+  });
+});
+
 test("account enums survive and missing wallet facts never become zero", () => {
   assert.deepEqual(
     mapAccountInfo(
