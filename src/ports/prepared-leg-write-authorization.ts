@@ -20,6 +20,12 @@ export interface PreparedLegWriteAuthorizationBinding {
   readonly clientOrderId: string;
   readonly exchangeOrderId?: string;
   readonly zeroFillProofHash?: PlanHash;
+  readonly remainderCancelProofHash?: PlanHash;
+  readonly approvedCancelPlanHash?: PlanHash;
+  readonly protectionEvidenceHash?: PlanHash;
+  readonly coverageHash?: PlanHash;
+  readonly filledQuantity?: string;
+  readonly unfilledRemainder?: string;
   readonly proofObservedAt?: UtcTimestamp;
 }
 

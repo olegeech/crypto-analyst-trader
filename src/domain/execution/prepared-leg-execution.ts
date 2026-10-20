@@ -221,7 +221,11 @@ export function derivePreparedLegSourceIdentity(
       accountIdentityHash.value
   )
     return invalid("durable prepared artifact does not match source scope");
-  const leg = selectApprovedLeg(prepared.value, legId.value);
+  const sourceLeg = selectApprovedLeg(prepared.value, legId.value);
+  const leg =
+    prepared.value.replayInputs.protectionPolicy === undefined
+      ? sourceLeg
+      : applyApprovedProtectionPolicy(prepared.value, sourceLeg);
   if (!leg.ok) return leg;
   const clientOrderId = derivePreparedLegClientOrderId(
     preparedHash.value,

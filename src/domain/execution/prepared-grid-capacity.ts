@@ -337,9 +337,15 @@ function matchesAccountTakeProfitChild(
   execution: PreparedLegExecution,
 ): boolean {
   const takeProfit = execution.leg.intent.protection?.takeProfit;
+  const policy = execution.leg.intent.protection?.takeProfitPolicy;
+  const childRemaining = restOrder.requestedQuantity.subtract(
+    restOrder.filledQuantity,
+  );
   return (
     takeProfit !== undefined &&
+    policy?.tpslMode === "Partial" &&
     matchesPreparedLegTakeProfitChild(restOrder, execution) &&
+    restOrder.requestedQuantity.compare(execution.leg.intent.quantity) === 0 &&
     isAccountTakeProfitChild(order) &&
     order.category === "linear" &&
     order.symbol === execution.leg.intent.instrument &&
@@ -353,18 +359,21 @@ function matchesAccountTakeProfitChild(
     order.reduceOnly.value &&
     isKnown(order.qty) &&
     order.qty.unit === "contracts" &&
-    order.qty.value.compare(execution.leg.intent.quantity) === 0 &&
+    order.qty.value.compare(restOrder.requestedQuantity) === 0 &&
+    restOrder.filledQuantity.isZero() &&
     isKnown(order.cumExecQty) &&
     order.cumExecQty.unit === "contracts" &&
-    order.cumExecQty.value.isZero() &&
+    order.cumExecQty.value.compare(restOrder.filledQuantity) === 0 &&
     isKnown(order.leavesQty) &&
     order.leavesQty.unit === "contracts" &&
-    order.leavesQty.value.compare(execution.leg.intent.quantity) === 0 &&
+    order.leavesQty.value.compare(childRemaining) === 0 &&
     isKnown(order.triggerPrice) &&
     order.triggerPrice.unit === "price" &&
     order.triggerPrice.value.compare(takeProfit) === 0 &&
     isKnown(order.tpslMode) &&
-    order.tpslMode.value === "Full"
+    order.tpslMode.value === "Partial" &&
+    isKnown(order.triggerBy) &&
+    order.triggerBy.value === "LastPrice"
   );
 }
 

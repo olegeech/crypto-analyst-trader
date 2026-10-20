@@ -217,7 +217,7 @@ export function matchesPreparedLegTakeProfitChild(
       : Number.NaN;
     const observedAt = timestampToEpochMs(child.observedAt);
     const sourceIsBybitOrderRead =
-      /^bybit-mainnet\/protection\/order\/(?:realtime|history)$/u.test(
+      /^bybit-mainnet\/(?:protection\/)?order\/(?:realtime|history)$/u.test(
         child.source,
       );
     const childIdentityIsConsistent =
