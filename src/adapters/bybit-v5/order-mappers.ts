@@ -5,6 +5,7 @@ import type {
 } from "../../ports/exchange-execution.js";
 import { isDecimalValue } from "../../domain/shared/decimal.js";
 import type { UtcTimestamp } from "../../domain/shared/time.js";
+import { closedRecord } from "../../domain/planning/planning-validation.js";
 import type { BybitResponse } from "./transport.js";
 
 export const CREATE_ORDER_PATH = "/v5/order/create";
@@ -26,7 +27,9 @@ export interface BybitCreateOrderRequest {
   readonly reduceOnly: boolean;
   readonly takeProfit?: string;
   readonly stopLoss?: string;
-  readonly tpslMode?: "Full";
+  readonly tpslMode?: "Full" | "Partial";
+  readonly tpOrderType?: "Market";
+  readonly tpTriggerBy?: "LastPrice";
 }
 
 export interface BybitCancelOrderRequest {
@@ -88,10 +91,17 @@ function validateTimeInForce(timeInForce: string): BybitOrderTimeInForce {
 function mapProtection(request: ExchangeOrderRequest): {
   takeProfit?: string;
   stopLoss?: string;
-  tpslMode?: "Full";
+  tpslMode?: "Full" | "Partial";
+  tpOrderType?: "Market";
+  tpTriggerBy?: "LastPrice";
 } {
   const protection = request.intent.protection;
   if (protection === undefined) return {};
+  if (
+    !closedRecord(protection, ["takeProfit", "stopLoss", "takeProfitPolicy"])
+  ) {
+    invalidRequest("attached protection contains an unsupported mechanism.");
+  }
   if (request.reduceOnly) {
     invalidRequest("reduce-only orders cannot carry attached protection.");
   }
@@ -129,6 +139,33 @@ function mapProtection(request: ExchangeOrderRequest): {
       invalidRequest("stop-loss is on the wrong side of the entry price.");
     }
   }
+  const takeProfitPolicy = protection.takeProfitPolicy;
+  if (takeProfitPolicy !== undefined) {
+    if (
+      !closedRecord(takeProfitPolicy, [
+        "policyVersion",
+        "tpslMode",
+        "orderType",
+        "triggerBy",
+      ]) ||
+      Reflect.ownKeys(takeProfitPolicy).length !== 4 ||
+      takeProfitPolicy.policyVersion !== "m1-mainnet-per-leg-tp/v1" ||
+      takeProfitPolicy.tpslMode !== "Partial" ||
+      takeProfitPolicy.orderType !== "Market" ||
+      takeProfitPolicy.triggerBy !== "LastPrice" ||
+      takeProfit === undefined ||
+      stopLoss !== undefined
+    ) {
+      invalidRequest("attached take-profit policy is not approved.");
+    }
+    return {
+      takeProfit,
+      tpslMode: "Partial",
+      tpOrderType: "Market",
+      tpTriggerBy: "LastPrice",
+    };
+  }
+  // Existing Demo orders retain Bybit's Full attached-protection behavior.
   return {
     ...(takeProfit === undefined ? {} : { takeProfit }),
     ...(stopLoss === undefined ? {} : { stopLoss }),

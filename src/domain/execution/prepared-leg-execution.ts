@@ -2,6 +2,10 @@ import type { PlanHash } from "../identity/canonical-serialization.js";
 import { hashCanonical } from "../identity/canonical-serialization.js";
 import type { DailyCandidateLeg } from "../planning/daily-entry-grid.js";
 import { MAX_PLANNING_LEVELS } from "../planning/planning-policy.js";
+import {
+  createOrderIntent,
+  type TakeProfitExecutionPolicy,
+} from "../planning/order-intent.js";
 import { boundedList, closedRecord } from "../planning/planning-validation.js";
 import {
   rehydratePreparedPlanApproval,
@@ -109,11 +113,15 @@ function executionIdentityFromApproval(
   approval: PreparedPlanApproval,
   approvalHash: PlanHash,
   legId: string,
+  requireCurrentProtectionPolicy: boolean,
 ): Result<PreparedLegExecution> {
   if (approval.contentHash !== approvalHash)
     return invalid("exact approval identity is required");
   const prepared = approval.replayInputs.prepared;
-  const selected = selectApprovedLeg(prepared, legId);
+  const sourceLeg = selectApprovedLeg(prepared, legId);
+  const selected = requireCurrentProtectionPolicy
+    ? applyApprovedProtectionPolicy(prepared, sourceLeg)
+    : sourceLeg;
   const preparedHash = requireHash(prepared.contentHash, "preparedHash");
   const accountIdentityHash = requireHash(
     prepared.inputIdentity.accountIdentityHash,
@@ -145,6 +153,44 @@ function executionIdentityFromApproval(
       expiresAt: approval.expiresAt,
     }),
   );
+}
+
+function applyApprovedProtectionPolicy(
+  prepared: PreparedDailyPlan,
+  leg: Result<DailyCandidateLeg>,
+): Result<DailyCandidateLeg> {
+  const policy = prepared.replayInputs.protectionPolicy;
+  if (
+    !leg.ok ||
+    prepared.inputIdentity.environment !== "mainnet" ||
+    policy === undefined ||
+    policy.schemaVersion !== "prepared-protection-policy/v1" ||
+    policy.environment !== "mainnet" ||
+    policy.policyVersion !== "m1-mainnet-per-leg-tp/v1" ||
+    policy.entry.orderType !== "Limit" ||
+    policy.entry.timeInForce !== "GTC" ||
+    policy.stopLoss !== "none" ||
+    policy.takeProfit.tpslMode !== "Partial" ||
+    !("orderType" in policy.takeProfit) ||
+    policy.takeProfit.orderType !== "Market" ||
+    policy.takeProfit.triggerBy !== "LastPrice"
+  )
+    return invalid("Mainnet approval lacks the current protection policy");
+  const takeProfitPolicy: TakeProfitExecutionPolicy = {
+    policyVersion: policy.policyVersion,
+    tpslMode: policy.takeProfit.tpslMode,
+    orderType: policy.takeProfit.orderType,
+    triggerBy: policy.takeProfit.triggerBy,
+  };
+  const intent = createOrderIntent({
+    ...leg.value.intent,
+    protection: {
+      takeProfit: leg.value.intent.protection!.takeProfit!,
+      takeProfitPolicy,
+    },
+  });
+  if (!intent.ok) return invalid("approved protection policy is invalid");
+  return ok(deepFreeze({ ...leg.value, intent: intent.value }));
 }
 
 /** Rebuilds immutable source terms from the prepared artifact without consent lookup. */
@@ -212,6 +258,7 @@ export function derivePreparedLegExecutionIdentity(
     parsedApproval.value,
     approvalHash.value as PlanHash,
     legId.value,
+    false,
   );
 }
 
@@ -237,6 +284,7 @@ export function createPreparedLegExecution(
     approval,
     approvalHash.value as PlanHash,
     legId.value,
+    true,
   );
   if (!derived.ok) return derived;
   const validApproval = validatePreparedPlanApproval(
@@ -339,6 +387,7 @@ export function createPreparedLegGridExecution(
       approval,
       approvalHash.value as PlanHash,
       leg.legId,
+      true,
     );
     if (!execution.ok) return execution;
     const sourceId = derivePreparedLegSourceId(

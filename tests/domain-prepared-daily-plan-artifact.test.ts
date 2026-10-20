@@ -21,6 +21,7 @@ import { portfolioRiskPlanningFixture } from "./fixtures/portfolio-risk-planning
 import { requireDailyFixture as value } from "./fixtures/daily-planning-evidence-fixtures.js";
 import { DecimalValue } from "../src/domain/shared/decimal.js";
 import { decimal } from "./account-evidence-fixture.js";
+import { preparedLegExecutionFixture } from "./fixtures/prepared-leg-execution-fixtures.js";
 
 function input() {
   const planning = portfolioRiskPlanningFixture({ fundingRate: "0" });
@@ -246,4 +247,43 @@ test("hash binds metadata and complete policies without inventing review warning
     }).ok,
     false,
   );
+});
+
+test("Mainnet preparation binds one closed Partial Market LastPrice policy and rejects edits", () => {
+  const prepared = preparedLegExecutionFixture().prepared;
+  assert.equal(prepared.schemaVersion, "prepared-daily-plan/v2");
+  assert.deepEqual(prepared.replayInputs.protectionPolicy, {
+    schemaVersion: "prepared-protection-policy/v1",
+    policyVersion: "m1-mainnet-per-leg-tp/v1",
+    environment: "mainnet",
+    entry: { orderType: "Limit", timeInForce: "GTC" },
+    takeProfit: {
+      tpslMode: "Partial",
+      orderType: "Market",
+      triggerBy: "LastPrice",
+    },
+    stopLoss: "none",
+  });
+
+  const policy = prepared.replayInputs.protectionPolicy!;
+  const { protectionPolicy: _policy, ...legacyReplayInputs } =
+    prepared.replayInputs;
+  void _policy;
+  for (const protectionPolicy of [
+    undefined,
+    { ...policy, takeProfit: { ...policy.takeProfit, orderType: "Limit" } },
+    { ...policy, stopLoss: "invented" },
+    { ...policy, tpLimitPrice: "70000" },
+  ]) {
+    const replayInputs =
+      protectionPolicy === undefined
+        ? legacyReplayInputs
+        : { ...legacyReplayInputs, protectionPolicy };
+    const { contentHash: _hash, ...payload } = {
+      ...prepared,
+      replayInputs,
+    };
+    void _hash;
+    assert.equal(rehydratePreparedDailyPlan(rehash(payload)).ok, false);
+  }
 });
