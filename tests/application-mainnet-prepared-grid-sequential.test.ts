@@ -3,7 +3,7 @@ import test from "node:test";
 
 import { createMainnetPreparedGrid } from "../src/application/mainnet-prepared-grid-boundary.js";
 import { createMainnetPreparedLegForGrid } from "../src/application/mainnet-prepared-leg-boundary.js";
-import { createExchangeOrder } from "../src/domain/execution/exchange-order.js";
+import { DecimalValue } from "../src/domain/shared/decimal.js";
 import { domainError } from "../src/domain/shared/errors.js";
 import { fail } from "../src/domain/shared/result.js";
 import {
@@ -54,35 +54,11 @@ test("executes all four exact approved legs in order under one renewed lease", a
   }
 });
 
-test("exact attached TP child does not conflict with its approved open parent", async () => {
+test("exact Partial TP child after an entry fill is accepted and stops the suffix", async () => {
   const state = setup();
   try {
-    const prefix = state.admittedGrid.legs[0]!.execution;
-    state.exchange.afterCreate = (_request, index) => {
-      if (index !== 0) return;
-      state.exchange.additionalOpenOrders.push(
-        unwrap(
-          createExchangeOrder({
-            exchangeOrderId: "grid-tp-child-0",
-            clientOrderId: prefix.clientOrderId,
-            parentOrderLinkId: prefix.clientOrderId,
-            instrument: prefix.leg.intent.instrument,
-            category: "linear",
-            protectionType: "take-profit",
-            side: "sell",
-            requestedQuantity: prefix.leg.intent.quantity.toString(),
-            filledQuantity: "0",
-            status: "open",
-            orderType: "market",
-            triggerPrice: prefix.leg.intent.protection!.takeProfit!.toString(),
-            reduceOnly: true,
-            positionIdx: 0,
-            observedAt: state.currentTime.value,
-            source: "bybit-mainnet/realtime",
-          }),
-        ),
-      );
-    };
+    state.exchange.behaviorForDispatch = (index) =>
+      index === 0 ? "partial" : "open";
     const result = await createMainnetPreparedGrid(
       {
         approvalHash: state.approval.contentHash,
@@ -93,9 +69,10 @@ test("exact attached TP child does not conflict with its approved open parent", 
     assert.equal(result.ok, true, result.ok ? "" : result.error.message);
     if (!result.ok) return;
     assert.equal(result.value.outcome, "stopped");
+    assert.equal(result.value.legs[0]!.status, "PROTECTION_CONFIRMED");
     assert.deepEqual(
-      result.value.legs.map((row) => row.status),
-      ["CONFIRMED_OPEN", "BLOCKED", "NOT_ATTEMPTED", "NOT_ATTEMPTED"],
+      result.value.legs.slice(1).map((row) => row.status),
+      ["NOT_ATTEMPTED", "NOT_ATTEMPTED", "NOT_ATTEMPTED"],
     );
     assert.ok(
       !result.value.legs[0]!.reasonCodes.includes(
@@ -103,6 +80,97 @@ test("exact attached TP child does not conflict with its approved open parent", 
       ),
     );
     assert.equal(state.exchange.createRequests.length, 1);
+    assert.equal(unwrap(state.persistence.readHalt()).active, false);
+  } finally {
+    state.cleanup();
+  }
+});
+
+test("partial Market TP exits reconcile only the remaining exposure", async () => {
+  const state = setup();
+  try {
+    const first = state.admittedGrid.legs[0]!.execution;
+    state.exchange.protectionBehaviorByParent.set(
+      first.clientOrderId,
+      "partial-exit",
+    );
+    state.exchange.behaviorForDispatch = (index) =>
+      index === 0 ? "filled" : "open";
+    const result = await createMainnetPreparedGrid(
+      {
+        approvalHash: state.approval.contentHash,
+        runId: "grid-run-partial-market-tp-exit",
+      },
+      state.dependencies,
+    );
+    assert.equal(result.ok, true, result.ok ? "" : result.error.message);
+    if (!result.ok) return;
+    assert.equal(result.value.outcome, "stopped");
+    assert.equal(result.value.legs[0]!.status, "PROTECTION_CONFIRMED");
+    assert.deepEqual(
+      result.value.legs.slice(1).map((row) => row.status),
+      ["NOT_ATTEMPTED", "NOT_ATTEMPTED", "NOT_ATTEMPTED"],
+    );
+    const source = unwrap(
+      state.dependencies.preparedLegs.readPreparedLegSource(
+        state.admittedGrid.legs[0]!.sourceId,
+      ),
+    );
+    const evidence = source?.reconciliations.at(-1)?.protectionEvidence;
+    assert.ok(evidence);
+    assert.equal(
+      evidence?.children[0]?.providerStopOrderType,
+      "PartialTakeProfit",
+    );
+    assert.equal(evidence?.children[0]?.providerTpslMode, "Partial");
+    const entryQuantity = DecimalValue.fromString(evidence!.entries.quantity!);
+    const exitQuantity = DecimalValue.fromString(evidence!.exits.quantity!);
+    assert.equal(entryQuantity.ok, true);
+    assert.equal(exitQuantity.ok, true);
+    if (!entryQuantity.ok || !exitQuantity.ok) return;
+    assert.ok(exitQuantity.value.isPositive());
+    assert.ok(exitQuantity.value.compare(entryQuantity.value) < 0);
+    const outstandingQuantity = entryQuantity.value
+      .subtract(exitQuantity.value)
+      .toString();
+    assert.equal(evidence?.coverage.outstandingQuantity, outstandingQuantity);
+    assert.equal(
+      evidence?.coverage.activeRemainingQuantity,
+      outstandingQuantity,
+    );
+    assert.equal(state.exchange.createRequests.length, 1);
+    assert.equal(unwrap(state.persistence.readHalt()).active, false);
+  } finally {
+    state.cleanup();
+  }
+});
+
+test("a protected second-leg fill stops before the remaining grid suffix", async () => {
+  const state = setup();
+  try {
+    state.exchange.behaviorForDispatch = (index) =>
+      index === 1 ? "partial" : "open";
+    const result = await createMainnetPreparedGrid(
+      {
+        approvalHash: state.approval.contentHash,
+        runId: "grid-run-protected-second-leg-fill",
+      },
+      state.dependencies,
+    );
+    assert.equal(result.ok, true, result.ok ? "" : result.error.message);
+    if (!result.ok) return;
+    assert.equal(result.value.outcome, "stopped");
+    assert.deepEqual(
+      result.value.legs.map((row) => row.status),
+      [
+        "CONFIRMED_OPEN",
+        "PROTECTION_CONFIRMED",
+        "NOT_ATTEMPTED",
+        "NOT_ATTEMPTED",
+      ],
+    );
+    assert.equal(state.exchange.createRequests.length, 2);
+    assert.equal(unwrap(state.persistence.readHalt()).active, false);
   } finally {
     state.cleanup();
   }
@@ -220,6 +288,11 @@ test("rejected second leg stops the suffix and reports every not-attempted leg",
 test("full fill on the second leg remains protection-pending and stops the suffix", async () => {
   const state = setup();
   try {
+    const second = state.admittedGrid.legs[1]!.execution;
+    state.exchange.protectionBehaviorByParent.set(
+      second.clientOrderId,
+      "missing",
+    );
     state.exchange.behaviorForDispatch = (index) =>
       index === 1 ? "filled" : "open";
     const result = await createMainnetPreparedGrid(
@@ -572,6 +645,11 @@ test("an invisible timeout on the second leg becomes unresolved and HALTs withou
 test("a partial fill on the second leg is protection-pending and prevents later creates", async () => {
   const state = setup();
   try {
+    const second = state.admittedGrid.legs[1]!.execution;
+    state.exchange.protectionBehaviorByParent.set(
+      second.clientOrderId,
+      "missing",
+    );
     state.exchange.behaviorForDispatch = (index) =>
       index === 1 ? "partial" : "open";
     const result = await createMainnetPreparedGrid(

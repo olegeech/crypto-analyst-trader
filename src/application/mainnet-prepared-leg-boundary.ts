@@ -86,7 +86,6 @@ export interface MainnetPreparedGridReconciliationContext {
 interface StoredGridSiblingEvidence {
   readonly status: PreparedLegReconciliationStatus;
   readonly proof?: PreparedLegOrderProof;
-  readonly fillQuantities: readonly DecimalValue[];
   readonly outstandingQuantity: DecimalValue;
 }
 
@@ -791,16 +790,17 @@ async function collectFilledProtectionReads(
       maxAgeMs: PROVISIONAL_M1_MAX_ACCOUNT_EVIDENCE_AGE_MS,
     });
     if (derived.ok) coverage = derived.value;
-    else
-      reasons.push(
-        !isProducedPreparedLegOrderProof(parent)
-          ? "PROTECTION_PARENT_PROOF_NOT_PRODUCED"
-          : !execution.leg.intent.protection?.takeProfitPolicy
-            ? "PROTECTION_TP_POLICY_UNAVAILABLE"
-            : !matchesPreparedLegOrder(parent, execution)
-              ? "PROTECTION_PARENT_TERMS_MISMATCH"
-              : "PROTECTION_COVERAGE_INPUT_INVALID",
-      );
+    else {
+      let reasonCode: string;
+      if (!isProducedPreparedLegOrderProof(parent))
+        reasonCode = "PROTECTION_PARENT_PROOF_NOT_PRODUCED";
+      else if (!execution.leg.intent.protection?.takeProfitPolicy)
+        reasonCode = "PROTECTION_TP_POLICY_UNAVAILABLE";
+      else if (!matchesPreparedLegOrder(parent, execution))
+        reasonCode = "PROTECTION_PARENT_TERMS_MISMATCH";
+      else reasonCode = "PROTECTION_COVERAGE_INPUT_INVALID";
+      reasons.push(reasonCode);
+    }
   }
   return {
     state,
@@ -842,13 +842,11 @@ function sharedReadStateScopeAndLeverageConflict(
 function exactFillPositionConflict(
   state: MainnetExchangeReadState,
   fills: readonly ExchangeFillObservation[],
-  siblingFillQuantities: readonly DecimalValue[] = [],
 ): string | undefined {
   const zero = DecimalValue.fromString("0");
   if (!zero.ok) return "INVALID_FILL_TOTAL";
   let total = zero.value;
   for (const fill of fills) total = total.add(fill.quantity);
-  for (const quantity of siblingFillQuantities) total = total.add(quantity);
   return exactPositionConflict(state, total);
 }
 
@@ -1062,7 +1060,6 @@ function gridTargetStateConflict(
       const parentId = order.parentOrderLinkId;
       if (
         parentId === undefined ||
-        order.clientOrderId !== parentId ||
         order.protectionType !== "take-profit" ||
         !byClientId.has(parentId) ||
         !matchesPreparedLegTakeProfitChild(order, byClientId.get(parentId)!) ||
@@ -1356,7 +1353,6 @@ function readStoredGridSiblingEvidence(
   return ok({
     status: reconciliation.status,
     proof,
-    fillQuantities: quantities,
     outstandingQuantity,
   });
 }
@@ -1558,28 +1554,14 @@ export async function reconcilePreparedLegSource(
   } catch {
     fillsResult = failedExchangeRead("fills");
   }
-  if (!fillsResult.ok) {
-    const saved = dependencies.preparedLegs.appendPreparedLegReconciliation({
-      authority,
-      sourceId,
-      status: "UNRESOLVED",
-      observedAt: proofObservedAt,
-      exchangeOrderId: proof.value.exchangeOrderId,
-      result: {
-        orderProof: proof.value,
-        reasonCodes: [safeProviderReason(fillsResult)],
-      },
-    });
-    if (!saved.ok) return saved;
-    return outcome(kind, execution, sourceId, saved.value, [
-      safeProviderReason(fillsResult),
-    ]);
-  }
-  const fills = fillEvidence(
-    fillsResult.value,
-    execution,
-    proof.value.exchangeOrderId,
-  );
+  const fills = fillsResult.ok
+    ? fillEvidence(fillsResult.value, execution, proof.value.exchangeOrderId)
+    : fail(
+        domainError(
+          "UNRESOLVED_RECONCILIATION",
+          "provider fill evidence is unavailable",
+        ),
+      );
   const zero = DecimalValue.fromString("0");
   if (!zero.ok)
     return fail(domainError("INVALID_DECIMAL", "zero constant is invalid"));
@@ -1605,6 +1587,11 @@ export async function reconcilePreparedLegSource(
     (expectedOrderId === undefined ||
       proof.value.exchangeOrderId === expectedOrderId) &&
     options.forceUnresolvedReason === undefined;
+  const sourceOrderIdentityProven =
+    matches &&
+    proof.value.instrument === execution.leg.intent.instrument &&
+    (expectedOrderId === undefined ||
+      proof.value.exchangeOrderId === expectedOrderId);
   const createAttempt = exactOrder
     ? ensurePreparedLegCreateAttempt(
         dependencies,
@@ -1616,7 +1603,10 @@ export async function reconcilePreparedLegSource(
   const createAttemptMissing =
     exactOrder && (!createAttempt.ok || createAttempt.value === undefined);
   const stateConflict =
-    fills.ok && exactOrder && proof.value.filledQuantity.isZero()
+    fillsResult.ok &&
+    fills.ok &&
+    exactOrder &&
+    proof.value.filledQuantity.isZero()
       ? targetStateConflict(
           dependencies,
           readState.value,
@@ -1638,7 +1628,13 @@ export async function reconcilePreparedLegSource(
       filledQuantity.isPositive() &&
       filledQuantity.compare(proof.value.requestedQuantity) < 0);
   let accounting: Result<void> = ok(undefined);
-  if (exactOrder && fills.ok && exactFillTotal && filledQuantity.isPositive()) {
+  if (
+    exactOrder &&
+    fillsResult.ok &&
+    fills.ok &&
+    exactFillTotal &&
+    filledQuantity.isPositive()
+  ) {
     if (!createAttempt.ok) accounting = fail(createAttempt.error);
     else if (createAttempt.value === undefined)
       accounting = fail(
@@ -1669,14 +1665,64 @@ export async function reconcilePreparedLegSource(
   };
   let protectionEvidence: PreparedLegProtectionEvidenceV2Input | undefined;
   let reconciliationObservedAt = proofObservedAt;
-  if (
+  const positiveFillProblems = [
+    ...(options.forceUnresolvedReason === undefined
+      ? []
+      : [options.forceUnresolvedReason]),
+    ...(createAttemptMissing ? ["CREATE_ATTEMPT_PERSISTENCE_FAILED"] : []),
+    ...(!fillsResult.ok ? [safeProviderReason(fillsResult)] : []),
+    ...(fillsResult.ok && !fills.ok ? ["FILL_IDENTITY_INVALID"] : []),
+    ...(!exactFillTotal ? ["FILL_TOTAL_MISMATCH"] : []),
+    ...(!filledStatusConsistent ? ["ORDER_STATUS_FILL_QUANTITY_CONFLICT"] : []),
+    ...(!accounting.ok ? ["ENTRY_ACCOUNTING_PERSISTENCE_FAILED"] : []),
+  ];
+  const persistPendingProtection =
+    filledQuantity.isPositive() &&
+    sourceOrderIdentityProven &&
+    positiveFillProblems.length > 0;
+  if (persistPendingProtection) {
+    const entries = fills.ok && fillsResult.ok ? fillsResult.value : [];
+    const entryFillsComplete = fills.ok && exactFillTotal;
+    const protectionReads = await collectFilledProtectionReads(
+      dependencies,
+      execution,
+      proof.value,
+      entries,
+      readState.value,
+    );
+    reconciliationObservedAt = protectionReads.observedAt;
+    const reasons = [
+      ...positiveFillProblems,
+      ...protectionReads.reasonCodes,
+      ...(protectionReads.coverage?.reasonCodes ?? []),
+    ];
+    status = "PROTECTION_PENDING";
+    result = {
+      orderProof: proof.value,
+      ...(fills.ok ? { fills: fills.value } : {}),
+      reasonCodes: [...new Set(reasons)].sort(),
+    };
+    protectionEvidence = createProtectionEvidenceV2({
+      execution,
+      parent: proof.value,
+      entries,
+      exits: protectionReads.exits,
+      children: protectionReads.children,
+      ...(protectionReads.coverage === undefined
+        ? {}
+        : { coverage: protectionReads.coverage }),
+      state: protectionReads.state,
+      observedAt: protectionReads.observedAt,
+      status: "PROTECTION_PENDING",
+      entryFillsComplete,
+      childOrdersComplete: protectionReads.childOrdersComplete,
+      exitFillsComplete: protectionReads.exitFillsComplete,
+      positionComplete: protectionReads.positionComplete,
+      reasonCodes: reasons,
+    });
+  } else if (
     !exactOrder ||
     createAttemptMissing ||
-    (filledQuantity.isPositive() &&
-      (!fills.ok ||
-        !exactFillTotal ||
-        !filledStatusConsistent ||
-        !accounting.ok)) ||
     (filledQuantity.isZero() &&
       (!fills.ok || !exactFillTotal || stateConflict !== undefined))
   ) {
@@ -1701,7 +1747,7 @@ export async function reconcilePreparedLegSource(
       ],
     };
   } else if (filledQuantity.isPositive()) {
-    if (fills.ok) {
+    if (fills.ok && fillsResult.ok) {
       const protectionReads = await collectFilledProtectionReads(
         dependencies,
         execution,

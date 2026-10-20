@@ -87,7 +87,7 @@ function baseResponse(path: string): BybitResponse {
   }
 }
 
-function orderRequest() {
+function orderRequest(options: { readonly partialTp?: boolean } = {}) {
   const price = DecimalValue.fromString("0.0887");
   const quantity = DecimalValue.fromString("57");
   const notional = DecimalValue.fromString("5.0559");
@@ -113,7 +113,19 @@ function orderRequest() {
       quantity: "floor",
       constraintVersion: "bybit-v5:DOGEUSDT:instrument",
     },
-    protection: { takeProfit: takeProfit.value },
+    protection: {
+      takeProfit: takeProfit.value,
+      ...(options.partialTp
+        ? {
+            takeProfitPolicy: {
+              policyVersion: "m1-mainnet-per-leg-tp/v1" as const,
+              tpslMode: "Partial" as const,
+              orderType: "Market" as const,
+              triggerBy: "LastPrice" as const,
+            },
+          }
+        : {}),
+    },
   });
   assert.equal(intent.ok, true);
   if (!intent.ok) throw new Error("order fixture");
@@ -363,9 +375,21 @@ function mainnetFixture(
               list: [
                 mainnetOrder({
                   orderId: "protection-1",
-                  orderLinkId: "protection-client",
+                  orderLinkId: "",
                   parentOrderLinkId: "owned-client",
-                  stopOrderType: "TakeProfit",
+                  side: "Sell",
+                  qty: "0.5",
+                  cumExecQty: "0",
+                  orderStatus: "Untriggered",
+                  orderType: "Market",
+                  stopOrderType: "PartialTakeProfit",
+                  tpslMode: "Partial",
+                  triggerPrice: "0.1",
+                  tpTriggerBy: "LastPrice",
+                  triggerBy: "MarkPrice",
+                  reduceOnly: true,
+                  createdTime: String(Date.parse(mainnetObservedAt) - 1_000),
+                  updatedTime: String(Date.parse(mainnetObservedAt)),
                 }),
               ],
             };
@@ -474,9 +498,22 @@ test("Mainnet adapter exposes sanitized symbol state and all supported single op
   });
   assert.equal(wrongScope.ok, false);
 
-  const created = await fixture.adapter.createOrder(orderRequest());
+  const created = await fixture.adapter.createOrder(
+    orderRequest({ partialTp: true }),
+  );
   assert.equal(created.ok, true);
   if (created.ok) assert.equal(created.value.exchangeOrderId, "exchange-1");
+  const createRequest = fixture.calls.find(
+    (call) =>
+      call.method === "POST" &&
+      new URL(call.url).pathname === "/v5/order/create",
+  );
+  assert.ok(createRequest?.body);
+  const createBody = JSON.parse(createRequest.body!) as Record<string, unknown>;
+  assert.equal(createBody.tpslMode, "Partial");
+  assert.equal(createBody.tpOrderType, "Market");
+  assert.equal(createBody.tpTriggerBy, "LastPrice");
+  assert.equal("stopLoss" in createBody, false);
 
   const observed = await fixture.adapter.observeOrder({
     instrument: "DOGEUSDT",
@@ -506,7 +543,20 @@ test("Mainnet adapter exposes sanitized symbol state and all supported single op
   if (protection.ok) {
     assert.equal(protection.value.length, 1);
     assert.equal(protection.value[0]?.protectionType, "take-profit");
-    assert.equal(protection.value[0]?.source, "bybit-mainnet/protection");
+    assert.equal(
+      protection.value[0]?.source,
+      "bybit-mainnet/protection/order/history",
+    );
+    assert.equal(protection.value[0]?.clientOrderId, "owned-client");
+    assert.equal(protection.value[0]?.providerOrderLinkId, undefined);
+    assert.equal(protection.value[0]?.parentOrderLinkId, "owned-client");
+    assert.equal(
+      protection.value[0]?.providerStopOrderType,
+      "PartialTakeProfit",
+    );
+    assert.equal(protection.value[0]?.providerTpslMode, "Partial");
+    assert.equal(protection.value[0]?.takeProfitTriggerBy, "LastPrice");
+    assert.equal(protection.value[0]?.triggerBy, "MarkPrice");
   }
 
   const target = DecimalValue.fromString("2");

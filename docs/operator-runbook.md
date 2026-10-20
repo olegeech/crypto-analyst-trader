@@ -109,7 +109,7 @@ not evaluate account capacity or risk approval; those belong to #17. Issue #31
 still owns the first deliberately authorized Mainnet write. This live command
 is excluded from default tests, `test:release` and CI.
 
-### Internal prepared execution boundaries (issues #21 and #46)
+### Internal prepared execution boundaries (issues #21, #23 and #46)
 
 Issues #21 and #46 add application-level boundaries for one exact approved
 Mainnet leg and a bounded sequential approved grid. They release no operator
@@ -122,6 +122,36 @@ operator authority or `LIVE_PROVEN` evidence. Do not invoke or synthesize write
 authority outside the #31-owned bounded canary. #31 remains the first
 deliberately authorized Mainnet write after the #30 release gate and applicable
 live-risk gate pass. #21/#46 require no live write or Testnet step.
+
+Issue [#23](https://github.com/olegeech/crypto-analyst-trader/issues/23)
+adds per-leg protection reconciliation to those internal boundaries. A new M1
+entry carries `tpslMode=Partial`, Market TP and `tpTriggerBy=LastPrice`; the
+one-way position is still shared across legs. After a fill, compare each
+leg's deduplicated entry executions minus its attributed TP exit executions
+with the remaining quantity of its active TP child, then reconcile the sum
+against the fresh position. A trigger or order acknowledgement is not an exit
+fill. Child proof requires a unique exchange order ID, raw
+`parentOrderLinkId` equal to the approved entry link, `PartialTakeProfit`, the
+approved trigger/side/type, consistent quantity/status and fresh provider
+timestamps. A mapped parent-link alias, position-level TP or sibling leg does
+not establish coverage. A fill stops the grid suffix even when coverage is
+confirmed.
+
+If a filled leg has missing, stale, malformed, mismatched or ambiguous child
+evidence, incomplete fill reads, or a position/coverage mismatch, the internal
+boundary records `PROTECTION_PENDING` and `HALT`; it does not wait, repair,
+retry the write or submit later entries. `PROTECTION_CONFIRMED` records current
+evidence only and does not guarantee execution or clear a prior `HALT`. Keep
+the original plan and local journal, capture sanitized reason codes and
+timestamps, and reconcile the approved parent, entry fills, every uniquely
+linked TP child, child exit fills and current one-way position. Do not cancel a
+TP, infer a fill from a trigger, or adopt an order by its normalized alias.
+For an unresolved Mainnet incident, follow the runtime containment steps in
+`SECURITY.md` and the exchange-UI fallback owned by [issue
+#25](https://github.com/olegeech/crypto-analyst-trader/issues/25); preserve
+protective orders, act only on verified ownership, and reconcile again before
+any explicit `HALT` clearance. These internal boundaries do not expose an
+operator command or authorize a Mainnet write.
 
 ## Bybit public market evidence smoke (issue #11)
 

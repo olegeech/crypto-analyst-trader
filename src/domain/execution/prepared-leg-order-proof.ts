@@ -2,8 +2,8 @@ import {
   createExchangeOrder,
   type ExchangeOrderObservation,
 } from "./exchange-order.js";
+import type { ExchangeFillObservation } from "./exchange-fill.js";
 import type { PreparedLegSourceIdentity } from "./prepared-leg-execution.js";
-import type { ExchangeFillObservation } from "../../ports/exchange-execution.js";
 import { closedRecord } from "../planning/planning-validation.js";
 import { deepFreeze } from "../shared/deep-freeze.js";
 import { domainError } from "../shared/errors.js";

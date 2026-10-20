@@ -23,7 +23,9 @@ import {
 } from "../domain/shared/time.js";
 import { requireIdentifier } from "../domain/shared/validation.js";
 import type {
+  PreparedLegProtectionEvidenceV2Input,
   PreparedLegRemainderCancelProof,
+  PreparedLegReconciliationRecord,
   PreparedLegRunSnapshot,
 } from "../ports/persistence.js";
 import type { PreparedLegWriteAuthorizationBinding } from "../ports/prepared-leg-write-authorization.js";
@@ -96,6 +98,124 @@ function cancelRecoveryBlockReason(
     (raw as Record<string, unknown>).result as Record<string, unknown>
   ).outcome;
   return outcome === "accepted" ? undefined : "CANCEL_ATTEMPT_AMBIGUOUS";
+}
+
+function reviveCanonicalDecimals(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(reviveCanonicalDecimals);
+  if (typeof value !== "object" || value === null) return value;
+  const record = value as Record<string, unknown>;
+  if (Object.keys(record).length === 1 && typeof record.$decimal === "string")
+    return record.$decimal;
+  return Object.fromEntries(
+    Object.entries(record).map(([key, item]) => [
+      key,
+      reviveCanonicalDecimals(item),
+    ]),
+  );
+}
+
+function priorOrderProof(
+  reconciliation: PreparedLegReconciliationRecord,
+): Result<PreparedLegOrderProof> {
+  try {
+    const raw = JSON.parse(reconciliation.canonicalJson) as {
+      readonly result?: { readonly orderProof?: unknown };
+    };
+    if (raw.result?.orderProof === undefined)
+      return fail(
+        domainError(
+          "PERSISTENCE_INTEGRITY",
+          "protected reconciliation has no parent proof",
+        ),
+      );
+    return createPreparedLegOrderProof(
+      reviveCanonicalDecimals(raw.result.orderProof),
+    );
+  } catch {
+    return fail(
+      domainError(
+        "PERSISTENCE_INTEGRITY",
+        "protected reconciliation parent proof is unreadable",
+      ),
+    );
+  }
+}
+
+function pendingProtectionEvidence(
+  evidence: NonNullable<PreparedLegReconciliationRecord["protectionEvidence"]>,
+  reasonCode: string,
+): PreparedLegProtectionEvidenceV2Input {
+  const reasons = [...new Set([...evidence.reasonCodes, reasonCode])].sort();
+  return {
+    schemaVersion: "prepared-leg-protection-evidence/v2",
+    status: "PROTECTION_PENDING",
+    observedAt: evidence.observedAt,
+    parent: evidence.parent,
+    entries: { ...evidence.entries, quantity: null },
+    exits: { ...evidence.exits, quantity: null },
+    children: evidence.children,
+    coverage: {
+      outstandingQuantity: null,
+      activeRemainingQuantity: null,
+      covered: null,
+      reasonCodes: reasons,
+    },
+    position: evidence.position,
+    collection: {
+      entryFills: "incomplete",
+      childOrders: "incomplete",
+      exitFills: "incomplete",
+      position: "incomplete",
+    },
+    reasonCodes: reasons,
+  };
+}
+
+function persistProtectionPending(
+  dependencies: MainnetPreparedLegDependencies,
+  execution: PreparedLegSourceIdentity,
+  sourceId: string,
+  authority: { readonly ownerRunId: string; readonly epoch: number },
+  reasonCode: string,
+): Result<MainnetPreparedLegOutcome> {
+  const snapshot = dependencies.preparedLegs.readPreparedLegSource(sourceId);
+  if (!snapshot.ok) return snapshot;
+  const latest = snapshot.value?.reconciliations.at(-1);
+  if (
+    !snapshot.value ||
+    latest?.status !== "PROTECTION_CONFIRMED" ||
+    latest.protectionEvidence === undefined
+  )
+    return fail(
+      domainError(
+        "PERSISTENCE_INTEGRITY",
+        "cannot persist pending protection without confirmed source evidence",
+      ),
+    );
+  const proof = priorOrderProof(latest);
+  if (!proof.ok) return proof;
+  const protectionEvidence = pendingProtectionEvidence(
+    latest.protectionEvidence,
+    reasonCode,
+  );
+  const saved = dependencies.preparedLegs.appendPreparedLegReconciliation({
+    authority,
+    sourceId,
+    status: "PROTECTION_PENDING",
+    observedAt: latest.observedAt,
+    exchangeOrderId: proof.value.exchangeOrderId,
+    result: { orderProof: proof.value, reasonCodes: [reasonCode] },
+    protectionEvidence,
+  });
+  if (!saved.ok) return saved;
+  return ok({
+    kind: "recovery",
+    sourceId,
+    clientOrderId: execution.clientOrderId,
+    status: saved.value.status,
+    reconciliationRevision: saved.value.revision,
+    reasonCodes: [reasonCode],
+  });
 }
 
 function haltAfterCancelIntent(
@@ -620,19 +740,44 @@ export async function cancelMainnetPreparedLeg(
     dependencies,
     execution.value,
   );
-  if (!accountBinding.ok) return accountBinding;
+  if (!accountBinding.ok)
+    return remainderMode
+      ? persistProtectionPending(
+          dependencies,
+          execution.value,
+          sourceId.value,
+          lease.value,
+          "CANCEL_ACCOUNT_BINDING_UNAVAILABLE",
+        )
+      : accountBinding;
   const orderId = source.value.reconciliations.at(-1)?.exchangeOrderId;
   if (!orderId)
-    return fail(
-      domainError(
-        "OWNERSHIP_MISMATCH",
-        "confirmed source has no exchange order identity",
-      ),
-    );
+    return remainderMode
+      ? persistProtectionPending(
+          dependencies,
+          execution.value,
+          sourceId.value,
+          lease.value,
+          "CANCEL_PARENT_IDENTITY_UNAVAILABLE",
+        )
+      : fail(
+          domainError(
+            "OWNERSHIP_MISMATCH",
+            "confirmed source has no exchange order identity",
+          ),
+        );
 
   const monotonicStart = dependencies.monotonicClock();
   if (!Number.isFinite(monotonicStart))
-    return blocked("MONOTONIC_CLOCK_INVALID");
+    return remainderMode
+      ? persistProtectionPending(
+          dependencies,
+          execution.value,
+          sourceId.value,
+          lease.value,
+          "CANCEL_PREFLIGHT_CLOCK_INVALID",
+        )
+      : blocked("MONOTONIC_CLOCK_INVALID");
   let stateBefore: ExchangeResult<MainnetExchangeReadState>;
   try {
     stateBefore = await dependencies.exchange.readState({
@@ -648,12 +793,20 @@ export async function cancelMainnetPreparedLeg(
       execution.value.leg.intent.instrument,
     )
   )
-    return fail(
-      domainError(
-        "UNRESOLVED_RECONCILIATION",
-        "fresh Mainnet order state is unavailable",
-      ),
-    );
+    return remainderMode
+      ? persistProtectionPending(
+          dependencies,
+          execution.value,
+          sourceId.value,
+          lease.value,
+          "CANCEL_PREFLIGHT_STATE_UNAVAILABLE",
+        )
+      : fail(
+          domainError(
+            "UNRESOLVED_RECONCILIATION",
+            "fresh Mainnet order state is unavailable",
+          ),
+        );
   const lookup = {
     instrument: execution.value.leg.intent.instrument,
     clientOrderId: execution.value.clientOrderId,
@@ -666,32 +819,56 @@ export async function cancelMainnetPreparedLeg(
     observed = failedRead("observe");
   }
   if (!observed.ok)
-    return fail(
-      domainError(
-        "UNRESOLVED_RECONCILIATION",
-        "exact owned order could not be freshly confirmed",
-      ),
-    );
+    return remainderMode
+      ? persistProtectionPending(
+          dependencies,
+          execution.value,
+          sourceId.value,
+          lease.value,
+          "CANCEL_PREFLIGHT_PARENT_UNAVAILABLE",
+        )
+      : fail(
+          domainError(
+            "UNRESOLVED_RECONCILIATION",
+            "exact owned order could not be freshly confirmed",
+          ),
+        );
   const proof = createPreparedLegOrderProof(observed.value);
   if (!proof.ok)
-    return fail(
-      domainError(
-        "OWNERSHIP_MISMATCH",
-        "fresh exact parent order proof is required",
-      ),
-    );
+    return remainderMode
+      ? persistProtectionPending(
+          dependencies,
+          execution.value,
+          sourceId.value,
+          lease.value,
+          "CANCEL_PREFLIGHT_PARENT_PROOF_INVALID",
+        )
+      : fail(
+          domainError(
+            "OWNERSHIP_MISMATCH",
+            "fresh exact parent order proof is required",
+          ),
+        );
   if (
     !matchesPreparedLegOrder(proof.value, execution.value) ||
     proof.value.exchangeOrderId !== orderId ||
     timestampToEpochMs(proof.value.observedAt) <
       timestampToEpochMs(latest!.observedAt)
   )
-    return fail(
-      domainError(
-        "OWNERSHIP_MISMATCH",
-        "fresh exact parent order proof is required",
-      ),
-    );
+    return remainderMode
+      ? persistProtectionPending(
+          dependencies,
+          execution.value,
+          sourceId.value,
+          lease.value,
+          "CANCEL_PREFLIGHT_PARENT_PROOF_CONFLICT",
+        )
+      : fail(
+          domainError(
+            "OWNERSHIP_MISMATCH",
+            "fresh exact parent order proof is required",
+          ),
+        );
 
   let stateAfter: MainnetExchangeReadState;
   let proofObservedAt: UtcTimestamp;
@@ -716,11 +893,12 @@ export async function cancelMainnetPreparedLeg(
       !proof.value.filledQuantity.isPositive() ||
       proof.value.filledQuantity.compare(proof.value.requestedQuantity) >= 0
     )
-      return fail(
-        domainError(
-          "OWNERSHIP_MISMATCH",
-          "partial remainder cancel requires a live partially-filled parent",
-        ),
+      return persistProtectionPending(
+        dependencies,
+        execution.value,
+        sourceId.value,
+        lease.value,
+        "CANCEL_PREFLIGHT_PARTIAL_PARENT_CONFLICT",
       );
     const latestProtectionHash = latest.protectionCanonicalHash;
     const fresh = await readRemainderCancelProof(
@@ -732,13 +910,12 @@ export async function cancelMainnetPreparedLeg(
       latestProtectionHash,
     );
     if (!fresh.ok)
-      return reconcilePreparedLegSource(
+      return persistProtectionPending(
         dependencies,
         execution.value,
         sourceId.value,
         lease.value,
-        "recovery",
-        { expectedOrderId: orderId },
+        "CANCEL_PREFLIGHT_PROTECTION_UNAVAILABLE",
       );
     stateAfter = fresh.value.state;
     remainderCancelProof = fresh.value.proof;

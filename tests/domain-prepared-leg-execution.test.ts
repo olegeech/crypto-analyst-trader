@@ -11,7 +11,10 @@ import {
 } from "../src/domain/execution/prepared-leg-execution.js";
 import { createPreparedPlanApproval } from "../src/domain/review/prepared-plan-approval.js";
 import { hashCanonical } from "../src/domain/identity/canonical-serialization.js";
-import { rehydratePreparedDailyPlan } from "../src/domain/review/prepared-daily-plan.js";
+import {
+  rehydratePreparedDailyPlan,
+  type PreparedDailyPlan,
+} from "../src/domain/review/prepared-daily-plan.js";
 import {
   PREPARED_LEG_FOUR_LEVELS,
   preparedLegExecutionFixture,
@@ -25,7 +28,7 @@ function value<T>(
   return result.value;
 }
 
-function legacyV1Plan(current: Record<string, any>) {
+function legacyV1Plan(current: PreparedDailyPlan) {
   const { protectionPolicy: _policy, ...legacyReplayInputs } =
     current.replayInputs;
   const { protectionPolicyHash: _policyHash, ...legacyInputIdentity } =
@@ -51,11 +54,8 @@ function legacyV1Plan(current: Record<string, any>) {
       ...current.summary,
       policies: legacyPolicies,
     },
-  };
-  const { contentHash: _contentHash, ...withoutHash } = payload as Record<
-    string,
-    any
-  >;
+  } as Record<string, unknown>;
+  const { contentHash: _contentHash, ...withoutHash } = payload;
   void _contentHash;
   return { ...withoutHash, contentHash: value(hashCanonical(withoutHash)) };
 }
@@ -127,9 +127,7 @@ test("approval hash, expiry, plan state and selected leg fail closed", () => {
 
 test("legacy v1 artifacts retain hashes and recovery identities but cannot authorize new protection", () => {
   const source = preparedLegExecutionFixture();
-  const legacy = legacyV1Plan(
-    source.prepared as unknown as Record<string, any>,
-  );
+  const legacy = legacyV1Plan(source.prepared);
   assert.equal(
     legacy.contentHash,
     "sha256:b80d08057ef0e72a52db82677d6de33551070ed1c19afa2abc6c054ab5226b68",

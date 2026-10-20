@@ -667,6 +667,66 @@ async function createPartialProtectedPreparedLeg(
   return result.value;
 }
 
+for (const fault of ["unavailable", "fill-total-mismatch"] as const) {
+  test(`positive parent fills with ${fault} entry evidence persist pending protection`, async () => {
+    const state = setup();
+    try {
+      const runId = `prepared-leg-${fault}-entry-evidence-run`;
+      const created = await createPartialProtectedPreparedLeg(state, runId);
+      const parentOrderId = state.exchange.exchangeOrderId;
+      const originalListFills = state.exchange.listFills.bind(state.exchange);
+      state.exchange.listFills = async (request) => {
+        if (request.exchangeOrderId === parentOrderId)
+          return fault === "unavailable"
+            ? {
+                ok: false,
+                error: {
+                  kind: "transport",
+                  message: "simulated entry-fill read failure",
+                  retry: "reconcile",
+                  operation: "fills",
+                },
+              }
+            : { ok: true, value: [] };
+        return originalListFills(request);
+      };
+      state.currentTime.value = plusMs(state.currentTime.value, 1000);
+      state.localTime.value = state.currentTime.value;
+
+      const recovered = await recoverMainnetPreparedLegSource(
+        { sourceId: created.sourceId, runId },
+        state.dependencies,
+      );
+      assert.equal(
+        recovered.ok,
+        true,
+        recovered.ok
+          ? ""
+          : `${recovered.error.code}: ${recovered.error.message}`,
+      );
+      if (!recovered.ok) return;
+      assert.equal(recovered.value.status, "PROTECTION_PENDING");
+      assert.equal(state.exchange.createRequests.length, 1);
+      assert.equal(unwrap(state.persistence.readHalt()).active, true);
+
+      state.reopenPersistence();
+      const saved = unwrap(
+        state.persistence.preparedLegExecution!.readPreparedLegSource(
+          created.sourceId,
+        ),
+      );
+      const evidence = saved?.reconciliations.at(-1)?.protectionEvidence;
+      assert.equal(saved?.reconciliations.at(-1)?.status, "PROTECTION_PENDING");
+      assert.equal(evidence?.status, "PROTECTION_PENDING");
+      assert.equal(evidence?.collection.entryFills, "incomplete");
+      assert.equal(evidence?.entries.quantity, null);
+      assert.equal(unwrap(state.persistence.readHalt()).active, true);
+    } finally {
+      state.cleanup();
+    }
+  });
+}
+
 test("persists exact intent before one authorized create and confirms known-open without HALT", async () => {
   const state = setup();
   try {
@@ -1325,6 +1385,103 @@ test("remainder cancel is blocked when active TP reads disagree", async () => {
   }
 });
 
+test("remainder-cancel preflight uncertainty persists pending protection and HALT", async (t) => {
+  for (const fault of [
+    "state-read",
+    "parent-read",
+    "malformed-parent",
+    "protection-read",
+    "fill-read",
+  ] as const) {
+    await t.test(fault, async () => {
+      const state = setup();
+      try {
+        const runId = `prepared-leg-cancel-preflight-${fault}-run`;
+        const created = await createPartialProtectedPreparedLeg(state, runId);
+        state.currentTime.value = plusMs(state.currentTime.value, 1000);
+        state.localTime.value = state.currentTime.value;
+
+        const readFailure = {
+          ok: false as const,
+          error: {
+            kind: "transport" as const,
+            message: "simulated preflight read failure",
+            retry: "reconcile" as const,
+            operation: "read" as const,
+          },
+        };
+        if (fault === "state-read") {
+          state.exchange.readState = async () => readFailure;
+        } else if (fault === "parent-read") {
+          state.exchange.observeOrder = async () => ({
+            ...readFailure,
+            error: { ...readFailure.error, operation: "observe" as const },
+          });
+        } else if (fault === "malformed-parent") {
+          const observe = state.exchange.observeOrder.bind(state.exchange);
+          state.exchange.observeOrder = async (request) => {
+            const result = await observe(request);
+            return result.ok
+              ? {
+                  ok: true,
+                  value: {
+                    ...result.value,
+                    category: "spot",
+                  },
+                }
+              : result;
+          };
+        } else if (fault === "protection-read") {
+          state.exchange.listAttachedProtection = async () => ({
+            ...readFailure,
+            error: { ...readFailure.error, operation: "observe" as const },
+          });
+        } else {
+          state.exchange.listFills = async () => ({
+            ...readFailure,
+            error: { ...readFailure.error, operation: "fills" as const },
+          });
+        }
+
+        const result = await cancelMainnetPreparedLeg(
+          { sourceId: created.sourceId, runId },
+          state.dependencies,
+        );
+        assert.equal(
+          result.ok,
+          true,
+          result.ok ? "" : `${result.error.code}: ${result.error.message}`,
+        );
+        if (!result.ok) return;
+        assert.equal(result.value.status, "PROTECTION_PENDING");
+        assert.equal(state.exchange.cancelRequests.length, 0);
+        assert.equal(unwrap(state.persistence.readHalt()).active, true);
+
+        state.reopenPersistence();
+        const saved = unwrap(
+          state.persistence.preparedLegExecution!.readPreparedLegSource(
+            created.sourceId,
+          ),
+        );
+        const latest = saved?.reconciliations.at(-1);
+        assert.equal(latest?.status, "PROTECTION_PENDING");
+        assert.equal(latest?.protectionEvidence?.status, "PROTECTION_PENDING");
+        assert.equal(
+          latest?.protectionEvidence?.collection.position,
+          "incomplete",
+        );
+        assert.equal(
+          latest?.protectionEvidence?.coverage.outstandingQuantity,
+          null,
+        );
+        assert.equal(unwrap(state.persistence.readHalt()).active, true);
+      } finally {
+        state.cleanup();
+      }
+    });
+  }
+});
+
 test("remainder cancel needs its own authority and writes nothing when denied", async () => {
   const state = setup();
   try {
@@ -1548,6 +1705,123 @@ test("already-filled partial parent is reconciled without a remainder-cancel POS
   }
 });
 
+test("fully executed TP is verified closed across SQLite reopen without replacement writes", async () => {
+  const state = setup();
+  try {
+    const runId = "prepared-leg-verified-closed-recovery-run";
+    const created = await createPartialProtectedPreparedLeg(state, runId);
+    const leg =
+      state.fixture.approval.replayInputs.prepared.replayInputs.preflight
+        .replayInputs.dailyPlan.candidateLegs![0]!;
+    const clientOrderId = unwrap(
+      derivePreparedLegClientOrderId(
+        state.prepared.contentHash,
+        state.fixture.legId,
+      ),
+    );
+    const quantity = leg.intent.quantity;
+    state.currentTime.value = plusMs(state.currentTime.value, 1000);
+    state.localTime.value = state.currentTime.value;
+    state.exchange.orderStatus = "filled";
+    state.exchange.filledQuantity = quantity.toString();
+    state.exchange.positionSide = "flat";
+    state.exchange.positionQuantity = "0";
+    state.exchange.fills = [
+      {
+        executionId: "exec-entry-fully-closed",
+        exchangeOrderId: state.exchange.exchangeOrderId,
+        clientOrderId,
+        instrument: leg.intent.instrument,
+        side: "buy",
+        quantity,
+        price: leg.intent.price,
+        executedAt: state.currentTime.value,
+        source: "bybit-mainnet/execution",
+      },
+    ];
+    const child = unwrap(
+      createExchangeOrder({
+        exchangeOrderId: "mainnet-tp-fully-closed",
+        clientOrderId,
+        providerOrderLinkId: clientOrderId,
+        parentOrderLinkId: clientOrderId,
+        providerStopOrderType: "PartialTakeProfit",
+        providerTpslMode: "Partial",
+        protectionType: "take-profit",
+        instrument: leg.intent.instrument,
+        category: "linear",
+        side: "sell",
+        orderType: "market",
+        requestedQuantity: quantity.toString(),
+        filledQuantity: quantity.toString(),
+        status: "filled",
+        triggerPrice: leg.intent.protection!.takeProfit!.toString(),
+        takeProfitTriggerBy: "LastPrice",
+        triggerBy: "LastPrice",
+        reduceOnly: true,
+        positionIdx: 0,
+        providerCreatedAt: state.currentTime.value,
+        providerUpdatedAt: state.currentTime.value,
+        observedAt: state.currentTime.value,
+        source: "bybit-mainnet/protection/order/realtime",
+      }),
+    );
+    state.exchange.attachedChildren = [child];
+    state.exchange.additionalOpenOrders = [];
+    state.exchange.exitFills = [
+      {
+        executionId: "exec-tp-fully-closed",
+        exchangeOrderId: child.exchangeOrderId,
+        clientOrderId,
+        instrument: leg.intent.instrument,
+        side: "sell",
+        quantity,
+        price: leg.intent.protection!.takeProfit!,
+        executedAt: state.currentTime.value,
+        source: "bybit-mainnet/execution",
+      },
+    ];
+
+    const recovered = await recoverMainnetPreparedLegSource(
+      { sourceId: created.sourceId, runId },
+      state.dependencies,
+    );
+    assert.equal(
+      recovered.ok,
+      true,
+      recovered.ok ? "" : `${recovered.error.code}: ${recovered.error.message}`,
+    );
+    if (!recovered.ok) return;
+    assert.equal(recovered.value.status, "VERIFIED_CLOSED");
+    assert.equal(state.exchange.createRequests.length, 1);
+    assert.equal(state.exchange.cancelRequests.length, 0);
+
+    state.reopenPersistence();
+    const saved = unwrap(
+      state.persistence.preparedLegExecution!.readPreparedLegSource(
+        created.sourceId,
+      ),
+    );
+    const evidence = saved?.reconciliations.at(-1)?.protectionEvidence;
+    assert.equal(saved?.reconciliations.at(-1)?.status, "VERIFIED_CLOSED");
+    assert.equal(evidence?.status, "VERIFIED_CLOSED");
+    assert.equal(evidence?.coverage.outstandingQuantity, "0");
+    assert.equal(evidence?.coverage.activeRemainingQuantity, "0");
+    assert.equal(evidence?.position.side, "flat");
+    assert.equal(evidence?.position.quantity, "0");
+
+    const resumed = await recoverMainnetPreparedLegSource(
+      { sourceId: created.sourceId, runId },
+      state.dependencies,
+    );
+    assert.equal(resumed.ok, true);
+    if (resumed.ok) assert.equal(resumed.value.status, "VERIFIED_CLOSED");
+    assert.equal(state.exchange.createRequests.length, 1);
+  } finally {
+    state.cleanup();
+  }
+});
+
 test("ambiguous remainder cancel journals once and stays recovery-only", async () => {
   const state = setup();
   try {
@@ -1564,13 +1838,18 @@ test("ambiguous remainder cancel journals once and stays recovery-only", async (
     );
     assert.equal(result.ok, true);
     if (!result.ok) return;
-    assert.equal(result.value.status, "UNRESOLVED");
+    assert.equal(result.value.status, "PROTECTION_PENDING");
     assert.equal(state.exchange.cancelRequests.length, 1);
     assert.equal(unwrap(state.persistence.readHalt()).active, true);
     const source = unwrap(
       state.persistence.preparedLegExecution!.readPreparedLegSource(
         created.sourceId,
       ),
+    );
+    assert.equal(source?.reconciliations.at(-1)?.status, "PROTECTION_PENDING");
+    assert.equal(
+      source?.reconciliations.at(-1)?.protectionEvidence?.status,
+      "PROTECTION_PENDING",
     );
     assert.ok(source?.cancelIntent?.remainderCancelProof);
     assert.ok(source?.cancelAttempt);
@@ -1581,7 +1860,8 @@ test("ambiguous remainder cancel journals once and stays recovery-only", async (
       state.dependencies,
     );
     assert.equal(recovered.ok, true);
-    if (recovered.ok) assert.equal(recovered.value.status, "UNRESOLVED");
+    if (recovered.ok)
+      assert.equal(recovered.value.status, "PROTECTION_PENDING");
     assert.equal(state.exchange.cancelRequests.length, 1);
   } finally {
     state.cleanup();
@@ -1672,7 +1952,8 @@ test("crash after remainder intent and restart is recovery-only before cancel PO
       state.dependencies,
     );
     assert.equal(recovered.ok, true);
-    if (recovered.ok) assert.equal(recovered.value.status, "UNRESOLVED");
+    if (recovered.ok)
+      assert.equal(recovered.value.status, "PROTECTION_PENDING");
     assert.equal(state.exchange.cancelRequests.length, 0);
     source = unwrap(
       state.persistence.preparedLegExecution!.readPreparedLegSource(
@@ -1680,6 +1961,10 @@ test("crash after remainder intent and restart is recovery-only before cancel PO
       ),
     );
     assert.equal(source?.cancelAttempt, undefined);
+    assert.equal(
+      source?.reconciliations.at(-1)?.protectionEvidence?.status,
+      "PROTECTION_PENDING",
+    );
     assert.equal(unwrap(state.persistence.readHalt()).active, true);
   } finally {
     state.cleanup();
@@ -1728,7 +2013,8 @@ test("attempt-journal interruption after remainder POST recovers without retry",
       state.dependencies,
     );
     assert.equal(recovered.ok, true);
-    if (recovered.ok) assert.equal(recovered.value.status, "UNRESOLVED");
+    if (recovered.ok)
+      assert.equal(recovered.value.status, "PROTECTION_PENDING");
     assert.equal(state.exchange.cancelRequests.length, 1);
     source = unwrap(
       state.persistence.preparedLegExecution!.readPreparedLegSource(
@@ -2037,7 +2323,7 @@ test("stale cancel authorization leaves durable cancel intent unresolved on crea
   }
 });
 
-test("ambiguous cancel and fill race remain unresolved without replacement writes", async () => {
+test("ambiguous cancel stays unresolved and fill race becomes protection-pending without replacement writes", async () => {
   const ambiguous = setup();
   try {
     const created = await createOpenPreparedLeg(
@@ -2100,10 +2386,20 @@ test("ambiguous cancel and fill race remain unresolved without replacement write
       result.ok ? "" : `${result.error.code}: ${result.error.message}`,
     );
     if (!result.ok) return;
-    assert.equal(result.value.status, "UNRESOLVED");
+    assert.equal(result.value.status, "PROTECTION_PENDING");
     assert.equal(fillRace.exchange.cancelRequests.length, 1);
     assert.equal(fillRace.exchange.createRequests.length, 1);
     assert.equal(unwrap(fillRace.persistence.readHalt()).active, true);
+    const saved = unwrap(
+      fillRace.persistence.preparedLegExecution!.readPreparedLegSource(
+        created.sourceId,
+      ),
+    );
+    assert.equal(saved?.reconciliations.at(-1)?.status, "PROTECTION_PENDING");
+    assert.equal(
+      saved?.reconciliations.at(-1)?.protectionEvidence?.status,
+      "PROTECTION_PENDING",
+    );
   } finally {
     fillRace.cleanup();
   }

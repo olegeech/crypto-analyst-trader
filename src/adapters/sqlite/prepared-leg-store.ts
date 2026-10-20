@@ -31,6 +31,8 @@ import {
   type UtcTimestamp,
 } from "../../domain/shared/time.js";
 import {
+  isRecord,
+  onlyKeys,
   requireFiniteInteger,
   requireHash,
   requireIdentifier,
@@ -554,9 +556,12 @@ function validateReconciliation(
     (proof.status === "partially-filled" && partialFill) ||
     (proof.status === "filled" && fullFill) ||
     (proof.status === "cancelled" && partialFill);
+  const pendingExposureIsUncertain =
+    protectionEvidence?.status === "PROTECTION_PENDING" &&
+    proof.filledQuantity.isPositive();
   if (
     legacyStatus !== "PROTECTION_PENDING" ||
-    !fillStatusConsistent ||
+    (!fillStatusConsistent && !pendingExposureIsUncertain) ||
     (fills.length === 0 && protectionEvidence?.status !== "PROTECTION_PENDING")
   )
     return invalid("reconciliation status conflicts with provider facts");
@@ -617,12 +622,7 @@ function exactRecord(
   value: unknown,
   allowed: readonly string[],
 ): value is Record<string, unknown> {
-  return (
-    typeof value === "object" &&
-    value !== null &&
-    !Array.isArray(value) &&
-    Object.keys(value).every((key) => allowed.includes(key))
-  );
+  return isRecord(value) && onlyKeys(value, allowed);
 }
 
 function exactDecimal(value: unknown, positive: boolean): value is string {
@@ -2073,16 +2073,28 @@ export class SqlitePreparedLegStore implements PreparedLegPersistencePort {
         "SELECT reconciliation_id, source_id, revision, status, observed_at, exchange_order_id, canonical_json, canonical_hash FROM prepared_leg_reconciliations WHERE source_id = ? ORDER BY revision",
       )
       .all(lineage.value.sourceId) as SqliteRow[];
+    const protectionRows = db
+      .prepare(
+        "SELECT protection.reconciliation_id, protection.source_id, protection.revision, protection.status, protection.canonical_json, protection.canonical_hash FROM prepared_leg_reconciliation_v2 AS protection JOIN prepared_leg_reconciliations AS reconciliation ON reconciliation.reconciliation_id = protection.reconciliation_id WHERE reconciliation.source_id = ? ORDER BY reconciliation.revision",
+      )
+      .all(lineage.value.sourceId) as SqliteRow[];
+    const protectionByReconciliationId = new Map<string, SqliteRow>();
+    for (const protectionRow of protectionRows) {
+      const reconciliationId = storedIdentifier(
+        protectionRow,
+        "reconciliation_id",
+      );
+      if (!reconciliationId.ok) return reconciliationId;
+      protectionByReconciliationId.set(reconciliationId.value, protectionRow);
+    }
     const reconciliations: PreparedLegReconciliationRecord[] = [];
     for (const item of rows) {
       const reconciliationId = storedIdentifier(item, "reconciliation_id");
       if (!reconciliationId.ok) return reconciliationId;
-      const protectionRow = db
-        .prepare(
-          "SELECT reconciliation_id, source_id, revision, status, canonical_json, canonical_hash FROM prepared_leg_reconciliation_v2 WHERE reconciliation_id = ?",
-        )
-        .get(reconciliationId.value) as SqliteRow | undefined;
-      const parsed = reconciliationFromRow(item, protectionRow);
+      const parsed = reconciliationFromRow(
+        item,
+        protectionByReconciliationId.get(reconciliationId.value),
+      );
       if (!parsed.ok) return parsed;
       reconciliations.push(parsed.value);
     }
