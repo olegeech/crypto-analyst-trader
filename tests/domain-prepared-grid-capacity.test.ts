@@ -137,6 +137,8 @@ function restOrder(
       price: execution.leg.intent.price.toString(),
       timeInForce: "GTC",
       takeProfit: execution.leg.intent.protection!.takeProfit!.toString(),
+      providerTpslMode: "Partial",
+      takeProfitTriggerBy: "LastPrice",
       stopLoss: null,
       reduceOnly: false,
       positionIdx: 0,
@@ -205,7 +207,8 @@ function accountTakeProfitChildFor(
       "price",
     ),
     stopOrderType: accountKnown("TakeProfit"),
-    tpslMode: accountKnown("Full"),
+    triggerBy: accountKnown("LastPrice"),
+    tpslMode: accountKnown("Partial"),
   };
 }
 
@@ -337,7 +340,10 @@ test("a confirmed zero-fill prefix permits the exact next leg and projects each 
       createExchangeOrder({
         exchangeOrderId: "tp-child-0",
         clientOrderId: prefix.execution.clientOrderId,
+        providerOrderLinkId: prefix.execution.clientOrderId,
         parentOrderLinkId: prefix.execution.clientOrderId,
+        providerStopOrderType: "PartialTakeProfit",
+        providerTpslMode: "Partial",
         instrument: "BTCUSDT",
         category: "linear",
         side: "sell",
@@ -347,10 +353,14 @@ test("a confirmed zero-fill prefix permits the exact next leg and projects each 
         orderType: "market",
         triggerPrice:
           prefix.execution.leg.intent.protection!.takeProfit!.toString(),
+        triggerBy: "LastPrice",
+        takeProfitTriggerBy: "LastPrice",
         reduceOnly: true,
         positionIdx: 0,
+        providerCreatedAt: serverTime,
+        providerUpdatedAt: serverTime,
         observedAt: serverTime,
-        source: "Bybit REST",
+        source: "bybit-mainnet/protection/order/realtime",
         protectionType: "take-profit",
         ...overrides,
       }),

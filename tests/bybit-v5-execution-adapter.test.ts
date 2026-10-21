@@ -15,7 +15,14 @@ import { BYBIT_MAINNET_CAPABILITY_PROFILE } from "../src/adapters/bybit-v5/capab
 import { requireCapability } from "../src/domain/capabilities/capability.js";
 import { createOrderIntent } from "../src/domain/planning/order-intent.js";
 import { DecimalValue } from "../src/domain/shared/decimal.js";
-import { fixedClock } from "../src/domain/shared/time.js";
+import { fixedClock, timestampFromEpochMs } from "../src/domain/shared/time.js";
+import { createPreparedLegExecution } from "../src/domain/execution/prepared-leg-execution.js";
+import {
+  createPreparedLegOrderProof,
+  derivePreparedLegProtectionCoverage,
+} from "../src/domain/execution/prepared-leg-order-proof.js";
+import { preparedLegExecutionFixture } from "./fixtures/prepared-leg-execution-fixtures.js";
+import { requireDailyFixture as value } from "./fixtures/daily-planning-evidence-fixtures.js";
 
 function response(result: Record<string, unknown>): BybitResponse {
   return { retCode: 0, retMsg: "OK", result };
@@ -87,7 +94,7 @@ function baseResponse(path: string): BybitResponse {
   }
 }
 
-function orderRequest() {
+function orderRequest(options: { readonly partialTp?: boolean } = {}) {
   const price = DecimalValue.fromString("0.0887");
   const quantity = DecimalValue.fromString("57");
   const notional = DecimalValue.fromString("5.0559");
@@ -113,7 +120,19 @@ function orderRequest() {
       quantity: "floor",
       constraintVersion: "bybit-v5:DOGEUSDT:instrument",
     },
-    protection: { takeProfit: takeProfit.value },
+    protection: {
+      takeProfit: takeProfit.value,
+      ...(options.partialTp
+        ? {
+            takeProfitPolicy: {
+              policyVersion: "m1-mainnet-per-leg-tp/v1" as const,
+              tpslMode: "Partial" as const,
+              orderType: "Market" as const,
+              triggerBy: "LastPrice" as const,
+            },
+          }
+        : {}),
+    },
   });
   assert.equal(intent.ok, true);
   if (!intent.ok) throw new Error("order fixture");
@@ -363,9 +382,21 @@ function mainnetFixture(
               list: [
                 mainnetOrder({
                   orderId: "protection-1",
-                  orderLinkId: "protection-client",
+                  orderLinkId: "",
                   parentOrderLinkId: "owned-client",
-                  stopOrderType: "TakeProfit",
+                  side: "Sell",
+                  qty: "0.5",
+                  cumExecQty: "0",
+                  orderStatus: "Untriggered",
+                  orderType: "Market",
+                  stopOrderType: "PartialTakeProfit",
+                  tpslMode: "Partial",
+                  triggerPrice: "0.1",
+                  tpTriggerBy: "LastPrice",
+                  triggerBy: "MarkPrice",
+                  reduceOnly: true,
+                  createdTime: String(Date.parse(mainnetObservedAt) - 1_000),
+                  updatedTime: String(Date.parse(mainnetObservedAt)),
                 }),
               ],
             };
@@ -426,6 +457,17 @@ test("Mainnet adapter exposes sanitized symbol state and all supported single op
   const state = await fixture.adapter.readState({ instrument: "DOGEUSDT" });
   assert.equal(state.ok, true);
   if (!state.ok) return;
+  assert.deepEqual(
+    fixture.calls.map((call) => new URL(call.url).pathname),
+    [
+      "/v5/market/instruments-info",
+      "/v5/market/tickers",
+      "/v5/position/list",
+      "/v5/order/realtime",
+      "/v5/market/time",
+    ],
+    "state observations use a provider time sample after the order read",
+  );
   assert.equal(state.value.market.scope.environment, "mainnet");
   assert.equal(state.value.position.side, "flat");
   assert.equal(state.value.position.quantity.toString(), "0");
@@ -474,9 +516,22 @@ test("Mainnet adapter exposes sanitized symbol state and all supported single op
   });
   assert.equal(wrongScope.ok, false);
 
-  const created = await fixture.adapter.createOrder(orderRequest());
+  const created = await fixture.adapter.createOrder(
+    orderRequest({ partialTp: true }),
+  );
   assert.equal(created.ok, true);
   if (created.ok) assert.equal(created.value.exchangeOrderId, "exchange-1");
+  const createRequest = fixture.calls.find(
+    (call) =>
+      call.method === "POST" &&
+      new URL(call.url).pathname === "/v5/order/create",
+  );
+  assert.ok(createRequest?.body);
+  const createBody = JSON.parse(createRequest.body!) as Record<string, unknown>;
+  assert.equal(createBody.tpslMode, "Partial");
+  assert.equal(createBody.tpOrderType, "Market");
+  assert.equal(createBody.tpTriggerBy, "LastPrice");
+  assert.equal("stopLoss" in createBody, false);
 
   const observed = await fixture.adapter.observeOrder({
     instrument: "DOGEUSDT",
@@ -506,7 +561,20 @@ test("Mainnet adapter exposes sanitized symbol state and all supported single op
   if (protection.ok) {
     assert.equal(protection.value.length, 1);
     assert.equal(protection.value[0]?.protectionType, "take-profit");
-    assert.equal(protection.value[0]?.source, "bybit-mainnet/protection");
+    assert.equal(
+      protection.value[0]?.source,
+      "bybit-mainnet/protection/order/history",
+    );
+    assert.equal(protection.value[0]?.clientOrderId, "owned-client");
+    assert.equal(protection.value[0]?.providerOrderLinkId, undefined);
+    assert.equal(protection.value[0]?.parentOrderLinkId, "owned-client");
+    assert.equal(
+      protection.value[0]?.providerStopOrderType,
+      "PartialTakeProfit",
+    );
+    assert.equal(protection.value[0]?.providerTpslMode, "Partial");
+    assert.equal(protection.value[0]?.takeProfitTriggerBy, "LastPrice");
+    assert.equal(protection.value[0]?.triggerBy, "MarkPrice");
   }
 
   const target = DecimalValue.fromString("2");
@@ -532,6 +600,167 @@ test("Mainnet adapter exposes sanitized symbol state and all supported single op
       .map((call) => new URL(call.url).pathname),
     ["/v5/order/create", "/v5/position/set-leverage", "/v5/order/cancel"],
   );
+});
+
+test("Mainnet child observations use post-read Bybit time despite a lagging local clock", async () => {
+  const source = preparedLegExecutionFixture();
+  const execution = value(
+    createPreparedLegExecution({
+      approval: source.approval,
+      approvalHash: source.approval.contentHash,
+      legId: source.legId,
+      now: source.now,
+    }),
+  );
+  const intent = execution.leg.intent;
+  const serverEpoch = Date.parse(source.now);
+  const observedAt = value(timestampFromEpochMs(serverEpoch));
+  const clock = value(
+    fixedClock(value(timestampFromEpochMs(serverEpoch - 500))),
+  );
+  const parent = value(
+    createPreparedLegOrderProof({
+      exchangeOrderId: "clock-parent",
+      clientOrderId: execution.clientOrderId,
+      instrument: intent.instrument,
+      category: "linear",
+      side: "buy",
+      requestedQuantity: intent.quantity.toString(),
+      filledQuantity: "0.5",
+      status: "partially-filled",
+      orderType: "limit",
+      price: intent.price.toString(),
+      timeInForce: "GTC",
+      takeProfit: intent.protection!.takeProfit!.toString(),
+      stopLoss: null,
+      providerTpslMode: "Partial",
+      takeProfitTriggerBy: "LastPrice",
+      reduceOnly: false,
+      positionIdx: 0,
+      observedAt: source.now,
+      source: "bybit-mainnet/realtime",
+    }),
+  );
+  const calls: string[] = [];
+  let childUpdatedAt = serverEpoch - 100;
+  let failServerTime = false;
+  const adapter = new BybitMainnetExecutionAdapter({
+    clock,
+    transport: createBybitPrivateTransport({
+      environment: "mainnet",
+      credentials: mainnetCredentials,
+      clock: () => Date.parse(clock.now()),
+      clockOffsetMs: 500,
+      request: async (input, init) => {
+        assert.equal(init?.method ?? "GET", "GET", "No writes expected");
+        const path = new URL(String(input)).pathname;
+        calls.push(path);
+        if (path === "/v5/market/time") {
+          if (failServerTime) throw new Error("server-time unavailable");
+          return new Response(
+            JSON.stringify(
+              response({
+                timeSecond: String(Math.floor(serverEpoch / 1_000)),
+                timeNano: String(BigInt(serverEpoch) * 1_000_000n),
+              }),
+            ),
+            { status: 200 },
+          );
+        }
+        const result = {
+          list:
+            path === "/v5/order/realtime"
+              ? [
+                  mainnetOrder({
+                    category: "linear",
+                    symbol: intent.instrument,
+                    orderId: "clock-child",
+                    orderLinkId: "",
+                    parentOrderLinkId: execution.clientOrderId,
+                    side: "Sell",
+                    qty: "0.5",
+                    orderStatus: "Untriggered",
+                    orderType: "Market",
+                    price: "0",
+                    stopOrderType: "PartialTakeProfit",
+                    tpslMode: "Partial",
+                    triggerPrice: intent.protection!.takeProfit!.toString(),
+                    tpTriggerBy: "LastPrice",
+                    triggerBy: "LastPrice",
+                    reduceOnly: true,
+                    createdTime: String(serverEpoch - 1_000),
+                    updatedTime: String(childUpdatedAt),
+                  }),
+                ]
+              : [],
+        };
+        return new Response(JSON.stringify(response(result)), { status: 200 });
+      },
+    }),
+  });
+  const lookup = {
+    instrument: intent.instrument,
+    parentClientOrderId: execution.clientOrderId,
+  };
+  const children = await adapter.listAttachedProtection(lookup);
+  assert.equal(children.ok, true);
+  if (!children.ok) return;
+  assert.deepEqual(calls, [
+    "/v5/order/realtime",
+    "/v5/order/history",
+    "/v5/market/time",
+  ]);
+  assert.equal(children.value[0]?.observedAt, source.now);
+  assert.ok(childUpdatedAt > Date.parse(clock.now()));
+  const coverageInput = {
+    execution,
+    parent,
+    entryFills: [
+      {
+        executionId: "clock-entry-fill",
+        exchangeOrderId: parent.exchangeOrderId,
+        clientOrderId: execution.clientOrderId,
+        instrument: intent.instrument,
+        side: "buy" as const,
+        quantity: value(DecimalValue.fromString("0.5")),
+        price: intent.price,
+        executedAt: observedAt,
+        source: "bybit-mainnet/execution",
+      },
+    ],
+    exitFills: [],
+    children: children.value,
+    observedAt,
+    maxAgeMs: 30_000,
+  };
+  const covered = value(derivePreparedLegProtectionCoverage(coverageInput));
+  assert.equal(covered.covered, true, JSON.stringify(covered.reasonCodes));
+  const stale = value(
+    derivePreparedLegProtectionCoverage({
+      ...coverageInput,
+      observedAt: value(timestampFromEpochMs(serverEpoch + 30_001)),
+    }),
+  );
+  assert.equal(stale.covered, false);
+  assert.ok(stale.reasonCodes.includes("CHILD_OBSERVATION_STALE"));
+
+  childUpdatedAt = serverEpoch + 1;
+  const futureChildren = await adapter.listAttachedProtection(lookup);
+  assert.equal(futureChildren.ok, true);
+  if (!futureChildren.ok) return;
+  const future = value(
+    derivePreparedLegProtectionCoverage({
+      ...coverageInput,
+      children: futureChildren.value,
+    }),
+  );
+  assert.equal(future.covered, false);
+  assert.ok(future.reasonCodes.includes("CHILD_PROOF_INVALID"));
+
+  failServerTime = true;
+  const unavailable = await adapter.listAttachedProtection(lookup);
+  assert.equal(unavailable.ok, false);
+  assert.equal("value" in unavailable, false);
 });
 
 test("Mainnet adapter refuses a Demo-scoped transport before any request", () => {

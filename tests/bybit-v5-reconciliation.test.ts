@@ -137,6 +137,36 @@ test("execution identity is deduplicated and retained outside the domain Fill at
   }
 });
 
+test("an exact child order id owns executions with an empty provider order link id", async () => {
+  const result = await listOwnedFills(
+    makeClient((path) =>
+      path === "/v5/execution/list"
+        ? response({
+            list: [
+              execution({
+                orderId: "tp-child-1",
+                orderLinkId: "",
+              }),
+            ],
+          })
+        : response({ list: [] }),
+    ),
+    {
+      instrument: "DOGEUSDT",
+      clientOrderId: "owned-parent",
+      exchangeOrderId: "tp-child-1",
+    },
+    "mainnet",
+  );
+
+  assert.equal(result.ok, true);
+  if (result.ok) {
+    assert.equal(result.value.length, 1);
+    assert.equal(result.value[0]?.exchangeOrderId, "tp-child-1");
+    assert.equal(result.value[0]?.clientOrderId, "");
+  }
+});
+
 test("missing order evidence and identity mismatches remain unresolved", async () => {
   const missing = await reconcileOrder(
     makeClient(() => response({ list: [] })),

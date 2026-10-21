@@ -15,6 +15,7 @@ import {
   type PreparedLegSourceIdentity,
 } from "../domain/execution/prepared-leg-execution.js";
 import { createPreparedGridCapacity } from "../domain/execution/prepared-grid-capacity.js";
+import type { PlanHash } from "../domain/identity/canonical-serialization.js";
 import { hashCanonical } from "../domain/identity/canonical-serialization.js";
 import {
   accountEvidenceContentHash,
@@ -23,10 +24,15 @@ import {
 } from "../domain/account/account-evidence-bundle.js";
 import {
   createPreparedLegOrderProof,
+  derivePreparedLegProtectionCoverage,
+  isProducedPreparedLegOrderProof,
   matchesPreparedLegTakeProfitChild,
   matchesPreparedLegOrder,
 } from "../domain/execution/prepared-leg-order-proof.js";
-import type { PreparedLegOrderProof } from "../domain/execution/prepared-leg-order-proof.js";
+import type {
+  PreparedLegOrderProof,
+  PreparedLegProtectionCoverage,
+} from "../domain/execution/prepared-leg-order-proof.js";
 import { domainError, type DomainErrorCode } from "../domain/shared/errors.js";
 import { normalizeOrderIntent } from "../domain/planning/normalize-order-intent.js";
 import { fail, ok, type Result } from "../domain/shared/result.js";
@@ -44,6 +50,7 @@ import { closedRecord } from "../domain/planning/planning-validation.js";
 import type { PreparedArtifactStore } from "../ports/prepared-artifact-store.js";
 import type {
   PreparedLegPersistencePort,
+  PreparedLegProtectionEvidenceV2Input,
   PreparedLegReconciliationStatus,
   PersistencePort,
 } from "../ports/persistence.js";
@@ -80,7 +87,7 @@ export interface MainnetPreparedGridReconciliationContext {
 interface StoredGridSiblingEvidence {
   readonly status: PreparedLegReconciliationStatus;
   readonly proof?: PreparedLegOrderProof;
-  readonly fillQuantities: readonly DecimalValue[];
+  readonly outstandingQuantity: DecimalValue;
 }
 
 export interface MainnetPreparedGridCreateContext {
@@ -534,6 +541,596 @@ function fillEvidence(
   return ok(result);
 }
 
+function protectionEvidenceFill(
+  fill: ExchangeFillObservation,
+): PreparedLegProtectionEvidenceV2Input["entries"]["fills"][number] {
+  return {
+    executionId: fill.executionId,
+    exchangeOrderId: fill.exchangeOrderId,
+    clientOrderId: fill.clientOrderId,
+    instrument: fill.instrument,
+    side: fill.side,
+    quantity: fill.quantity.toString(),
+    price: fill.price.toString(),
+    executedAt: fill.executedAt,
+    source: fill.source,
+  };
+}
+
+function protectionEvidenceChild(
+  child: ExchangeOrderObservation,
+): PreparedLegProtectionEvidenceV2Input["children"][number] {
+  return {
+    exchangeOrderId: child.exchangeOrderId,
+    clientOrderId: child.clientOrderId,
+    instrument: child.instrument,
+    ...(child.providerOrderLinkId === undefined
+      ? {}
+      : { providerOrderLinkId: child.providerOrderLinkId }),
+    ...(child.parentOrderLinkId === undefined
+      ? {}
+      : { parentOrderLinkId: child.parentOrderLinkId }),
+    ...(child.category === undefined ? {} : { category: child.category }),
+    ...(child.orderType === undefined ? {} : { orderType: child.orderType }),
+    ...(child.price === undefined ? {} : { price: child.price.toString() }),
+    side: child.side,
+    requestedQuantity: child.requestedQuantity.toString(),
+    filledQuantity: child.filledQuantity.toString(),
+    remainingQuantity: child.requestedQuantity
+      .subtract(child.filledQuantity)
+      .toString(),
+    status: child.status,
+    source: child.source,
+    observedAt: child.observedAt,
+    ...(child.providerCreatedAt === undefined
+      ? {}
+      : { providerCreatedAt: child.providerCreatedAt }),
+    ...(child.providerUpdatedAt === undefined
+      ? {}
+      : { providerUpdatedAt: child.providerUpdatedAt }),
+    ...(child.providerStopOrderType === undefined
+      ? {}
+      : { providerStopOrderType: child.providerStopOrderType }),
+    ...(child.providerTpslMode === undefined
+      ? {}
+      : { providerTpslMode: child.providerTpslMode }),
+    ...(child.protectionType === undefined
+      ? {}
+      : { protectionType: child.protectionType }),
+    ...(child.reduceOnly === undefined ? {} : { reduceOnly: child.reduceOnly }),
+    ...(child.positionIdx === undefined
+      ? {}
+      : { positionIdx: child.positionIdx }),
+    ...(child.triggerPrice === undefined
+      ? {}
+      : { triggerPrice: child.triggerPrice.toString() }),
+    ...(child.triggerBy === undefined ? {} : { triggerBy: child.triggerBy }),
+    ...(child.takeProfitTriggerBy === undefined
+      ? {}
+      : { takeProfitTriggerBy: child.takeProfitTriggerBy }),
+  };
+}
+
+export function createProtectionEvidenceV2(input: {
+  readonly execution: PreparedLegSourceIdentity;
+  readonly parent: PreparedLegOrderProof;
+  readonly entries: readonly ExchangeFillObservation[];
+  readonly exits: readonly ExchangeFillObservation[];
+  readonly children: readonly ExchangeOrderObservation[];
+  readonly coverage?: PreparedLegProtectionCoverage;
+  readonly state: MainnetExchangeReadState;
+  readonly observedAt: UtcTimestamp;
+  readonly status: PreparedLegProtectionEvidenceV2Input["status"];
+  readonly entryFillsComplete: boolean;
+  readonly childOrdersComplete: boolean;
+  readonly exitFillsComplete: boolean;
+  readonly positionComplete: boolean;
+  readonly reasonCodes: readonly string[];
+}): PreparedLegProtectionEvidenceV2Input {
+  const quantity = (fills: readonly ExchangeFillObservation[]) => {
+    const zero = DecimalValue.fromString("0");
+    if (!zero.ok) return null;
+    return fills
+      .reduce((sum, fill) => sum.add(fill.quantity), zero.value)
+      .toString();
+  };
+  const entryQuantity = input.entryFillsComplete
+    ? quantity(input.entries)
+    : null;
+  const exitQuantity = input.exitFillsComplete ? quantity(input.exits) : null;
+  const reasonCodes = [
+    ...new Set([...(input.coverage?.reasonCodes ?? []), ...input.reasonCodes]),
+  ].sort();
+  const coverageCovered = input.coverage
+    ? input.coverage.covered &&
+      input.positionComplete &&
+      input.reasonCodes.length === 0
+    : null;
+  return {
+    schemaVersion: "prepared-leg-protection-evidence/v2",
+    status: input.status,
+    observedAt: input.observedAt,
+    parent: {
+      exchangeOrderId: input.parent.exchangeOrderId,
+      clientOrderId: input.parent.clientOrderId,
+      instrument: input.parent.instrument,
+      category: input.parent.category,
+      side: input.parent.side,
+      requestedQuantity: input.parent.requestedQuantity.toString(),
+      filledQuantity: input.parent.filledQuantity.toString(),
+      status: input.parent.status,
+      source: input.parent.source,
+      observedAt: input.parent.observedAt,
+      takeProfit: input.parent.takeProfit?.toString() ?? null,
+      ...(input.parent.providerTpslMode === undefined
+        ? {}
+        : { providerTpslMode: input.parent.providerTpslMode }),
+      ...(input.parent.takeProfitTriggerBy === undefined
+        ? {}
+        : { takeProfitTriggerBy: input.parent.takeProfitTriggerBy }),
+    },
+    entries: {
+      quantity: entryQuantity,
+      executionIds: input.entries.map((fill) => fill.executionId).sort(),
+      fills: input.entries.map(protectionEvidenceFill),
+    },
+    exits: {
+      quantity: exitQuantity,
+      executionIds: input.exits.map((fill) => fill.executionId).sort(),
+      fills: input.exits.map(protectionEvidenceFill),
+    },
+    children: input.children.map(protectionEvidenceChild),
+    coverage: {
+      outstandingQuantity:
+        input.coverage?.outstandingQuantity.toString() ?? null,
+      activeRemainingQuantity:
+        input.coverage?.activeRemainingQuantity.toString() ?? null,
+      covered: coverageCovered,
+      reasonCodes,
+    },
+    position: {
+      instrument: input.state.position.instrument,
+      side: input.state.position.side,
+      quantity: input.state.position.quantity.toString(),
+      serverTime: input.state.serverTime,
+    },
+    collection: {
+      entryFills: input.entryFillsComplete ? "complete" : "incomplete",
+      childOrders: input.childOrdersComplete ? "complete" : "incomplete",
+      exitFills: input.childOrdersComplete
+        ? input.exitFillsComplete
+          ? "complete"
+          : "incomplete"
+        : "incomplete",
+      position: input.positionComplete ? "complete" : "incomplete",
+    },
+    reasonCodes,
+  };
+}
+
+interface FilledProtectionReads {
+  readonly state: MainnetExchangeReadState;
+  readonly observedAt: UtcTimestamp;
+  readonly children: readonly ExchangeOrderObservation[];
+  readonly exits: readonly ExchangeFillObservation[];
+  readonly coverage?: PreparedLegProtectionCoverage;
+  readonly childOrdersComplete: boolean;
+  readonly exitFillsComplete: boolean;
+  readonly positionComplete: boolean;
+  readonly reasonCodes: readonly string[];
+}
+
+async function collectFilledProtectionReads(
+  dependencies: MainnetPreparedLegDependencies,
+  execution: PreparedLegSourceIdentity,
+  parent: PreparedLegOrderProof,
+  entries: readonly ExchangeFillObservation[],
+  initialState: MainnetExchangeReadState,
+): Promise<FilledProtectionReads> {
+  const reasons: string[] = [];
+  let children: readonly ExchangeOrderObservation[] = [];
+  let childOrdersComplete = false;
+  const exits: ExchangeFillObservation[] = [];
+  let exitFillsComplete = false;
+
+  let childResult: ExchangeResult<readonly ExchangeOrderObservation[]>;
+  try {
+    childResult = await dependencies.exchange.listAttachedProtection({
+      instrument: execution.leg.intent.instrument,
+      parentClientOrderId: execution.clientOrderId,
+    });
+  } catch {
+    childResult = failedExchangeRead("observe");
+  }
+  if (childResult.ok) {
+    children = childResult.value;
+    childOrdersComplete = true;
+    exitFillsComplete = true;
+    for (const child of children) {
+      let childFills: ExchangeResult<readonly ExchangeFillObservation[]>;
+      try {
+        childFills = await dependencies.exchange.listFills({
+          instrument: execution.leg.intent.instrument,
+          clientOrderId: child.providerOrderLinkId ?? child.clientOrderId,
+          exchangeOrderId: child.exchangeOrderId,
+        });
+      } catch {
+        childFills = failedExchangeRead("fills");
+      }
+      if (childFills.ok) exits.push(...childFills.value);
+      else {
+        exitFillsComplete = false;
+        reasons.push(safeProviderReason(childFills));
+      }
+    }
+  } else {
+    reasons.push(safeProviderReason(childResult));
+  }
+
+  let freshState: ExchangeResult<MainnetExchangeReadState>;
+  try {
+    freshState = await dependencies.exchange.readState({
+      instrument: execution.leg.intent.instrument,
+    });
+  } catch {
+    freshState = failedExchangeRead("read");
+  }
+  const positionComplete = freshState.ok;
+  const state = freshState.ok ? freshState.value : initialState;
+  if (!freshState.ok) reasons.push(safeProviderReason(freshState));
+  const observedAt = state.serverTime;
+  let coverage: PreparedLegProtectionCoverage | undefined;
+  if (childOrdersComplete && exitFillsComplete) {
+    const derived = derivePreparedLegProtectionCoverage({
+      execution,
+      parent,
+      entryFills: entries,
+      exitFills: exits,
+      children,
+      observedAt,
+      maxAgeMs: PROVISIONAL_M1_MAX_ACCOUNT_EVIDENCE_AGE_MS,
+    });
+    if (derived.ok) coverage = derived.value;
+    else {
+      let reasonCode: string;
+      if (!isProducedPreparedLegOrderProof(parent))
+        reasonCode = "PROTECTION_PARENT_PROOF_NOT_PRODUCED";
+      else if (!execution.leg.intent.protection?.takeProfitPolicy)
+        reasonCode = "PROTECTION_TP_POLICY_UNAVAILABLE";
+      else if (!matchesPreparedLegOrder(parent, execution))
+        reasonCode = "PROTECTION_PARENT_TERMS_MISMATCH";
+      else reasonCode = "PROTECTION_COVERAGE_INPUT_INVALID";
+      reasons.push(reasonCode);
+    }
+  }
+  return {
+    state,
+    observedAt,
+    children,
+    exits,
+    ...(coverage === undefined ? {} : { coverage }),
+    childOrdersComplete,
+    exitFillsComplete,
+    positionComplete,
+    reasonCodes: [...new Set(reasons)].sort(),
+  };
+}
+
+export interface FreshPreparedLegSibling {
+  readonly sourceId: string;
+  readonly execution: PreparedLegExecution;
+  readonly parent: PreparedLegOrderProof;
+  readonly entries: readonly ExchangeFillObservation[];
+  readonly reads: FilledProtectionReads;
+}
+
+/** Read every durably owned sibling under the same immutable approval. */
+export async function collectFreshPreparedLegSiblings(
+  dependencies: MainnetPreparedLegDependencies,
+  execution: PreparedLegSourceIdentity,
+  sourceId: string,
+  state: MainnetExchangeReadState,
+): Promise<
+  Result<{
+    readonly approvalHash?: PlanHash;
+    readonly siblings: readonly FreshPreparedLegSibling[];
+    readonly state: MainnetExchangeReadState;
+  }>
+> {
+  const selected = dependencies.preparedLegs.readPreparedLegSource(sourceId);
+  if (!selected.ok) return selected;
+  if (!selected.value)
+    return fail(
+      domainError("OWNERSHIP_MISMATCH", "selected source is unavailable"),
+    );
+  const approvalHash = selected.value.approvalHashes[0];
+  if (!approvalHash)
+    return fail(
+      domainError("OWNERSHIP_MISMATCH", "source approval is unavailable"),
+    );
+  const approval = dependencies.artifacts.loadApproval(approvalHash);
+  if (!approval.ok) return approval;
+  if (!approval.value)
+    return fail(
+      domainError(
+        "OWNERSHIP_MISMATCH",
+        "source approval artifact is unavailable",
+      ),
+    );
+  const grid = createPreparedLegGridExecution({
+    approval: approval.value,
+    approvalHash,
+    now: approval.value.approvedAt,
+  });
+  if (!grid.ok) return grid;
+  if (
+    grid.value.preparedHash !== execution.preparedHash ||
+    !grid.value.legs.some(
+      (row) =>
+        row.sourceId === sourceId &&
+        row.execution.clientOrderId === execution.clientOrderId,
+    )
+  )
+    return fail(
+      domainError(
+        "OWNERSHIP_MISMATCH",
+        "source does not belong to approved grid",
+      ),
+    );
+  const siblings: FreshPreparedLegSibling[] = [];
+  for (const row of grid.value.legs) {
+    if (row.sourceId === sourceId) continue;
+    const source = dependencies.preparedLegs.readPreparedLegSource(
+      row.sourceId,
+    );
+    if (!source.ok) return source;
+    if (!source.value) continue;
+    const snapshot = source.value;
+    const orderId = snapshot.reconciliations.at(-1)?.exchangeOrderId;
+    if (
+      snapshot.lineage.preparedHash !== execution.preparedHash ||
+      snapshot.lineage.clientOrderId !== row.execution.clientOrderId ||
+      !snapshot.approvalHashes.includes(approvalHash) ||
+      !orderId
+    )
+      return fail(
+        domainError(
+          "OWNERSHIP_MISMATCH",
+          "sibling durable ownership is incomplete",
+        ),
+      );
+    try {
+      const observed = await dependencies.exchange.observeOrder({
+        instrument: execution.leg.intent.instrument,
+        clientOrderId: row.execution.clientOrderId,
+        exchangeOrderId: orderId,
+      });
+      if (!observed.ok)
+        return fail(
+          domainError(
+            "UNRESOLVED_RECONCILIATION",
+            "sibling parent read failed",
+          ),
+        );
+      const parent = createPreparedLegOrderProof(observed.value);
+      if (
+        !parent.ok ||
+        !matchesPreparedLegOrder(parent.value, row.execution) ||
+        parent.value.exchangeOrderId !== orderId
+      )
+        return fail(
+          domainError("OWNERSHIP_MISMATCH", "sibling parent proof conflicts"),
+        );
+      const entries = await dependencies.exchange.listFills({
+        instrument: execution.leg.intent.instrument,
+        clientOrderId: row.execution.clientOrderId,
+        exchangeOrderId: orderId,
+      });
+      if (!entries.ok)
+        return fail(
+          domainError(
+            "UNRESOLVED_RECONCILIATION",
+            "sibling entry fills unavailable",
+          ),
+        );
+      const reads = await collectFilledProtectionReads(
+        dependencies,
+        row.execution,
+        parent.value,
+        entries.value,
+        state,
+      );
+      if (
+        !reads.positionComplete ||
+        !reads.childOrdersComplete ||
+        !reads.exitFillsComplete ||
+        reads.reasonCodes.length ||
+        !reads.coverage?.covered
+      )
+        return fail(
+          domainError(
+            "UNRESOLVED_RECONCILIATION",
+            "sibling TP proof is incomplete",
+          ),
+        );
+      siblings.push({
+        sourceId: row.sourceId,
+        execution: row.execution,
+        parent: parent.value,
+        entries: entries.value,
+        reads,
+      });
+    } catch {
+      return fail(
+        domainError("UNRESOLVED_RECONCILIATION", "sibling proof reads failed"),
+      );
+    }
+  }
+  if (!siblings.length) return ok({ siblings, state });
+  try {
+    const fresh = await dependencies.exchange.readState({
+      instrument: execution.leg.intent.instrument,
+    });
+    if (!fresh.ok)
+      return fail(
+        domainError(
+          "UNRESOLVED_RECONCILIATION",
+          "aggregate position read failed",
+        ),
+      );
+    return ok({ approvalHash, siblings, state: fresh.value });
+  } catch {
+    return fail(
+      domainError(
+        "UNRESOLVED_RECONCILIATION",
+        "aggregate position read failed",
+      ),
+    );
+  }
+}
+
+export function freshPreparedLegAggregateConflict(
+  state: MainnetExchangeReadState,
+  execution: PreparedLegSourceIdentity,
+  parent: PreparedLegOrderProof,
+  entries: readonly ExchangeFillObservation[],
+  children: readonly ExchangeOrderObservation[],
+  exits: readonly ExchangeFillObservation[],
+  siblings: readonly FreshPreparedLegSibling[],
+): string | undefined {
+  const scope = sharedReadStateScopeAndLeverageConflict(
+    state,
+    execution.leg.intent.instrument,
+  );
+  if (scope) return scope;
+  if (
+    new Set(state.openOrders.map((order) => order.exchangeOrderId)).size !==
+    state.openOrders.length
+  )
+    return "DUPLICATE_AGGREGATE_OPEN_ORDER";
+  const rows = [
+    { execution, parent, entries, children, exits },
+    ...siblings.map((sibling) => ({
+      execution: sibling.execution,
+      parent: sibling.parent,
+      entries: sibling.entries,
+      children: sibling.reads.children,
+      exits: sibling.reads.exits,
+    })),
+  ];
+  const zero = DecimalValue.fromString("0");
+  if (!zero.ok) return "INVALID_FILL_TOTAL";
+  let outstanding = zero.value;
+  const ids = new Set<string>();
+  const childIds = new Set<string>();
+  const parentIds = new Set<string>();
+  for (const row of rows) {
+    if (
+      parentIds.has(row.parent.exchangeOrderId) ||
+      childIds.has(row.parent.exchangeOrderId)
+    )
+      return "DUPLICATE_AGGREGATE_PARENT";
+    parentIds.add(row.parent.exchangeOrderId);
+    const coverage = derivePreparedLegProtectionCoverage({
+      execution: row.execution,
+      parent: row.parent,
+      entryFills: row.entries,
+      exitFills: row.exits,
+      children: row.children,
+      observedAt: state.serverTime,
+      maxAgeMs: PROVISIONAL_M1_MAX_ACCOUNT_EVIDENCE_AGE_MS,
+    });
+    if (!coverage.ok || !coverage.value.covered)
+      return "AGGREGATE_COVERAGE_UNVERIFIED";
+    outstanding = outstanding.add(coverage.value.outstandingQuantity);
+    for (const fill of [...row.entries, ...row.exits]) {
+      if (ids.has(fill.executionId)) return "DUPLICATE_AGGREGATE_EXECUTION";
+      ids.add(fill.executionId);
+    }
+    for (const child of row.children) {
+      if (
+        childIds.has(child.exchangeOrderId) ||
+        parentIds.has(child.exchangeOrderId)
+      )
+        return "DUPLICATE_AGGREGATE_CHILD";
+      childIds.add(child.exchangeOrderId);
+    }
+    const openParent = state.openOrders.filter(
+      (order) =>
+        order.exchangeOrderId === row.parent.exchangeOrderId &&
+        order.protectionType === undefined,
+    );
+    const active =
+      row.parent.status === "open" || row.parent.status === "partially-filled";
+    if (openParent.length !== (active ? 1 : 0))
+      return "AGGREGATE_PARENT_STATE_MISMATCH";
+    if (openParent[0]) {
+      const proof = createPreparedLegOrderProof(openParent[0]);
+      if (
+        !proof.ok ||
+        !matchesPreparedLegOrder(proof.value, row.execution) ||
+        !sameOrderObservation(proof.value, row.parent)
+      )
+        return "AGGREGATE_PARENT_STATE_MISMATCH";
+    }
+    const conflict = protectionChildStateConflict(
+      state,
+      row.execution,
+      row.children,
+    );
+    if (conflict) return conflict;
+  }
+  if (
+    state.openOrders.some(
+      (order) =>
+        !rows.some(
+          (row) =>
+            (order.exchangeOrderId === row.parent.exchangeOrderId &&
+              order.protectionType === undefined) ||
+            row.children.some(
+              (child) =>
+                child.exchangeOrderId === order.exchangeOrderId &&
+                matchesPreparedLegTakeProfitChild(order, row.execution),
+            ),
+        ),
+    )
+  )
+    return "UNOWNED_TARGET_ORDER_PRESENT";
+  return exactPositionConflict(state, outstanding);
+}
+
+export function aggregateProtectionEvidence(
+  approvalHash: PlanHash | undefined,
+  siblings: readonly FreshPreparedLegSibling[],
+  state: MainnetExchangeReadState,
+): PreparedLegProtectionEvidenceV2Input["aggregate"] {
+  if (!approvalHash || !siblings.length) return undefined;
+  return {
+    approvalHash,
+    siblings: siblings.map((sibling) => ({
+      sourceId: sibling.sourceId,
+      evidence: createProtectionEvidenceV2({
+        execution: sibling.execution,
+        parent: sibling.parent,
+        entries: sibling.entries,
+        exits: sibling.reads.exits,
+        children: sibling.reads.children,
+        coverage: sibling.reads.coverage!,
+        state,
+        observedAt: state.serverTime,
+        status: sibling.reads.coverage!.outstandingQuantity.isZero()
+          ? "VERIFIED_CLOSED"
+          : "PROTECTION_CONFIRMED",
+        entryFillsComplete: true,
+        childOrdersComplete: true,
+        exitFillsComplete: true,
+        positionComplete: true,
+        reasonCodes: [],
+      }),
+    })),
+  };
+}
+
 function sharedReadStateScopeAndLeverageConflict(
   state: MainnetExchangeReadState,
   instrument: string,
@@ -561,13 +1158,18 @@ function sharedReadStateScopeAndLeverageConflict(
 function exactFillPositionConflict(
   state: MainnetExchangeReadState,
   fills: readonly ExchangeFillObservation[],
-  siblingFillQuantities: readonly DecimalValue[] = [],
 ): string | undefined {
   const zero = DecimalValue.fromString("0");
   if (!zero.ok) return "INVALID_FILL_TOTAL";
   let total = zero.value;
   for (const fill of fills) total = total.add(fill.quantity);
-  for (const quantity of siblingFillQuantities) total = total.add(quantity);
+  return exactPositionConflict(state, total);
+}
+
+function exactPositionConflict(
+  state: MainnetExchangeReadState,
+  total: DecimalValue,
+): string | undefined {
   if (total.isZero()) {
     if (state.position.side !== "flat" || !state.position.quantity.isZero())
       return "UNOWNED_TARGET_POSITION_PRESENT";
@@ -580,13 +1182,81 @@ function exactFillPositionConflict(
   return undefined;
 }
 
+function sameProtectionChildTerms(
+  left: ExchangeOrderObservation,
+  right: ExchangeOrderObservation,
+): boolean {
+  return (
+    left.exchangeOrderId === right.exchangeOrderId &&
+    left.clientOrderId === right.clientOrderId &&
+    left.providerOrderLinkId === right.providerOrderLinkId &&
+    left.parentOrderLinkId === right.parentOrderLinkId &&
+    left.instrument === right.instrument &&
+    left.category === right.category &&
+    left.side === right.side &&
+    left.requestedQuantity.compare(right.requestedQuantity) === 0 &&
+    left.filledQuantity.compare(right.filledQuantity) === 0 &&
+    left.status === right.status &&
+    left.orderType === right.orderType &&
+    (left.triggerPrice === undefined
+      ? right.triggerPrice === undefined
+      : right.triggerPrice !== undefined &&
+        left.triggerPrice.compare(right.triggerPrice) === 0) &&
+    left.providerStopOrderType === right.providerStopOrderType &&
+    left.providerTpslMode === right.providerTpslMode &&
+    left.triggerBy === right.triggerBy &&
+    left.takeProfitTriggerBy === right.takeProfitTriggerBy &&
+    left.providerCreatedAt === right.providerCreatedAt &&
+    left.providerUpdatedAt === right.providerUpdatedAt &&
+    left.protectionType === right.protectionType &&
+    left.reduceOnly === right.reduceOnly &&
+    left.positionIdx === right.positionIdx
+  );
+}
+
+function protectionChildStateConflict(
+  state: MainnetExchangeReadState,
+  execution: PreparedLegSourceIdentity,
+  providerChildren: readonly ExchangeOrderObservation[],
+): string | undefined {
+  const expectedActive = providerChildren.filter(
+    (child) => child.status === "open" || child.status === "partially-filled",
+  );
+  const observedActive = state.openOrders.filter(
+    (order) => order.parentOrderLinkId === execution.clientOrderId,
+  );
+  const expectedById = new Map<string, ExchangeOrderObservation>();
+  for (const child of expectedActive) {
+    if (expectedById.has(child.exchangeOrderId))
+      return "READ_STATE_PROTECTION_CHILD_MISMATCH";
+    expectedById.set(child.exchangeOrderId, child);
+  }
+  const observedIds = new Set<string>();
+  for (const child of observedActive) {
+    if (
+      observedIds.has(child.exchangeOrderId) ||
+      !matchesPreparedLegTakeProfitChild(child, execution)
+    )
+      return "READ_STATE_PROTECTION_CHILD_MISMATCH";
+    observedIds.add(child.exchangeOrderId);
+    const providerChild = expectedById.get(child.exchangeOrderId);
+    if (!providerChild || !sameProtectionChildTerms(child, providerChild))
+      return "READ_STATE_PROTECTION_CHILD_MISMATCH";
+  }
+  if (observedIds.size !== expectedById.size)
+    return "READ_STATE_PROTECTION_CHILD_MISMATCH";
+  return undefined;
+}
+
 function targetStateConflict(
   dependencies: MainnetPreparedLegDependencies,
   state: MainnetExchangeReadState,
   execution: PreparedLegSourceIdentity,
   proof: PreparedLegOrderProof,
   fills: readonly ExchangeFillObservation[],
+  coverage?: PreparedLegProtectionCoverage,
   gridContext?: MainnetPreparedGridReconciliationContext,
+  protectionChildren: readonly ExchangeOrderObservation[] = [],
 ): string | undefined {
   const symbol = execution.leg.intent.instrument;
   if (gridContext)
@@ -595,8 +1265,9 @@ function targetStateConflict(
       state,
       execution,
       proof,
-      fills,
+      coverage,
       gridContext,
+      protectionChildren,
     );
   const isAttachedTakeProfitChild = (order: ExchangeOrderObservation) =>
     order.parentOrderLinkId === execution.clientOrderId &&
@@ -632,6 +1303,16 @@ function targetStateConflict(
     )
       return "READ_STATE_ORDER_CONTRADICTS_RECONCILIATION";
   }
+  if (proof.filledQuantity.isPositive()) {
+    if (!coverage) return "PROTECTION_COVERAGE_UNAVAILABLE";
+    const childConflict = protectionChildStateConflict(
+      state,
+      execution,
+      protectionChildren,
+    );
+    if (childConflict) return childConflict;
+    return exactPositionConflict(state, coverage.outstandingQuantity);
+  }
   return exactFillPositionConflict(state, fills);
 }
 
@@ -640,8 +1321,9 @@ function gridTargetStateConflict(
   state: MainnetExchangeReadState,
   execution: PreparedLegSourceIdentity,
   proof: PreparedLegOrderProof,
-  fills: readonly ExchangeFillObservation[],
+  coverage: PreparedLegProtectionCoverage | undefined,
   context: MainnetPreparedGridReconciliationContext,
+  protectionChildren: readonly ExchangeOrderObservation[],
 ): string | undefined {
   const symbol = execution.leg.intent.instrument;
   const scopeAndLeverageConflict = sharedReadStateScopeAndLeverageConflict(
@@ -684,7 +1366,7 @@ function gridTargetStateConflict(
     siblingEvidence.set(index, evidence.value);
   }
   const parentOrders = new Map<string, ExchangeOrderObservation>();
-  const protectionParents = new Set<string>();
+  const protectionOrderIds = new Set<string>();
   for (const order of state.openOrders) {
     if (order.instrument !== symbol) return "READ_STATE_SCOPE_MISMATCH";
     if (
@@ -694,14 +1376,13 @@ function gridTargetStateConflict(
       const parentId = order.parentOrderLinkId;
       if (
         parentId === undefined ||
-        order.clientOrderId !== parentId ||
         order.protectionType !== "take-profit" ||
         !byClientId.has(parentId) ||
         !matchesPreparedLegTakeProfitChild(order, byClientId.get(parentId)!) ||
-        protectionParents.has(parentId)
+        protectionOrderIds.has(order.exchangeOrderId)
       )
         return "ATTACHED_PROTECTION_CONTRADICTS_APPROVAL";
-      protectionParents.add(parentId);
+      protectionOrderIds.add(order.exchangeOrderId);
       continue;
     }
     const approved = byClientId.get(order.clientOrderId);
@@ -733,8 +1414,8 @@ function gridTargetStateConflict(
     if (!parent) {
       const sibling = siblingEvidence.get(index);
       const siblingIsDurablyTerminalFill =
-        (sibling?.status === "PROTECTION_PENDING" ||
-          sibling?.status === "UNRESOLVED") &&
+        (sibling?.status === "PROTECTION_CONFIRMED" ||
+          sibling?.status === "VERIFIED_CLOSED") &&
         sibling.proof !== undefined &&
         (sibling.proof.status === "filled" ||
           sibling.proof.status === "cancelled") &&
@@ -745,10 +1426,26 @@ function gridTargetStateConflict(
     }
   }
 
-  const siblingFillQuantities = [...siblingEvidence.values()].flatMap(
-    (evidence) => evidence.fillQuantities,
+  if (proof.filledQuantity.isPositive()) {
+    if (!coverage) return "PROTECTION_COVERAGE_UNAVAILABLE";
+    const childConflict = protectionChildStateConflict(
+      state,
+      execution,
+      protectionChildren,
+    );
+    if (childConflict) return childConflict;
+  }
+  const zero = DecimalValue.fromString("0");
+  if (!zero.ok) return "INVALID_FILL_TOTAL";
+  const siblingOutstanding = [...siblingEvidence.values()].reduce(
+    (total, evidence) => total.add(evidence.outstandingQuantity),
+    zero.value,
   );
-  return exactFillPositionConflict(state, fills, siblingFillQuantities);
+  const currentOutstanding = coverage?.outstandingQuantity ?? zero.value;
+  return exactPositionConflict(
+    state,
+    siblingOutstanding.add(currentOutstanding),
+  );
 }
 
 function sameOrderObservation(
@@ -828,7 +1525,7 @@ function readStoredGridSiblingEvidence(
     record.schemaVersion !== "prepared-leg-reconciliation/v1" ||
     record.sourceId !== sourceId ||
     record.revision !== reconciliation.revision ||
-    record.status !== reconciliation.status ||
+    record.status !== (reconciliation.legacyStatus ?? reconciliation.status) ||
     record.observedAt !== reconciliation.observedAt ||
     record.exchangeOrderId !== reconciliation.exchangeOrderId ||
     !closedRecord(record.result, ["orderProof", "fills", "reasonCodes"])
@@ -931,7 +1628,49 @@ function readStoredGridSiblingEvidence(
         "grid sibling fills do not reconcile",
       ),
     );
-  return ok({ status: record.status, proof, fillQuantities: quantities });
+  const zero = DecimalValue.fromString("0");
+  if (!zero.ok) return zero;
+  let outstandingQuantity = zero.value;
+  if (proof.filledQuantity.isPositive()) {
+    const v2 = reconciliation.protectionEvidence;
+    const outstanding = DecimalValue.fromString(
+      v2?.coverage.outstandingQuantity,
+    );
+    if (
+      !v2 ||
+      (v2.status !== "PROTECTION_CONFIRMED" &&
+        v2.status !== "VERIFIED_CLOSED") ||
+      !v2.coverage.covered ||
+      v2.collection.entryFills !== "complete" ||
+      v2.collection.childOrders !== "complete" ||
+      v2.collection.exitFills !== "complete" ||
+      v2.collection.position !== "complete" ||
+      !outstanding.ok
+    )
+      return fail(
+        domainError(
+          "PERSISTENCE_INTEGRITY",
+          "filled grid sibling lacks exact v2 coverage evidence",
+        ),
+      );
+    outstandingQuantity = outstanding.value;
+  } else if (
+    record.status !== "CONFIRMED_OPEN" ||
+    proof.status !== "open" ||
+    quantities.length !== 0
+  ) {
+    return fail(
+      domainError(
+        "PERSISTENCE_INTEGRITY",
+        "zero-fill grid sibling is not a confirmed open parent",
+      ),
+    );
+  }
+  return ok({
+    status: reconciliation.status,
+    proof,
+    outstandingQuantity,
+  });
 }
 
 function ensurePreparedLegCreateAttempt(
@@ -1131,28 +1870,14 @@ export async function reconcilePreparedLegSource(
   } catch {
     fillsResult = failedExchangeRead("fills");
   }
-  if (!fillsResult.ok) {
-    const saved = dependencies.preparedLegs.appendPreparedLegReconciliation({
-      authority,
-      sourceId,
-      status: "UNRESOLVED",
-      observedAt: proofObservedAt,
-      exchangeOrderId: proof.value.exchangeOrderId,
-      result: {
-        orderProof: proof.value,
-        reasonCodes: [safeProviderReason(fillsResult)],
-      },
-    });
-    if (!saved.ok) return saved;
-    return outcome(kind, execution, sourceId, saved.value, [
-      safeProviderReason(fillsResult),
-    ]);
-  }
-  const fills = fillEvidence(
-    fillsResult.value,
-    execution,
-    proof.value.exchangeOrderId,
-  );
+  const fills = fillsResult.ok
+    ? fillEvidence(fillsResult.value, execution, proof.value.exchangeOrderId)
+    : fail(
+        domainError(
+          "UNRESOLVED_RECONCILIATION",
+          "provider fill evidence is unavailable",
+        ),
+      );
   const zero = DecimalValue.fromString("0");
   if (!zero.ok)
     return fail(domainError("INVALID_DECIMAL", "zero constant is invalid"));
@@ -1178,6 +1903,11 @@ export async function reconcilePreparedLegSource(
     (expectedOrderId === undefined ||
       proof.value.exchangeOrderId === expectedOrderId) &&
     options.forceUnresolvedReason === undefined;
+  const sourceOrderIdentityProven =
+    matches &&
+    proof.value.instrument === execution.leg.intent.instrument &&
+    (expectedOrderId === undefined ||
+      proof.value.exchangeOrderId === expectedOrderId);
   const createAttempt = exactOrder
     ? ensurePreparedLegCreateAttempt(
         dependencies,
@@ -1189,13 +1919,17 @@ export async function reconcilePreparedLegSource(
   const createAttemptMissing =
     exactOrder && (!createAttempt.ok || createAttempt.value === undefined);
   const stateConflict =
-    fills.ok && exactOrder
+    fillsResult.ok &&
+    fills.ok &&
+    exactOrder &&
+    proof.value.filledQuantity.isZero()
       ? targetStateConflict(
           dependencies,
           readState.value,
           execution,
           proof.value,
           fillsResult.value,
+          undefined,
           options.gridContext,
         )
       : undefined;
@@ -1210,7 +1944,13 @@ export async function reconcilePreparedLegSource(
       filledQuantity.isPositive() &&
       filledQuantity.compare(proof.value.requestedQuantity) < 0);
   let accounting: Result<void> = ok(undefined);
-  if (exactOrder && fills.ok && exactFillTotal && filledQuantity.isPositive()) {
+  if (
+    exactOrder &&
+    fillsResult.ok &&
+    fills.ok &&
+    exactFillTotal &&
+    filledQuantity.isPositive()
+  ) {
     if (!createAttempt.ok) accounting = fail(createAttempt.error);
     else if (createAttempt.value === undefined)
       accounting = fail(
@@ -1239,12 +1979,68 @@ export async function reconcilePreparedLegSource(
     }[];
     reasonCodes?: readonly string[];
   };
-  if (
+  let protectionEvidence: PreparedLegProtectionEvidenceV2Input | undefined;
+  let reconciliationObservedAt = proofObservedAt;
+  const positiveFillProblems = [
+    ...(options.forceUnresolvedReason === undefined
+      ? []
+      : [options.forceUnresolvedReason]),
+    ...(createAttemptMissing ? ["CREATE_ATTEMPT_PERSISTENCE_FAILED"] : []),
+    ...(!fillsResult.ok ? [safeProviderReason(fillsResult)] : []),
+    ...(fillsResult.ok && !fills.ok ? ["FILL_IDENTITY_INVALID"] : []),
+    ...(!exactFillTotal ? ["FILL_TOTAL_MISMATCH"] : []),
+    ...(!filledStatusConsistent ? ["ORDER_STATUS_FILL_QUANTITY_CONFLICT"] : []),
+    ...(!accounting.ok ? ["ENTRY_ACCOUNTING_PERSISTENCE_FAILED"] : []),
+  ];
+  const persistPendingProtection =
+    filledQuantity.isPositive() &&
+    sourceOrderIdentityProven &&
+    positiveFillProblems.length > 0;
+  if (persistPendingProtection) {
+    const entries = fills.ok && fillsResult.ok ? fillsResult.value : [];
+    const entryFillsComplete = fills.ok && exactFillTotal;
+    const protectionReads = await collectFilledProtectionReads(
+      dependencies,
+      execution,
+      proof.value,
+      entries,
+      readState.value,
+    );
+    reconciliationObservedAt = protectionReads.observedAt;
+    const reasons = [
+      ...positiveFillProblems,
+      ...protectionReads.reasonCodes,
+      ...(protectionReads.coverage?.reasonCodes ?? []),
+    ];
+    status = "PROTECTION_PENDING";
+    result = {
+      orderProof: proof.value,
+      ...(fills.ok ? { fills: fills.value } : {}),
+      reasonCodes: [...new Set(reasons)].sort(),
+    };
+    protectionEvidence = createProtectionEvidenceV2({
+      execution,
+      parent: proof.value,
+      entries,
+      exits: protectionReads.exits,
+      children: protectionReads.children,
+      ...(protectionReads.coverage === undefined
+        ? {}
+        : { coverage: protectionReads.coverage }),
+      state: protectionReads.state,
+      observedAt: protectionReads.observedAt,
+      status: "PROTECTION_PENDING",
+      entryFillsComplete,
+      childOrdersComplete: protectionReads.childOrdersComplete,
+      exitFillsComplete: protectionReads.exitFillsComplete,
+      positionComplete: protectionReads.positionComplete,
+      reasonCodes: reasons,
+    });
+  } else if (
     !exactOrder ||
-    !fills.ok ||
-    !exactFillTotal ||
     createAttemptMissing ||
-    stateConflict !== undefined
+    (filledQuantity.isZero() &&
+      (!fills.ok || !exactFillTotal || stateConflict !== undefined))
   ) {
     status = "UNRESOLVED";
     result = {
@@ -1259,37 +2055,204 @@ export async function reconcilePreparedLegSource(
               ? "FILL_IDENTITY_INVALID"
               : !exactFillTotal
                 ? "FILL_TOTAL_MISMATCH"
-                : "CREATE_ATTEMPT_PERSISTENCE_FAILED"),
+                : !filledStatusConsistent
+                  ? "ORDER_STATUS_FILL_QUANTITY_CONFLICT"
+                  : !accounting.ok
+                    ? "ENTRY_ACCOUNTING_PERSISTENCE_FAILED"
+                    : "CREATE_ATTEMPT_PERSISTENCE_FAILED"),
       ],
     };
   } else if (filledQuantity.isPositive()) {
-    if (!filledStatusConsistent) {
-      status = "UNRESOLVED";
+    if (fills.ok && fillsResult.ok) {
+      let protectionReads = await collectFilledProtectionReads(
+        dependencies,
+        execution,
+        proof.value,
+        fillsResult.value,
+        readState.value,
+      );
+      const aggregate =
+        options.gridContext ||
+        sourceSnapshot.value.cancelIntent?.remainderCancelProof
+          ? await collectFreshPreparedLegSiblings(
+              dependencies,
+              execution,
+              sourceId,
+              protectionReads.state,
+            )
+          : undefined;
+      if (aggregate?.ok)
+        protectionReads = {
+          ...protectionReads,
+          state: aggregate.value.state,
+          observedAt: aggregate.value.state.serverTime,
+        };
+      reconciliationObservedAt = protectionReads.observedAt;
+      const filledStateConflict =
+        aggregate !== undefined
+          ? !aggregate.ok
+            ? "AGGREGATE_PROTECTION_UNAVAILABLE"
+            : freshPreparedLegAggregateConflict(
+                protectionReads.state,
+                execution,
+                proof.value,
+                fillsResult.value,
+                protectionReads.children,
+                protectionReads.exits,
+                aggregate.value.siblings,
+              )
+          : protectionReads.positionComplete && protectionReads.coverage
+            ? targetStateConflict(
+                dependencies,
+                protectionReads.state,
+                execution,
+                proof.value,
+                fillsResult.value,
+                protectionReads.coverage,
+                options.gridContext,
+                protectionReads.children,
+              )
+            : undefined;
+      const priorReconciliation = sourceSnapshot.value.reconciliations.at(-1);
+      const legacyPendingNeedsReview =
+        priorReconciliation?.status === "PROTECTION_PENDING" &&
+        priorReconciliation.protectionEvidence === undefined;
+      const cancelStillOpen =
+        cancelPending &&
+        proof.value.status !== "cancelled" &&
+        proof.value.status !== "filled";
+      const reasons = [
+        ...protectionReads.reasonCodes,
+        ...(protectionReads.coverage?.reasonCodes ?? []),
+        ...(filledStateConflict ? [filledStateConflict] : []),
+        ...(legacyPendingNeedsReview
+          ? ["LEGACY_PROTECTION_PENDING_REQUIRES_REVIEW"]
+          : []),
+        ...(cancelStillOpen ? ["CANCEL_NOT_TERMINAL"] : []),
+      ];
+      const canConfirm =
+        filledStatusConsistent &&
+        exactFillTotal &&
+        accounting.ok &&
+        protectionReads.positionComplete &&
+        protectionReads.childOrdersComplete &&
+        protectionReads.exitFillsComplete &&
+        protectionReads.coverage?.covered === true &&
+        filledStateConflict === undefined &&
+        !legacyPendingNeedsReview &&
+        !cancelStillOpen;
+      const isClosed =
+        canConfirm &&
+        protectionReads.coverage?.outstandingQuantity.isZero() === true;
+      status = canConfirm
+        ? isClosed
+          ? "VERIFIED_CLOSED"
+          : "PROTECTION_CONFIRMED"
+        : "PROTECTION_PENDING";
+      if (status === "PROTECTION_PENDING" && reasons.length === 0)
+        reasons.push("PROTECTION_COVERAGE_UNVERIFIED");
       result = {
         orderProof: proof.value,
         fills: fills.value,
-        reasonCodes: ["ORDER_STATUS_FILL_QUANTITY_CONFLICT"],
+        ...(reasons.length === 0
+          ? {}
+          : { reasonCodes: [...new Set(reasons)].sort() }),
       };
-    } else if (!accounting.ok) {
-      status = "UNRESOLVED";
-      result = {
-        orderProof: proof.value,
-        fills: fills.value,
-        reasonCodes: ["ENTRY_ACCOUNTING_PERSISTENCE_FAILED"],
-      };
+      protectionEvidence = createProtectionEvidenceV2({
+        execution,
+        parent: proof.value,
+        entries: fillsResult.value,
+        exits: protectionReads.exits,
+        children: protectionReads.children,
+        ...(protectionReads.coverage === undefined
+          ? {}
+          : { coverage: protectionReads.coverage }),
+        state: protectionReads.state,
+        observedAt: protectionReads.observedAt,
+        status:
+          status === "PROTECTION_CONFIRMED" || status === "VERIFIED_CLOSED"
+            ? status
+            : "PROTECTION_PENDING",
+        entryFillsComplete: fills.ok,
+        childOrdersComplete: protectionReads.childOrdersComplete,
+        exitFillsComplete: protectionReads.exitFillsComplete,
+        positionComplete: protectionReads.positionComplete,
+        reasonCodes: status === "PROTECTION_PENDING" ? reasons : [],
+      });
+      if (aggregate?.ok && canConfirm) {
+        const aggregateEvidence = aggregateProtectionEvidence(
+          aggregate.value.approvalHash,
+          aggregate.value.siblings,
+          protectionReads.state,
+        );
+        if (aggregateEvidence)
+          protectionEvidence = {
+            ...protectionEvidence,
+            aggregate: aggregateEvidence,
+          };
+      }
     } else {
+      const protectionReads = await collectFilledProtectionReads(
+        dependencies,
+        execution,
+        proof.value,
+        [],
+        readState.value,
+      );
+      reconciliationObservedAt = protectionReads.observedAt;
       status = "PROTECTION_PENDING";
-      result = { orderProof: proof.value, fills: fills.value };
+      result = {
+        orderProof: proof.value,
+        reasonCodes: [
+          safeProviderReason(fillsResult),
+          "ENTRY_FILLS_INCOMPLETE",
+        ],
+      };
+      protectionEvidence = createProtectionEvidenceV2({
+        execution,
+        parent: proof.value,
+        entries: [],
+        exits: protectionReads.exits,
+        children: protectionReads.children,
+        ...(protectionReads.coverage === undefined
+          ? {}
+          : { coverage: protectionReads.coverage }),
+        state: protectionReads.state,
+        observedAt: protectionReads.observedAt,
+        status: "PROTECTION_PENDING",
+        entryFillsComplete: false,
+        childOrdersComplete: protectionReads.childOrdersComplete,
+        exitFillsComplete: protectionReads.exitFillsComplete,
+        positionComplete: protectionReads.positionComplete,
+        reasonCodes: [
+          safeProviderReason(fillsResult),
+          "ENTRY_FILLS_INCOMPLETE",
+          ...protectionReads.reasonCodes,
+        ],
+      });
     }
-  } else if (proof.value.status === "open" && fills.value.length === 0) {
+  } else if (!fills.ok) {
+    status = "UNRESOLVED";
+    result = {
+      orderProof: proof.value,
+      reasonCodes: [safeProviderReason(fillsResult)],
+    };
+  } else if (fills.value.length !== 0 || !exactFillTotal) {
+    status = "UNRESOLVED";
+    result = {
+      orderProof: proof.value,
+      fills: fills.value,
+      reasonCodes: ["ZERO_FILL_PARENT_HAS_EXECUTIONS"],
+    };
+  } else if (proof.value.status === "open") {
     status = cancelPending ? "UNRESOLVED" : "CONFIRMED_OPEN";
     result = cancelPending
       ? { orderProof: proof.value, reasonCodes: ["CANCEL_NOT_TERMINAL"] }
       : { orderProof: proof.value };
-  } else if (proof.value.status === "cancelled" && fills.value.length === 0) {
+  } else if (proof.value.status === "cancelled") {
     status = "CANCELLED";
     result = { orderProof: proof.value };
-  } else if (proof.value.status === "rejected" && fills.value.length === 0) {
+  } else if (proof.value.status === "rejected") {
     status = "REJECTED";
     result = { orderProof: proof.value };
   } else {
@@ -1300,9 +2263,10 @@ export async function reconcilePreparedLegSource(
     authority,
     sourceId,
     status,
-    observedAt: proofObservedAt,
+    observedAt: reconciliationObservedAt,
     exchangeOrderId: proof.value.exchangeOrderId,
     result,
+    ...(protectionEvidence === undefined ? {} : { protectionEvidence }),
   });
   if (!saved.ok) return saved;
   const final = outcome(

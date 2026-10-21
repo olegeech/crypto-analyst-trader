@@ -54,7 +54,10 @@ function ownsExecution(
 ): boolean {
   return (
     record.instrument === request.instrument &&
-    record.clientOrderId === request.clientOrderId &&
+    (record.clientOrderId === request.clientOrderId ||
+      (record.clientOrderId === "" &&
+        request.exchangeOrderId !== undefined &&
+        record.exchangeOrderId === request.exchangeOrderId)) &&
     (request.exchangeOrderId === undefined ||
       record.exchangeOrderId === request.exchangeOrderId)
   );

@@ -116,9 +116,20 @@ type DispatchBehavior =
   | "wrong-tp"
   | "wrong-order";
 
+export type ProtectionBehavior =
+  | "normal"
+  | "missing"
+  | "missing-parent"
+  | "wrong-parent"
+  | "wrong-trigger"
+  | "partial-exit"
+  | "complete-exit"
+  | "distinct-child-link";
+
 interface FakeOrder {
   readonly request: ExchangeOrderRequest;
   readonly exchangeOrderId: string;
+  readonly createdAt: UtcTimestamp;
   status: ExchangeOrderObservation["status"];
   filledQuantity: string;
   fills: readonly ExchangeFillObservation[];
@@ -128,10 +139,12 @@ interface FakeOrder {
 
 class FakeGridExchange implements MainnetExchangeExecutionPort {
   readonly createRequests: ExchangeOrderRequest[] = [];
+  readonly cancelRequests: ExchangeCancelOrderRequest[] = [];
   readonly readRequests: ExchangeReadStateRequest[] = [];
   readonly observeRequests: ExchangeOrderLookup[] = [];
   readonly orders = new Map<string, FakeOrder>();
   readonly additionalOpenOrders: ExchangeOrderObservation[] = [];
+  readonly protectionBehaviorByParent = new Map<string, ProtectionBehavior>();
   behaviorForDispatch: (index: number) => DispatchBehavior = () => "open";
   afterCreate?: (request: ExchangeOrderRequest, index: number) => void;
 
@@ -160,12 +173,125 @@ class FakeGridExchange implements MainnetExchangeExecutionPort {
           order.request.intent.protection?.takeProfit?.toString() ??
           null,
         stopLoss: order.request.intent.protection?.stopLoss?.toString() ?? null,
+        providerTpslMode:
+          order.request.intent.protection?.takeProfitPolicy?.tpslMode,
+        takeProfitTriggerBy:
+          order.request.intent.protection?.takeProfitPolicy?.triggerBy,
         reduceOnly: order.request.reduceOnly,
         positionIdx: 0,
         observedAt: this.clock.value,
         source: "bybit-mainnet/realtime",
       }),
     );
+  }
+
+  private protectionChild(
+    parent: FakeOrder,
+  ): ExchangeOrderObservation | undefined {
+    if (
+      !Number.isFinite(Number(parent.filledQuantity)) ||
+      Number(parent.filledQuantity) <= 0
+    )
+      return undefined;
+    const behavior =
+      this.protectionBehaviorByParent.get(parent.request.clientOrderId) ??
+      "normal";
+    if (behavior === "missing") return undefined;
+
+    const requestedQuantity = decimal(parent.filledQuantity);
+    const filledQuantity =
+      behavior === "partial-exit"
+        ? requestedQuantity.multiply(decimal("0.4"))
+        : behavior === "complete-exit"
+          ? requestedQuantity
+          : decimal("0");
+    const takeProfit = parent.request.intent.protection?.takeProfit;
+    const takeProfitPolicy = parent.request.intent.protection?.takeProfitPolicy;
+    if (!takeProfit || !takeProfitPolicy) return undefined;
+    return unwrap(
+      createExchangeOrder({
+        exchangeOrderId: `grid-tp-${parent.exchangeOrderId}`,
+        // Bybit may return an empty child orderLinkId. Its mapped client id is
+        // then the parent alias, while raw parentOrderLinkId remains proof.
+        clientOrderId:
+          behavior === "distinct-child-link"
+            ? `${parent.request.clientOrderId}-tp-child`
+            : parent.request.clientOrderId,
+        ...(behavior === "distinct-child-link"
+          ? {
+              providerOrderLinkId: `${parent.request.clientOrderId}-tp-child`,
+            }
+          : {}),
+        instrument: parent.request.intent.instrument,
+        category: "linear",
+        protectionType: "take-profit",
+        side: "sell",
+        requestedQuantity: requestedQuantity.toString(),
+        filledQuantity: filledQuantity.toString(),
+        status: filledQuantity.isZero()
+          ? "open"
+          : filledQuantity.compare(requestedQuantity) === 0
+            ? "filled"
+            : "partially-filled",
+        orderType: "market",
+        triggerPrice:
+          behavior === "wrong-trigger"
+            ? takeProfit.add(decimal("1")).toString()
+            : takeProfit.toString(),
+        reduceOnly: true,
+        positionIdx: 0,
+        ...(behavior === "missing-parent"
+          ? {}
+          : {
+              parentOrderLinkId:
+                behavior === "wrong-parent"
+                  ? "foreign-parent-order"
+                  : parent.request.clientOrderId,
+            }),
+        providerStopOrderType: "PartialTakeProfit",
+        providerTpslMode: takeProfitPolicy.tpslMode,
+        triggerBy: takeProfitPolicy.triggerBy,
+        takeProfitTriggerBy: takeProfitPolicy.triggerBy,
+        providerCreatedAt: parent.createdAt,
+        providerUpdatedAt: filledQuantity.isZero()
+          ? parent.createdAt
+          : this.clock.value,
+        observedAt: this.clock.value,
+        source: "bybit-mainnet/protection/order/realtime",
+      }),
+    );
+  }
+
+  private protectionChildren(): ExchangeOrderObservation[] {
+    return [...this.orders.values()].flatMap((order) => {
+      const child = this.protectionChild(order);
+      return child &&
+        (child.status === "open" || child.status === "partially-filled")
+        ? [child]
+        : [];
+    });
+  }
+
+  private protectionFills(): ExchangeFillObservation[] {
+    return [...this.orders.values()].flatMap((parent) => {
+      const child = this.protectionChild(parent);
+      if (!child || child.filledQuantity.isZero()) return [];
+      const takeProfit = parent.request.intent.protection?.takeProfit;
+      if (!takeProfit) return [];
+      return [
+        {
+          executionId: `grid-tp-fill-${parent.exchangeOrderId}`,
+          exchangeOrderId: child.exchangeOrderId,
+          clientOrderId: child.providerOrderLinkId ?? child.clientOrderId,
+          instrument: parent.request.intent.instrument,
+          side: "sell" as const,
+          quantity: child.filledQuantity,
+          price: takeProfit,
+          executedAt: this.clock.value,
+          source: "bybit-mainnet/execution",
+        },
+      ];
+    });
   }
 
   private readStateValue(): MainnetExchangeReadState {
@@ -234,11 +360,19 @@ class FakeGridExchange implements MainnetExchangeExecutionPort {
           order.status === "open" || order.status === "partially-filled",
       )
       .map((order) => this.orderObservation(order));
-    const fills = [...this.orders.values()].flatMap((order) => order.fills);
-    const filledQuantity = fills.reduce(
+    const entryFills = [...this.orders.values()].flatMap(
+      (order) => order.fills,
+    );
+    const exitFills = this.protectionFills();
+    const entryQuantity = entryFills.reduce(
       (total, fill) => total.add(fill.quantity),
       decimal("0"),
     );
+    const exitQuantity = exitFills.reduce(
+      (total, fill) => total.add(fill.quantity),
+      decimal("0"),
+    );
+    const filledQuantity = entryQuantity.subtract(exitQuantity);
     return {
       serverTime: now,
       market,
@@ -248,7 +382,11 @@ class FakeGridExchange implements MainnetExchangeExecutionPort {
         quantity: filledQuantity,
         leverage: decimal("1"),
       },
-      openOrders: [...activeOrders, ...this.additionalOpenOrders],
+      openOrders: [
+        ...activeOrders,
+        ...this.protectionChildren(),
+        ...this.additionalOpenOrders,
+      ],
       leverage: {
         buy: decimal("1"),
         sell: decimal("1"),
@@ -275,6 +413,7 @@ class FakeGridExchange implements MainnetExchangeExecutionPort {
       const order: FakeOrder = {
         request,
         exchangeOrderId: `grid-exchange-order-${index}`,
+        createdAt: this.clock.value,
         status:
           behavior === "rejected"
             ? "rejected"
@@ -372,17 +511,42 @@ class FakeGridExchange implements MainnetExchangeExecutionPort {
     return { ok: true, value: this.orderObservation(order) };
   }
 
-  async listAttachedProtection(): Promise<
-    ExchangeResult<readonly ExchangeOrderObservation[]>
-  > {
-    return { ok: true, value: [] };
+  async listAttachedProtection(request: {
+    readonly instrument: string;
+    readonly parentClientOrderId: string;
+  }): Promise<ExchangeResult<readonly ExchangeOrderObservation[]>> {
+    return {
+      ok: true,
+      value: [
+        ...[...this.orders.values()].flatMap((order) => {
+          if (order.request.clientOrderId !== request.parentClientOrderId)
+            return [];
+          const child = this.protectionChild(order);
+          return child ? [child] : [];
+        }),
+        ...this.additionalOpenOrders.filter(
+          (order) => order.parentOrderLinkId === request.parentClientOrderId,
+        ),
+      ],
+    };
   }
 
   async listFills(
     request: ExchangeOrderLookup,
   ): Promise<ExchangeResult<readonly ExchangeFillObservation[]>> {
     const order = this.orders.get(request.clientOrderId);
-    return { ok: true, value: order?.fills ?? [] };
+    if (order && order.exchangeOrderId === request.exchangeOrderId)
+      return { ok: true, value: order.fills };
+    const child = [...this.orders.values()]
+      .map((parent) => ({ parent, child: this.protectionChild(parent) }))
+      .find((row) => row.child?.exchangeOrderId === request.exchangeOrderId);
+    if (!child?.child || !child.parent) return { ok: true, value: [] };
+    return {
+      ok: true,
+      value: this.protectionFills().filter(
+        (fill) => fill.exchangeOrderId === child.child!.exchangeOrderId,
+      ),
+    };
   }
 
   async setLeverage(
@@ -401,16 +565,20 @@ class FakeGridExchange implements MainnetExchangeExecutionPort {
   }
 
   async cancelOrder(
-    _request: ExchangeCancelOrderRequest,
+    request: ExchangeCancelOrderRequest,
   ): Promise<ExchangeResult<ExchangeOrderAcknowledgement>> {
-    void _request;
+    this.cancelRequests.push(request);
+    const order = this.orders.get(request.clientOrderId);
+    if (!order || order.exchangeOrderId !== request.exchangeOrderId)
+      throw new Error("cancel identity mismatch");
+    order.status = "cancelled";
     return {
-      ok: false,
-      error: {
-        kind: "permission",
-        message: "cancel is outside this test",
-        retry: "never",
-        operation: "cancel",
+      ok: true,
+      value: {
+        clientOrderId: request.clientOrderId,
+        exchangeOrderId: order.exchangeOrderId,
+        acknowledgedAt: this.clock.value,
+        status: "accepted",
       },
     };
   }
@@ -419,7 +587,11 @@ class FakeGridExchange implements MainnetExchangeExecutionPort {
 function accountOrderFor(
   execution: PreparedLegExecution,
   exchangeOrderId: string,
+  order?: FakeOrder,
 ): AccountOrderEvidence {
+  const filledQuantity = decimal(order?.filledQuantity ?? "0");
+  const remainingQuantity =
+    execution.leg.intent.quantity.subtract(filledQuantity);
   const fact = <const Unit extends "price" | "contracts">(
     value: string,
     unit: Unit,
@@ -430,14 +602,19 @@ function accountOrderFor(
     symbol: execution.leg.intent.instrument,
     orderId: exchangeOrderId,
     orderLinkId: execution.clientOrderId,
-    status: "New",
+    status:
+      order?.status === "partially-filled"
+        ? "PartiallyFilled"
+        : order?.status === "filled"
+          ? "Filled"
+          : "New",
     side: "Buy",
     orderType: "Limit",
     triggerPrice: { ...accountNotApplicable, unit: "price" as const },
     price: fact(execution.leg.intent.price.toString(), "price"),
     qty: fact(execution.leg.intent.quantity.toString(), "contracts"),
-    cumExecQty: fact("0", "contracts"),
-    leavesQty: fact(execution.leg.intent.quantity.toString(), "contracts"),
+    cumExecQty: fact(filledQuantity.toString(), "contracts"),
+    leavesQty: fact(remainingQuantity.toString(), "contracts"),
     positionIdx: accountKnown(0),
     reduceOnly: accountKnown(false),
     takeProfit: fact(
@@ -455,6 +632,8 @@ function accountOrderFor(
 function accountTakeProfitOrderFor(
   execution: PreparedLegExecution,
   exchangeOrderId: string,
+  requestedQuantity = execution.leg.intent.quantity,
+  filledQuantity = decimal("0"),
 ): AccountOrderEvidence {
   return {
     ...accountOrder(),
@@ -462,23 +641,23 @@ function accountTakeProfitOrderFor(
     symbol: execution.leg.intent.instrument,
     orderId: exchangeOrderId,
     orderLinkId: null,
-    status: "Untriggered",
+    status: filledQuantity.isZero() ? "Untriggered" : "PartiallyFilled",
     side: "Sell",
     orderType: "Market",
     price: { ...accountNotApplicable, unit: "price" as const },
     qty: {
       state: "known",
-      value: decimal(execution.leg.intent.quantity.toString()),
+      value: requestedQuantity,
       unit: "contracts",
     },
     cumExecQty: {
       state: "known",
-      value: decimal("0"),
+      value: filledQuantity,
       unit: "contracts",
     },
     leavesQty: {
       state: "known",
-      value: decimal(execution.leg.intent.quantity.toString()),
+      value: requestedQuantity.subtract(filledQuantity),
       unit: "contracts",
     },
     positionIdx: accountKnown(0),
@@ -488,8 +667,8 @@ function accountTakeProfitOrderFor(
       value: decimal(execution.leg.intent.protection!.takeProfit!.toString()),
       unit: "price",
     },
-    stopOrderType: accountKnown("TakeProfit"),
-    tpslMode: accountKnown("Full"),
+    stopOrderType: accountKnown("PartialTakeProfit"),
+    tpslMode: accountKnown("Partial"),
     takeProfit: { ...accountNotApplicable, unit: "price" as const },
     stopLoss: { ...accountNotApplicable, unit: "price" as const },
     timeInForce: accountKnown("IOC"),
@@ -592,7 +771,7 @@ export function setup() {
   assert.ok(instrument);
   const root = mkdtempSync(join(tmpdir(), "mainnet-prepared-grid-"));
   const currentTime = { value: timestamp(evaluationTime) };
-  const persistence = unwrap(
+  let persistence = unwrap(
     openSqlitePersistence({
       environment: "mainnet",
       databasePath: join(root, "mainnet.db"),
@@ -670,25 +849,32 @@ export function setup() {
       const state = stateResult.value;
       const activeRows = admittedGrid.legs.filter(({ execution }) => {
         const order = exchange.orders.get(execution.clientOrderId);
-        return order?.status === "open";
+        return order?.status === "open" || order?.status === "partially-filled";
       });
       const index = activeRows.length;
       let liveAccount = accountsByOpenPrefixCount.get(index);
       if (!liveAccount) {
         const accountRows = activeRows.map(({ execution }) => {
           const order = exchange.orders.get(execution.clientOrderId)!;
-          return accountOrderFor(execution, order.exchangeOrderId);
+          return accountOrderFor(execution, order.exchangeOrderId, order);
         });
-        const protectionRows = exchange.additionalOpenOrders.flatMap(
-          (order) => {
-            const execution = admittedGrid.legs.find(
-              (row) => row.execution.clientOrderId === order.clientOrderId,
-            )?.execution;
-            return execution
-              ? [accountTakeProfitOrderFor(execution, order.exchangeOrderId)]
-              : [];
-          },
-        );
+        const protectionRows = state.openOrders.flatMap((order) => {
+          const parentClientOrderId = order.parentOrderLinkId;
+          if (parentClientOrderId === undefined) return [];
+          const execution = admittedGrid.legs.find(
+            (row) => row.execution.clientOrderId === parentClientOrderId,
+          )?.execution;
+          return execution
+            ? [
+                accountTakeProfitOrderFor(
+                  execution,
+                  order.exchangeOrderId,
+                  order.requestedQuantity,
+                  order.filledQuantity,
+                ),
+              ]
+            : [];
+        });
         liveAccount = accountWithOrders(account, [
           ...accountRows,
           ...protectionRows,
@@ -750,7 +936,30 @@ export function setup() {
     accountsByOpenPrefixCount,
     currentTime,
     localTime,
-    persistence,
+    get persistence() {
+      return persistence;
+    },
+    reopenPersistence() {
+      persistence.close();
+      persistence = unwrap(
+        openSqlitePersistence({
+          environment: "mainnet",
+          databasePath: join(root, "mainnet.db"),
+          runtime,
+          clock: { now: () => currentTime.value },
+          scope: {
+            exchange: "bybit",
+            environment: "mainnet",
+            accountId: accountHash,
+            category: "linear",
+            positionMode: "one-way",
+          },
+        }),
+      );
+      assert.ok(persistence.preparedLegExecution);
+      dependencies.persistence = persistence;
+      dependencies.preparedLegs = persistence.preparedLegExecution;
+    },
     exchange,
     authorization,
     dependencies,

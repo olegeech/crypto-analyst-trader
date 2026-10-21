@@ -229,11 +229,18 @@ test("rehydrates the execution and accounting artifact graph through domain cons
   }
 });
 
-test("exchange-order artifacts retain an exact protective parent identity", () => {
+test("exchange-order artifacts retain provider TP child evidence", () => {
   const order = createExchangeOrder({
     exchangeOrderId: "child-exchange",
     clientOrderId: "child-client",
     parentOrderLinkId: "entry-client",
+    providerOrderLinkId: "child-client",
+    providerStopOrderType: "PartialTakeProfit",
+    providerTpslMode: "Partial",
+    triggerBy: "LastPrice",
+    takeProfitTriggerBy: "LastPrice",
+    providerCreatedAt: "2026-09-19T10:00:00Z",
+    providerUpdatedAt: "2026-09-19T10:00:01Z",
     instrument: "DOGEUSDT",
     side: "sell",
     requestedQuantity: "57",
@@ -251,5 +258,18 @@ test("exchange-order artifacts retain an exact protective parent identity", () =
   assert.equal(rehydrated.ok, true);
   if (rehydrated.ok) {
     assert.equal(rehydrated.value.parentOrderLinkId, "entry-client");
+    assert.equal(rehydrated.value.providerOrderLinkId, "child-client");
+    assert.equal(rehydrated.value.providerStopOrderType, "PartialTakeProfit");
+    assert.equal(rehydrated.value.providerTpslMode, "Partial");
+    assert.equal(rehydrated.value.triggerBy, "LastPrice");
+    assert.equal(rehydrated.value.takeProfitTriggerBy, "LastPrice");
+    assert.equal(
+      rehydrated.value.providerCreatedAt,
+      "2026-09-19T10:00:00.000Z",
+    );
+    assert.equal(
+      rehydrated.value.providerUpdatedAt,
+      "2026-09-19T10:00:01.000Z",
+    );
   }
 });

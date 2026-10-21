@@ -503,7 +503,6 @@ function mainnetCapabilities(
  */
 export class BybitMainnetExecutionAdapter implements MainnetExchangeExecutionPort {
   private readonly client: BybitDemoExecutionClient;
-  private readonly clock: Clock;
 
   constructor(options: BybitMainnetExecutionAdapterOptions) {
     if (
@@ -518,7 +517,6 @@ export class BybitMainnetExecutionAdapter implements MainnetExchangeExecutionPor
       transport: options.transport,
       clock: options.clock ?? systemClock,
     });
-    this.clock = options.clock ?? systemClock;
   }
 
   async readState(
@@ -528,12 +526,12 @@ export class BybitMainnetExecutionAdapter implements MainnetExchangeExecutionPor
       // The first signed read establishes the transport clock offset before
       // concurrent requests use it; avoid duplicate initialization races.
       const instrument = await this.client.readInstrument(request.instrument);
-      const [serverTime, ticker, position, openOrders] = await Promise.all([
-        this.client.readServerTime(),
+      const [ticker, position, openOrders] = await Promise.all([
         this.client.readTicker(request.instrument),
         this.client.readPosition(request.instrument),
         this.client.readOpenOrders(request.instrument),
       ]);
+      const serverTime = await this.client.readServerTime();
       const normalizedPosition: MainnetExchangeReadState["position"] =
         Object.freeze({
           instrument: position.instrument,
@@ -612,14 +610,14 @@ export class BybitMainnetExecutionAdapter implements MainnetExchangeExecutionPor
         request.instrument,
         request.parentClientOrderId,
       );
+      // Child update times and the observation must share the provider clock.
+      // Sample after both child reads so valid updates cannot appear future-dated
+      // merely because the local wall clock trails Bybit.
+      const observedAt = await this.client.readServerTime();
       return exchangeSuccess(
         Object.freeze(
           records.map((record) =>
-            mapOrderObservation(
-              record,
-              this.clock.now(),
-              "bybit-mainnet/protection",
-            ),
+            mapOrderObservation(record, observedAt, "bybit-mainnet/protection"),
           ),
         ),
       );

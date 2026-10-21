@@ -223,9 +223,143 @@ export type PreparedLegOperation = "create" | "cancel";
 export type PreparedLegReconciliationStatus =
   | "CONFIRMED_OPEN"
   | "PROTECTION_PENDING"
+  | "PROTECTION_CONFIRMED"
+  | "VERIFIED_CLOSED"
   | "CANCELLED"
   | "REJECTED"
   | "UNRESOLVED";
+
+export type LegacyPreparedLegReconciliationStatus =
+  | "CONFIRMED_OPEN"
+  | "PROTECTION_PENDING"
+  | "CANCELLED"
+  | "REJECTED"
+  | "UNRESOLVED";
+
+export interface PreparedLegProtectionFillEvidenceV2 {
+  readonly executionId: string;
+  readonly exchangeOrderId: string;
+  readonly clientOrderId: string;
+  readonly instrument: string;
+  readonly side: "buy" | "sell";
+  readonly quantity: string;
+  readonly price: string;
+  readonly executedAt: UtcTimestamp;
+  readonly source: string;
+}
+
+export interface PreparedLegProtectionChildEvidenceV2 {
+  readonly exchangeOrderId: string;
+  readonly clientOrderId: string;
+  readonly instrument: string;
+  readonly providerOrderLinkId?: string;
+  readonly parentOrderLinkId?: string;
+  readonly category?: string;
+  readonly orderType?: string;
+  readonly price?: string;
+  readonly side: "buy" | "sell";
+  readonly requestedQuantity: string;
+  readonly filledQuantity: string;
+  readonly remainingQuantity: string;
+  readonly status: string;
+  readonly source: string;
+  readonly observedAt: UtcTimestamp;
+  readonly providerCreatedAt?: UtcTimestamp;
+  readonly providerUpdatedAt?: UtcTimestamp;
+  readonly providerStopOrderType?: string;
+  readonly providerTpslMode?: string;
+  readonly protectionType?: string;
+  readonly reduceOnly?: boolean;
+  readonly positionIdx?: 0 | 1 | 2;
+  readonly triggerPrice?: string;
+  readonly triggerBy?: string;
+  readonly takeProfitTriggerBy?: string;
+}
+
+export interface PreparedLegProtectionEvidenceV2 {
+  readonly schemaVersion: "prepared-leg-protection-evidence/v2";
+  readonly sourceId: string;
+  readonly revision: number;
+  readonly status:
+    "PROTECTION_PENDING" | "PROTECTION_CONFIRMED" | "VERIFIED_CLOSED";
+  readonly observedAt: UtcTimestamp;
+  readonly parent: {
+    readonly exchangeOrderId: string;
+    readonly clientOrderId: string;
+    readonly instrument: string;
+    readonly category: string;
+    readonly side: "buy" | "sell";
+    readonly requestedQuantity: string;
+    readonly filledQuantity: string;
+    readonly status: string;
+    readonly source: string;
+    readonly observedAt: UtcTimestamp;
+    readonly takeProfit: string | null;
+    readonly providerTpslMode?: string;
+    readonly takeProfitTriggerBy?: string;
+  };
+  readonly entries: {
+    readonly quantity: string | null;
+    readonly executionIds: readonly string[];
+    readonly fills: readonly PreparedLegProtectionFillEvidenceV2[];
+  };
+  readonly exits: {
+    readonly quantity: string | null;
+    readonly executionIds: readonly string[];
+    readonly fills: readonly PreparedLegProtectionFillEvidenceV2[];
+  };
+  readonly children: readonly PreparedLegProtectionChildEvidenceV2[];
+  readonly coverage: {
+    readonly outstandingQuantity: string | null;
+    readonly activeRemainingQuantity: string | null;
+    readonly covered: boolean | null;
+    readonly reasonCodes: readonly string[];
+  };
+  readonly position: {
+    readonly instrument: string;
+    readonly side: "long" | "short" | "flat";
+    readonly quantity: string;
+    readonly serverTime: UtcTimestamp;
+  };
+  readonly aggregate?: {
+    readonly approvalHash: PlanHash;
+    readonly siblings: readonly {
+      readonly sourceId: string;
+      readonly evidence: PreparedLegProtectionEvidenceV2Input;
+    }[];
+  };
+  readonly collection: {
+    readonly entryFills: "complete" | "incomplete";
+    readonly childOrders: "complete" | "incomplete" | "not-required";
+    readonly exitFills: "complete" | "incomplete" | "not-required";
+    readonly position: "complete" | "incomplete";
+  };
+  readonly reasonCodes: readonly string[];
+}
+
+export type PreparedLegProtectionEvidenceV2Input = Omit<
+  PreparedLegProtectionEvidenceV2,
+  "sourceId" | "revision"
+>;
+
+export interface PreparedLegRemainderCancelProof {
+  readonly schemaVersion: "prepared-leg-remainder-cancel-proof/v1";
+  readonly sourceId: string;
+  readonly leaseEpoch: number;
+  readonly parentExchangeOrderId: string;
+  readonly clientOrderId: string;
+  readonly requestedQuantity: string;
+  readonly filledQuantity: string;
+  readonly unfilledRemainder: string;
+  readonly outstandingQuantity: string;
+  readonly entryExecutionIds: readonly string[];
+  readonly exitExecutionIds: readonly string[];
+  readonly protectionEvidenceHash: PlanHash;
+  readonly coverageHash: PlanHash;
+  readonly approvedCancelPlanHash: PlanHash;
+  readonly remainderCancelProofHash: PlanHash;
+  readonly observedAt: UtcTimestamp;
+}
 
 export interface PreparedLegLineageRecord {
   readonly sourceId: string;
@@ -249,6 +383,7 @@ export interface PreparedLegWriteIntentRecord {
   readonly canonicalJson: string;
   readonly canonicalHash: PlanHash;
   readonly preparedAt: UtcTimestamp;
+  readonly remainderCancelProof?: PreparedLegRemainderCancelProof;
 }
 
 export interface PreparedLegAttemptRecord {
@@ -265,6 +400,10 @@ export interface PreparedLegReconciliationRecord {
   readonly sourceId: string;
   readonly revision: number;
   readonly status: PreparedLegReconciliationStatus;
+  readonly legacyStatus?: LegacyPreparedLegReconciliationStatus;
+  readonly protectionEvidence?: PreparedLegProtectionEvidenceV2;
+  readonly protectionCanonicalJson?: string;
+  readonly protectionCanonicalHash?: PlanHash;
   readonly observedAt: UtcTimestamp;
   readonly exchangeOrderId?: string;
   readonly canonicalJson: string;
@@ -301,6 +440,7 @@ export interface PreparePreparedLegCancelRequest {
   readonly sourceId: string;
   readonly runId: string;
   readonly proof: PreparedLegOrderProof;
+  readonly remainderCancelProof?: PreparedLegRemainderCancelProof;
   readonly preparedAt: UtcTimestamp;
 }
 
@@ -346,6 +486,7 @@ export interface AppendPreparedLegReconciliationRequest {
   readonly observedAt: UtcTimestamp;
   readonly exchangeOrderId?: string;
   readonly result: PreparedLegReconciliationEvidence;
+  readonly protectionEvidence?: PreparedLegProtectionEvidenceV2Input;
 }
 
 export interface PersistenceScopeSnapshot {

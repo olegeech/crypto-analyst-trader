@@ -334,6 +334,7 @@ export function mapAccountOrders(
 ): readonly AccountOrderEvidence[] {
   const category = responseCategory(response, scope);
   const values = rows(response).map((a) => {
+    const orderType = text(a.orderType);
     const marketUnit =
       category === "spot"
         ? missing(a.marketUnit)
@@ -348,12 +349,15 @@ export function mapAccountOrders(
         orderLinkId: link(a.orderLinkId),
         status: text(a.orderStatus),
         side: text(a.side),
-        orderType: text(a.orderType),
+        orderType,
         marketUnit,
-        price: decimal(a.price, "price"),
+        price:
+          orderType === "Market" && missing(a.price)
+            ? { state: "not-applicable", unit: "price" }
+            : decimal(a.price, "price"),
         qty: decimal(
           a.qty,
-          accountOrderQuantityUnit(category, text(a.orderType), marketUnit),
+          accountOrderQuantityUnit(category, orderType, marketUnit),
         ),
         cumExecQty: decimal(
           a.cumExecQty,

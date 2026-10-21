@@ -5,13 +5,17 @@ import type { BybitResponse } from "../src/adapters/bybit-v5/transport.js";
 import {
   BybitReadMappingError,
   mapAccountKeyMetadata,
+  mapExecutionRecords,
   mapInstrumentInfo,
   mapOrderRecords,
+  mapOrderObservation,
   mapPosition,
   mapTicker,
   mapWalletBalance,
   nextPageCursor,
 } from "../src/adapters/bybit-v5/read-mappers.js";
+import { parseUtcTimestamp } from "../src/domain/shared/time.js";
+import { requireDailyFixture as value } from "./fixtures/daily-planning-evidence-fixtures.js";
 
 function response(result: Record<string, unknown>): BybitResponse {
   return { retCode: 0, retMsg: "OK", result };
@@ -326,7 +330,10 @@ test("order mapping preserves an exact attached-protection parent link", () => {
         order({
           orderLinkId: "",
           parentOrderLinkId: "entry-client",
-          stopOrderType: "TakeProfit",
+          stopOrderType: "PartialTakeProfit",
+          tpslMode: "Partial",
+          tpTriggerBy: "LastPrice",
+          triggerBy: "MarkPrice",
           orderStatus: "Untriggered",
           category: "linear",
           side: "Sell",
@@ -341,11 +348,58 @@ test("order mapping preserves an exact attached-protection parent link", () => {
     "DOGEUSDT",
   );
   assert.equal(mapped?.clientOrderId, "entry-client");
+  assert.equal(mapped?.providerOrderLinkId, undefined);
   assert.equal(mapped?.parentOrderLinkId, "entry-client");
   assert.equal(mapped?.protectionType, "take-profit");
+  assert.equal(mapped?.providerStopOrderType, "PartialTakeProfit");
+  assert.equal(mapped?.providerTpslMode, "Partial");
+  assert.equal(mapped?.takeProfitTriggerBy, "LastPrice");
+  assert.equal(mapped?.triggerBy, "MarkPrice");
   assert.equal(mapped?.status, "open");
   assert.equal(mapped?.orderType, "market");
   assert.equal(mapped?.triggerPrice?.toString(), "0.0912");
+});
+
+test("strict child projection retains provider timestamps and endpoint source", () => {
+  const [record] = mapOrderRecords(
+    response({
+      list: [
+        order({
+          orderLinkId: "",
+          parentOrderLinkId: "entry-client",
+          stopOrderType: "PartialTakeProfit",
+          tpslMode: "Partial",
+          tpTriggerBy: "LastPrice",
+          orderStatus: "Untriggered",
+          side: "Sell",
+          orderType: "Market",
+          qty: "12",
+          triggerPrice: "0.0912",
+          reduceOnly: true,
+          positionIdx: 0,
+          createdTime: "1789984800000",
+          updatedTime: "1789984801000",
+        }),
+      ],
+    }),
+    "DOGEUSDT",
+    "order/history",
+  );
+  assert.ok(record);
+  const observation = mapOrderObservation(
+    record,
+    value(parseUtcTimestamp("2026-09-21T10:00:00.000Z")),
+    "bybit-mainnet/protection",
+  );
+  assert.equal(observation.clientOrderId, "entry-client");
+  assert.equal(observation.providerOrderLinkId, undefined);
+  assert.equal(observation.parentOrderLinkId, "entry-client");
+  assert.equal(observation.providerStopOrderType, "PartialTakeProfit");
+  assert.equal(observation.providerTpslMode, "Partial");
+  assert.equal(observation.takeProfitTriggerBy, "LastPrice");
+  assert.equal(observation.source, "bybit-mainnet/protection/order/history");
+  assert.equal(observation.providerCreatedAt, "2026-09-21T10:00:00.000Z");
+  assert.equal(observation.providerUpdatedAt, "2026-09-21T10:00:01.000Z");
 });
 
 test("ordinary orders with an empty client identity still fail closed", () => {
@@ -357,6 +411,53 @@ test("ordinary orders with an empty client identity still fail closed", () => {
       ),
     BybitReadMappingError,
   );
+});
+
+test("generic UNKNOWN triggerBy is absent while unknown TP trigger remains invalid", () => {
+  const [ordinary] = mapOrderRecords(
+    response({ list: [order({ triggerBy: "UNKNOWN" })] }),
+    "DOGEUSDT",
+  );
+  assert.equal(ordinary?.triggerBy, undefined);
+
+  assert.throws(
+    () =>
+      mapOrderRecords(
+        response({
+          list: [
+            order({
+              stopOrderType: "PartialTakeProfit",
+              tpTriggerBy: "UNKNOWN",
+            }),
+          ],
+        }),
+        "DOGEUSDT",
+      ),
+    BybitReadMappingError,
+  );
+});
+
+test("execution mapping preserves an empty TP child link id without parent alias", () => {
+  const [execution] = mapExecutionRecords(
+    response({
+      list: [
+        {
+          symbol: "DOGEUSDT",
+          execId: "exit-exec-1",
+          orderId: "tp-child-1",
+          orderLinkId: "",
+          side: "Sell",
+          execQty: "0.2",
+          execPrice: "0.0912",
+          execTime: "1789984801000",
+        },
+      ],
+    }),
+    "DOGEUSDT",
+  );
+
+  assert.equal(execution?.exchangeOrderId, "tp-child-1");
+  assert.equal(execution?.clientOrderId, "");
 });
 
 test("position leverage is mandatory and one-way rows are unambiguous", () => {

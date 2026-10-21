@@ -211,7 +211,7 @@ test("any durable source makes a repeated or renewed approval invocation recover
   }
 });
 
-test("recovery aggregates exact durable fills from a filled sibling leg", async () => {
+test("out-of-band fill after a zero-fill sibling snapshot stays recovery-only and HALTed", async () => {
   const state = setup();
   try {
     const created = await createMainnetPreparedGrid(
@@ -257,8 +257,38 @@ test("recovery aggregates exact durable fills from a filled sibling leg", async 
     );
     if (!firstRecovery.ok) return;
     assert.equal(firstRecovery.value.outcome, "recovery-only");
-    assert.equal(firstRecovery.value.legs[1]!.status, "PROTECTION_PENDING");
+    assert.equal(firstRecovery.value.legs[1]!.status, "PROTECTION_CONFIRMED");
+    assert.ok(
+      firstRecovery.value.legs.some((row) => row.status === "UNRESOLVED"),
+    );
+    const source = unwrap(
+      state.persistence.preparedLegExecution!.readPreparedLegSource(
+        sibling.sourceId,
+      ),
+    );
+    const evidence = source?.reconciliations.at(-1)?.protectionEvidence;
+    assert.equal(evidence?.status, "PROTECTION_CONFIRMED");
+    assert.equal(evidence?.entries.quantity, quantity.toString());
+    assert.equal(evidence?.exits.quantity, "0");
+    assert.equal(evidence?.coverage.outstandingQuantity, quantity.toString());
+    assert.equal(
+      evidence?.coverage.activeRemainingQuantity,
+      quantity.toString(),
+    );
+    assert.equal(evidence?.coverage.covered, true);
+    assert.equal(evidence?.position.quantity, quantity.toString());
+    assert.equal(
+      evidence?.children[0]?.parentOrderLinkId,
+      sibling.execution.clientOrderId,
+    );
+    assert.equal(
+      evidence?.children[0]?.triggerPrice,
+      sibling.execution.leg.intent.protection?.takeProfit?.toString(),
+    );
+    assert.equal(evidence?.aggregate?.siblings.length, 3);
     assert.equal(state.exchange.createRequests.length, 4);
+    assert.equal(unwrap(state.persistence.readHalt()).active, true);
+    state.reopenPersistence();
 
     const retried = await createMainnetPreparedGrid(
       {
@@ -270,19 +300,210 @@ test("recovery aggregates exact durable fills from a filled sibling leg", async 
     assert.equal(retried.ok, true, retried.ok ? "" : retried.error.message);
     if (!retried.ok) return;
     assert.equal(retried.value.outcome, "recovery-only");
-    assert.deepEqual(
-      retried.value.legs.map((row) => row.status),
-      [
-        "CONFIRMED_OPEN",
-        "PROTECTION_PENDING",
-        "CONFIRMED_OPEN",
-        "CONFIRMED_OPEN",
-      ],
+    assert.equal(retried.value.legs[1]!.status, "PROTECTION_CONFIRMED");
+    assert.ok(retried.value.legs.some((row) => row.status === "UNRESOLVED"));
+    assert.ok(
+      retried.value.legs.every((row) => row.status !== "PROTECTION_PENDING"),
     );
     assert.equal(state.exchange.createRequests.length, 4);
     assert.equal(unwrap(state.persistence.readHalt()).active, true);
   } finally {
     state.cleanup();
+  }
+});
+
+test("delayed Partial TP evidence can confirm on restart but does not clear HALT", async () => {
+  const state = setup();
+  try {
+    const first = state.admittedGrid.legs[0]!.execution;
+    state.exchange.behaviorForDispatch = (index) =>
+      index === 0 ? "filled" : "open";
+    state.exchange.protectionBehaviorByParent.set(
+      first.clientOrderId,
+      "missing",
+    );
+    const initial = await createMainnetPreparedGrid(
+      {
+        approvalHash: state.approval.contentHash,
+        runId: "grid-run-delayed-tp",
+      },
+      state.dependencies,
+    );
+    assert.equal(initial.ok, true, initial.ok ? "" : initial.error.message);
+    if (!initial.ok) return;
+    assert.equal(initial.value.legs[0]!.status, "PROTECTION_PENDING");
+    assert.equal(state.exchange.createRequests.length, 1);
+    assert.equal(unwrap(state.persistence.readHalt()).active, true);
+
+    state.exchange.protectionBehaviorByParent.set(
+      first.clientOrderId,
+      "normal",
+    );
+    const recovered = await createMainnetPreparedGrid(
+      {
+        approvalHash: state.approval.contentHash,
+        runId: "grid-run-delayed-tp",
+      },
+      state.dependencies,
+    );
+    assert.equal(
+      recovered.ok,
+      true,
+      recovered.ok ? "" : recovered.error.message,
+    );
+    if (!recovered.ok) return;
+    assert.equal(recovered.value.outcome, "recovery-only");
+    assert.equal(recovered.value.legs[0]!.status, "PROTECTION_CONFIRMED");
+    assert.equal(state.exchange.createRequests.length, 1);
+    assert.equal(unwrap(state.persistence.readHalt()).active, true);
+  } finally {
+    state.cleanup();
+  }
+});
+
+test("distinct provider child link remains attributable through grid recovery", async () => {
+  const state = setup();
+  try {
+    const first = state.admittedGrid.legs[0]!.execution;
+    state.exchange.behaviorForDispatch = (index) =>
+      index === 0 ? "filled" : "open";
+    state.exchange.protectionBehaviorByParent.set(
+      first.clientOrderId,
+      "distinct-child-link",
+    );
+
+    const initial = await createMainnetPreparedGrid(
+      {
+        approvalHash: state.approval.contentHash,
+        runId: "grid-run-distinct-tp-child-link",
+      },
+      state.dependencies,
+    );
+    assert.equal(initial.ok, true, initial.ok ? "" : initial.error.message);
+    if (!initial.ok) return;
+    assert.equal(initial.value.legs[0]!.status, "PROTECTION_CONFIRMED");
+    assert.equal(state.exchange.createRequests.length, 1);
+
+    const recovered = await createMainnetPreparedGrid(
+      {
+        approvalHash: state.approval.contentHash,
+        runId: "grid-run-distinct-tp-child-link",
+      },
+      state.dependencies,
+    );
+    assert.equal(
+      recovered.ok,
+      true,
+      recovered.ok ? "" : recovered.error.message,
+    );
+    if (!recovered.ok) return;
+    assert.equal(recovered.value.outcome, "recovery-only");
+    assert.equal(recovered.value.legs[0]!.status, "PROTECTION_CONFIRMED");
+    assert.equal(state.exchange.createRequests.length, 1);
+  } finally {
+    state.cleanup();
+  }
+});
+
+test("restart after a protected second-leg fill never creates the grid suffix", async () => {
+  const state = setup();
+  try {
+    state.exchange.behaviorForDispatch = (index) =>
+      index === 1 ? "partial" : "open";
+    const initial = await createMainnetPreparedGrid(
+      {
+        approvalHash: state.approval.contentHash,
+        runId: "grid-run-protected-second-leg-restart",
+      },
+      state.dependencies,
+    );
+    assert.equal(initial.ok, true, initial.ok ? "" : initial.error.message);
+    if (!initial.ok) return;
+    assert.deepEqual(
+      initial.value.legs.map((row) => row.status),
+      [
+        "CONFIRMED_OPEN",
+        "PROTECTION_CONFIRMED",
+        "NOT_ATTEMPTED",
+        "NOT_ATTEMPTED",
+      ],
+    );
+    assert.equal(state.exchange.createRequests.length, 2);
+
+    const restarted = await createMainnetPreparedGrid(
+      {
+        approvalHash: state.approval.contentHash,
+        runId: "grid-run-protected-second-leg-restart",
+      },
+      state.dependencies,
+    );
+    assert.equal(
+      restarted.ok,
+      true,
+      restarted.ok ? "" : restarted.error.message,
+    );
+    if (!restarted.ok) return;
+    assert.equal(restarted.value.outcome, "recovery-only");
+    const restartedStatuses = restarted.value.legs.map((row) => row.status);
+    assert.deepEqual(
+      restartedStatuses,
+      [
+        "CONFIRMED_OPEN",
+        "PROTECTION_CONFIRMED",
+        "NOT_ATTEMPTED",
+        "NOT_ATTEMPTED",
+      ],
+      JSON.stringify(
+        restarted.value.legs.map((row) => ({
+          status: row.status,
+          reasonCodes: row.reasonCodes,
+        })),
+      ),
+    );
+    assert.equal(state.exchange.createRequests.length, 2);
+    assert.equal(unwrap(state.persistence.readHalt()).active, false);
+  } finally {
+    state.cleanup();
+  }
+});
+
+test("missing or contradictory Partial TP attribution remains pending after a fill", async (t) => {
+  for (const behavior of [
+    "missing-parent",
+    "wrong-parent",
+    "wrong-trigger",
+  ] as const) {
+    await t.test(behavior, async () => {
+      const state = setup();
+      try {
+        const first = state.admittedGrid.legs[0]!.execution;
+        state.exchange.behaviorForDispatch = (index) =>
+          index === 0 ? "filled" : "open";
+        state.exchange.protectionBehaviorByParent.set(
+          first.clientOrderId,
+          behavior,
+        );
+        const result = await createMainnetPreparedGrid(
+          {
+            approvalHash: state.approval.contentHash,
+            runId: `grid-run-${behavior}`,
+          },
+          state.dependencies,
+        );
+        assert.equal(result.ok, true, result.ok ? "" : result.error.message);
+        if (!result.ok) return;
+        assert.equal(result.value.outcome, "stopped");
+        assert.equal(result.value.legs[0]!.status, "PROTECTION_PENDING");
+        assert.deepEqual(
+          result.value.legs.slice(1).map((row) => row.status),
+          ["NOT_ATTEMPTED", "NOT_ATTEMPTED", "NOT_ATTEMPTED"],
+        );
+        assert.equal(state.exchange.createRequests.length, 1);
+        assert.equal(unwrap(state.persistence.readHalt()).active, true);
+      } finally {
+        state.cleanup();
+      }
+    });
   }
 });
 

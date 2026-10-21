@@ -100,6 +100,82 @@ test("create mapping preserves caller identity and exact TP-only protection", ()
   });
 });
 
+test("approved Mainnet TP policy maps Partial Market with LastPrice and no invented exits", () => {
+  const base = request("buy", { protection: { takeProfit: "0.1" } });
+  const intent = {
+    ...base.intent,
+    protection: {
+      ...base.intent.protection,
+      takeProfitPolicy: {
+        policyVersion: "m1-mainnet-per-leg-tp/v1",
+        tpslMode: "Partial",
+        orderType: "Market",
+        triggerBy: "LastPrice",
+      },
+    },
+  } as ExchangeOrderRequest["intent"];
+  assert.deepEqual(mapCreateOrderRequest({ ...base, intent }), {
+    category: "linear",
+    symbol: "DOGEUSDT",
+    side: "Buy",
+    orderType: "Limit",
+    qty: "57",
+    price: "0.0887",
+    timeInForce: "GTC",
+    positionIdx: 0,
+    orderLinkId: "run-1-long",
+    reduceOnly: false,
+    takeProfit: "0.1",
+    tpslMode: "Partial",
+    tpOrderType: "Market",
+    tpTriggerBy: "LastPrice",
+  });
+});
+
+test("mapping rejects changed protection policy and unapproved TP/SL mechanisms", () => {
+  const base = request("buy", { protection: { takeProfit: "0.1" } });
+  const approvedPolicy = {
+    policyVersion: "m1-mainnet-per-leg-tp/v1",
+    tpslMode: "Partial",
+    orderType: "Market",
+    triggerBy: "LastPrice",
+  };
+  for (const policy of [
+    { ...approvedPolicy, policyVersion: "foreign/v1" },
+    { ...approvedPolicy, tpslMode: "Full" },
+    { ...approvedPolicy, orderType: "Limit" },
+    { ...approvedPolicy, triggerBy: "MarkPrice" },
+  ]) {
+    const intent = {
+      ...base.intent,
+      protection: { ...base.intent.protection, takeProfitPolicy: policy },
+    } as ExchangeOrderRequest["intent"];
+    assert.throws(() => mapCreateOrderRequest({ ...base, intent }));
+  }
+  const limitPriceIntent = {
+    ...base.intent,
+    protection: {
+      ...base.intent.protection,
+      takeProfitPolicy: approvedPolicy,
+      tpLimitPrice: decimal("0.1"),
+    },
+  } as ExchangeOrderRequest["intent"];
+  assert.throws(() =>
+    mapCreateOrderRequest({ ...base, intent: limitPriceIntent }),
+  );
+  const stopLossIntent = {
+    ...base.intent,
+    protection: {
+      ...base.intent.protection,
+      stopLoss: decimal("0.08"),
+      takeProfitPolicy: approvedPolicy,
+    },
+  } as ExchangeOrderRequest["intent"];
+  assert.throws(() =>
+    mapCreateOrderRequest({ ...base, intent: stopLossIntent }),
+  );
+});
+
 test("cleanup mapping is reduce-only IOC and cannot carry attached exits", () => {
   const mapped = mapCreateOrderRequest(
     request("sell", {

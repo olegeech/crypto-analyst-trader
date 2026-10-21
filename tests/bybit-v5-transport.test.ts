@@ -370,3 +370,62 @@ test("Demo ret-code classification keeps ambiguity and rate limiting distinct", 
   assert.equal(classifyRetCode(110072).kind, "ownership-conflict");
   assert.equal(classifyRetCode(110003).kind, "validation-failed");
 });
+
+test("execution server time preserves exact milliseconds ahead of its seconds field", async () => {
+  for (const [result, time, expected] of [
+    [
+      { timeSecond: "1700000000", timeNano: "1700000000123456789" },
+      undefined,
+      1700000000123,
+    ],
+    [
+      { timeSecond: "1700000000", timeNano: "1700000000123999999" },
+      undefined,
+      1700000000123,
+    ],
+    [{ timeSecond: "1700000000" }, undefined, 1700000000000],
+    [{}, 1700000000123, 1700000000123],
+  ] as const) {
+    const transport = createBybitPrivateTransport({
+      environment: "mainnet",
+      credentials,
+      request: async () =>
+        new Response(
+          JSON.stringify({
+            retCode: 0,
+            retMsg: "OK",
+            result,
+            ...(time === undefined ? {} : { time }),
+          }),
+          { status: 200 },
+        ),
+    });
+    assert.equal(await transport.getServerTime(), expected);
+  }
+});
+
+test("execution server time rejects malformed and unsafe provider values", async () => {
+  for (const result of [
+    { timeNano: "not-nanoseconds" },
+    { timeNano: 1700000000123456789 },
+    { timeNano: "9007199254740992000000" },
+    { timeNano: "0" },
+    { timeSecond: "9007199254740992" },
+    { timeSecond: -1 },
+  ]) {
+    const transport = createBybitPrivateTransport({
+      environment: "mainnet",
+      credentials,
+      request: async () =>
+        new Response(JSON.stringify({ retCode: 0, retMsg: "OK", result }), {
+          status: 200,
+        }),
+    });
+    await assert.rejects(
+      transport.getServerTime(),
+      (error: unknown) =>
+        error instanceof BybitPrivateTransportError &&
+        error.kind === "invalid-response",
+    );
+  }
+});

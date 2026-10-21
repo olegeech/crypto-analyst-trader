@@ -12,6 +12,7 @@ import {
   prepareDailyPlanningInputs,
   type DailyPlanningInputs,
 } from "../planning/daily-planning-inputs.js";
+import type { AccountEvidenceEnvironment } from "../account/account-evidence-bundle.js";
 import { closedRecord } from "../planning/planning-validation.js";
 import {
   rehydratePortfolioRiskPreflight,
@@ -23,7 +24,30 @@ import { fail, ok, type Result } from "../shared/result.js";
 import { requireIdentifier } from "../shared/validation.js";
 
 export const PREPARED_DAILY_PLAN_SCHEMA_VERSION =
+  "prepared-daily-plan/v2" as const;
+const LEGACY_PREPARED_DAILY_PLAN_SCHEMA_VERSION =
   "prepared-daily-plan/v1" as const;
+
+export interface PreparedProtectionPolicy {
+  readonly schemaVersion: "prepared-protection-policy/v1";
+  readonly policyVersion:
+    | "m1-mainnet-per-leg-tp/v1"
+    | "bybit-demo-full-attached-protection/v1"
+    | "bybit-testnet-full-attached-protection/v1";
+  readonly environment: AccountEvidenceEnvironment;
+  readonly entry: {
+    readonly orderType: "Limit";
+    readonly timeInForce: "GTC";
+  };
+  readonly takeProfit:
+    | {
+        readonly tpslMode: "Partial";
+        readonly orderType: "Market";
+        readonly triggerBy: "LastPrice";
+      }
+    | { readonly tpslMode: "Full" };
+  readonly stopLoss: "none";
+}
 
 export interface DailyReviewPolicy {
   readonly schemaVersion: "daily-review-policy/v1";
@@ -52,6 +76,8 @@ export interface PreparedDailyPlanReplayInputs {
   readonly reviewPolicy: DailyReviewPolicy;
   readonly approvalPolicy: DailyApprovalPolicy;
   readonly externalAvailability: readonly PreparedExternalAvailability[];
+  /** Absent only on readable legacy v1 artifacts. */
+  readonly protectionPolicy?: PreparedProtectionPolicy;
 }
 
 export interface PreparedTargetGate {
@@ -66,7 +92,9 @@ export type PreparedDailyPlanState =
 export type PreparedDailyPlanSummary = ReturnType<typeof materialSummary>;
 
 export interface PreparedDailyPlan {
-  readonly schemaVersion: typeof PREPARED_DAILY_PLAN_SCHEMA_VERSION;
+  readonly schemaVersion:
+    | typeof PREPARED_DAILY_PLAN_SCHEMA_VERSION
+    | typeof LEGACY_PREPARED_DAILY_PLAN_SCHEMA_VERSION;
   readonly preparedPlanId: string;
   readonly contentHash: PlanHash;
   readonly inputIdentity: {
@@ -75,6 +103,7 @@ export interface PreparedDailyPlan {
     readonly reviewPolicyHash: string;
     readonly approvalPolicyHash: string;
     readonly externalAvailabilityHash: string;
+    readonly protectionPolicyHash?: string;
     readonly runId: string;
     readonly environment: PortfolioRiskPreflight["replayInputs"]["account"]["accountBinding"]["environment"];
     readonly accountIdentityHash: string;
@@ -103,6 +132,72 @@ function exactRecord(
     closedRecord(value, fields) &&
     fields.every((key) => Object.hasOwn(value, key))
   );
+}
+
+function protectionPolicyFor(
+  environment: AccountEvidenceEnvironment,
+): PreparedProtectionPolicy {
+  const common = {
+    schemaVersion: "prepared-protection-policy/v1" as const,
+    environment,
+    entry: { orderType: "Limit" as const, timeInForce: "GTC" as const },
+    stopLoss: "none" as const,
+  };
+  return environment === "mainnet"
+    ? deepFreeze({
+        ...common,
+        policyVersion: "m1-mainnet-per-leg-tp/v1" as const,
+        takeProfit: {
+          tpslMode: "Partial" as const,
+          orderType: "Market" as const,
+          triggerBy: "LastPrice" as const,
+        },
+      })
+    : deepFreeze({
+        ...common,
+        policyVersion:
+          environment === "demo"
+            ? ("bybit-demo-full-attached-protection/v1" as const)
+            : ("bybit-testnet-full-attached-protection/v1" as const),
+        takeProfit: { tpslMode: "Full" as const },
+      });
+}
+
+function parseProtectionPolicy(
+  input: unknown,
+  environment: AccountEvidenceEnvironment,
+): Result<PreparedProtectionPolicy> {
+  const policy = protectionPolicyFor(environment);
+  const keys = [
+    "schemaVersion",
+    "policyVersion",
+    "environment",
+    "entry",
+    "takeProfit",
+    "stopLoss",
+  ];
+  if (
+    !exactRecord(input, keys) ||
+    !exactRecord(input.entry, ["orderType", "timeInForce"]) ||
+    !exactRecord(
+      input.takeProfit,
+      environment === "mainnet"
+        ? ["tpslMode", "orderType", "triggerBy"]
+        : ["tpslMode"],
+    ) ||
+    input.schemaVersion !== policy.schemaVersion ||
+    input.policyVersion !== policy.policyVersion ||
+    input.environment !== policy.environment ||
+    input.entry.orderType !== "Limit" ||
+    input.entry.timeInForce !== "GTC" ||
+    input.stopLoss !== "none" ||
+    input.takeProfit.tpslMode !== policy.takeProfit.tpslMode ||
+    (environment === "mainnet" &&
+      (input.takeProfit.orderType !== "Market" ||
+        input.takeProfit.triggerBy !== "LastPrice"))
+  )
+    return invalid("prepared protection policy is missing or unsupported");
+  return ok(policy);
 }
 
 function dataList(value: unknown, max: number): value is unknown[] {
@@ -413,6 +508,9 @@ function materialSummary(
       decisionVersion: planning.decisionPolicy.policyVersion,
       planningVersion: planning.planningPolicy.policyVersion,
       riskVersion: p.replayInputs.policy.policyVersion,
+      ...(inputs.protectionPolicy === undefined
+        ? {}
+        : { protectionVersion: inputs.protectionPolicy.policyVersion }),
     },
     account: {
       environment: account.accountBinding.environment,
@@ -475,6 +573,7 @@ const INPUT_KEYS = [
   "approvalPolicy",
   "externalAvailability",
 ] as const;
+const V2_REPLAY_INPUT_KEYS = [...INPUT_KEYS, "protectionPolicy"] as const;
 const ARTIFACT_KEYS = [
   "schemaVersion",
   "preparedPlanId",
@@ -488,9 +587,12 @@ const ARTIFACT_KEYS = [
   "summary",
 ] as const;
 
-/** Pure decision-only preparation. Invalid/pre-auth inputs never fabricate a canonical artifact. */
-export function createPreparedDailyPlan(
+function createPreparedDailyPlanVersion(
   input: unknown,
+  schemaVersion:
+    | typeof PREPARED_DAILY_PLAN_SCHEMA_VERSION
+    | typeof LEGACY_PREPARED_DAILY_PLAN_SCHEMA_VERSION,
+  suppliedProtectionPolicy?: unknown,
 ): Result<PreparedDailyPlan> {
   if (!exactRecord(input, INPUT_KEYS)) return invalid();
   const preflight = rehydratePortfolioRiskPreflight(input.preflight);
@@ -506,6 +608,16 @@ export function createPreparedDailyPlan(
   const account = p.replayInputs.account;
   if (account.runId !== planning.value.identity.runId)
     return invalid("account and planning runs differ");
+  const protectionPolicy =
+    schemaVersion === PREPARED_DAILY_PLAN_SCHEMA_VERSION
+      ? parseProtectionPolicy(
+          suppliedProtectionPolicy ??
+            protectionPolicyFor(account.accountBinding.environment),
+          account.accountBinding.environment,
+        )
+      : undefined;
+  if (protectionPolicy !== undefined && !protectionPolicy.ok)
+    return protectionPolicy;
   const availability = externalAvailability(
     input.externalAvailability,
     planning.value,
@@ -516,6 +628,9 @@ export function createPreparedDailyPlan(
     reviewPolicy: reviewPolicy.value,
     approvalPolicy: approvalPolicy.value,
     externalAvailability: availability.value,
+    ...(protectionPolicy === undefined
+      ? {}
+      : { protectionPolicy: protectionPolicy.value }),
   };
   const gate = targetGate(p);
   const reasonCodes: string[] = [...p.reasonCodes];
@@ -539,11 +654,16 @@ export function createPreparedDailyPlan(
   const reviewPolicyHash = hashCanonical(reviewPolicy.value);
   const approvalPolicyHash = hashCanonical(approvalPolicy.value);
   const externalAvailabilityHash = hashCanonical(availability.value);
+  const protectionPolicyHash =
+    protectionPolicy === undefined
+      ? undefined
+      : hashCanonical(protectionPolicy.value);
   if (
     !preflightArtifactHash.ok ||
     !reviewPolicyHash.ok ||
     !approvalPolicyHash.ok ||
-    !externalAvailabilityHash.ok
+    !externalAvailabilityHash.ok ||
+    (protectionPolicyHash !== undefined && !protectionPolicyHash.ok)
   )
     return invalid("prepared source identity is invalid");
   const inputIdentity = {
@@ -552,6 +672,9 @@ export function createPreparedDailyPlan(
     reviewPolicyHash: reviewPolicyHash.value,
     approvalPolicyHash: approvalPolicyHash.value,
     externalAvailabilityHash: externalAvailabilityHash.value,
+    ...(protectionPolicyHash === undefined
+      ? {}
+      : { protectionPolicyHash: protectionPolicyHash.value }),
     runId: account.runId,
     environment: account.accountBinding.environment,
     accountIdentityHash: account.accountBinding.accountIdentityHash,
@@ -563,7 +686,7 @@ export function createPreparedDailyPlan(
   });
   if (!id.ok) return id;
   const payload = {
-    schemaVersion: PREPARED_DAILY_PLAN_SCHEMA_VERSION,
+    schemaVersion,
     preparedPlanId: `prepared-daily-plan:${id.value}`,
     inputIdentity,
     replayInputs,
@@ -579,12 +702,46 @@ export function createPreparedDailyPlan(
     : contentHash;
 }
 
+/** New preparation binds the current environment-specific protection policy. */
+export function createPreparedDailyPlan(
+  input: unknown,
+): Result<PreparedDailyPlan> {
+  if (exactRecord(input, INPUT_KEYS))
+    return createPreparedDailyPlanVersion(
+      input,
+      PREPARED_DAILY_PLAN_SCHEMA_VERSION,
+    );
+  if (!exactRecord(input, V2_REPLAY_INPUT_KEYS)) return invalid();
+  const source = Object.fromEntries(INPUT_KEYS.map((key) => [key, input[key]]));
+  return createPreparedDailyPlanVersion(
+    source,
+    PREPARED_DAILY_PLAN_SCHEMA_VERSION,
+    input.protectionPolicy,
+  );
+}
+
 /** Recompute all claims at the saved preflight time, even if an attacker rehashed them. */
 export function rehydratePreparedDailyPlan(
   input: unknown,
 ): Result<PreparedDailyPlan> {
   if (!exactRecord(input, ARTIFACT_KEYS)) return invalid();
-  const replayed = createPreparedDailyPlan(input.replayInputs);
+  let replayed: Result<PreparedDailyPlan>;
+  if (
+    input.schemaVersion === LEGACY_PREPARED_DAILY_PLAN_SCHEMA_VERSION &&
+    exactRecord(input.replayInputs, INPUT_KEYS)
+  ) {
+    replayed = createPreparedDailyPlanVersion(
+      input.replayInputs,
+      LEGACY_PREPARED_DAILY_PLAN_SCHEMA_VERSION,
+    );
+  } else if (
+    input.schemaVersion === PREPARED_DAILY_PLAN_SCHEMA_VERSION &&
+    exactRecord(input.replayInputs, V2_REPLAY_INPUT_KEYS)
+  ) {
+    replayed = createPreparedDailyPlan(input.replayInputs);
+  } else {
+    return invalid();
+  }
   if (!replayed.ok) return replayed;
   const actual = canonicalSerialize(input);
   const expected = canonicalSerialize(replayed.value);

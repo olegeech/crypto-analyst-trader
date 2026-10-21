@@ -6,6 +6,8 @@ import type { DecimalValue } from "../domain/shared/decimal.js";
 import type { UtcTimestamp } from "../domain/shared/time.js";
 import type { OrderIntent } from "../domain/planning/order-intent.js";
 import type { ExchangeOrderObservation } from "../domain/execution/exchange-order.js";
+import type { ExchangeFillObservation } from "../domain/execution/exchange-fill.js";
+export type { ExchangeFillObservation } from "../domain/execution/exchange-fill.js";
 import type { CapabilityObservation } from "../domain/capabilities/capability.js";
 
 export type { ExchangeOrderObservation } from "../domain/execution/exchange-order.js";
@@ -185,25 +187,6 @@ export interface ExchangeSetLeverageResult {
 
 export type ExchangeOrderObservationRequest = ExchangeOrderLookup;
 export type ExchangeFillLookupRequest = ExchangeOrderLookup;
-
-/**
- * An adapter-level execution observation is not yet a domain Fill: the
- * application supplies its owned attempt/lineage identity before persisting
- * accounting facts.
- */
-export interface ExchangeFillObservation {
-  readonly executionId: string;
-  readonly exchangeOrderId: string;
-  readonly clientOrderId: string;
-  readonly instrument: string;
-  readonly side: "buy" | "sell";
-  readonly quantity: DecimalValue;
-  readonly price: DecimalValue;
-  readonly executedAt: UtcTimestamp;
-  readonly source: string;
-  readonly fee?: DecimalValue;
-  readonly feeCurrency?: string;
-}
 
 export type ExchangeCancelOrderRequest = ExchangeOrderLookup;
 

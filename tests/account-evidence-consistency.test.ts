@@ -279,6 +279,63 @@ test("quantity, lock, liability and collateral switch changes are material", () 
   );
 });
 
+test("a Market TP with an N/A generic price can establish stable order evidence", () => {
+  const source = fixture();
+  const takeProfit = {
+    ...order(),
+    orderId: "tp-child-1",
+    status: "Untriggered",
+    side: "Sell",
+    orderType: "Market",
+    price: { state: "not-applicable" as const, unit: "price" as const },
+    qty: decimal("1", "contracts"),
+    cumExecQty: decimal("0", "contracts"),
+    leavesQty: decimal("1", "contracts"),
+    reduceOnly: known(true),
+    triggerPrice: decimal("120", "price"),
+    triggerDirection: known(1),
+    triggerBy: known("LastPrice"),
+    stopOrderType: known("PartialTakeProfit"),
+    tpslMode: known("Partial"),
+    timeInForce: known("IOC"),
+  };
+  const passes = {
+    A: { ...source.criticalPasses.A, orders: [takeProfit] },
+    B: { ...source.criticalPasses.B, orders: [takeProfit] },
+  };
+  const result = createAccountEvidenceBundle(
+    withCounts({
+      ...source,
+      criticalPasses: passes,
+      budget: { ...source.budget, retainedRows: 18 },
+    }),
+  );
+  assert.ok(result.ok);
+  if (result.ok) assert.equal(result.value.consistency.complete, true);
+});
+
+test("an N/A generic price remains incomplete for a Limit order", () => {
+  const source = fixture();
+  const limitOrder = {
+    ...order(),
+    orderId: "limit-1",
+    price: { state: "not-applicable" as const, unit: "price" as const },
+  };
+  const result = createAccountEvidenceBundle(
+    withCounts({
+      ...source,
+      collectionStatus: "incomplete",
+      criticalPasses: {
+        A: { ...source.criticalPasses.A, orders: [limitOrder] },
+        B: { ...source.criticalPasses.B, orders: [limitOrder] },
+      },
+      budget: { ...source.budget, retainedRows: 18 },
+    }),
+  );
+  assert.ok(result.ok);
+  if (result.ok) assert.equal(result.value.consistency.complete, false);
+});
+
 test("stable wallet/collateral contradictions are incomplete within each pass", () => {
   const input = fixture();
   for (const pass of [input.criticalPasses.A, input.criticalPasses.B])

@@ -3,14 +3,23 @@ import type { DecimalValue } from "../shared/decimal.js";
 import { domainError } from "../shared/errors.js";
 import { fail, ok, type Result } from "../shared/result.js";
 import { requireIdentifier, requireSafeText } from "../shared/validation.js";
+import { closedRecord } from "./planning-validation.js";
 
 export type OrderSide = "buy" | "sell";
 export type PositionEffect = "open" | "close";
 export type RoundingDirection = "floor" | "ceil";
 
+export interface TakeProfitExecutionPolicy {
+  readonly policyVersion: "m1-mainnet-per-leg-tp/v1";
+  readonly tpslMode: "Partial";
+  readonly orderType: "Market";
+  readonly triggerBy: "LastPrice";
+}
+
 export interface ProtectionIntent {
   readonly stopLoss?: DecimalValue;
   readonly takeProfit?: DecimalValue;
+  readonly takeProfitPolicy?: TakeProfitExecutionPolicy;
 }
 
 export interface OrderIntent {
@@ -46,6 +55,10 @@ export interface ValidatedOrderIntentInput {
 export function createOrderIntent(
   input: ValidatedOrderIntentInput,
 ): Result<OrderIntent> {
+  const protectionInput = input.protection;
+  const stopLoss = protectionInput?.stopLoss;
+  const takeProfit = protectionInput?.takeProfit;
+  const takeProfitPolicy = protectionInput?.takeProfitPolicy;
   const intentId = requireIdentifier(input.intentId, "intentId");
   const instrument = requireIdentifier(input.instrument, "instrument");
   if (
@@ -99,22 +112,39 @@ export function createOrderIntent(
     );
   }
   if (
-    input.protection !== undefined &&
-    ((input.protection.stopLoss !== undefined &&
-      (!isDecimalValue(input.protection.stopLoss) ||
-        !input.protection.stopLoss.isPositive())) ||
-      (input.protection.takeProfit !== undefined &&
-        (!isDecimalValue(input.protection.takeProfit) ||
-          !input.protection.takeProfit.isPositive())))
+    protectionInput !== undefined &&
+    (!closedRecord(protectionInput, [
+      "stopLoss",
+      "takeProfit",
+      "takeProfitPolicy",
+    ]) ||
+      (stopLoss !== undefined &&
+        (!isDecimalValue(stopLoss) || !stopLoss.isPositive())) ||
+      (takeProfit !== undefined &&
+        (!isDecimalValue(takeProfit) || !takeProfit.isPositive())) ||
+      (takeProfitPolicy !== undefined &&
+        (!closedRecord(takeProfitPolicy, [
+          "policyVersion",
+          "tpslMode",
+          "orderType",
+          "triggerBy",
+        ]) ||
+          Reflect.ownKeys(takeProfitPolicy).length !== 4 ||
+          takeProfitPolicy.policyVersion !== "m1-mainnet-per-leg-tp/v1" ||
+          takeProfitPolicy.tpslMode !== "Partial" ||
+          takeProfitPolicy.orderType !== "Market" ||
+          takeProfitPolicy.triggerBy !== "LastPrice" ||
+          takeProfit === undefined ||
+          stopLoss !== undefined)))
   ) {
     return fail(
       domainError("PROTECTION_REQUIRED", "order protection values are invalid"),
     );
   }
   if (
-    input.protection !== undefined &&
-    input.protection.stopLoss === undefined &&
-    input.protection.takeProfit === undefined
+    protectionInput !== undefined &&
+    stopLoss === undefined &&
+    takeProfit === undefined
   ) {
     return fail(
       domainError("PROTECTION_REQUIRED", "order protection requires an exit"),
@@ -146,8 +176,21 @@ export function createOrderIntent(
       constraintVersion: constraintVersion.value,
     }),
   };
-  if (input.protection !== undefined) {
-    result.protection = Object.freeze({ ...input.protection });
+  if (protectionInput !== undefined) {
+    result.protection = Object.freeze({
+      ...(stopLoss === undefined ? {} : { stopLoss }),
+      ...(takeProfit === undefined ? {} : { takeProfit }),
+      ...(takeProfitPolicy === undefined
+        ? {}
+        : {
+            takeProfitPolicy: Object.freeze({
+              policyVersion: "m1-mainnet-per-leg-tp/v1" as const,
+              tpslMode: "Partial" as const,
+              orderType: "Market" as const,
+              triggerBy: "LastPrice" as const,
+            }),
+          }),
+    });
   }
   return ok(Object.freeze(result));
 }
