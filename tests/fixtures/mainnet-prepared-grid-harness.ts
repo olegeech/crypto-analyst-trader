@@ -123,6 +123,7 @@ export type ProtectionBehavior =
   | "wrong-parent"
   | "wrong-trigger"
   | "partial-exit"
+  | "complete-exit"
   | "distinct-child-link";
 
 interface FakeOrder {
@@ -201,7 +202,9 @@ class FakeGridExchange implements MainnetExchangeExecutionPort {
     const filledQuantity =
       behavior === "partial-exit"
         ? requestedQuantity.multiply(decimal("0.4"))
-        : decimal("0");
+        : behavior === "complete-exit"
+          ? requestedQuantity
+          : decimal("0");
     const takeProfit = parent.request.intent.protection?.takeProfit;
     const takeProfitPolicy = parent.request.intent.protection?.takeProfitPolicy;
     if (!takeProfit || !takeProfitPolicy) return undefined;

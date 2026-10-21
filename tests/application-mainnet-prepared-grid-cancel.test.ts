@@ -203,6 +203,77 @@ test("remainder cancel proves two filled grid siblings and survives SQLite resta
   }
 });
 
+test("a fully TP-exited selected leg can cancel its entry remainder while a sibling remains exposed", async () => {
+  const { state, runId } = await twoFilledSiblings(true);
+  try {
+    const selected = state.admittedGrid.legs[0]!;
+    const sibling = state.admittedGrid.legs[1]!;
+    state.exchange.protectionBehaviorByParent.set(
+      selected.execution.clientOrderId,
+      "complete-exit",
+    );
+    state.reopenPersistence();
+    const result = unwrap(
+      await cancelMainnetPreparedLeg(
+        { sourceId: selected.sourceId, runId },
+        state.dependencies,
+      ),
+    );
+    assert.equal(result.status, "VERIFIED_CLOSED", JSON.stringify(result));
+    assert.equal(state.exchange.cancelRequests.length, 1);
+    assert.equal(
+      state.exchange.cancelRequests[0]?.clientOrderId,
+      selected.execution.clientOrderId,
+    );
+    assert.equal(
+      state.exchange.orders.get(sibling.execution.clientOrderId)?.status,
+      "filled",
+    );
+    const saved = unwrap(
+      state.persistence.preparedLegExecution!.readPreparedLegSource(
+        selected.sourceId,
+      ),
+    );
+    const evidence = saved?.reconciliations.at(-1)?.protectionEvidence;
+    assert.equal(evidence?.coverage.outstandingQuantity, "0");
+    assert.equal(evidence?.position.side, "long");
+    assert.equal(
+      evidence?.position.quantity,
+      state.exchange.orders.get(sibling.execution.clientOrderId)
+        ?.filledQuantity,
+    );
+    assert.equal(
+      saved?.cancelIntent?.remainderCancelProof?.outstandingQuantity,
+      "0",
+    );
+    assert.ok(saved?.cancelIntent?.remainderCancelProof?.unfilledRemainder);
+    const siblingEvidence = evidence?.aggregate?.siblings.find(
+      (row) => row.sourceId === sibling.sourceId,
+    )?.evidence;
+    assert.equal(siblingEvidence?.status, "PROTECTION_CONFIRMED");
+    assert.equal(
+      siblingEvidence?.coverage.outstandingQuantity,
+      evidence?.position.quantity,
+    );
+    state.reopenPersistence();
+    const recovered = unwrap(
+      await cancelMainnetPreparedLeg(
+        { sourceId: selected.sourceId, runId },
+        state.dependencies,
+      ),
+    );
+    assert.equal(
+      recovered.status,
+      "VERIFIED_CLOSED",
+      JSON.stringify(recovered),
+    );
+    assert.equal(state.exchange.cancelRequests.length, 1);
+    assert.equal(unwrap(state.persistence.readHalt()).active, false);
+  } finally {
+    state.cleanup();
+  }
+});
+
 test("aggregate mismatch, unknown order and unavailable sibling proof block remainder cancel", async (t) => {
   for (const fault of [
     "aggregate-position",
