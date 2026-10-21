@@ -138,6 +138,7 @@ interface FakeOrder {
 
 class FakeGridExchange implements MainnetExchangeExecutionPort {
   readonly createRequests: ExchangeOrderRequest[] = [];
+  readonly cancelRequests: ExchangeCancelOrderRequest[] = [];
   readonly readRequests: ExchangeReadStateRequest[] = [];
   readonly observeRequests: ExchangeOrderLookup[] = [];
   readonly orders = new Map<string, FakeOrder>();
@@ -561,16 +562,20 @@ class FakeGridExchange implements MainnetExchangeExecutionPort {
   }
 
   async cancelOrder(
-    _request: ExchangeCancelOrderRequest,
+    request: ExchangeCancelOrderRequest,
   ): Promise<ExchangeResult<ExchangeOrderAcknowledgement>> {
-    void _request;
+    this.cancelRequests.push(request);
+    const order = this.orders.get(request.clientOrderId);
+    if (!order || order.exchangeOrderId !== request.exchangeOrderId)
+      throw new Error("cancel identity mismatch");
+    order.status = "cancelled";
     return {
-      ok: false,
-      error: {
-        kind: "permission",
-        message: "cancel is outside this test",
-        retry: "never",
-        operation: "cancel",
+      ok: true,
+      value: {
+        clientOrderId: request.clientOrderId,
+        exchangeOrderId: order.exchangeOrderId,
+        acknowledgedAt: this.clock.value,
+        status: "accepted",
       },
     };
   }
@@ -763,7 +768,7 @@ export function setup() {
   assert.ok(instrument);
   const root = mkdtempSync(join(tmpdir(), "mainnet-prepared-grid-"));
   const currentTime = { value: timestamp(evaluationTime) };
-  const persistence = unwrap(
+  let persistence = unwrap(
     openSqlitePersistence({
       environment: "mainnet",
       databasePath: join(root, "mainnet.db"),
@@ -928,7 +933,30 @@ export function setup() {
     accountsByOpenPrefixCount,
     currentTime,
     localTime,
-    persistence,
+    get persistence() {
+      return persistence;
+    },
+    reopenPersistence() {
+      persistence.close();
+      persistence = unwrap(
+        openSqlitePersistence({
+          environment: "mainnet",
+          databasePath: join(root, "mainnet.db"),
+          runtime,
+          clock: { now: () => currentTime.value },
+          scope: {
+            exchange: "bybit",
+            environment: "mainnet",
+            accountId: accountHash,
+            category: "linear",
+            positionMode: "one-way",
+          },
+        }),
+      );
+      assert.ok(persistence.preparedLegExecution);
+      dependencies.persistence = persistence;
+      dependencies.preparedLegs = persistence.preparedLegExecution;
+    },
     exchange,
     authorization,
     dependencies,

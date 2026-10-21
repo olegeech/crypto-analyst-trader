@@ -1362,6 +1362,204 @@ test("authorized exact remainder cancel journals v2 intent, keeps TP coverage, a
   }
 });
 
+function closePartialTp(state: ReturnType<typeof setup>) {
+  const original = state.exchange.attachedChildren[0]!;
+  state.currentTime.value = plusMs(state.currentTime.value, 1000);
+  state.localTime.value = state.currentTime.value;
+  const child = unwrap(
+    createExchangeOrder({
+      ...original,
+      requestedQuantity: original.requestedQuantity.toString(),
+      filledQuantity: original.requestedQuantity.toString(),
+      triggerPrice: original.triggerPrice!.toString(),
+      status: "filled",
+      observedAt: state.currentTime.value,
+      providerUpdatedAt: state.currentTime.value,
+    }),
+  );
+  state.exchange.attachedChildren = [child];
+  state.exchange.additionalOpenOrders = [];
+  state.exchange.positionSide = "flat";
+  state.exchange.positionQuantity = "0";
+  state.exchange.exitFills = [
+    {
+      executionId: "complete-partial-tp-exit",
+      exchangeOrderId: child.exchangeOrderId,
+      clientOrderId: child.clientOrderId,
+      instrument: child.instrument,
+      side: "sell",
+      quantity: child.filledQuantity,
+      price: child.triggerPrice!,
+      executedAt: state.currentTime.value,
+      source: "bybit-mainnet/execution",
+    },
+  ];
+}
+
+test("complete TP exit preserves separately authorized entry remainder cancellation across restart", async (t) => {
+  for (const reconcileFirst of [true, false])
+    await t.test(
+      reconcileFirst
+        ? "durable verified closed"
+        : "fresh exit since confirmed protection",
+      async () => {
+        const state = setup();
+        try {
+          const runId = "closed-exposure-open-parent";
+          const created = await createPartialProtectedPreparedLeg(state, runId);
+          closePartialTp(state);
+          const child = state.exchange.attachedChildren[0]!;
+          if (reconcileFirst) {
+            const closed = unwrap(
+              await recoverMainnetPreparedLegSource(
+                { sourceId: created.sourceId, runId },
+                state.dependencies,
+              ),
+            );
+            assert.equal(closed.status, "VERIFIED_CLOSED");
+            state.reopenPersistence();
+          }
+          state.exchange.beforeCancel = () => {
+            const saved = unwrap(
+              state.persistence.preparedLegExecution!.readPreparedLegSource(
+                created.sourceId,
+              ),
+            );
+            assert.equal(
+              saved?.cancelIntent?.remainderCancelProof?.outstandingQuantity,
+              "0",
+            );
+            assert.equal(
+              saved?.reconciliations.at(-1)?.status,
+              "VERIFIED_CLOSED",
+            );
+            assert.equal(
+              saved?.cancelIntent?.remainderCancelProof?.protectionEvidenceHash,
+              saved?.reconciliations.at(-1)?.protectionCanonicalHash,
+            );
+            assert.equal(
+              saved?.cancelIntent?.remainderCancelProof?.unfilledRemainder,
+              state.exchange.filledQuantity,
+            );
+          };
+          const cancelled = unwrap(
+            await cancelMainnetPreparedLeg(
+              { sourceId: created.sourceId, runId },
+              state.dependencies,
+            ),
+          );
+          assert.equal(cancelled.status, "VERIFIED_CLOSED");
+          assert.equal(state.exchange.orderStatus, "cancelled");
+          assert.equal(state.exchange.cancelRequests.length, 1);
+          assert.equal(
+            state.exchange.cancelRequests[0]?.exchangeOrderId,
+            state.exchange.exchangeOrderId,
+          );
+          assert.equal(state.exchange.attachedChildren[0], child);
+          state.reopenPersistence();
+          const recovery = unwrap(
+            await cancelMainnetPreparedLeg(
+              { sourceId: created.sourceId, runId },
+              state.dependencies,
+            ),
+          );
+          assert.equal(recovery.status, "VERIFIED_CLOSED");
+          assert.equal(state.exchange.cancelRequests.length, 1);
+          assert.equal(unwrap(state.persistence.readHalt()).active, false);
+        } finally {
+          state.cleanup();
+        }
+      },
+    );
+});
+
+test("verified closed exposure fails closed on unavailable, malformed or mismatched fresh cancel proof", async (t) => {
+  for (const fault of [
+    "state-read",
+    "malformed-parent",
+    "exit-mismatch",
+    "recovery-state-read",
+    "recovery-parent-read",
+  ] as const)
+    await t.test(fault, async () => {
+      const state = setup();
+      try {
+        const runId = "closed-exposure-cancel-fault";
+        const created = await createPartialProtectedPreparedLeg(state, runId);
+        closePartialTp(state);
+        assert.equal(
+          unwrap(
+            await recoverMainnetPreparedLegSource(
+              { sourceId: created.sourceId, runId },
+              state.dependencies,
+            ),
+          ).status,
+          "VERIFIED_CLOSED",
+        );
+        state.reopenPersistence();
+        if (fault.startsWith("recovery-")) {
+          assert.equal(
+            unwrap(
+              await cancelMainnetPreparedLeg(
+                { sourceId: created.sourceId, runId },
+                state.dependencies,
+              ),
+            ).status,
+            "VERIFIED_CLOSED",
+          );
+          state.reopenPersistence();
+        }
+        if (fault === "state-read" || fault === "recovery-state-read")
+          state.exchange.readState = async () => {
+            throw new Error("state unavailable");
+          };
+        else if (
+          fault === "malformed-parent" ||
+          fault === "recovery-parent-read"
+        ) {
+          const observe = state.exchange.observeOrder.bind(state.exchange);
+          state.exchange.observeOrder = async (request) => {
+            if (fault === "recovery-parent-read")
+              throw new Error("parent unavailable");
+            const result = await observe(request);
+            return result.ok
+              ? {
+                  ok: true,
+                  value: {
+                    ...result.value,
+                    exchangeOrderId: "contradictory-parent",
+                  },
+                }
+              : result;
+          };
+        } else state.exchange.exitFills = [];
+        const blocked = unwrap(
+          await cancelMainnetPreparedLeg(
+            { sourceId: created.sourceId, runId },
+            state.dependencies,
+          ),
+        );
+        assert.equal(blocked.status, "PROTECTION_PENDING");
+        assert.equal(
+          state.exchange.cancelRequests.length,
+          fault.startsWith("recovery-") ? 1 : 0,
+        );
+        state.reopenPersistence();
+        assert.equal(unwrap(state.persistence.readHalt()).active, true);
+        assert.equal(
+          unwrap(
+            state.persistence.preparedLegExecution!.readPreparedLegSource(
+              created.sourceId,
+            ),
+          )?.reconciliations.at(-1)?.status,
+          "PROTECTION_PENDING",
+        );
+      } finally {
+        state.cleanup();
+      }
+    });
+});
+
 test("remainder cancel is blocked when active TP reads disagree", async () => {
   const state = setup();
   try {

@@ -8,7 +8,6 @@ import {
   createPreparedLegOrderProof,
   derivePreparedLegProtectionCoverage,
   matchesPreparedLegOrder,
-  matchesPreparedLegTakeProfitChild,
   type PreparedLegOrderProof,
 } from "../domain/execution/prepared-leg-order-proof.js";
 import { hashCanonical } from "../domain/identity/canonical-serialization.js";
@@ -39,6 +38,10 @@ import type {
 } from "../ports/exchange-execution.js";
 import {
   acquireOrReuseMainnetLease,
+  collectFreshPreparedLegSiblings,
+  freshPreparedLegAggregateConflict,
+  aggregateProtectionEvidence,
+  createProtectionEvidenceV2,
   reconcilePreparedLegSource,
   verifyCurrentAccountBinding,
   type MainnetPreparedLegDependencies,
@@ -180,10 +183,20 @@ function persistProtectionPending(
 ): Result<MainnetPreparedLegOutcome> {
   const snapshot = dependencies.preparedLegs.readPreparedLegSource(sourceId);
   if (!snapshot.ok) return snapshot;
-  const latest = snapshot.value?.reconciliations.at(-1);
+  const latest = snapshot.value
+    ? [...snapshot.value.reconciliations]
+        .reverse()
+        .find(
+          (record) =>
+            (record.status === "PROTECTION_CONFIRMED" ||
+              record.status === "VERIFIED_CLOSED") &&
+            record.protectionEvidence !== undefined,
+        )
+    : undefined;
   if (
     !snapshot.value ||
-    latest?.status !== "PROTECTION_CONFIRMED" ||
+    (latest?.status !== "PROTECTION_CONFIRMED" &&
+      latest?.status !== "VERIFIED_CLOSED") ||
     latest.protectionEvidence === undefined
   )
     return fail(
@@ -364,51 +377,6 @@ function entryFillsMatchParent(
   return total.compare(proof.filledQuantity) === 0;
 }
 
-function sameActiveProtectionReads(
-  state: MainnetExchangeReadState,
-  execution: PreparedLegSourceIdentity,
-  providerChildren: readonly ExchangeOrderObservation[],
-): boolean {
-  const active = (order: ExchangeOrderObservation) =>
-    order.status === "open" || order.status === "partially-filled";
-  const expected = providerChildren.filter(active);
-  const observed = state.openOrders.filter(
-    (order) => order.parentOrderLinkId === execution.clientOrderId,
-  );
-  if (
-    new Set(expected.map((child) => child.exchangeOrderId)).size !==
-      expected.length ||
-    new Set(observed.map((child) => child.exchangeOrderId)).size !==
-      observed.length ||
-    expected.length !== observed.length
-  )
-    return false;
-  return observed.every((child) => {
-    const providerChild = expected.find(
-      (candidate) => candidate.exchangeOrderId === child.exchangeOrderId,
-    );
-    return (
-      providerChild !== undefined &&
-      matchesPreparedLegTakeProfitChild(child, execution) &&
-      child.clientOrderId === providerChild.clientOrderId &&
-      child.providerOrderLinkId === providerChild.providerOrderLinkId &&
-      child.parentOrderLinkId === providerChild.parentOrderLinkId &&
-      child.side === providerChild.side &&
-      child.requestedQuantity.compare(providerChild.requestedQuantity) === 0 &&
-      child.filledQuantity.compare(providerChild.filledQuantity) === 0 &&
-      child.status === providerChild.status &&
-      child.orderType === providerChild.orderType &&
-      child.triggerPrice?.compare(providerChild.triggerPrice!) === 0 &&
-      child.providerStopOrderType === providerChild.providerStopOrderType &&
-      child.providerTpslMode === providerChild.providerTpslMode &&
-      child.triggerBy === providerChild.triggerBy &&
-      child.takeProfitTriggerBy === providerChild.takeProfitTriggerBy &&
-      child.reduceOnly === providerChild.reduceOnly &&
-      child.positionIdx === providerChild.positionIdx
-    );
-  });
-}
-
 async function readRemainderCancelProof(
   dependencies: MainnetPreparedLegDependencies,
   execution: PreparedLegSourceIdentity,
@@ -504,7 +472,7 @@ async function readRemainderCancelProof(
         "fresh one-way position is unavailable",
       ),
     );
-  const state = stateResult.value;
+  let state = stateResult.value;
   const coverage = derivePreparedLegProtectionCoverage({
     execution,
     parent,
@@ -521,70 +489,96 @@ async function readRemainderCancelProof(
         "fresh partial TP coverage is not exact",
       ),
     );
-  if (!coverage.value.outstandingQuantity.isPositive())
-    return fail(
-      domainError(
-        "OWNERSHIP_MISMATCH",
-        "partial cancel requires a live protected position",
-      ),
-    );
-  const one = DecimalValue.fromString("1");
-  if (!one.ok) return one;
-  const currentParent = state.openOrders.filter(
-    (order) =>
-      order.clientOrderId === execution.clientOrderId &&
-      order.parentOrderLinkId !== execution.clientOrderId &&
-      order.protectionType !== "take-profit",
+  const aggregate = await collectFreshPreparedLegSiblings(
+    dependencies,
+    execution,
+    sourceId,
+    state,
   );
-  const stateChildren = state.openOrders.filter(
-    (order) =>
-      order.parentOrderLinkId === execution.clientOrderId ||
-      order.protectionType === "take-profit",
+  if (!aggregate.ok) return aggregate;
+  state = aggregate.value.state;
+  const conflict = freshPreparedLegAggregateConflict(
+    state,
+    execution,
+    parent,
+    entryResult.value,
+    childrenResult.value,
+    exits,
+    aggregate.value.siblings,
   );
-  const currentParentProof =
-    currentParent.length === 1
-      ? createPreparedLegOrderProof(currentParent[0])
-      : undefined;
-  if (
-    state.leverage.buy.compare(one.value) !== 0 ||
-    state.leverage.sell.compare(one.value) !== 0 ||
-    state.leverage.effective.compare(one.value) !== 0 ||
-    state.position.side !== "long" ||
-    state.position.quantity.compare(coverage.value.outstandingQuantity) !== 0 ||
-    currentParent.length !== 1 ||
-    !currentParentProof?.ok ||
-    !matchesPreparedLegOrder(currentParentProof.value, execution) ||
-    currentParent[0]?.exchangeOrderId !== parent.exchangeOrderId ||
-    currentParent[0]?.status !== "partially-filled" ||
-    currentParentProof?.value.filledQuantity.compare(parent.filledQuantity) !==
-      0 ||
-    new Set(stateChildren.map((child) => child.exchangeOrderId)).size !==
-      stateChildren.length ||
-    !sameActiveProtectionReads(state, execution, childrenResult.value) ||
-    state.openOrders.some(
-      (order) =>
-        order.exchangeOrderId !== parent.exchangeOrderId &&
-        !childrenResult.value.some(
-          (child) =>
-            child.exchangeOrderId === order.exchangeOrderId &&
-            matchesPreparedLegTakeProfitChild(order, execution),
-        ),
-    )
-  )
-    return fail(
-      domainError(
-        "OWNERSHIP_MISMATCH",
-        "fresh parent, position, or TP ownership conflicts",
-      ),
-    );
+  if (conflict) return fail(domainError("OWNERSHIP_MISMATCH", conflict));
+  const aggregateEvidence = aggregateProtectionEvidence(
+    aggregate.value.approvalHash,
+    aggregate.value.siblings,
+    state,
+  );
   const remainder = parent.requestedQuantity.subtract(parent.filledQuantity);
   if (!remainder.isPositive())
     return fail(
       domainError("OWNERSHIP_MISMATCH", "parent remainder is already filled"),
     );
+  const evidence = createProtectionEvidenceV2({
+    execution,
+    parent,
+    entries: entryResult.value,
+    exits,
+    children: childrenResult.value,
+    coverage: coverage.value,
+    state,
+    observedAt: state.serverTime,
+    status: coverage.value.outstandingQuantity.isZero()
+      ? "VERIFIED_CLOSED"
+      : "PROTECTION_CONFIRMED",
+    entryFillsComplete: true,
+    childOrdersComplete: true,
+    exitFillsComplete: true,
+    positionComplete: true,
+    reasonCodes: [],
+  });
+  const saved = dependencies.preparedLegs.appendPreparedLegReconciliation({
+    authority,
+    sourceId,
+    status: evidence.status,
+    observedAt: state.serverTime,
+    exchangeOrderId: parent.exchangeOrderId,
+    result: {
+      orderProof: parent,
+      fills: entryResult.value.map((fill) => ({
+        executionId: fill.executionId,
+        quantity: fill.quantity.toString(),
+        price: fill.price.toString(),
+        executedAt: fill.executedAt,
+        ...(fill.fee === undefined ? {} : { fee: fill.fee.toString() }),
+        ...(fill.feeCurrency === undefined
+          ? {}
+          : { feeCurrency: fill.feeCurrency }),
+      })),
+    },
+    protectionEvidence: {
+      ...evidence,
+      ...(aggregateEvidence === undefined
+        ? {}
+        : { aggregate: aggregateEvidence }),
+    },
+  });
+  if (!saved.ok) return saved;
+  if (
+    !saved.value.protectionCanonicalHash ||
+    saved.value.status !== evidence.status
+  )
+    return fail(
+      domainError(
+        "UNRESOLVED_RECONCILIATION",
+        "fresh protection evidence could not be persisted",
+      ),
+    );
+  latestProtectionHash = saved.value.protectionCanonicalHash;
   const coverageHash = hashCanonical({
     schemaVersion: "prepared-leg-remainder-cancel-coverage/v1",
     coverage: coverage.value,
+    ...(aggregateEvidence === undefined
+      ? {}
+      : { aggregate: aggregateEvidence }),
     entries: entryResult.value.map((fill) => ({
       executionId: fill.executionId,
       exchangeOrderId: fill.exchangeOrderId,
@@ -648,6 +642,42 @@ async function readRemainderCancelProof(
   });
 }
 
+async function reconcileCancelSource(
+  dependencies: MainnetPreparedLegDependencies,
+  execution: PreparedLegSourceIdentity,
+  sourceId: string,
+  authority: { readonly ownerRunId: string; readonly epoch: number },
+  kind: "created" | "recovery",
+  options: Parameters<typeof reconcilePreparedLegSource>[5],
+): Promise<Result<MainnetPreparedLegOutcome>> {
+  const result = await reconcilePreparedLegSource(
+    dependencies,
+    execution,
+    sourceId,
+    authority,
+    kind,
+    options,
+  );
+  if (result.ok && result.value.status !== "UNRESOLVED") return result;
+  const snapshot = dependencies.preparedLegs.readPreparedLegSource(sourceId);
+  if (!snapshot.ok) return snapshot;
+  const hadProtectedExposure = snapshot.value?.reconciliations.some(
+    (record) =>
+      (record.status === "PROTECTION_CONFIRMED" ||
+        record.status === "VERIFIED_CLOSED") &&
+      record.protectionEvidence !== undefined,
+  );
+  return hadProtectedExposure
+    ? persistProtectionPending(
+        dependencies,
+        execution,
+        sourceId,
+        authority,
+        "CANCEL_RECOVERY_PROTECTION_UNAVAILABLE",
+      )
+    : result;
+}
+
 /** One separately authorized cancellation of the exact owned, proven-unfilled order. */
 export async function cancelMainnetPreparedLeg(
   input: unknown,
@@ -698,9 +728,18 @@ export async function cancelMainnetPreparedLeg(
       dependencies,
       execution.value,
     );
-    if (!accountBinding.ok) return accountBinding;
+    if (!accountBinding.ok)
+      return source.value.cancelIntent.remainderCancelProof
+        ? persistProtectionPending(
+            dependencies,
+            execution.value,
+            sourceId.value,
+            lease.value,
+            "CANCEL_RECOVERY_ACCOUNT_BINDING_UNAVAILABLE",
+          )
+        : accountBinding;
     const recoveryBlockReason = cancelRecoveryBlockReason(source.value);
-    return reconcilePreparedLegSource(
+    return reconcileCancelSource(
       dependencies,
       execution.value,
       sourceId.value,
@@ -723,7 +762,8 @@ export async function cancelMainnetPreparedLeg(
     );
   const latest = source.value.reconciliations.at(-1);
   const remainderMode =
-    latest?.status === "PROTECTION_CONFIRMED" &&
+    (latest?.status === "PROTECTION_CONFIRMED" ||
+      latest?.status === "VERIFIED_CLOSED") &&
     latest.protectionEvidence !== undefined &&
     latest.protectionCanonicalHash !== undefined;
   if (latest?.status !== "CONFIRMED_OPEN" && !remainderMode)
@@ -880,7 +920,7 @@ export async function cancelMainnetPreparedLeg(
       proof.value.status === "filled" ||
       proof.value.filledQuantity.compare(proof.value.requestedQuantity) === 0
     )
-      return reconcilePreparedLegSource(
+      return reconcileCancelSource(
         dependencies,
         execution.value,
         sourceId.value,
@@ -1022,7 +1062,7 @@ export async function cancelMainnetPreparedLeg(
       ?.remainderCancelProofHash !==
       remainderCancelProof?.remainderCancelProofHash
   )
-    return reconcilePreparedLegSource(
+    return reconcileCancelSource(
       dependencies,
       execution.value,
       sourceId.value,
@@ -1117,7 +1157,7 @@ export async function cancelMainnetPreparedLeg(
     );
     return attempt;
   }
-  return reconcilePreparedLegSource(
+  return reconcileCancelSource(
     dependencies,
     execution.value,
     sourceId.value,

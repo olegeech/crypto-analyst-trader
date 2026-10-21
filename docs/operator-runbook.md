@@ -137,6 +137,13 @@ timestamps. A mapped parent-link alias, position-level TP or sibling leg does
 not establish coverage. A fill stops the grid suffix even when coverage is
 confirmed.
 
+`VERIFIED_CLOSED` proves the leg has no outstanding filled exposure; its entry
+may still have an unfilled remainder. Cancelling that remainder needs separate
+exact authorization and fresh entry, exit, TP and position proof. With several
+owned grid legs, the boundary verifies each leg independently and compares their
+sum against the actual one-way position, retaining the sibling evidence in the
+journal. Only the selected entry is cancelled; TP orders stay untouched.
+
 If a filled leg has missing, stale, malformed, mismatched or ambiguous child
 evidence, incomplete fill reads, or a position/coverage mismatch, the internal
 boundary records `PROTECTION_PENDING` and `HALT`; it does not wait, repair,

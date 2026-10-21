@@ -12,6 +12,7 @@ import {
 } from "../../domain/identity/canonical-serialization.js";
 import {
   createPreparedLegExecution,
+  createPreparedLegGridExecution,
   derivePreparedLegClientOrderId,
   derivePreparedLegSourceId,
   type PreparedLegExecution,
@@ -684,6 +685,7 @@ function validEvidenceFills(
 
 function validateProtectionEvidenceV2(
   value: PreparedLegProtectionEvidenceV2Input,
+  aggregatePosition?: DecimalValue,
 ): Result<void> {
   if (
     !exactRecord(value, [
@@ -698,6 +700,7 @@ function validateProtectionEvidenceV2(
       "position",
       "collection",
       "reasonCodes",
+      "aggregate",
     ]) ||
     value.schemaVersion !== "prepared-leg-protection-evidence/v2" ||
     !isV2ProtectionStatus(value.status) ||
@@ -937,6 +940,85 @@ function validateProtectionEvidenceV2(
       return invalid("v2 protection child evidence is malformed");
   }
 
+  let expectedPosition = aggregatePosition;
+  if (value.aggregate !== undefined) {
+    if (
+      aggregatePosition !== undefined ||
+      !exactRecord(value.aggregate, ["approvalHash", "siblings"]) ||
+      !requireHash(value.aggregate.approvalHash, "approvalHash").ok ||
+      !Array.isArray(value.aggregate.siblings) ||
+      value.aggregate.siblings.length === 0
+    )
+      return invalid("aggregate protection lineage is malformed");
+    const own = DecimalValue.fromString(value.coverage.outstandingQuantity);
+    if (!own.ok) return invalid("aggregate own outstanding is invalid");
+    let total = own.value;
+    const sourceIds = new Set<string>();
+    const parentIds = new Set([value.parent.exchangeOrderId]);
+    const executionIds = new Set([
+      ...value.entries.executionIds,
+      ...value.exits.executionIds,
+    ]);
+    const childIds = new Set(
+      value.children.map((child) => child.exchangeOrderId),
+    );
+    for (const sibling of value.aggregate.siblings) {
+      if (
+        !exactRecord(sibling, ["sourceId", "evidence"]) ||
+        typeof sibling.sourceId !== "string" ||
+        !requireIdentifier(sibling.sourceId, "sourceId").ok ||
+        sourceIds.has(sibling.sourceId) ||
+        !isRecord(sibling.evidence) ||
+        sibling.evidence.aggregate !== undefined
+      )
+        return invalid("aggregate sibling identity is malformed");
+      sourceIds.add(sibling.sourceId);
+      const net = DecimalValue.fromString(value.position.quantity);
+      if (!net.ok) return invalid("aggregate position quantity is malformed");
+      const checked = validateProtectionEvidenceV2(
+        sibling.evidence as unknown as PreparedLegProtectionEvidenceV2Input,
+        net.value,
+      );
+      if (!checked.ok) return checked;
+      const e =
+        sibling.evidence as unknown as PreparedLegProtectionEvidenceV2Input;
+      if (e.status !== "PROTECTION_CONFIRMED" && e.status !== "VERIFIED_CLOSED")
+        return invalid("aggregate sibling coverage is not proven");
+      const quantity = DecimalValue.fromString(e.coverage?.outstandingQuantity);
+      if (
+        !quantity.ok ||
+        parentIds.has(e.parent?.exchangeOrderId) ||
+        e.parent?.instrument !== value.parent.instrument ||
+        e.observedAt !== value.observedAt ||
+        e.position?.quantity !== value.position.quantity ||
+        e.position?.serverTime !== value.position.serverTime ||
+        e.position?.side !== value.position.side
+      )
+        return invalid("aggregate sibling proof conflicts");
+      parentIds.add(e.parent.exchangeOrderId);
+      total = total.add(quantity.value);
+      for (const id of [
+        ...(e.entries?.executionIds ?? []),
+        ...(e.exits?.executionIds ?? []),
+      ]) {
+        if (executionIds.has(id))
+          return invalid("aggregate execution is shared");
+        executionIds.add(id);
+      }
+      for (const child of e.children ?? []) {
+        if (childIds.has(child.exchangeOrderId))
+          return invalid("aggregate child is shared");
+        childIds.add(child.exchangeOrderId);
+      }
+    }
+    if ([...parentIds].some((id) => childIds.has(id)))
+      return invalid("aggregate parent is also a child");
+    expectedPosition = total;
+    for (const sibling of value.aggregate.siblings) {
+      const valid = validateProtectionEvidenceV2(sibling.evidence, total);
+      if (!valid.ok) return valid;
+    }
+  }
   const outstanding =
     value.coverage.outstandingQuantity === null
       ? undefined
@@ -952,9 +1034,14 @@ function validateProtectionEvidenceV2(
         outstanding === undefined ||
         !outstanding.ok ||
         !outstanding.value.isPositive() ||
-        value.position.side !== "long" ||
+        value.position.side !==
+          ((expectedPosition ?? outstanding.value).isZero()
+            ? "flat"
+            : "long") ||
         !positionQuantity.ok ||
-        positionQuantity.value.compare(outstanding.value) !== 0 ||
+        positionQuantity.value.compare(
+          expectedPosition ?? outstanding.value,
+        ) !== 0 ||
         activeRemaining === undefined ||
         !activeRemaining.ok ||
         activeRemaining.value.compare(outstanding.value) !== 0)) ||
@@ -962,8 +1049,12 @@ function validateProtectionEvidenceV2(
       (value.coverage.covered !== true ||
         value.coverage.outstandingQuantity !== "0" ||
         value.coverage.activeRemainingQuantity !== "0" ||
-        value.position.side !== "flat" ||
-        value.position.quantity !== "0")) ||
+        (expectedPosition === undefined
+          ? value.position.side !== "flat" || value.position.quantity !== "0"
+          : !positionQuantity.ok ||
+            positionQuantity.value.compare(expectedPosition) !== 0 ||
+            value.position.side !==
+              (expectedPosition.isZero() ? "flat" : "long")))) ||
     ((value.status === "PROTECTION_CONFIRMED" ||
       value.status === "VERIFIED_CLOSED") &&
       (value.collection.entryFills !== "complete" ||
@@ -972,6 +1063,20 @@ function validateProtectionEvidenceV2(
         value.collection.position !== "complete"))
   )
     return invalid("v2 protection outcome lacks exact complete coverage");
+  const nestedZeroFill =
+    aggregatePosition !== undefined &&
+    value.parent.filledQuantity === "0" &&
+    value.status === "VERIFIED_CLOSED" &&
+    ["open", "cancelled", "rejected"].includes(value.parent.status) &&
+    value.entries.quantity === "0" &&
+    value.entries.fills.length === 0 &&
+    value.entries.executionIds.length === 0 &&
+    value.exits.quantity === "0" &&
+    value.exits.fills.length === 0 &&
+    value.exits.executionIds.length === 0 &&
+    value.children.length === 0 &&
+    value.parent.providerTpslMode === "Partial" &&
+    value.parent.takeProfitTriggerBy === "LastPrice";
   if (
     (value.status === "PROTECTION_CONFIRMED" ||
       value.status === "VERIFIED_CLOSED") &&
@@ -980,6 +1085,7 @@ function validateProtectionEvidenceV2(
       entryTotal,
       exitTotal,
       parentFillTotal.value,
+      nestedZeroFill,
     )
   )
     return invalid("v2 protection outcome conflicts with observed TP facts");
@@ -991,6 +1097,7 @@ function hasExactProtectionFacts(
   entryTotal: DecimalValue,
   exitTotal: DecimalValue,
   parentFillTotal: DecimalValue,
+  allowZeroFill = false,
 ): boolean {
   const timestamp = timestampToEpochMs;
   const validOrderSource = (source: string): boolean =>
@@ -1004,7 +1111,11 @@ function hasExactProtectionFacts(
     value.parent.providerTpslMode !== "Partial" ||
     value.parent.takeProfitTriggerBy !== "LastPrice" ||
     !validOrderSource(value.parent.source) ||
-    !parentFillTotal.isPositive() ||
+    timestamp(value.parent.observedAt) > timestamp(value.observedAt) ||
+    timestamp(value.observedAt) - timestamp(value.parent.observedAt) >
+      CANCEL_PROOF_MAX_AGE_MS ||
+    value.position.serverTime !== value.observedAt ||
+    (!parentFillTotal.isPositive() && !allowZeroFill) ||
     entryTotal.compare(parentFillTotal) !== 0 ||
     value.entries.quantity === null ||
     value.exits.quantity === null ||
@@ -1163,20 +1274,9 @@ function hasExactProtectionFacts(
   )
     return false;
 
-  const positionQuantity = DecimalValue.fromString(value.position.quantity);
-  if (!positionQuantity.ok) return false;
-  if (value.status === "PROTECTION_CONFIRMED")
-    return (
-      outstanding.value.isPositive() &&
-      value.position.side === "long" &&
-      positionQuantity.value.compare(outstanding.value) === 0
-    );
-  return (
-    outstanding.value.isZero() &&
-    active.isZero() &&
-    value.position.side === "flat" &&
-    value.position.quantity === "0"
-  );
+  return value.status === "PROTECTION_CONFIRMED"
+    ? outstanding.value.isPositive()
+    : outstanding.value.isZero() && active.isZero();
 }
 
 export class SqlitePreparedLegStore implements PreparedLegPersistencePort {
@@ -1452,12 +1552,14 @@ export class SqlitePreparedLegStore implements PreparedLegPersistencePort {
             validateRemainderCancelProof(remainderProof);
           cancelProofValid =
             remainderProofResult.ok &&
-            last.status === "PROTECTION_CONFIRMED" &&
+            (last.status === "PROTECTION_CONFIRMED" ||
+              last.status === "VERIFIED_CLOSED") &&
             proof.status === "partially-filled" &&
             proof.filledQuantity.isPositive() &&
             proof.filledQuantity.compare(proof.requestedQuantity) < 0 &&
             proofAgeIsValid &&
-            v2.status === "PROTECTION_CONFIRMED" &&
+            (v2.status === "PROTECTION_CONFIRMED" ||
+              v2.status === "VERIFIED_CLOSED") &&
             v2.coverage.covered === true &&
             v2.collection.entryFills === "complete" &&
             v2.collection.childOrders === "complete" &&
@@ -1471,8 +1573,10 @@ export class SqlitePreparedLegStore implements PreparedLegPersistencePort {
               remainderProof.outstandingQuantity &&
             v2.coverage.activeRemainingQuantity ===
               remainderProof.outstandingQuantity &&
-            v2.position.side === "long" &&
-            v2.position.quantity === remainderProof.outstandingQuantity &&
+            v2.position.side ===
+              (v2.position.quantity === "0" ? "flat" : "long") &&
+            (v2.aggregate !== undefined ||
+              v2.position.quantity === remainderProof.outstandingQuantity) &&
             v2.sourceId === sourceId.value &&
             remainderProof.sourceId === sourceId.value &&
             remainderProof.leaseEpoch === request.authority.epoch &&
@@ -1697,6 +1801,14 @@ export class SqlitePreparedLegStore implements PreparedLegPersistencePort {
           );
         const parsedSource = sourceFromRow(sourceRow, this.scope);
         if (!parsedSource.ok) return parsedSource;
+        if (protectionEvidence?.aggregate) {
+          const aggregateValid = this.validateAggregateOwnership(
+            db,
+            parsedSource.value,
+            protectionEvidence,
+          );
+          if (!aggregateValid.ok) return aggregateValid;
+        }
         let status = request.status;
         let evidenceResult = request.result;
         let v2Evidence = protectionEvidence;
@@ -2113,6 +2225,85 @@ export class SqlitePreparedLegStore implements PreparedLegPersistencePort {
       halt: halt.value,
       ...(lease.value ? { lease: leaseState(this.scope, lease.value) } : {}),
     });
+  }
+
+  private validateAggregateOwnership(
+    db: DatabaseSync,
+    selected: PreparedLegLineageRecord,
+    evidence: PreparedLegProtectionEvidenceV2Input,
+  ): Result<void> {
+    const aggregate = evidence.aggregate;
+    if (!aggregate) return ok(undefined);
+    const envelope = this.readArtifact(
+      db,
+      approvalId(aggregate.approvalHash),
+      "prepared-plan-approval",
+      aggregate.approvalHash,
+    );
+    if (!envelope.ok) return envelope;
+    const approval = rehydrateArtifact(
+      "prepared-plan-approval",
+      envelope.value,
+    );
+    if (!approval.ok)
+      return invalid("aggregate approval could not be rehydrated");
+    const grid = createPreparedLegGridExecution({
+      approval: approval.value,
+      approvalHash: aggregate.approvalHash,
+      now: approval.value.approvedAt,
+    });
+    if (
+      !grid.ok ||
+      grid.value.preparedHash !== selected.preparedHash ||
+      !grid.value.legs.some((row) => row.sourceId === selected.sourceId)
+    )
+      return invalid("aggregate approval does not own selected source");
+    const selectedRow = this.sourceRow(selected.sourceId, db);
+    const selectedSnapshot = selectedRow
+      ? this.snapshot(selectedRow, db)
+      : undefined;
+    if (
+      !selectedSnapshot?.ok ||
+      !selectedSnapshot.value.approvalHashes.includes(aggregate.approvalHash)
+    )
+      return invalid("selected source lacks aggregate approval");
+    const expected = new Set<string>();
+    for (const row of grid.value.legs) {
+      if (row.sourceId === selected.sourceId) continue;
+      const stored = this.sourceRow(row.sourceId, db);
+      if (!stored) continue;
+      expected.add(row.sourceId);
+      const source = this.snapshot(stored, db);
+      const sibling = aggregate.siblings.find(
+        (item) => item.sourceId === row.sourceId,
+      );
+      if (
+        !source.ok ||
+        !sibling ||
+        !source.value.approvalHashes.includes(aggregate.approvalHash) ||
+        source.value.lineage.preparedHash !== selected.preparedHash ||
+        source.value.lineage.clientOrderId !== row.execution.clientOrderId ||
+        sibling.evidence.parent.exchangeOrderId !==
+          source.value.reconciliations.at(-1)?.exchangeOrderId ||
+        sibling.evidence.parent.clientOrderId !== row.execution.clientOrderId ||
+        sibling.evidence.parent.requestedQuantity !==
+          row.execution.leg.intent.quantity.toString() ||
+        sibling.evidence.parent.takeProfit !==
+          row.execution.leg.intent.protection?.takeProfit?.toString() ||
+        sibling.evidence.parent.instrument !==
+          row.execution.leg.intent.instrument ||
+        sibling.evidence.parent.side !== "buy" ||
+        sibling.evidence.parent.providerTpslMode !== "Partial" ||
+        sibling.evidence.parent.takeProfitTriggerBy !== "LastPrice"
+      )
+        return invalid("aggregate sibling lacks exact durable ownership");
+    }
+    if (
+      aggregate.siblings.length !== expected.size ||
+      aggregate.siblings.some((sibling) => !expected.has(sibling.sourceId))
+    )
+      return invalid("aggregate sibling set does not match durable approval");
+    return ok(undefined);
   }
 
   private matchesSource(

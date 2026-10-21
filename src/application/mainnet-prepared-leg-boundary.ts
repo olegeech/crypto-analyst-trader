@@ -15,6 +15,7 @@ import {
   type PreparedLegSourceIdentity,
 } from "../domain/execution/prepared-leg-execution.js";
 import { createPreparedGridCapacity } from "../domain/execution/prepared-grid-capacity.js";
+import type { PlanHash } from "../domain/identity/canonical-serialization.js";
 import { hashCanonical } from "../domain/identity/canonical-serialization.js";
 import {
   accountEvidenceContentHash,
@@ -610,7 +611,7 @@ function protectionEvidenceChild(
   };
 }
 
-function createProtectionEvidenceV2(input: {
+export function createProtectionEvidenceV2(input: {
   readonly execution: PreparedLegSourceIdentity;
   readonly parent: PreparedLegOrderProof;
   readonly entries: readonly ExchangeFillObservation[];
@@ -812,6 +813,321 @@ async function collectFilledProtectionReads(
     exitFillsComplete,
     positionComplete,
     reasonCodes: [...new Set(reasons)].sort(),
+  };
+}
+
+export interface FreshPreparedLegSibling {
+  readonly sourceId: string;
+  readonly execution: PreparedLegExecution;
+  readonly parent: PreparedLegOrderProof;
+  readonly entries: readonly ExchangeFillObservation[];
+  readonly reads: FilledProtectionReads;
+}
+
+/** Read every durably owned sibling under the same immutable approval. */
+export async function collectFreshPreparedLegSiblings(
+  dependencies: MainnetPreparedLegDependencies,
+  execution: PreparedLegSourceIdentity,
+  sourceId: string,
+  state: MainnetExchangeReadState,
+): Promise<
+  Result<{
+    readonly approvalHash?: PlanHash;
+    readonly siblings: readonly FreshPreparedLegSibling[];
+    readonly state: MainnetExchangeReadState;
+  }>
+> {
+  const selected = dependencies.preparedLegs.readPreparedLegSource(sourceId);
+  if (!selected.ok) return selected;
+  if (!selected.value)
+    return fail(
+      domainError("OWNERSHIP_MISMATCH", "selected source is unavailable"),
+    );
+  const approvalHash = selected.value.approvalHashes[0];
+  if (!approvalHash)
+    return fail(
+      domainError("OWNERSHIP_MISMATCH", "source approval is unavailable"),
+    );
+  const approval = dependencies.artifacts.loadApproval(approvalHash);
+  if (!approval.ok) return approval;
+  if (!approval.value)
+    return fail(
+      domainError(
+        "OWNERSHIP_MISMATCH",
+        "source approval artifact is unavailable",
+      ),
+    );
+  const grid = createPreparedLegGridExecution({
+    approval: approval.value,
+    approvalHash,
+    now: approval.value.approvedAt,
+  });
+  if (!grid.ok) return grid;
+  if (
+    grid.value.preparedHash !== execution.preparedHash ||
+    !grid.value.legs.some(
+      (row) =>
+        row.sourceId === sourceId &&
+        row.execution.clientOrderId === execution.clientOrderId,
+    )
+  )
+    return fail(
+      domainError(
+        "OWNERSHIP_MISMATCH",
+        "source does not belong to approved grid",
+      ),
+    );
+  const siblings: FreshPreparedLegSibling[] = [];
+  for (const row of grid.value.legs) {
+    if (row.sourceId === sourceId) continue;
+    const source = dependencies.preparedLegs.readPreparedLegSource(
+      row.sourceId,
+    );
+    if (!source.ok) return source;
+    if (!source.value) continue;
+    const snapshot = source.value;
+    const orderId = snapshot.reconciliations.at(-1)?.exchangeOrderId;
+    if (
+      snapshot.lineage.preparedHash !== execution.preparedHash ||
+      snapshot.lineage.clientOrderId !== row.execution.clientOrderId ||
+      !snapshot.approvalHashes.includes(approvalHash) ||
+      !orderId
+    )
+      return fail(
+        domainError(
+          "OWNERSHIP_MISMATCH",
+          "sibling durable ownership is incomplete",
+        ),
+      );
+    try {
+      const observed = await dependencies.exchange.observeOrder({
+        instrument: execution.leg.intent.instrument,
+        clientOrderId: row.execution.clientOrderId,
+        exchangeOrderId: orderId,
+      });
+      if (!observed.ok)
+        return fail(
+          domainError(
+            "UNRESOLVED_RECONCILIATION",
+            "sibling parent read failed",
+          ),
+        );
+      const parent = createPreparedLegOrderProof(observed.value);
+      if (
+        !parent.ok ||
+        !matchesPreparedLegOrder(parent.value, row.execution) ||
+        parent.value.exchangeOrderId !== orderId
+      )
+        return fail(
+          domainError("OWNERSHIP_MISMATCH", "sibling parent proof conflicts"),
+        );
+      const entries = await dependencies.exchange.listFills({
+        instrument: execution.leg.intent.instrument,
+        clientOrderId: row.execution.clientOrderId,
+        exchangeOrderId: orderId,
+      });
+      if (!entries.ok)
+        return fail(
+          domainError(
+            "UNRESOLVED_RECONCILIATION",
+            "sibling entry fills unavailable",
+          ),
+        );
+      const reads = await collectFilledProtectionReads(
+        dependencies,
+        row.execution,
+        parent.value,
+        entries.value,
+        state,
+      );
+      if (
+        !reads.positionComplete ||
+        !reads.childOrdersComplete ||
+        !reads.exitFillsComplete ||
+        reads.reasonCodes.length ||
+        !reads.coverage?.covered
+      )
+        return fail(
+          domainError(
+            "UNRESOLVED_RECONCILIATION",
+            "sibling TP proof is incomplete",
+          ),
+        );
+      siblings.push({
+        sourceId: row.sourceId,
+        execution: row.execution,
+        parent: parent.value,
+        entries: entries.value,
+        reads,
+      });
+    } catch {
+      return fail(
+        domainError("UNRESOLVED_RECONCILIATION", "sibling proof reads failed"),
+      );
+    }
+  }
+  if (!siblings.length) return ok({ siblings, state });
+  try {
+    const fresh = await dependencies.exchange.readState({
+      instrument: execution.leg.intent.instrument,
+    });
+    if (!fresh.ok)
+      return fail(
+        domainError(
+          "UNRESOLVED_RECONCILIATION",
+          "aggregate position read failed",
+        ),
+      );
+    return ok({ approvalHash, siblings, state: fresh.value });
+  } catch {
+    return fail(
+      domainError(
+        "UNRESOLVED_RECONCILIATION",
+        "aggregate position read failed",
+      ),
+    );
+  }
+}
+
+export function freshPreparedLegAggregateConflict(
+  state: MainnetExchangeReadState,
+  execution: PreparedLegSourceIdentity,
+  parent: PreparedLegOrderProof,
+  entries: readonly ExchangeFillObservation[],
+  children: readonly ExchangeOrderObservation[],
+  exits: readonly ExchangeFillObservation[],
+  siblings: readonly FreshPreparedLegSibling[],
+): string | undefined {
+  const scope = sharedReadStateScopeAndLeverageConflict(
+    state,
+    execution.leg.intent.instrument,
+  );
+  if (scope) return scope;
+  if (
+    new Set(state.openOrders.map((order) => order.exchangeOrderId)).size !==
+    state.openOrders.length
+  )
+    return "DUPLICATE_AGGREGATE_OPEN_ORDER";
+  const rows = [
+    { execution, parent, entries, children, exits },
+    ...siblings.map((sibling) => ({
+      execution: sibling.execution,
+      parent: sibling.parent,
+      entries: sibling.entries,
+      children: sibling.reads.children,
+      exits: sibling.reads.exits,
+    })),
+  ];
+  const zero = DecimalValue.fromString("0");
+  if (!zero.ok) return "INVALID_FILL_TOTAL";
+  let outstanding = zero.value;
+  const ids = new Set<string>();
+  const childIds = new Set<string>();
+  const parentIds = new Set<string>();
+  for (const row of rows) {
+    if (
+      parentIds.has(row.parent.exchangeOrderId) ||
+      childIds.has(row.parent.exchangeOrderId)
+    )
+      return "DUPLICATE_AGGREGATE_PARENT";
+    parentIds.add(row.parent.exchangeOrderId);
+    const coverage = derivePreparedLegProtectionCoverage({
+      execution: row.execution,
+      parent: row.parent,
+      entryFills: row.entries,
+      exitFills: row.exits,
+      children: row.children,
+      observedAt: state.serverTime,
+      maxAgeMs: PROVISIONAL_M1_MAX_ACCOUNT_EVIDENCE_AGE_MS,
+    });
+    if (!coverage.ok || !coverage.value.covered)
+      return "AGGREGATE_COVERAGE_UNVERIFIED";
+    outstanding = outstanding.add(coverage.value.outstandingQuantity);
+    for (const fill of [...row.entries, ...row.exits]) {
+      if (ids.has(fill.executionId)) return "DUPLICATE_AGGREGATE_EXECUTION";
+      ids.add(fill.executionId);
+    }
+    for (const child of row.children) {
+      if (
+        childIds.has(child.exchangeOrderId) ||
+        parentIds.has(child.exchangeOrderId)
+      )
+        return "DUPLICATE_AGGREGATE_CHILD";
+      childIds.add(child.exchangeOrderId);
+    }
+    const openParent = state.openOrders.filter(
+      (order) =>
+        order.exchangeOrderId === row.parent.exchangeOrderId &&
+        order.protectionType === undefined,
+    );
+    const active =
+      row.parent.status === "open" || row.parent.status === "partially-filled";
+    if (openParent.length !== (active ? 1 : 0))
+      return "AGGREGATE_PARENT_STATE_MISMATCH";
+    if (openParent[0]) {
+      const proof = createPreparedLegOrderProof(openParent[0]);
+      if (
+        !proof.ok ||
+        !matchesPreparedLegOrder(proof.value, row.execution) ||
+        !sameOrderObservation(proof.value, row.parent)
+      )
+        return "AGGREGATE_PARENT_STATE_MISMATCH";
+    }
+    const conflict = protectionChildStateConflict(
+      state,
+      row.execution,
+      row.children,
+    );
+    if (conflict) return conflict;
+  }
+  if (
+    state.openOrders.some(
+      (order) =>
+        !rows.some(
+          (row) =>
+            (order.exchangeOrderId === row.parent.exchangeOrderId &&
+              order.protectionType === undefined) ||
+            row.children.some(
+              (child) =>
+                child.exchangeOrderId === order.exchangeOrderId &&
+                matchesPreparedLegTakeProfitChild(order, row.execution),
+            ),
+        ),
+    )
+  )
+    return "UNOWNED_TARGET_ORDER_PRESENT";
+  return exactPositionConflict(state, outstanding);
+}
+
+export function aggregateProtectionEvidence(
+  approvalHash: PlanHash | undefined,
+  siblings: readonly FreshPreparedLegSibling[],
+  state: MainnetExchangeReadState,
+): PreparedLegProtectionEvidenceV2Input["aggregate"] {
+  if (!approvalHash || !siblings.length) return undefined;
+  return {
+    approvalHash,
+    siblings: siblings.map((sibling) => ({
+      sourceId: sibling.sourceId,
+      evidence: createProtectionEvidenceV2({
+        execution: sibling.execution,
+        parent: sibling.parent,
+        entries: sibling.entries,
+        exits: sibling.reads.exits,
+        children: sibling.reads.children,
+        coverage: sibling.reads.coverage!,
+        state,
+        observedAt: state.serverTime,
+        status: sibling.reads.coverage!.outstandingQuantity.isZero()
+          ? "VERIFIED_CLOSED"
+          : "PROTECTION_CONFIRMED",
+        entryFillsComplete: true,
+        childOrdersComplete: true,
+        exitFillsComplete: true,
+        positionComplete: true,
+        reasonCodes: [],
+      }),
+    })),
   };
 }
 
@@ -1098,8 +1414,8 @@ function gridTargetStateConflict(
     if (!parent) {
       const sibling = siblingEvidence.get(index);
       const siblingIsDurablyTerminalFill =
-        (sibling?.status === "PROTECTION_PENDING" ||
-          sibling?.status === "UNRESOLVED") &&
+        (sibling?.status === "PROTECTION_CONFIRMED" ||
+          sibling?.status === "VERIFIED_CLOSED") &&
         sibling.proof !== undefined &&
         (sibling.proof.status === "filled" ||
           sibling.proof.status === "cancelled") &&
@@ -1748,27 +2064,55 @@ export async function reconcilePreparedLegSource(
     };
   } else if (filledQuantity.isPositive()) {
     if (fills.ok && fillsResult.ok) {
-      const protectionReads = await collectFilledProtectionReads(
+      let protectionReads = await collectFilledProtectionReads(
         dependencies,
         execution,
         proof.value,
         fillsResult.value,
         readState.value,
       );
-      reconciliationObservedAt = protectionReads.observedAt;
-      const filledStateConflict =
-        protectionReads.positionComplete && protectionReads.coverage
-          ? targetStateConflict(
+      const aggregate =
+        options.gridContext ||
+        sourceSnapshot.value.cancelIntent?.remainderCancelProof
+          ? await collectFreshPreparedLegSiblings(
               dependencies,
-              protectionReads.state,
               execution,
-              proof.value,
-              fillsResult.value,
-              protectionReads.coverage,
-              options.gridContext,
-              protectionReads.children,
+              sourceId,
+              protectionReads.state,
             )
           : undefined;
+      if (aggregate?.ok)
+        protectionReads = {
+          ...protectionReads,
+          state: aggregate.value.state,
+          observedAt: aggregate.value.state.serverTime,
+        };
+      reconciliationObservedAt = protectionReads.observedAt;
+      const filledStateConflict =
+        aggregate !== undefined
+          ? !aggregate.ok
+            ? "AGGREGATE_PROTECTION_UNAVAILABLE"
+            : freshPreparedLegAggregateConflict(
+                protectionReads.state,
+                execution,
+                proof.value,
+                fillsResult.value,
+                protectionReads.children,
+                protectionReads.exits,
+                aggregate.value.siblings,
+              )
+          : protectionReads.positionComplete && protectionReads.coverage
+            ? targetStateConflict(
+                dependencies,
+                protectionReads.state,
+                execution,
+                proof.value,
+                fillsResult.value,
+                protectionReads.coverage,
+                options.gridContext,
+                protectionReads.children,
+              )
+            : undefined;
       const priorReconciliation = sourceSnapshot.value.reconciliations.at(-1);
       const legacyPendingNeedsReview =
         priorReconciliation?.status === "PROTECTION_PENDING" &&
@@ -1835,6 +2179,18 @@ export async function reconcilePreparedLegSource(
         positionComplete: protectionReads.positionComplete,
         reasonCodes: status === "PROTECTION_PENDING" ? reasons : [],
       });
+      if (aggregate?.ok && canConfirm) {
+        const aggregateEvidence = aggregateProtectionEvidence(
+          aggregate.value.approvalHash,
+          aggregate.value.siblings,
+          protectionReads.state,
+        );
+        if (aggregateEvidence)
+          protectionEvidence = {
+            ...protectionEvidence,
+            aggregate: aggregateEvidence,
+          };
+      }
     } else {
       const protectionReads = await collectFilledProtectionReads(
         dependencies,

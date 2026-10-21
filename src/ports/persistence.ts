@@ -321,6 +321,13 @@ export interface PreparedLegProtectionEvidenceV2 {
     readonly quantity: string;
     readonly serverTime: UtcTimestamp;
   };
+  readonly aggregate?: {
+    readonly approvalHash: PlanHash;
+    readonly siblings: readonly {
+      readonly sourceId: string;
+      readonly evidence: PreparedLegProtectionEvidenceV2Input;
+    }[];
+  };
   readonly collection: {
     readonly entryFills: "complete" | "incomplete";
     readonly childOrders: "complete" | "incomplete" | "not-required";

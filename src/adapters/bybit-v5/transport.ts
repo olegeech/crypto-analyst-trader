@@ -1,4 +1,5 @@
 import { buildSignaturePayload, hmacSha256 } from "./request-signing.js";
+import { responseServerTimeMs } from "./public-response.js";
 import {
   classifyRetCode,
   type TransportFailureKind,
@@ -182,15 +183,18 @@ function requestUrl(
 }
 
 function parseServerTime(response: BybitResponse): number {
-  const resultTime =
-    safeResponseTime(response.result.timeSecond) !== undefined
-      ? safeResponseTime(response.result.timeSecond)! * 1_000
-      : safeResponseTime(response.result.timeNano) !== undefined
-        ? Math.trunc(safeResponseTime(response.result.timeNano)! / 1_000_000)
-        : response.time;
+  const resultTime = responseServerTimeMs({
+    ...response,
+    // Bybit includes both fields; seconds lose the precision required to
+    // compare this observation against millisecond order update times.
+    result:
+      response.result.timeNano === undefined
+        ? response.result
+        : { timeNano: response.result.timeNano },
+  });
   if (
     resultTime === undefined ||
-    !Number.isFinite(resultTime) ||
+    !Number.isSafeInteger(resultTime) ||
     resultTime <= 0
   ) {
     throw new BybitDemoTransportError(

@@ -257,16 +257,38 @@ test("out-of-band fill after a zero-fill sibling snapshot stays recovery-only an
     );
     if (!firstRecovery.ok) return;
     assert.equal(firstRecovery.value.outcome, "recovery-only");
-    assert.equal(firstRecovery.value.legs[1]!.status, "PROTECTION_PENDING");
+    assert.equal(firstRecovery.value.legs[1]!.status, "PROTECTION_CONFIRMED");
     assert.ok(
       firstRecovery.value.legs.some((row) => row.status === "UNRESOLVED"),
     );
-    assert.ok(
-      firstRecovery.value.legs[1]!.reasonCodes.includes(
-        "GRID_SIBLING_EVIDENCE_INVALID",
+    const source = unwrap(
+      state.persistence.preparedLegExecution!.readPreparedLegSource(
+        sibling.sourceId,
       ),
     );
+    const evidence = source?.reconciliations.at(-1)?.protectionEvidence;
+    assert.equal(evidence?.status, "PROTECTION_CONFIRMED");
+    assert.equal(evidence?.entries.quantity, quantity.toString());
+    assert.equal(evidence?.exits.quantity, "0");
+    assert.equal(evidence?.coverage.outstandingQuantity, quantity.toString());
+    assert.equal(
+      evidence?.coverage.activeRemainingQuantity,
+      quantity.toString(),
+    );
+    assert.equal(evidence?.coverage.covered, true);
+    assert.equal(evidence?.position.quantity, quantity.toString());
+    assert.equal(
+      evidence?.children[0]?.parentOrderLinkId,
+      sibling.execution.clientOrderId,
+    );
+    assert.equal(
+      evidence?.children[0]?.triggerPrice,
+      sibling.execution.leg.intent.protection?.takeProfit?.toString(),
+    );
+    assert.equal(evidence?.aggregate?.siblings.length, 3);
     assert.equal(state.exchange.createRequests.length, 4);
+    assert.equal(unwrap(state.persistence.readHalt()).active, true);
+    state.reopenPersistence();
 
     const retried = await createMainnetPreparedGrid(
       {
@@ -278,9 +300,10 @@ test("out-of-band fill after a zero-fill sibling snapshot stays recovery-only an
     assert.equal(retried.ok, true, retried.ok ? "" : retried.error.message);
     if (!retried.ok) return;
     assert.equal(retried.value.outcome, "recovery-only");
+    assert.equal(retried.value.legs[1]!.status, "PROTECTION_CONFIRMED");
     assert.ok(retried.value.legs.some((row) => row.status === "UNRESOLVED"));
     assert.ok(
-      retried.value.legs.some((row) => row.status === "PROTECTION_PENDING"),
+      retried.value.legs.every((row) => row.status !== "PROTECTION_PENDING"),
     );
     assert.equal(state.exchange.createRequests.length, 4);
     assert.equal(unwrap(state.persistence.readHalt()).active, true);
