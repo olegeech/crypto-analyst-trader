@@ -10,6 +10,7 @@ import { authorityAccountScopeMigration } from "./migrations/004-authority-accou
 import { executionIdentityBindingsMigration } from "./migrations/005-execution-identity-bindings.js";
 import { preparedLegExecutionMigration } from "./migrations/006-prepared-leg-execution.js";
 import { preparedLegProtectionV2Migration } from "./migrations/007-prepared-leg-protection-v2.js";
+import { operatorMainnetTestMigration } from "./migrations/008-operator-mainnet-test.js";
 
 export interface SqliteMigration {
   readonly version: number;
@@ -25,6 +26,7 @@ export const MIGRATIONS: readonly SqliteMigration[] = [
   executionIdentityBindingsMigration,
   preparedLegExecutionMigration,
   preparedLegProtectionV2Migration,
+  operatorMainnetTestMigration,
 ];
 
 export const CURRENT_SCHEMA_VERSION = MIGRATIONS.at(-1)?.version ?? 0;

@@ -73,6 +73,48 @@ test("fresh and reopened journals configure verified SQLite durability state", (
   assert.equal(statSync(root).isDirectory(), true);
 });
 
+test("operator Mainnet journal is an additive v8 schema with empty tables", () => {
+  assert.equal(CURRENT_SCHEMA_VERSION, 8);
+  const { path } = temporaryDatabase();
+  const opened = openSqliteConnection({
+    environment: "mainnet",
+    databasePath: path,
+    runtime: supportedRuntime,
+  });
+  assert.equal(opened.ok, true);
+  if (!opened.ok) return;
+  const { db } = opened.value;
+  for (const table of [
+    "operator_mainnet_test_sources",
+    "operator_mainnet_test_write_intents",
+    "operator_mainnet_test_attempts",
+    "operator_mainnet_test_reconciliations",
+    "operator_mainnet_test_manual_actions",
+  ]) {
+    assert.equal(
+      db
+        .prepare(
+          "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+        )
+        .get(table)?.name,
+      table,
+    );
+  }
+  assert.equal(
+    db.prepare("SELECT COUNT(*) AS count FROM prepared_leg_sources").get()
+      ?.count,
+    0,
+  );
+  assert.equal(
+    db
+      .prepare("SELECT COUNT(*) AS count FROM operator_mainnet_test_sources")
+      .get()?.count,
+    0,
+  );
+  assert.deepEqual(db.prepare("PRAGMA foreign_key_check").all(), []);
+  opened.value.close();
+});
+
 test("identity-binding migration is additive and starts without fabricated bindings", () => {
   const { path } = temporaryDatabase();
   const db = openDatabase(path);
