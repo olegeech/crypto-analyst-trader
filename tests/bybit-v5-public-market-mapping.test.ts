@@ -11,6 +11,10 @@ import {
   mapTicker,
 } from "../src/adapters/bybit-v5/public-market-mappers.js";
 import type { UtcTimestamp } from "../src/domain/shared/time.js";
+import {
+  BybitPublicMarketClient,
+  PUBLIC_TICKERS_PATH,
+} from "../src/adapters/bybit-v5/public-market-client.js";
 
 function response(
   result: Record<string, unknown>,
@@ -81,6 +85,28 @@ test("public mappings validate instrument identity, funding interval and ticker 
   );
   assert.equal(ticker.observedAt, "2024-08-01T18:00:00.000Z");
   assert.equal(ticker.fundingRate?.toString(), "-0.0001");
+});
+
+test("ticker mapping rejects contradictory returned scope and unusable best books", () => {
+  const ticker = {
+    symbol: "DOGEUSDT",
+    bid1Price: "1",
+    ask1Price: "2",
+    lastPrice: "1.5",
+  };
+  for (const invalid of [
+    response({ category: "spot", list: [ticker] }),
+    response({ symbol: "BTCUSDT", list: [ticker] }),
+    response({ list: [{ ...ticker, bid1Price: "0" }] }),
+    response({ list: [{ ...ticker, bid1Price: "2", ask1Price: "1.9" }] }),
+  ]) {
+    assert.throws(
+      () => mapTicker(invalid, "DOGEUSDT"),
+      (error: unknown) =>
+        error instanceof BybitPublicMarketMappingError &&
+        (error.kind === "precondition" || error.kind === "invalid-response"),
+    );
+  }
 });
 
 test("public mappings normalize reverse kline ordering and exclude only after cutoff normalization", () => {
@@ -217,4 +243,55 @@ test("funding and open-interest mappings reject wrong identity, duplicates and m
       error instanceof BybitPublicMarketMappingError &&
       error.kind === "missing-data",
   );
+});
+
+test("operator quote client binds the linear ticker to Bybit mainnet and provider-time bounds", async () => {
+  const exchangeTimes = [
+    Date.parse("2026-10-22T10:00:00.000Z"),
+    Date.parse("2026-10-22T10:00:00.020Z"),
+  ];
+  const requests: Array<{ path: string; query: Record<string, string> }> = [];
+  const client = new BybitPublicMarketClient({
+    transport: {
+      async get(path, query) {
+        requests.push({ path, query: query as Record<string, string> });
+        return response(
+          {
+            list: [
+              {
+                symbol: "DOGEUSDT",
+                bid1Price: "0.0886",
+                ask1Price: "0.0887",
+                lastPrice: "0.08865",
+              },
+            ],
+          },
+          Date.parse("2026-10-22T10:00:00.010Z"),
+        );
+      },
+      async getExchangeTime() {
+        const next = exchangeTimes.shift();
+        if (next === undefined) throw new Error("unexpected time read");
+        return next;
+      },
+    },
+  });
+
+  const quote = await client.readOperatorQuote("DOGEUSDT");
+  assert.deepEqual(requests, [
+    {
+      path: PUBLIC_TICKERS_PATH,
+      query: { category: "linear", symbol: "DOGEUSDT" },
+    },
+  ]);
+  assert.equal(quote.schemaVersion, "bybit-linear-operator-quote/v1");
+  assert.equal(quote.exchange, "bybit");
+  assert.equal(quote.environment, "mainnet");
+  assert.equal(quote.category, "linear");
+  assert.equal(quote.origin, "https://api.bybit.com");
+  assert.equal(quote.symbol, "DOGEUSDT");
+  assert.equal(quote.observedAt, "2026-10-22T10:00:00.010Z");
+  assert.equal(quote.collectionStartedAt, "2026-10-22T10:00:00.000Z");
+  assert.equal(quote.collectionCompletedAt, "2026-10-22T10:00:00.020Z");
+  assert.match(quote.contentHash, /^sha256:[0-9a-f]{64}$/u);
 });

@@ -12,6 +12,7 @@ import {
   hashCanonical,
   canonicalSerialize,
 } from "../src/domain/identity/canonical-serialization.js";
+import { encodeCanonicalArtifact } from "../src/domain/identity/canonical-artifact.js";
 import {
   portfolioRiskAccountInput,
   portfolioRiskPosition,
@@ -286,4 +287,19 @@ test("Mainnet preparation binds one closed Partial Market LastPrice policy and r
     void _hash;
     assert.equal(rehydratePreparedDailyPlan(rehash(payload)).ok, false);
   }
+});
+
+test("prepared daily artifact compatibility retains its pre-operator golden hashes", () => {
+  const prepared = value(createPreparedDailyPlan(input()));
+  const envelope = value(
+    encodeCanonicalArtifact("prepared-daily-plan", prepared),
+  );
+  assert.equal(
+    prepared.contentHash,
+    "sha256:9943be849a9ef46b588024b9e89feb756d5e5005d855282a6acb7a4129cdb0ea",
+  );
+  assert.equal(
+    envelope.canonicalHash,
+    "sha256:e73b5cda51e9104f4dbc046fd55c36621feb55c6bd1afd7b4a24b7b71ffde463",
+  );
 });
