@@ -160,6 +160,51 @@ protective orders, act only on verified ownership, and reconcile again before
 any explicit `HALT` clearance. These internal boundaries do not expose an
 operator command or authorize a Mainnet write.
 
+### Supervised Mainnet lifecycle check (issue #31 U3)
+
+The attended CLI exposes three commands. Preparation performs bounded GET-only
+account/market checks, freezes the approved symbol, allocation, gross entry
+notional cap and quote-deviation band, and saves the exact plan by hash:
+
+```bash
+npm run mainnet:test -- prepare --symbol BTCUSDT --allocation 10 --gross-cap 8 --max-deviation-bps 10
+npm run mainnet:test -- execute --plan-hash sha256:<exact-64-hex>
+npm run mainnet:test -- status --source-id operator-mainnet-test:sha256:<exact-64-hex>
+```
+
+Review the frozen entry Limit/GTC price, quantity, Partial Market LastPrice TP,
+quote age, deviation range, allocation and gross cap before executing. The cap
+limits gross entry notional only; it is not a cap on fees, slippage, funding or
+total loss. Execute requires an interactive terminal and the exact lowercase
+answer `yes` for one bounded CREATE attempt. Any durable intent or restart
+routes to status recovery; execute will not resend it. After any attempt, run
+`status` and follow the displayed next action. A successful CREATE response is
+not a TP lifecycle pass.
+
+Status uses bounded authenticated GET reads and appends the fresh evidence to
+the local scoped journal. It never retries an exchange write, cancels an order,
+closes a position or clears HALT. In an attended terminal it asks whether the
+operator acted in Bybit UI since the prior check (`none`, `cancel`, `close` or
+`other`). That answer is append-only provenance, not exchange proof. A manual
+entry remainder cancellation can still reach TP pass after a later fresh proof;
+a manual position close or mixed/manual exit remains `MANUAL_CLEANUP`.
+
+`NOT_EXERCISED` means fresh evidence proves zero entry fills; an open GTC entry
+still reports cleanup pending. `PARTIAL_EVIDENCE` means the lifecycle is
+incomplete but the known evidence remains attributable. `TP_LIFECYCLE_PASS`
+requires every entry fill to be closed by the exact TP child's execution fills,
+with no open parent/child order and a flat position. `UNKNOWN` means fresh
+proof is incomplete or contradictory and retains HALT. For pending cleanup,
+manual cleanup or UNKNOWN, inspect the exact orders and position in Bybit UI,
+perform any necessary action yourself, then rerun `status` to record fresh
+exchange proof. Do not treat the manual declaration itself as proof or use it
+to clear HALT.
+
+Exit codes: 0 means preparation succeeded or status is verified clean (including
+`NOT_EXERCISED`); 2 means invalid input, 3 means execution was declined or the
+terminal was unattended, 4 means preparation/admission was blocked, and 5
+means status/reconciliation is needed or the exchange outcome is unresolved.
+
 ## Bybit public market evidence smoke (issue #11)
 
 The public market-evidence boundary uses unsigned Bybit mainnet REST reads and

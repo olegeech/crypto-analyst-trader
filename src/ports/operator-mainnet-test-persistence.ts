@@ -88,6 +88,8 @@ export interface OperatorMainnetTestManualActionRecord {
 
 export interface OperatorMainnetTestSnapshot {
   readonly source: OperatorMainnetTestSourceRecord;
+  readonly plan: OperatorMainnetTestPlan;
+  readonly approval: OperatorMainnetTestApproval;
   readonly intent: OperatorMainnetTestIntentRecord;
   readonly attempt?: OperatorMainnetTestAttemptRecord;
   readonly reconciliations: readonly OperatorMainnetTestReconciliationRecord[];
@@ -140,6 +142,11 @@ export interface AppendOperatorMainnetTestManualActionRequest {
  * transaction to close the gap between admission and durable intent.
  */
 export interface OperatorMainnetTestPersistencePort {
+  /** Keep a prepared, not-yet-approved plan in the scoped canonical artifact store. */
+  persistPreparedPlan(plan: OperatorMainnetTestPlan): Result<void>;
+  readPreparedPlan(
+    planHash: PlanHash,
+  ): Result<OperatorMainnetTestPlan | undefined>;
   readOperatorMainnetTestSource(
     sourceId: string,
   ): Result<OperatorMainnetTestSnapshot | undefined>;

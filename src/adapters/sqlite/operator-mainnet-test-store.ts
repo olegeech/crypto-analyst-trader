@@ -285,6 +285,64 @@ export class SqliteOperatorMainnetTestStore implements OperatorMainnetTestPersis
     this.db = connection.db;
   }
 
+  persistPreparedPlan(planInput: OperatorMainnetTestPlan): Result<void> {
+    const plan = rehydrateOperatorMainnetTestPlan(planInput);
+    if (
+      !plan.ok ||
+      !validScope(this.scope) ||
+      plan.value.environment !== "mainnet" ||
+      plan.value.accountIdentityHash !== this.scope.accountId
+    )
+      return invalid("prepared operator plan does not match its account scope");
+    const envelope = encodeCanonicalArtifact(PLAN_KIND, plan.value);
+    if (!envelope.ok) return envelope;
+    const artifactId = PLAN_ARTIFACT_ID(plan.value.contentHash);
+    try {
+      return runInTransaction(
+        this.db,
+        (database) =>
+          insertArtifact(
+            database,
+            this.scope,
+            artifactId,
+            envelope.value,
+            plan.value.contentHash,
+            plan.value.preparedAt,
+          ),
+        "PERSISTENCE_CONFLICT",
+      );
+    } catch (error) {
+      return fail(sqliteError(error, "PERSISTENCE_INTEGRITY"));
+    }
+  }
+
+  readPreparedPlan(
+    planHashInput: PlanHash,
+  ): Result<OperatorMainnetTestPlan | undefined> {
+    const planHash = requireHash(planHashInput, "planHash");
+    if (!planHash.ok || !validScope(this.scope)) return invalid();
+    const artifact = this.artifactRow(PLAN_ARTIFACT_ID(planHash.value));
+    if (!artifact.ok) return artifact;
+    if (!artifact.value) return ok(undefined);
+    if (
+      artifact.value.artifactKind !== PLAN_KIND ||
+      artifact.value.materialHash !== planHash.value
+    )
+      return persistenceFailure(
+        "prepared operator plan artifact identity is invalid",
+      );
+    const plan = rehydrateArtifact(PLAN_KIND, artifact.value.envelope);
+    if (
+      !plan.ok ||
+      plan.value.contentHash !== planHash.value ||
+      plan.value.accountIdentityHash !== this.scope.accountId
+    )
+      return persistenceFailure(
+        "prepared operator plan does not match its scope",
+      );
+    return ok(plan.value);
+  }
+
   private sourceRow(
     sourceId: string,
     database = this.db,
@@ -681,6 +739,24 @@ export class SqliteOperatorMainnetTestStore implements OperatorMainnetTestPersis
   ): Result<OperatorMainnetTestSnapshot> {
     const source = this.sourceFromRow(sourceRow);
     if (!source.ok) return source;
+    const planArtifact = this.artifactRow(source.value.planArtifactId);
+    const approvalArtifact = this.artifactRow(source.value.approvalArtifactId);
+    if (!planArtifact.ok) return planArtifact;
+    if (!approvalArtifact.ok) return approvalArtifact;
+    if (!planArtifact.value || !approvalArtifact.value)
+      return persistenceFailure("operator source artifacts are missing");
+    const plan = rehydrateArtifact(PLAN_KIND, planArtifact.value.envelope);
+    const approval = rehydrateArtifact(
+      APPROVAL_KIND,
+      approvalArtifact.value.envelope,
+    );
+    if (
+      !plan.ok ||
+      !approval.ok ||
+      plan.value.contentHash !== source.value.planHash ||
+      approval.value.contentHash !== source.value.approvalHash
+    )
+      return persistenceFailure("operator source artifacts failed validation");
     const intentRow = database
       .prepare(
         "SELECT * FROM operator_mainnet_test_write_intents WHERE source_id = ?",
@@ -715,6 +791,8 @@ export class SqliteOperatorMainnetTestStore implements OperatorMainnetTestPersis
     if (!lease.ok) return lease;
     return ok({
       source: source.value,
+      plan: plan.value,
+      approval: approval.value,
       intent: intent.value,
       ...(attempt.value === undefined ? {} : { attempt: attempt.value }),
       reconciliations: reconciliations.value,

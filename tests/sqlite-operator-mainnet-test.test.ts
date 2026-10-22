@@ -220,6 +220,42 @@ test("operator create intent, canonical artifacts and exact payload commit atomi
   assert.equal(CURRENT_SCHEMA_VERSION, 8);
 });
 
+test("prepared plan is durable and readable before any CREATE intent", () => {
+  const fixture = setup();
+  const valuePlan = plan("prepared-only-01");
+  value(fixture.store.persistPreparedPlan(valuePlan));
+  assert.equal(
+    value(fixture.store.readPreparedPlan(valuePlan.contentHash))?.contentHash,
+    valuePlan.contentHash,
+  );
+  assert.equal(
+    fixture.connection.db
+      .prepare(
+        "SELECT COUNT(*) AS count FROM operator_mainnet_test_write_intents",
+      )
+      .get()?.count,
+    0,
+  );
+  fixture.connection.close();
+
+  const reopened = value(
+    openSqliteConnection({
+      environment: "mainnet",
+      databasePath: fixture.path,
+      runtime,
+      clock: { now: () => fixture.clock.value },
+    }),
+  );
+  const store = value(
+    createSqliteOperatorMainnetTestStore(reopened, fixture.scope),
+  );
+  assert.equal(
+    value(store.readPreparedPlan(valuePlan.contentHash))?.contentHash,
+    valuePlan.contentHash,
+  );
+  reopened.close();
+});
+
 test("pending operator source for the same account blocks a different nonce and hash", () => {
   const fixture = setup();
   const firstPlan = plan("operator-test-01");
@@ -437,4 +473,60 @@ test("reconciliation and manual action provenance append without rewriting prior
     ),
     undefined,
   );
+});
+
+test("status reconciliation can append after lease takeover without clearing HALT", () => {
+  const fixture = setup();
+  const created = value(prepare(fixture));
+  value(
+    fixture.store.recordAttemptAndHalt({
+      authority: {
+        ownerRunId: fixture.lease.ownerRunId,
+        epoch: fixture.lease.epoch,
+      },
+      sourceId: created.source.sourceId,
+      attemptId: "operator-attempt-recovery",
+      outcome: "accepted",
+      exchangeOrderId: "exchange-parent-recovery",
+      recordedAt: fixture.clock.value,
+    }),
+  );
+
+  fixture.clock.value = timestamp("2026-10-22T10:02:01.000Z");
+  const recoveryLease = value(
+    fixture.execution.acquireLease({
+      scope: fixture.scope,
+      ownerRunId: "operator-status-recovery",
+      now: fixture.clock.value,
+      ttlMs: 60_000,
+    }),
+  );
+  assert.equal(recoveryLease.reconciliationRequired, true);
+  assert.equal(value(fixture.execution.readHalt()).active, true);
+
+  const appended = value(
+    fixture.store.appendReconciliation({
+      authority: {
+        ownerRunId: recoveryLease.ownerRunId,
+        epoch: recoveryLease.epoch,
+      },
+      sourceId: created.source.sourceId,
+      lifecycleOutcome: "UNKNOWN",
+      cleanupStatus: "unknown",
+      evidence: { reason: "recovery read incomplete" },
+      observedAt: fixture.clock.value,
+    }),
+  );
+  assert.equal(appended.revision, 1);
+  assert.equal(
+    value(fixture.store.readOperatorMainnetTestSource(created.source.sourceId))
+      ?.reconciliations.length,
+    1,
+  );
+  assert.equal(
+    value(fixture.execution.readLease())?.reconciliationRequired,
+    true,
+  );
+  assert.equal(value(fixture.execution.readHalt()).active, true);
+  fixture.connection.close();
 });
