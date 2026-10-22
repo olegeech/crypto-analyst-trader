@@ -27,6 +27,7 @@ import {
   deriveMainnetExecutionReadiness,
   type MainnetExecutionReadiness,
 } from "./mainnet-execution-readiness.js";
+import { snapshotExchangeCredentials } from "./mainnet-composition-helpers.js";
 
 export interface MainnetPreflightRequestCounts {
   readonly exchangeReads: number;
@@ -114,16 +115,6 @@ function instrumentProviderFailureCode(
   return "TRANSPORT_FAILED";
 }
 
-function snapshotCredentials(
-  credentials: ExchangeCredentials,
-): Readonly<ExchangeCredentials> {
-  return Object.freeze({
-    apiKey: credentials.apiKey,
-    apiSecret: credentials.apiSecret,
-    accountId: credentials.accountId,
-  });
-}
-
 function failed(
   reasonCode: MainnetPreflightFailure["reasonCode"],
   requestCounts: MainnetPreflightRequestCounts,
@@ -154,7 +145,9 @@ export async function runMainnetPreflight(
     load: async (environment: CredentialEnvironment) => {
       if (environment !== "mainnet") throw new Error("Environment mismatch.");
       if (credentialSnapshot) return credentialSnapshot;
-      credentialSnapshot = snapshotCredentials(await provider.load("mainnet"));
+      credentialSnapshot = snapshotExchangeCredentials(
+        await provider.load("mainnet"),
+      );
       return credentialSnapshot;
     },
   };

@@ -75,7 +75,12 @@ The forward release evidence is deterministic and fault-injection/replay
 verification followed by explicit read-only Mainnet readiness checks against
 the isolated AI Subaccount. The first deliberately authorized Mainnet write is
 the bounded canary in [issue #31](https://github.com/olegeech/crypto-analyst-trader/issues/31),
-after the #30 release gate and the applicable live-risk gate pass.
+after the #31 implementation is reviewed and released, a fresh read-only
+preflight is READY, every mandatory runtime safety gate passes, and the operator
+separately approves the exact attended order. Completion of #30's integrated
+daily-strategy data gate is not a prerequisite for this one execution-contract
+experiment; this exception does not establish daily-strategy readiness or waive
+account, permission, capacity, ownership, position, lease or HALT checks.
 
 Testnet is not a release prerequisite. The bounded Testnet and Demo probes
 below remain opt-in, environment-scoped capability checks; their observations
@@ -120,8 +125,11 @@ The test-only authority fixture is not part of any operator entry point.
 `daily:approve` remains decision-only; a typed Mainnet writer in source is not
 operator authority or `LIVE_PROVEN` evidence. Do not invoke or synthesize write
 authority outside the #31-owned bounded canary. #31 remains the first
-deliberately authorized Mainnet write after the #30 release gate and applicable
-live-risk gate pass. #21/#46 require no live write or Testnet step.
+deliberately authorized Mainnet write after its own implementation/release,
+fresh readiness checks and applicable runtime safety gates pass. The #30
+integrated daily-data release gate is not a prerequisite for this single
+supervised execution-contract experiment. #21/#46 require no live write or
+Testnet step.
 
 Issue [#23](https://github.com/olegeech/crypto-analyst-trader/issues/23)
 adds per-leg protection reconciliation to those internal boundaries. A new M1
@@ -169,7 +177,8 @@ notional cap and quote-deviation band, and saves the exact plan by hash:
 ```bash
 npm run mainnet:test -- prepare --symbol BTCUSDT --allocation 10 --gross-cap 8 --max-deviation-bps 10
 npm run mainnet:test -- execute --plan-hash sha256:<exact-64-hex>
-npm run mainnet:test -- status --source-id operator-mainnet-test:sha256:<exact-64-hex>
+# Copy the exact SOURCE_ID printed by prepare into this command.
+npm run mainnet:test -- status --source-id "$SOURCE_ID"
 ```
 
 Review the frozen entry Limit/GTC price, quantity, Partial Market LastPrice TP,
@@ -199,6 +208,17 @@ manual cleanup or UNKNOWN, inspect the exact orders and position in Bybit UI,
 perform any necessary action yourself, then rerun `status` to record fresh
 exchange proof. Do not treat the manual declaration itself as proof or use it
 to clear HALT.
+
+The command output is a sanitized, machine-readable evidence record. Keep the
+reviewed build HEAD (`git rev-parse HEAD`) with the plan schema/hash, policy
+version and identity hash, approval and payload hashes, per-invocation GET and
+POST counts, lifecycle/cleanup result, known entry/exit/position quantities,
+reason codes and uncertainty field. Status is GET-only and always reports zero
+exchange POSTs. The scoped artifacts and append-only journal stay in the existing
+private Mainnet SQLite database; do not copy account identifiers, credentials,
+raw provider responses or private account snapshots into PRs or public logs.
+No live outcome exists until a separately authorized attended run has been
+performed and reconciled; offline tests and this code PR do not complete AC7.
 
 Exit codes: 0 means preparation succeeded or status is verified clean (including
 `NOT_EXERCISED`); 2 means invalid input, 3 means execution was declined or the
@@ -504,6 +524,15 @@ v5-aware adapter while preserving the database and its `-wal`, or restore a
 verified pre-migration backup before deploying the v4 adapter. On a copied
 backup, verify the schema marker and that existing execution attempts remain
 present before returning the journal to service.
+
+Migration 008 is also additive and advances the journal to schema version 8
+for supervised Mainnet test records. A v7 adapter must fail closed on this
+database. Do not lower the marker or remove the operator-test tables manually.
+Before any #31 source exists, a rollback can use a verified pre-migration v7
+backup; after a source or exchange attempt exists, preserve the database and
+its `-wal` file and use a v8-aware forward fix while reconciling any exchange
+exposure. Restoring a v7 backup after that point would discard durable recovery
+evidence.
 
 The persistence port returns machine-readable recovery metadata that the
 operator CLI will render. The safe default for every failure is no new

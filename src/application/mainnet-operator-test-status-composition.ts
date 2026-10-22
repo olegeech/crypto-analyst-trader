@@ -30,6 +30,10 @@ import {
   type MainnetOperatorTestChildFills,
   type MainnetOperatorTestStatusObservation,
 } from "./mainnet-operator-test-status.js";
+import {
+  snapshotExchangeCredentials,
+  withExchangeCounts,
+} from "./mainnet-composition-helpers.js";
 
 const ORDER_REALTIME_PATH = "/v5/order/realtime";
 const ORDER_HISTORY_PATH = "/v5/order/history";
@@ -53,14 +57,17 @@ function failClosed(code: string): Result<never> {
   );
 }
 
-function snapshotCredentials(
-  credentials: ExchangeCredentials,
-): Readonly<ExchangeCredentials> {
-  return Object.freeze({
-    apiKey: credentials.apiKey,
-    apiSecret: credentials.apiSecret,
-    accountId: credentials.accountId,
-  });
+function failClosedWithReads(
+  code: string,
+  exchangeReads: number,
+): Result<never> {
+  return fail(
+    domainError(
+      "UNRESOLVED_RECONCILIATION",
+      "operator status read is unresolved",
+      { reasonCode: code, exchangeReads },
+    ),
+  );
 }
 
 function orderSignature(record: BybitOrderRecord): string {
@@ -172,10 +179,10 @@ class ReadOnlyOperatorStatusExchange {
   private reads: number;
 
   constructor(
-    private readonly credentials: Readonly<ExchangeCredentials>,
-    private readonly monotonicClock: () => number,
-    private readonly utcClock: () => number,
-    private readonly request: typeof fetch,
+    credentials: Readonly<ExchangeCredentials>,
+    monotonicClock: () => number,
+    utcClock: () => number,
+    request: typeof fetch,
     deadline: number,
     initialReads = 0,
   ) {
@@ -209,6 +216,10 @@ class ReadOnlyOperatorStatusExchange {
       monotonicClock,
       timeoutMs: 5_000,
     });
+  }
+
+  readCount(): number {
+    return this.reads;
   }
 
   private async readOrders(
@@ -288,7 +299,7 @@ class ReadOnlyOperatorStatusExchange {
     exchangeOrderId?: string,
   ): Promise<Result<MainnetOperatorTestStatusObservation>> {
     try {
-      const [realtime, history] = await Promise.all([
+      const orderResults = await Promise.allSettled([
         this.readOrders(
           ORDER_REALTIME_PATH,
           plan.symbol,
@@ -304,14 +315,20 @@ class ReadOnlyOperatorStatusExchange {
           exchangeOrderId,
         ),
       ]);
+      const [realtimeResult, historyResult] = orderResults;
+      if (realtimeResult.status === "rejected") throw realtimeResult.reason;
+      if (historyResult.status === "rejected") throw historyResult.reason;
+      const realtime = realtimeResult.value;
+      const history = historyResult.value;
       const parentRecords = deduplicateOrders([...realtime, ...history]);
-      if (!parentRecords.ok) return failClosed("ORDER_READ_CONTRADICTION");
+      if (!parentRecords.ok)
+        return failClosedWithReads("ORDER_READ_CONTRADICTION", this.reads);
       if (parentRecords.value.length > 1)
-        return failClosed("MULTIPLE_PARENT_ORDERS");
+        return failClosedWithReads("MULTIPLE_PARENT_ORDERS", this.reads);
       const parentRecord = parentRecords.value[0];
       const exactParentOrderId =
         parentRecord?.exchangeOrderId ?? exchangeOrderId;
-      const [entryFills, symbolRealtime, symbolHistory] = await Promise.all([
+      const symbolResults = await Promise.allSettled([
         this.readFills({
           instrument: plan.symbol,
           clientOrderId: plan.clientOrderId,
@@ -322,11 +339,22 @@ class ReadOnlyOperatorStatusExchange {
         this.readOrders(ORDER_REALTIME_PATH, plan.symbol, "order/realtime"),
         this.readOrders(ORDER_HISTORY_PATH, plan.symbol, "order/history"),
       ]);
+      const [entryResult, symbolRealtimeResult, symbolHistoryResult] =
+        symbolResults;
+      if (entryResult.status === "rejected") throw entryResult.reason;
+      if (symbolRealtimeResult.status === "rejected")
+        throw symbolRealtimeResult.reason;
+      if (symbolHistoryResult.status === "rejected")
+        throw symbolHistoryResult.reason;
+      const entryFills = entryResult.value;
+      const symbolRealtime = symbolRealtimeResult.value;
+      const symbolHistory = symbolHistoryResult.value;
       const allRecords = deduplicateOrders([
         ...symbolRealtime,
         ...symbolHistory,
       ]);
-      if (!allRecords.ok) return failClosed("ORDER_READ_CONTRADICTION");
+      if (!allRecords.ok)
+        return failClosedWithReads("ORDER_READ_CONTRADICTION", this.reads);
       const all = allRecords.value;
       const childRecords = all.filter(
         (record) => record.parentOrderLinkId === plan.clientOrderId,
@@ -361,7 +389,8 @@ class ReadOnlyOperatorStatusExchange {
       }
       const providerTime = await this.transport.readExchangeTime();
       const observedAt = timestampFromEpochMs(providerTime);
-      if (!observedAt.ok) return failClosed("PROVIDER_TIME_INVALID");
+      if (!observedAt.ok)
+        return failClosedWithReads("PROVIDER_TIME_INVALID", this.reads);
       const parent = parentRecord
         ? mapOrderObservation(
             parentRecord,
@@ -407,13 +436,14 @@ class ReadOnlyOperatorStatusExchange {
         },
       };
     } catch (error) {
-      return failClosed(
+      return failClosedWithReads(
         error instanceof BybitAccountReadError
           ? `READ_${error.code}`
           : error instanceof Error &&
               error.message === "status page budget exhausted"
             ? "PAGE_BUDGET_EXHAUSTED"
             : "READ_FAILED",
+        this.reads,
       );
     }
   }
@@ -426,11 +456,17 @@ export async function runMainnetOperatorTestStatusComposition(input: {
     "entry-remainder-cancelled" | "position-closed" | "other";
   readonly actor?: unknown;
 }) {
+  let exchangeReads = 0;
+  let statusExchange: ReadOnlyOperatorStatusExchange | undefined;
   const resolved = resolveOperatorMainnetSource(input.sourceId);
-  if (!resolved.ok) return resolved;
+  if (!resolved.ok) return withExchangeCounts(resolved, exchangeReads, 0);
   if (!resolved.value)
-    return fail(
-      domainError("INVALID_VALUE", "operator status source was not found"),
+    return withExchangeCounts(
+      fail(
+        domainError("INVALID_VALUE", "operator status source was not found"),
+      ),
+      exchangeReads,
+      0,
     );
   const wall = Date.now;
   const monotonic = () => performance.now();
@@ -446,12 +482,19 @@ export async function runMainnetOperatorTestStatusComposition(input: {
     scope: resolved.value.scope,
     clock: localClock,
   });
-  if (!persistence.ok) return persistence;
+  if (!persistence.ok) return withExchangeCounts(persistence, exchangeReads, 0);
   try {
     const journal = persistence.value.operatorMainnetTest;
-    if (!journal) return failClosed("OPERATOR_JOURNAL_UNAVAILABLE");
+    if (!journal)
+      return withExchangeCounts(
+        failClosed("OPERATOR_JOURNAL_UNAVAILABLE"),
+        exchangeReads,
+        0,
+      );
     const provider = createMacOSKeychainProvider();
-    const credentials = snapshotCredentials(await provider.load("mainnet"));
+    const credentials = snapshotExchangeCredentials(
+      await provider.load("mainnet"),
+    );
     const observationDeadline = monotonic() + OBSERVATION_DEADLINE_MS;
     const identityBudget: AccountReadBudget = {
       deadline: observationDeadline,
@@ -460,11 +503,10 @@ export async function runMainnetOperatorTestStatusComposition(input: {
       maxResponseBytes: MAX_RESPONSE_BYTES,
       maxObservedResponseBytes: 0,
     };
-    let identityReads = 0;
     const identityRequest: typeof fetch = async (url, init) => {
       if ((init?.method ?? "GET").toUpperCase() !== "GET")
         throw new Error("status permits GET only");
-      identityReads += 1;
+      exchangeReads += 1;
       return fetch(url, init);
     };
     const identityTransport = new BybitAccountReadTransport({
@@ -478,7 +520,12 @@ export async function runMainnetOperatorTestStatusComposition(input: {
     });
     const authenticatedAtMs = await identityTransport.readExchangeTime();
     const authenticatedAt = timestampFromEpochMs(authenticatedAtMs);
-    if (!authenticatedAt.ok) return failClosed("ACCOUNT_TIME_INVALID");
+    if (!authenticatedAt.ok)
+      return withExchangeCounts(
+        failClosed("ACCOUNT_TIME_INVALID"),
+        exchangeReads,
+        0,
+      );
     const identity = mapAccountReadIdentity(
       await identityTransport.get("/v5/user/query-api"),
       credentials.accountId,
@@ -489,26 +536,35 @@ export async function runMainnetOperatorTestStatusComposition(input: {
       identity.accountBinding.accountIdentityHash !==
       resolved.value.snapshot.plan.accountIdentityHash
     )
-      return failClosed("ACCOUNT_IDENTITY_MISMATCH");
-    const exchange = new ReadOnlyOperatorStatusExchange(
+      return withExchangeCounts(
+        failClosed("ACCOUNT_IDENTITY_MISMATCH"),
+        exchangeReads,
+        0,
+      );
+    statusExchange = new ReadOnlyOperatorStatusExchange(
       credentials,
       monotonic,
       wall,
       fetch,
       observationDeadline,
-      identityReads,
+      exchangeReads,
     );
-    return await runMainnetOperatorTestStatus(input, {
+    const result = await runMainnetOperatorTestStatus(input, {
       persistence: persistence.value,
       journal,
-      exchange,
+      exchange: statusExchange,
       clock: localClock,
     });
+    return withExchangeCounts(result, statusExchange.readCount(), 0);
   } catch (error) {
-    return failClosed(
-      error instanceof BybitAccountReadError
-        ? `READ_${error.code}`
-        : "STATUS_COMPOSITION_FAILED",
+    return withExchangeCounts(
+      failClosed(
+        error instanceof BybitAccountReadError
+          ? `READ_${error.code}`
+          : "STATUS_COMPOSITION_FAILED",
+      ),
+      statusExchange?.readCount() ?? exchangeReads,
+      0,
     );
   } finally {
     persistence.value.close();

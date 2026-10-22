@@ -833,13 +833,26 @@ test("failed or incomplete status reads append UNKNOWN and preserve active HALT"
     fail(
       domainError("UNRESOLVED_RECONCILIATION", "read failed", {
         reasonCode: "PAGE_BUDGET_EXHAUSTED",
+        exchangeReads: 7,
       }),
     ),
   );
   const result = unwrap(await h.run());
   assert.equal(result.lifecycleOutcome, "UNKNOWN");
   assert.equal(result.cleanupStatus, "unknown");
+  assert.equal(result.exchangeReads, 7);
   assert.equal(result.halt.active, true);
+  assert.deepEqual(result.reasons, ["PAGE_BUDGET_EXHAUSTED"]);
+  const evidence = JSON.parse(
+    result.latestSnapshot.reconciliations[0]!.canonicalJson,
+  ) as {
+    readonly evidence: {
+      readonly exchangeReads: number;
+      readonly failedStage: string;
+    };
+  };
+  assert.equal(evidence.evidence.exchangeReads, 7);
+  assert.equal(evidence.evidence.failedStage, "PAGE_BUDGET_EXHAUSTED");
 });
 
 test("status appends after lease takeover while reconciliation-required HALT stays active", async () => {

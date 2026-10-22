@@ -682,13 +682,28 @@ export async function runMainnetOperatorTestStatus(
 
   let observation: MainnetOperatorTestStatusObservation | undefined;
   let observationFailure: string | undefined;
+  let failedObservationReads = 0;
   try {
     const observed = await dependencies.exchange.observe(
       snapshot.plan,
       snapshot.attempt?.exchangeOrderId,
     );
     if (observed.ok) observation = observed.value;
-    else observationFailure = observed.error.code;
+    else {
+      const reasonCode = observed.error.details?.reasonCode;
+      observationFailure =
+        typeof reasonCode === "string" &&
+        /^[A-Z0-9_:-]{1,100}$/u.test(reasonCode)
+          ? reasonCode
+          : observed.error.code;
+      const exchangeReads = observed.error.details?.exchangeReads;
+      failedObservationReads =
+        typeof exchangeReads === "number" &&
+        Number.isSafeInteger(exchangeReads) &&
+        exchangeReads >= 0
+          ? exchangeReads
+          : 0;
+    }
   } catch {
     observationFailure = "READ_FAILED";
   }
@@ -703,7 +718,7 @@ export async function runMainnetOperatorTestStatus(
         evidence: {
           schemaVersion: "operator-mainnet-test-status-evidence/v1",
           observedAt,
-          exchangeReads: 0,
+          exchangeReads: failedObservationReads,
           failedStage: observationFailure ?? "READ_FAILED",
           manualActions: snapshot.manualActions.map((row) => row.action),
         },
@@ -751,7 +766,7 @@ export async function runMainnetOperatorTestStatus(
     sourceId: sourceId.value,
     lifecycleOutcome: result.lifecycleOutcome,
     cleanupStatus: result.cleanupStatus,
-    exchangeReads: observation?.exchangeReads ?? 0,
+    exchangeReads: observation?.exchangeReads ?? failedObservationReads,
     journaled: true,
     latestSnapshot: latest.value,
     halt: halt.value,

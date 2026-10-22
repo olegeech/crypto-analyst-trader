@@ -1,10 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import { createMacOSKeychainProvider } from "../adapters/macos-keychain.js";
-import {
-  BybitAccountReadTransport,
-  type AccountReadBudget,
-} from "../adapters/bybit-v5/account-read-transport.js";
+import { BybitAccountReadTransport } from "../adapters/bybit-v5/account-read-transport.js";
 import { BybitAccountReadClient } from "../adapters/bybit-v5/account-read-client.js";
 import { BybitMainnetReadCapabilityFacade } from "../adapters/bybit-v5/read-capability-facade.js";
 import { BybitPublicMarketClient } from "../adapters/bybit-v5/public-market-client.js";
@@ -26,12 +23,22 @@ import type {
 } from "../ports/credential-provider.js";
 import { collectAccountEvidence } from "./account-evidence-collection.js";
 import { deriveMainnetExecutionReadiness } from "./mainnet-execution-readiness.js";
+import {
+  snapshotExchangeCredentials,
+  withExchangeCounts,
+} from "./mainnet-composition-helpers.js";
 
 export interface MainnetOperatorTestPrepareInput {
   readonly symbol: unknown;
   readonly allocation: unknown;
   readonly grossNotionalCap: unknown;
   readonly maxDeviationBps: unknown;
+}
+
+export interface MainnetOperatorTestPreparation {
+  readonly plan: OperatorMainnetTestPlan;
+  readonly exchangeReads: number;
+  readonly exchangeWrites: 0;
 }
 
 function scopeFor(accountId: string) {
@@ -52,20 +59,11 @@ function failed(code: string): Result<never> {
   );
 }
 
-function snapshotCredentials(
-  credentials: ExchangeCredentials,
-): Readonly<ExchangeCredentials> {
-  return Object.freeze({
-    apiKey: credentials.apiKey,
-    apiSecret: credentials.apiSecret,
-    accountId: credentials.accountId,
-  });
-}
-
 /** GET-only preparation and canonical persistence; it has no private write transport. */
 export async function prepareMainnetOperatorTest(
   input: MainnetOperatorTestPrepareInput,
-): Promise<Result<OperatorMainnetTestPlan>> {
+): Promise<Result<MainnetOperatorTestPreparation>> {
+  let exchangeReads = 0;
   if (
     typeof input !== "object" ||
     input === null ||
@@ -81,25 +79,35 @@ export async function prepareMainnetOperatorTest(
       (value) => typeof value !== "string" || value.length > 128,
     )
   )
-    return failed("INVALID_INPUT");
+    return withExchangeCounts(failed("INVALID_INPUT"), exchangeReads, 0);
 
   const wall = Date.now;
   const monotonic = () => performance.now();
-  const runId = `operator-prepare-${randomUUID()}`;
-  const provider = createMacOSKeychainProvider();
-  let credentials: Readonly<ExchangeCredentials> | undefined;
-  const credentialLoader: Pick<CredentialProvider, "load"> = {
-    load: async (environment: CredentialEnvironment) => {
-      if (environment !== "mainnet") throw new Error("environment mismatch");
-      if (!credentials)
-        credentials = snapshotCredentials(await provider.load("mainnet"));
-      return credentials;
-    },
+  const request: typeof fetch = async (url, init) => {
+    const method = (
+      init?.method ?? (url instanceof Request ? url.method : "GET")
+    ).toUpperCase();
+    if (method !== "GET")
+      throw new Error("operator preparation permits GET requests only");
+    exchangeReads += 1;
+    return fetch(url, init);
   };
+  const runId = `operator-prepare-${randomUUID()}`;
+  let credentials: Readonly<ExchangeCredentials> | undefined;
   let accountTransport: BybitAccountReadTransport | undefined;
-  let accountBudget: AccountReadBudget | undefined;
   let accountResult: AccountEvidenceCollectionResult;
   try {
+    const provider = createMacOSKeychainProvider();
+    const credentialLoader: Pick<CredentialProvider, "load"> = {
+      load: async (environment: CredentialEnvironment) => {
+        if (environment !== "mainnet") throw new Error("environment mismatch");
+        if (!credentials)
+          credentials = snapshotExchangeCredentials(
+            await provider.load("mainnet"),
+          );
+        return credentials;
+      },
+    };
     accountResult = await collectAccountEvidence({
       environment: "mainnet",
       runId,
@@ -108,12 +116,11 @@ export async function prepareMainnetOperatorTest(
       utcClock: wall,
       monotonicClock: monotonic,
       createReadPort: (options) => {
-        accountBudget = options.budget;
         accountTransport = new BybitAccountReadTransport({
           environment: "mainnet",
           credentials: options.credentials,
           budget: options.budget,
-          request: fetch,
+          request,
           clock: options.utcClock,
           monotonicClock: options.monotonicClock,
         });
@@ -124,27 +131,39 @@ export async function prepareMainnetOperatorTest(
       },
     });
   } catch {
-    return failed("ACCOUNT_EVIDENCE_UNAVAILABLE");
+    return withExchangeCounts(
+      failed("ACCOUNT_EVIDENCE_UNAVAILABLE"),
+      exchangeReads,
+      0,
+    );
   }
   if (
     accountResult.kind !== "account-evidence" ||
     !credentials ||
-    !accountTransport ||
-    !accountBudget
+    !accountTransport
   )
-    return failed("ACCOUNT_EVIDENCE_INCOMPLETE");
+    return withExchangeCounts(
+      failed("ACCOUNT_EVIDENCE_INCOMPLETE"),
+      exchangeReads,
+      0,
+    );
 
   try {
     const instrument = await new BybitMainnetReadCapabilityFacade(
       accountTransport,
     ).readInstrument(input.symbol);
     const publicMarkets = new BybitPublicMarketClient({
-      transport: new BybitPublicTransport({ request: fetch }),
+      transport: new BybitPublicTransport({ request }),
     });
     const quote = await publicMarkets.readOperatorQuote(input.symbol);
     const providerTimeMs = await accountTransport.readExchangeTime();
     const providerTime = timestampFromEpochMs(providerTimeMs);
-    if (!providerTime.ok) return failed("PROVIDER_TIME_UNAVAILABLE");
+    if (!providerTime.ok)
+      return withExchangeCounts(
+        failed("PROVIDER_TIME_UNAVAILABLE"),
+        exchangeReads,
+        0,
+      );
     const readiness = deriveMainnetExecutionReadiness({
       accountResult,
       symbol: input.symbol,
@@ -156,8 +175,10 @@ export async function prepareMainnetOperatorTest(
       readiness.internalBinding?.accountIdentityHash !==
         accountResult.bundle.accountBinding.accountIdentityHash
     )
-      return failed(
-        `READINESS_${readiness.reasonCodes.join("_") || "BLOCKED"}`,
+      return withExchangeCounts(
+        failed(`READINESS_${readiness.reasonCodes.join("_") || "BLOCKED"}`),
+        exchangeReads,
+        0,
       );
     const warningCodes = readiness.warningCodes.includes("API_KEY_IP_UNBOUND")
       ? ["API_KEY_IP_UNBOUND"]
@@ -175,22 +196,34 @@ export async function prepareMainnetOperatorTest(
       constraints: instrument.constraints,
       preparedAt: providerTime.value,
     });
-    if (!plan.ok) return plan;
+    if (!plan.ok) return withExchangeCounts(plan, exchangeReads, 0);
     const persistence = openSqlitePersistence({
       environment: "mainnet",
       scope: scopeFor(plan.value.accountIdentityHash),
       clock: { now: () => providerTime.value },
     });
-    if (!persistence.ok) return persistence;
+    if (!persistence.ok)
+      return withExchangeCounts(persistence, exchangeReads, 0);
     try {
       const journal = persistence.value.operatorMainnetTest;
-      if (!journal) return failed("OPERATOR_PLAN_STORE_UNAVAILABLE");
+      if (!journal)
+        return withExchangeCounts(
+          failed("OPERATOR_PLAN_STORE_UNAVAILABLE"),
+          exchangeReads,
+          0,
+        );
       const stored = journal.persistPreparedPlan(plan.value);
-      return stored.ok ? ok(plan.value) : stored;
+      return stored.ok
+        ? ok({ plan: plan.value, exchangeReads, exchangeWrites: 0 })
+        : withExchangeCounts(stored, exchangeReads, 0);
     } finally {
       persistence.value.close();
     }
   } catch {
-    return failed("PREPARATION_FAILED_CLOSED");
+    return withExchangeCounts(
+      failed("PREPARATION_FAILED_CLOSED"),
+      exchangeReads,
+      0,
+    );
   }
 }

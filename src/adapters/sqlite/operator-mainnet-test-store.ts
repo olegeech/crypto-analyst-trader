@@ -8,7 +8,6 @@ import {
 } from "../../domain/identity/canonical-artifact.js";
 import {
   canonicalSerialize,
-  hashCanonical,
   type PlanHash,
 } from "../../domain/identity/canonical-serialization.js";
 import {
@@ -90,9 +89,8 @@ function validScope(scope: PersistenceScope): boolean {
 
 function encode(value: unknown): Result<{ json: string; hash: PlanHash }> {
   const serialized = canonicalSerialize(value);
-  const hash = hashCanonical(value);
-  return serialized.ok && hash.ok
-    ? ok({ json: serialized.value, hash: hash.value })
+  return serialized.ok
+    ? ok({ json: serialized.value, hash: hashPayload(serialized.value) })
     : invalid("operator journal record is not canonical");
 }
 
@@ -138,10 +136,8 @@ function validatePayload(
     return invalid("operator CREATE payload is malformed");
   }
   const expected = expectedPayload(plan);
-  if (
-    JSON.stringify(parsed) !== JSON.stringify(expected) ||
-    JSON.stringify(expected) !== payloadJson
-  )
+  const expectedJson = JSON.stringify(expected);
+  if (JSON.stringify(parsed) !== expectedJson || expectedJson !== payloadJson)
     return invalid("operator CREATE payload differs from the approved plan");
   return ok({ json: payloadJson, hash: hash.value as PlanHash });
 }
@@ -529,11 +525,10 @@ export class SqliteOperatorMainnetTestStore implements OperatorMainnetTestPersis
       return persistenceFailure("persisted operator CREATE intent is invalid");
     const parsed = parseJsonHash(canonicalJson.value, canonicalHash.value);
     if (!parsed.ok) return parsed;
-    const encoded = encode(parsed.value);
+    const serialized = canonicalSerialize(parsed.value);
     if (
-      !encoded.ok ||
-      encoded.value.json !== canonicalJson.value ||
-      encoded.value.hash !== canonicalHash.value ||
+      !serialized.ok ||
+      serialized.value !== canonicalJson.value ||
       typeof parsed.value !== "object" ||
       parsed.value === null ||
       (parsed.value as Record<string, unknown>).sourceId !== sourceId.value ||
@@ -583,11 +578,10 @@ export class SqliteOperatorMainnetTestStore implements OperatorMainnetTestPersis
       return persistenceFailure("persisted operator CREATE attempt is invalid");
     const parsed = parseJsonHash(canonicalJson.value, canonicalHash.value);
     if (!parsed.ok) return parsed;
-    const encoded = encode(parsed.value);
+    const serialized = canonicalSerialize(parsed.value);
     if (
-      !encoded.ok ||
-      encoded.value.json !== canonicalJson.value ||
-      encoded.value.hash !== canonicalHash.value ||
+      !serialized.ok ||
+      serialized.value !== canonicalJson.value ||
       typeof parsed.value !== "object" ||
       parsed.value === null ||
       (parsed.value as Record<string, unknown>).outcome !== row.outcome ||
@@ -645,11 +639,10 @@ export class SqliteOperatorMainnetTestStore implements OperatorMainnetTestPersis
         );
       const parsed = parseJsonHash(canonicalJson.value, canonicalHash.value);
       if (!parsed.ok) return parsed;
-      const encoded = encode(parsed.value);
+      const serialized = canonicalSerialize(parsed.value);
       if (
-        !encoded.ok ||
-        encoded.value.json !== canonicalJson.value ||
-        encoded.value.hash !== canonicalHash.value ||
+        !serialized.ok ||
+        serialized.value !== canonicalJson.value ||
         typeof parsed.value !== "object" ||
         parsed.value === null ||
         (parsed.value as Record<string, unknown>).sourceId !== source.value ||
@@ -708,11 +701,10 @@ export class SqliteOperatorMainnetTestStore implements OperatorMainnetTestPersis
         );
       const parsed = parseJsonHash(canonicalJson.value, canonicalHash.value);
       if (!parsed.ok) return parsed;
-      const encoded = encode(parsed.value);
+      const serialized = canonicalSerialize(parsed.value);
       if (
-        !encoded.ok ||
-        encoded.value.json !== canonicalJson.value ||
-        encoded.value.hash !== canonicalHash.value ||
+        !serialized.ok ||
+        serialized.value !== canonicalJson.value ||
         typeof parsed.value !== "object" ||
         parsed.value === null ||
         (parsed.value as Record<string, unknown>).sourceId !== source.value ||

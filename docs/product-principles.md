@@ -106,20 +106,26 @@ Prefer the shortest safe path to a useful end-to-end product:
 ### First mainnet canary
 
 [Issue #31](https://github.com/olegeech/crypto-analyst-trader/issues/31) owns the
-canonical production-canary scope and acceptance criteria. The first canary uses
-a dedicated subaccount, one symbol and side, and a strict capital cap. Expanding
-to multiple symbols is a later product step and requires the separate issue and
-approval required by #31.
+canonical production-canary scope and acceptance criteria. Its first supervised
+experiment is an execution-contract check on a dedicated subaccount: one
+quote-based Limit entry, one attached take-profit and an operator-defined gross
+notional cap. It is not a daily-strategy recommendation, a daily-data quality
+approval, a guaranteed-profit system or evidence that the strategy is ready.
+This one experiment does not depend on completion of #30's integrated daily-data
+gate. It still requires the fresh #31 Mainnet preflight and every mandatory
+runtime account, permission, capacity, ownership, position, lease, approval and
+HALT check. Any broader strategy canary or expansion to multiple symbols needs
+its own issue and approval.
 
 Before approval, the operator should see at least:
 
-- instrument;
-- proposed entry price and quantity;
-- capital allocated;
-- grid and take-profit parameters;
-- confidence and evidence-quality assessment;
-- rationale for the recommendation; and
-- when modifying existing state, a clear comparison with the current state.
+- the symbol and fresh quote timestamp;
+- the frozen entry price, quantity, quote-deviation bound and exact plan hash;
+- the operator allocation and gross entry notional cap;
+- the attached TP trigger, order mode and target price;
+- the policy identity and any warnings; and
+- the fact that fees, funding, slippage and total loss are not bounded by the
+  gross entry cap.
 
 A strategy recommendation that later proves unprofitable is an acceptable
 learning outcome when evidence, risk and execution contracts behaved as

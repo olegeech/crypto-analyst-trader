@@ -11,12 +11,14 @@ import {
   deriveOperatorMainnetTestSourceId,
   type OperatorMainnetTestPlan,
 } from "../domain/execution/operator-mainnet-test-plan.js";
+import { hashCanonical } from "../domain/identity/canonical-serialization.js";
 import { timestampFromEpochMs } from "../domain/shared/time.js";
 import { requireHash } from "../domain/shared/validation.js";
 import { resolveOperatorMainnetPlan } from "../adapters/sqlite/operator-mainnet-test-lookup.js";
 import { openSqlitePersistence } from "../adapters/sqlite/sqlite-persistence.js";
 import { runMainnetOperatorTestStatusComposition } from "../application/mainnet-operator-test-status-composition.js";
 import { prepareMainnetOperatorTest } from "../application/mainnet-operator-test-preparation-composition.js";
+import { createOperatorMainnetCreateRequest } from "../application/mainnet-entry-evidence.js";
 import { promptVisible, PromptInterruptedError } from "./interactive-prompt.js";
 
 export const MAINNET_OPERATOR_TEST_USAGE = `Usage:
@@ -124,10 +126,25 @@ function parseArgs(argv: readonly string[]): ParsedCommand | undefined {
 }
 
 function planReview(output: OutputStream, plan: OperatorMainnetTestPlan): void {
+  const policyIdentityHash = hashCanonical({
+    schemaVersion: plan.schemaVersion,
+    policyVersion: plan.policyVersion,
+  });
+  const createRequest = createOperatorMainnetCreateRequest(plan);
   line(output, "ENVIRONMENT=MAINNET");
   line(output, `SYMBOL=${plan.symbol}`);
+  line(output, `PLAN_SCHEMA=${plan.schemaVersion}`);
+  line(output, `POLICY_VERSION=${plan.policyVersion}`);
+  line(
+    output,
+    `POLICY_IDENTITY_HASH=${policyIdentityHash.ok ? policyIdentityHash.value : "UNKNOWN"}`,
+  );
   line(output, "ACCOUNT_SCOPE=VERIFIED_BYBIT_MAINNET_LINEAR_ONE_WAY");
   line(output, `PLAN_HASH=${plan.contentHash}`);
+  line(
+    output,
+    `PAYLOAD_HASH=${createRequest.ok ? createRequest.value.payloadHash : "UNKNOWN"}`,
+  );
   line(output, `CLIENT_ORDER_ID=${plan.clientOrderId}`);
   line(output, `QUOTE_BID=${plan.quote.bid}`);
   line(output, `QUOTE_ASK=${plan.quote.ask}`);
@@ -159,6 +176,80 @@ function planReview(output: OutputStream, plan: OperatorMainnetTestPlan): void {
   );
 }
 
+function countText(value: unknown): string {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0
+    ? String(value)
+    : "UNKNOWN";
+}
+
+function resultCount(
+  value: unknown,
+  key: "exchangeReads" | "exchangeWrites",
+): string {
+  if (typeof value !== "object" || value === null || !("ok" in value))
+    return "UNKNOWN";
+  const result = value as {
+    readonly ok: boolean;
+    readonly value?: Record<string, unknown>;
+    readonly error?: { readonly details?: Record<string, unknown> };
+  };
+  return countText(
+    result.ok ? result.value?.[key] : result.error?.details?.[key],
+  );
+}
+
+function evidenceText(value: unknown): string {
+  return typeof value === "string" &&
+    /^(?:unknown|flat|long|short|[0-9]+(?:\.[0-9]+)?)$/u.test(value)
+    ? value
+    : "unknown";
+}
+
+function evidenceRecord(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+function evidenceIdentifier(value: unknown): string | undefined {
+  return typeof value === "string" && /^[A-Za-z0-9._:-]{1,128}$/u.test(value)
+    ? value
+    : undefined;
+}
+
+function latestEvidence(
+  snapshot: unknown,
+): Record<string, unknown> | undefined {
+  if (typeof snapshot !== "object" || snapshot === null) return undefined;
+  const reconciliations =
+    "reconciliations" in snapshot ? snapshot.reconciliations : undefined;
+  if (!Array.isArray(reconciliations)) return undefined;
+  const latest = reconciliations.at(-1);
+  if (
+    typeof latest !== "object" ||
+    latest === null ||
+    !("canonicalJson" in latest)
+  )
+    return undefined;
+  try {
+    const record: unknown = JSON.parse(String(latest.canonicalJson));
+    if (
+      typeof record !== "object" ||
+      record === null ||
+      !("evidence" in record)
+    )
+      return undefined;
+    const evidence = record.evidence;
+    return typeof evidence === "object" &&
+      evidence !== null &&
+      !Array.isArray(evidence)
+      ? (evidence as Record<string, unknown>)
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function mapErrorCode(value: unknown): string {
   if (typeof value !== "object" || value === null || !("error" in value))
     return "OPERATION_FAILED";
@@ -187,6 +278,8 @@ function printStatusResult(output: OutputStream, result: unknown): number {
   if (typeof result !== "object" || result === null || !("ok" in result)) {
     line(output, "LIFECYCLE_OUTCOME=UNKNOWN");
     line(output, "CLEANUP_STATUS=unknown");
+    line(output, "EXCHANGE_READS=UNKNOWN");
+    line(output, "UNCERTAINTY=STATUS_RESULT_INVALID");
     line(output, "REASON_CODE=STATUS_RESULT_INVALID");
     return 5;
   }
@@ -201,17 +294,32 @@ function printStatusResult(output: OutputStream, result: unknown): number {
       readonly halt: { readonly active: boolean; readonly revision: number };
       readonly reasons: readonly string[];
       readonly latestSnapshot: {
-        readonly source: { readonly clientOrderId: string };
+        readonly plan: {
+          readonly schemaVersion?: string;
+          readonly policyVersion?: string;
+          readonly contentHash?: string;
+        };
+        readonly source: {
+          readonly clientOrderId: string;
+          readonly planHash?: string;
+          readonly approvalHash?: string;
+          readonly payloadHash?: string;
+        };
         readonly attempt?: {
           readonly exchangeOrderId?: string;
           readonly outcome: string;
         };
+        readonly reconciliations?: readonly {
+          readonly canonicalJson: string;
+        }[];
       };
     };
   };
   if (!typed.ok || !typed.value) {
     line(output, "LIFECYCLE_OUTCOME=UNKNOWN");
     line(output, "CLEANUP_STATUS=unknown");
+    line(output, `EXCHANGE_READS=${resultCount(result, "exchangeReads")}`);
+    line(output, "UNCERTAINTY=STATUS_READ_FAILED");
     line(output, `REASON_CODE=${mapErrorCode(result)}`);
     line(
       output,
@@ -220,24 +328,139 @@ function printStatusResult(output: OutputStream, result: unknown): number {
     return 5;
   }
   const value = typed.value;
+  const evidence = latestEvidence(value.latestSnapshot);
+  const parent = evidenceRecord(evidence?.parent);
+  const observedParentOrderId = evidenceIdentifier(parent?.exchangeOrderId);
+  const attemptOrderId = evidenceIdentifier(
+    value.latestSnapshot.attempt?.exchangeOrderId,
+  );
+  const policyIdentityHash = hashCanonical({
+    schemaVersion: value.latestSnapshot.plan.schemaVersion,
+    policyVersion: value.latestSnapshot.plan.policyVersion,
+  });
   line(output, `SOURCE_ID=${value.sourceId}`);
+  line(
+    output,
+    `PLAN_SCHEMA=${value.latestSnapshot.plan.schemaVersion ?? "unknown"}`,
+  );
+  line(
+    output,
+    `POLICY_VERSION=${value.latestSnapshot.plan.policyVersion ?? "unknown"}`,
+  );
+  line(
+    output,
+    `POLICY_IDENTITY_HASH=${policyIdentityHash.ok ? policyIdentityHash.value : "UNKNOWN"}`,
+  );
+  line(
+    output,
+    `PLAN_HASH=${value.latestSnapshot.source.planHash ?? value.latestSnapshot.plan.contentHash ?? "unknown"}`,
+  );
+  line(
+    output,
+    `APPROVAL_HASH=${value.latestSnapshot.source.approvalHash ?? "unknown"}`,
+  );
+  line(
+    output,
+    `PAYLOAD_HASH=${value.latestSnapshot.source.payloadHash ?? "unknown"}`,
+  );
   line(output, `CLIENT_ORDER_ID=${value.latestSnapshot.source.clientOrderId}`);
-  if (value.latestSnapshot.attempt?.exchangeOrderId)
-    line(
-      output,
-      `EXCHANGE_ORDER_ID=${value.latestSnapshot.attempt.exchangeOrderId}`,
-    );
+  line(
+    output,
+    `EXCHANGE_ORDER_ID=${observedParentOrderId ?? attemptOrderId ?? "unknown"}`,
+  );
   line(
     output,
     `ATTEMPT_OUTCOME=${value.latestSnapshot.attempt?.outcome ?? "unknown"}`,
   );
   line(output, `LIFECYCLE_OUTCOME=${value.lifecycleOutcome}`);
   line(output, `CLEANUP_STATUS=${value.cleanupStatus}`);
-  line(output, `EXCHANGE_READS=${value.exchangeReads}`);
+  line(output, `EXCHANGE_READS=${countText(value.exchangeReads)}`);
   line(output, `STATUS_JOURNALED=${value.journaled ? "yes" : "no"}`);
   line(output, `HALT_ACTIVE=${value.halt.active ? "yes" : "no"}`);
   line(output, `HALT_REVISION=${value.halt.revision}`);
   line(output, `REASONS=${value.reasons.join(",") || "NONE"}`);
+  const tpChildren = Array.isArray(evidence?.tpChildren)
+    ? evidence.tpChildren
+    : [];
+  line(output, `TP_CHILD_COUNT=${tpChildren.length}`);
+  tpChildren.forEach((child, index) => {
+    const childRecord = evidenceRecord(child);
+    const prefix = `TP_CHILD_${index + 1}`;
+    line(
+      output,
+      `${prefix}_EXCHANGE_ORDER_ID=${evidenceIdentifier(childRecord?.exchangeOrderId) ?? "unknown"}`,
+    );
+    line(
+      output,
+      `${prefix}_CLIENT_ORDER_ID=${evidenceIdentifier(childRecord?.clientOrderId) ?? "unknown"}`,
+    );
+    line(
+      output,
+      `${prefix}_STATUS=${evidenceIdentifier(childRecord?.status) ?? "unknown"}`,
+    );
+    line(
+      output,
+      `${prefix}_REQUESTED_QUANTITY=${evidenceText(childRecord?.requestedQuantity)}`,
+    );
+    line(
+      output,
+      `${prefix}_FILLED_QUANTITY=${evidenceText(childRecord?.filledQuantity)}`,
+    );
+    line(
+      output,
+      `${prefix}_TRIGGER_PRICE=${evidenceText(childRecord?.triggerPrice)}`,
+    );
+  });
+  const activeOwnedOrderIds = Array.isArray(evidence?.activeOwnedOrderIds)
+    ? evidence.activeOwnedOrderIds
+    : [];
+  line(output, `ACTIVE_OWNED_ORDER_COUNT=${activeOwnedOrderIds.length}`);
+  activeOwnedOrderIds.forEach((orderId, index) => {
+    line(
+      output,
+      `ACTIVE_OWNED_ORDER_ID_${index + 1}=${evidenceIdentifier(orderId) ?? "unknown"}`,
+    );
+  });
+  const position = evidenceRecord(evidence?.position);
+  line(
+    output,
+    `EXECUTED_ENTRY_QUANTITY=${evidenceText(evidence?.executedEntryQuantity)}`,
+  );
+  line(output, `TP_EXIT_QUANTITY=${evidenceText(evidence?.tpExitQuantity)}`);
+  line(
+    output,
+    `ENTRY_REMAINDER_QUANTITY=${evidenceText(parent?.remainingQuantity)}`,
+  );
+  line(output, `POSITION_SIDE=${evidenceText(position?.side)}`);
+  line(output, `POSITION_QUANTITY=${evidenceText(position?.quantity)}`);
+  line(
+    output,
+    `UNCERTAINTY=${value.reasons.length ? value.reasons.join(",") : value.cleanupStatus === "verified-clean" ? "NONE" : "PENDING_CLEANUP"}`,
+  );
+  if (value.cleanupStatus === "verified-clean") {
+    line(
+      output,
+      "NEXT_ACTION=no manual cleanup is indicated by fresh status evidence",
+    );
+  } else if (
+    value.lifecycleOutcome === "UNKNOWN" ||
+    value.cleanupStatus === "unknown"
+  ) {
+    line(
+      output,
+      "NEXT_ACTION=preserve HALT; inspect the listed parent, TP children and position in Bybit UI; act only on confirmed owned orders, then rerun status",
+    );
+  } else if (value.lifecycleOutcome === "MANUAL_CLEANUP") {
+    line(
+      output,
+      "NEXT_ACTION=inspect the listed orders and position in Bybit UI, record any manual action, then rerun status for fresh proof",
+    );
+  } else {
+    line(
+      output,
+      "NEXT_ACTION=inspect the parent remainder, TP children and position in Bybit UI; perform any needed cleanup manually, then rerun status",
+    );
+  }
   if (
     value.lifecycleOutcome === "TP_LIFECYCLE_PASS" &&
     value.cleanupStatus === "verified-clean"
@@ -284,6 +507,8 @@ export async function runMainnetOperatorTestCli(
   if (!parsed) {
     line(output, MAINNET_OPERATOR_TEST_USAGE);
     line(output, "REASON_CODE=INVALID_REQUEST");
+    line(output, "EXCHANGE_READS=0");
+    line(output, "EXCHANGE_WRITES=0");
     return 2;
   }
 
@@ -301,24 +526,33 @@ export async function runMainnetOperatorTestCli(
       if (!prepared.ok) {
         line(output, "VERDICT=BLOCKED");
         line(output, `REASON_CODE=${mapErrorCode(prepared)}`);
-        line(output, "EXCHANGE_WRITES=0");
+        line(
+          output,
+          `EXCHANGE_READS=${resultCount(prepared, "exchangeReads")}`,
+        );
+        line(
+          output,
+          `EXCHANGE_WRITES=${resultCount(prepared, "exchangeWrites")}`,
+        );
         line(
           output,
           "NEXT_ACTION=correct the explicit preparation input or readiness issue",
         );
         return 4;
       }
-      planReview(output, prepared.value);
+      const { plan } = prepared.value;
+      planReview(output, plan);
       line(output, "VERDICT=PREPARED");
-      line(output, "EXCHANGE_WRITES=0");
-      const sourceId = deriveOperatorMainnetTestSourceId(
-        prepared.value.contentHash,
-      );
+      line(output, `EXCHANGE_READS=${countText(prepared.value.exchangeReads)}`);
+      line(output, `EXCHANGE_WRITES=${prepared.value.exchangeWrites}`);
+      line(output, "APPROVAL_HASH=NOT_APPROVED");
+      const sourceId = deriveOperatorMainnetTestSourceId(plan.contentHash);
       if (sourceId.ok) line(output, `SOURCE_ID=${sourceId.value}`);
       return 0;
     } catch {
       line(output, "VERDICT=BLOCKED");
       line(output, "REASON_CODE=PREPARATION_FAILED_CLOSED");
+      line(output, "EXCHANGE_READS=UNKNOWN");
       line(output, "EXCHANGE_WRITES=0");
       line(
         output,
@@ -329,9 +563,10 @@ export async function runMainnetOperatorTestCli(
   }
 
   if (parsed.command === "execute") {
-    if (!input.isTTY) {
+    if (!input.isTTY || !output.isTTY) {
       line(output, "VERDICT=DECLINED");
       line(output, "REASON_CODE=NON_INTERACTIVE_WRITE_SESSION");
+      line(output, "EXCHANGE_READS=0");
       line(output, "EXCHANGE_WRITES=0");
       line(
         output,
@@ -343,6 +578,8 @@ export async function runMainnetOperatorTestCli(
     if (!planHash.ok) {
       line(output, "VERDICT=BLOCKED");
       line(output, "REASON_CODE=INVALID_PLAN_HASH");
+      line(output, "EXCHANGE_READS=0");
+      line(output, "EXCHANGE_WRITES=0");
       return 2;
     }
     const resolved = (dependencies.resolvePlan ?? resolveOperatorMainnetPlan)(
@@ -354,6 +591,7 @@ export async function runMainnetOperatorTestCli(
         output,
         `REASON_CODE=${resolved.ok ? "PREPARED_PLAN_NOT_FOUND" : mapErrorCode(resolved)}`,
       );
+      line(output, "EXCHANGE_READS=0");
       line(output, "EXCHANGE_WRITES=0");
       return 4;
     }
@@ -362,6 +600,8 @@ export async function runMainnetOperatorTestCli(
     if (!sourceIdResult.ok) {
       line(output, "VERDICT=BLOCKED");
       line(output, "REASON_CODE=SOURCE_ID_INVALID");
+      line(output, "EXCHANGE_READS=0");
+      line(output, "EXCHANGE_WRITES=0");
       return 4;
     }
     const existing = (dependencies.hasDurableIntent ?? hasDurableIntent)(
@@ -371,6 +611,7 @@ export async function runMainnetOperatorTestCli(
     if (!existing.ok) {
       line(output, "VERDICT=BLOCKED");
       line(output, `REASON_CODE=${mapErrorCode(existing)}`);
+      line(output, "EXCHANGE_READS=0");
       line(output, "EXCHANGE_WRITES=0");
       return 4;
     }
@@ -382,12 +623,24 @@ export async function runMainnetOperatorTestCli(
         output,
         "NEXT_ACTION=run mainnet:test status with this source ID; execute will never resend it",
       );
-      return printStatusResult(
-        output,
-        await (dependencies.status ?? runMainnetOperatorTestStatusComposition)({
-          sourceId: sourceIdResult.value,
-        }),
-      );
+      try {
+        return printStatusResult(
+          output,
+          await (
+            dependencies.status ?? runMainnetOperatorTestStatusComposition
+          )({
+            sourceId: sourceIdResult.value,
+          }),
+        );
+      } catch {
+        line(output, "LIFECYCLE_OUTCOME=UNKNOWN");
+        line(output, "CLEANUP_STATUS=unknown");
+        line(output, "EXCHANGE_READS=UNKNOWN");
+        line(output, "EXCHANGE_WRITES=0");
+        line(output, "UNCERTAINTY=STATUS_FAILED_CLOSED");
+        line(output, "REASON_CODE=STATUS_FAILED_CLOSED");
+        return 5;
+      }
     }
 
     planReview(output, plan);
@@ -412,6 +665,8 @@ export async function runMainnetOperatorTestCli(
         output,
         `REASON_CODE=${error instanceof PromptInterruptedError ? "CONSENT_INTERRUPTED" : "CONSENT_UNAVAILABLE"}`,
       );
+      line(output, "APPROVAL_HASH=NOT_APPROVED");
+      line(output, "EXCHANGE_READS=0");
       line(output, "EXCHANGE_WRITES=0");
       line(
         output,
@@ -422,6 +677,8 @@ export async function runMainnetOperatorTestCli(
     if (answer !== "yes") {
       line(output, "VERDICT=DECLINED");
       line(output, "REASON_CODE=CONSENT_NOT_EXACT_YES");
+      line(output, "APPROVAL_HASH=NOT_APPROVED");
+      line(output, "EXCHANGE_READS=0");
       line(output, "EXCHANGE_WRITES=0");
       line(output, "NEXT_ACTION=prepare again if the order terms need changes");
       return 3;
@@ -430,6 +687,8 @@ export async function runMainnetOperatorTestCli(
     if (!approvedAt.ok) {
       line(output, "VERDICT=BLOCKED");
       line(output, "REASON_CODE=LOCAL_TIME_INVALID");
+      line(output, "APPROVAL_HASH=NOT_APPROVED");
+      line(output, "EXCHANGE_READS=0");
       line(output, "EXCHANGE_WRITES=0");
       return 4;
     }
@@ -444,16 +703,21 @@ export async function runMainnetOperatorTestCli(
     if (!approval.ok) {
       line(output, "VERDICT=BLOCKED");
       line(output, `REASON_CODE=${mapErrorCode(approval)}`);
+      line(output, "APPROVAL_HASH=NOT_APPROVED");
+      line(output, "EXCHANGE_READS=0");
       line(output, "EXCHANGE_WRITES=0");
       return 4;
     }
+    line(output, `APPROVAL_HASH=${approval.value.contentHash}`);
     line(output, "STAGE=FRESH_ADMISSION_AND_SINGLE_CREATE");
+    let productionCompositionStarted = false;
     try {
       const execute =
         dependencies.execute ??
         (async (value) => {
           const composition =
             await import("../application/mainnet-operator-test-composition.js");
+          productionCompositionStarted = true;
           return composition.runMainnetOperatorTestComposition(value);
         });
       const result = await execute({
@@ -474,6 +738,8 @@ export async function runMainnetOperatorTestCli(
               readonly sourceId?: string;
               readonly clientOrderId?: string;
               readonly attemptOutcome?: string;
+              readonly exchangeReads?: number;
+              readonly exchangeWrites?: number;
             };
           }
         ).value;
@@ -481,10 +747,8 @@ export async function runMainnetOperatorTestCli(
           output,
           `EXECUTION_STATE=${outcome?.kind === "recovery" ? "RECOVERY_ONLY" : "ATTEMPTED"}`,
         );
-        line(
-          output,
-          `EXCHANGE_WRITES=${outcome?.kind === "attempted" ? "1" : "0"}`,
-        );
+        line(output, `EXCHANGE_READS=${countText(outcome?.exchangeReads)}`);
+        line(output, `EXCHANGE_WRITES=${countText(outcome?.exchangeWrites)}`);
         line(output, `SOURCE_ID=${outcome?.sourceId ?? sourceIdResult.value}`);
         line(
           output,
@@ -500,7 +764,8 @@ export async function runMainnetOperatorTestCli(
       line(output, "VERDICT=BLOCKED");
       line(output, `REASON_CODE=${mapErrorCode(result)}`);
       line(output, `SOURCE_ID=${sourceIdResult.value}`);
-      line(output, "EXCHANGE_WRITES=UNKNOWN");
+      line(output, `EXCHANGE_READS=${resultCount(result, "exchangeReads")}`);
+      line(output, `EXCHANGE_WRITES=${resultCount(result, "exchangeWrites")}`);
       line(
         output,
         "NEXT_ACTION=run mainnet:test status with the source ID; do not retry execute",
@@ -510,7 +775,14 @@ export async function runMainnetOperatorTestCli(
       line(output, "VERDICT=RECOVERY_ONLY");
       line(output, "REASON_CODE=EXECUTION_OUTCOME_UNKNOWN");
       line(output, `SOURCE_ID=${sourceIdResult.value}`);
-      line(output, "EXCHANGE_WRITES=UNKNOWN");
+      line(
+        output,
+        `EXCHANGE_READS=${dependencies.execute === undefined && !productionCompositionStarted ? "0" : "UNKNOWN"}`,
+      );
+      line(
+        output,
+        `EXCHANGE_WRITES=${dependencies.execute === undefined && !productionCompositionStarted ? "0" : "UNKNOWN"}`,
+      );
       line(
         output,
         "NEXT_ACTION=run mainnet:test status with the source ID; do not retry execute",
@@ -534,12 +806,14 @@ export async function runMainnetOperatorTestCli(
       else if (answer !== "none") {
         line(output, "VERDICT=UNKNOWN");
         line(output, "REASON_CODE=MANUAL_ACTION_ANSWER_INVALID");
+        line(output, "EXCHANGE_READS=0");
         line(output, "EXCHANGE_WRITES=0");
         return 5;
       }
     } catch {
       line(output, "VERDICT=UNKNOWN");
       line(output, "REASON_CODE=STATUS_PROMPT_INTERRUPTED");
+      line(output, "EXCHANGE_READS=0");
       line(output, "EXCHANGE_WRITES=0");
       return 5;
     }
@@ -558,6 +832,7 @@ export async function runMainnetOperatorTestCli(
     line(output, "LIFECYCLE_OUTCOME=UNKNOWN");
     line(output, "CLEANUP_STATUS=unknown");
     line(output, "REASON_CODE=STATUS_FAILED_CLOSED");
+    line(output, "EXCHANGE_READS=UNKNOWN");
     line(output, "EXCHANGE_WRITES=0");
     return 5;
   }

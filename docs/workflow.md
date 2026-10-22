@@ -111,9 +111,15 @@ owner action needed to refresh the paused workflow.
 - live changes include deterministic fault-test evidence, explicit read-only
   Mainnet readiness checks, disable/rollback and reconciliation; Testnet or an
   earlier Mainnet write is not a release prerequisite;
+- the single supervised execution-contract experiment in [issue #31](https://github.com/olegeech/crypto-analyst-trader/issues/31)
+  does not wait for #30's integrated daily-data release gate, but still requires
+  its reviewed production code, fresh read-only Mainnet preflight and all
+  mandatory runtime safety gates; this does not promote daily-strategy
+  readiness;
 - contracts or operator behavior are documented;
 - no secret or private account artifact is committed;
-- the pull request closes the issue;
+- the pull request closes the issue when all acceptance criteria are complete;
+  implementation-only pull requests keep separately gated live criteria open;
 - residual work is a separate issue.
 
 ## Context budget

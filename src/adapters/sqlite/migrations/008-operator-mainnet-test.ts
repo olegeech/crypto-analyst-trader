@@ -39,8 +39,7 @@ export const operatorMainnetTestMigration = {
         lease_epoch INTEGER NOT NULL CHECK (lease_epoch > 0),
         canonical_json TEXT NOT NULL,
         canonical_hash TEXT NOT NULL,
-        prepared_at TEXT NOT NULL,
-        UNIQUE (source_id, operation)
+        prepared_at TEXT NOT NULL
       );
 
       CREATE TABLE operator_mainnet_test_attempts (
@@ -73,9 +72,6 @@ export const operatorMainnetTestMigration = {
         UNIQUE (source_id, revision)
       );
 
-      CREATE INDEX operator_mainnet_test_reconciliations_source_idx
-        ON operator_mainnet_test_reconciliations (source_id, revision);
-
       CREATE TABLE operator_mainnet_test_manual_actions (
         action_id TEXT PRIMARY KEY,
         source_id TEXT NOT NULL
@@ -90,8 +86,6 @@ export const operatorMainnetTestMigration = {
         UNIQUE (source_id, revision)
       );
 
-      CREATE INDEX operator_mainnet_test_manual_actions_source_idx
-        ON operator_mainnet_test_manual_actions (source_id, revision);
     `);
   },
 } as const;

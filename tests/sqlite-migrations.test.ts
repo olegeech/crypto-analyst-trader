@@ -13,8 +13,17 @@ import {
 } from "../src/adapters/sqlite/migrations.js";
 import {
   openSqliteConnection,
+  type SqliteConnection,
   type SqliteRuntimeVersions,
 } from "../src/adapters/sqlite/connection.js";
+import { createSqliteExecutionStore } from "../src/adapters/sqlite/execution-store.js";
+import { createSqlitePreparedLegStore } from "../src/adapters/sqlite/prepared-leg-store.js";
+import { createPreparedLegExecution } from "../src/domain/execution/prepared-leg-execution.js";
+import { encodeCanonicalArtifact } from "../src/domain/identity/canonical-artifact.js";
+import { registerTrustedClock } from "../src/adapters/sqlite/sqlite-helpers.js";
+import { parseUtcTimestamp } from "../src/domain/shared/time.js";
+import { preparedLegExecutionFixture } from "./fixtures/prepared-leg-execution-fixtures.js";
+import { requireDailyFixture } from "./fixtures/daily-planning-evidence-fixtures.js";
 
 const supportedRuntime: SqliteRuntimeVersions = {
   nodeVersion: "22.22.3",
@@ -113,6 +122,148 @@ test("operator Mainnet journal is an additive v8 schema with empty tables", () =
   );
   assert.deepEqual(db.prepare("PRAGMA foreign_key_check").all(), []);
   opened.value.close();
+});
+
+test("v8 migration preserves populated v7 daily artifacts and prepared-leg source bytes", () => {
+  const { path } = temporaryDatabase();
+  const database = openDatabase(path);
+  database.exec("PRAGMA foreign_keys = ON");
+  assert.equal(applyMigrations(database, MIGRATIONS.slice(0, 7)).ok, true);
+  database
+    .prepare(
+      "INSERT INTO database_identity (singleton, environment, created_at) VALUES (1, 'mainnet', ?)",
+    )
+    .run("2026-10-22T12:00:00.000Z");
+
+  const fixture = preparedLegExecutionFixture();
+  const now = requireDailyFixture(parseUtcTimestamp(fixture.now));
+  const execution = requireDailyFixture(
+    createPreparedLegExecution({
+      approval: fixture.approval,
+      approvalHash: fixture.approval.contentHash,
+      legId: fixture.legId,
+      now: fixture.now,
+    }),
+  );
+  const clock = { now: () => now };
+  registerTrustedClock(database, clock);
+  const connection: SqliteConnection = {
+    db: database,
+    path,
+    environment: "mainnet",
+    runtime: supportedRuntime,
+    clock,
+    close: () => database.close(),
+  };
+  const scope = {
+    exchange: "bybit",
+    environment: "mainnet" as const,
+    accountId: execution.accountIdentityHash,
+    category: "linear",
+    positionMode: "one-way" as const,
+  };
+  const artifacts = requireDailyFixture(
+    createSqliteExecutionStore(connection, scope),
+  );
+  requireDailyFixture(
+    artifacts.writeArtifact({
+      artifactId: `prepared:${fixture.prepared.contentHash}`,
+      artifactKind: "prepared-daily-plan",
+      envelope: requireDailyFixture(
+        encodeCanonicalArtifact("prepared-daily-plan", fixture.prepared),
+      ),
+      materialHash: fixture.prepared.contentHash,
+    }),
+  );
+  requireDailyFixture(
+    artifacts.writeArtifact({
+      artifactId: `prepared-consent:${fixture.approval.contentHash}`,
+      artifactKind: "prepared-plan-approval",
+      envelope: requireDailyFixture(
+        encodeCanonicalArtifact("prepared-plan-approval", fixture.approval),
+      ),
+      materialHash: fixture.approval.contentHash,
+    }),
+  );
+  const preparedLegs = requireDailyFixture(
+    createSqlitePreparedLegStore(connection, scope),
+  );
+  const lease = requireDailyFixture(
+    artifacts.acquireLease({
+      scope,
+      ownerRunId: "migration-v7-fixture",
+      now,
+      ttlMs: 60_000,
+    }),
+  );
+  requireDailyFixture(
+    preparedLegs.preparePreparedLegCreate({
+      authority: { ownerRunId: lease.ownerRunId, epoch: lease.epoch },
+      runId: lease.ownerRunId,
+      execution,
+      preparedAt: now,
+    }),
+  );
+
+  const preservedArtifactBytes = database
+    .prepare(
+      `SELECT artifact_id, artifact_kind, schema_version, canonical_json,
+              canonical_hash, material_hash, exchange, environment, account_id,
+              category, position_mode
+       FROM artifacts ORDER BY artifact_id`,
+    )
+    .all();
+  const preservedPreparedSourceBytes = database
+    .prepare(
+      `SELECT source_id, exchange, environment, account_id, category,
+              position_mode, prepared_hash, prepared_artifact_id, leg_id,
+              client_order_id, selection_json, selection_hash, created_at
+       FROM prepared_leg_sources ORDER BY source_id`,
+    )
+    .all();
+  assert.ok(preservedPreparedSourceBytes.length > 0);
+  database.close();
+
+  const migrated = openSqliteConnection({
+    environment: "mainnet",
+    databasePath: path,
+    runtime: supportedRuntime,
+  });
+  assert.equal(migrated.ok, true);
+  if (!migrated.ok) return;
+  assert.deepEqual(
+    migrated.value.db
+      .prepare(
+        `SELECT artifact_id, artifact_kind, schema_version, canonical_json,
+                canonical_hash, material_hash, exchange, environment, account_id,
+                category, position_mode
+         FROM artifacts ORDER BY artifact_id`,
+      )
+      .all(),
+    preservedArtifactBytes,
+  );
+  assert.deepEqual(
+    migrated.value.db
+      .prepare(
+        `SELECT source_id, exchange, environment, account_id, category,
+                position_mode, prepared_hash, prepared_artifact_id, leg_id,
+                client_order_id, selection_json, selection_hash, created_at
+         FROM prepared_leg_sources ORDER BY source_id`,
+      )
+      .all(),
+    preservedPreparedSourceBytes,
+  );
+  assert.equal(
+    migrated.value.db
+      .prepare("SELECT COUNT(*) AS count FROM operator_mainnet_test_sources")
+      .get()?.count,
+    0,
+  );
+  assert.deepEqual(
+    migrated.value.db.prepare("PRAGMA foreign_key_check").all(),
+    [],
+  );
+  migrated.value.close();
 });
 
 test("identity-binding migration is additive and starts without fabricated bindings", () => {

@@ -1,10 +1,7 @@
 import { createHash } from "node:crypto";
 
 import { createMacOSKeychainProvider } from "../adapters/macos-keychain.js";
-import {
-  BybitAccountReadTransport,
-  type AccountReadBudget,
-} from "../adapters/bybit-v5/account-read-transport.js";
+import { BybitAccountReadTransport } from "../adapters/bybit-v5/account-read-transport.js";
 import { BybitAccountReadClient } from "../adapters/bybit-v5/account-read-client.js";
 import { BybitMainnetExecutionAdapter } from "../adapters/bybit-v5/execution-adapter.js";
 import { mapCreateOrderRequest } from "../adapters/bybit-v5/order-mappers.js";
@@ -61,6 +58,10 @@ import {
   type MainnetOperatorTestFreshEvidence,
 } from "./mainnet-entry-evidence.js";
 import { deriveMainnetExecutionReadiness } from "./mainnet-execution-readiness.js";
+import {
+  snapshotExchangeCredentials,
+  withExchangeCounts,
+} from "./mainnet-composition-helpers.js";
 
 const ACCOUNT_FEE_RATE_PATH = "/v5/account/fee-rate";
 const CREATE_ORDER_PATH = "/v5/order/create";
@@ -186,16 +187,6 @@ function createPrivateCreateIssuer(): {
   };
 }
 
-function snapshotCredentials(
-  credentials: ExchangeCredentials,
-): Readonly<ExchangeCredentials> {
-  return Object.freeze({
-    apiKey: credentials.apiKey,
-    apiSecret: credentials.apiSecret,
-    accountId: credentials.accountId,
-  });
-}
-
 function failed<T>(reasonCode: string): Result<T> {
   return fail(
     domainError(
@@ -300,8 +291,15 @@ type ValidatedAdmission = Extract<
 export async function runMainnetOperatorTestComposition(
   input: MainnetOperatorTestInput,
 ): Promise<Result<MainnetOperatorTestOutcome>> {
+  let exchangeReads = 0;
+  let exchangeWrites = 0;
   const normalized = inputIdentity(input);
-  if (!normalized) return failed("APPROVAL_OR_PLAN_INVALID");
+  if (!normalized)
+    return withExchangeCounts(
+      failed("APPROVAL_OR_PLAN_INVALID"),
+      exchangeReads,
+      exchangeWrites,
+    );
   const admitted = normalized;
   const wall = Date.now;
   const monotonic = () => performance.now();
@@ -317,11 +315,17 @@ export async function runMainnetOperatorTestComposition(
     scope: scopeFor(admitted.plan),
     clock: localClock,
   });
-  if (!persistence.ok) return persistence;
+  if (!persistence.ok)
+    return withExchangeCounts(persistence, exchangeReads, exchangeWrites);
   try {
     const sqlite = persistence.value;
     const journal = sqlite.operatorMainnetTest;
-    if (!journal) return failed("MAINNET_OPERATOR_JOURNAL_UNAVAILABLE");
+    if (!journal)
+      return withExchangeCounts(
+        failed("MAINNET_OPERATOR_JOURNAL_UNAVAILABLE"),
+        exchangeReads,
+        exchangeWrites,
+      );
     const operatorJournal = journal;
     const credentialProvider = createMacOSKeychainProvider();
     let credentialSnapshot: Readonly<ExchangeCredentials> | undefined;
@@ -330,16 +334,23 @@ export async function runMainnetOperatorTestComposition(
         if (environment !== "mainnet")
           throw new Error("credential environment mismatch");
         if (!credentialSnapshot)
-          credentialSnapshot = snapshotCredentials(
+          credentialSnapshot = snapshotExchangeCredentials(
             await credentialProvider.load("mainnet"),
           );
         return credentialSnapshot;
       },
     };
 
-    const request = fetch;
+    const request: typeof fetch = async (url, init) => {
+      const method = (
+        init?.method ?? (url instanceof Request ? url.method : "GET")
+      ).toUpperCase();
+      if (method === "GET") exchangeReads += 1;
+      else if (method === "POST") exchangeWrites += 1;
+      else throw new Error("operator composition permits GET and CREATE only");
+      return fetch(url, init);
+    };
     let accountTransport: BybitAccountReadTransport | undefined;
-    let accountBudget: AccountReadBudget | undefined;
     const accountResult: AccountEvidenceCollectionResult =
       await collectAccountEvidence({
         environment: "mainnet",
@@ -349,7 +360,6 @@ export async function runMainnetOperatorTestComposition(
         utcClock: wall,
         monotonicClock: monotonic,
         createReadPort: (configuration) => {
-          accountBudget = configuration.budget;
           accountTransport = new BybitAccountReadTransport({
             environment: "mainnet",
             credentials: configuration.credentials,
@@ -367,10 +377,13 @@ export async function runMainnetOperatorTestComposition(
     if (
       accountResult.kind !== "account-evidence" ||
       !credentialSnapshot ||
-      !accountTransport ||
-      !accountBudget
+      !accountTransport
     )
-      return failed("ACCOUNT_EVIDENCE_INCOMPLETE");
+      return withExchangeCounts(
+        failed("ACCOUNT_EVIDENCE_INCOMPLETE"),
+        exchangeReads,
+        exchangeWrites,
+      );
 
     const instrument: BybitInstrumentInfo =
       await new BybitMainnetReadCapabilityFacade(
@@ -378,7 +391,12 @@ export async function runMainnetOperatorTestComposition(
       ).readInstrument(admitted.plan.symbol);
     const evaluatedAtMs = await accountTransport.readExchangeTime();
     const evaluatedAt = timestampFromEpochMs(evaluatedAtMs);
-    if (!evaluatedAt.ok) return failed("PROVIDER_TIME_UNAVAILABLE");
+    if (!evaluatedAt.ok)
+      return withExchangeCounts(
+        failed("PROVIDER_TIME_UNAVAILABLE"),
+        exchangeReads,
+        exchangeWrites,
+      );
     const readiness = deriveMainnetExecutionReadiness({
       accountResult,
       symbol: admitted.plan.symbol,
@@ -600,7 +618,7 @@ export async function runMainnetOperatorTestComposition(
       consume: issuer.authorization.consume,
     };
 
-    return await executeMainnetOperatorTest(input, {
+    const result = await executeMainnetOperatorTest(input, {
       persistence: sqlite,
       journal: operatorJournal,
       exchange,
@@ -609,8 +627,18 @@ export async function runMainnetOperatorTestComposition(
       localClock,
       monotonicClock: monotonic,
     });
+    return result.ok
+      ? {
+          ok: true,
+          value: { ...result.value, exchangeReads, exchangeWrites },
+        }
+      : withExchangeCounts(result, exchangeReads, exchangeWrites);
   } catch {
-    return failed("MAINNET_OPERATOR_TEST_FAILED_CLOSED");
+    return withExchangeCounts(
+      failed("MAINNET_OPERATOR_TEST_FAILED_CLOSED"),
+      exchangeReads,
+      exchangeWrites,
+    );
   } finally {
     persistence.value.close();
   }

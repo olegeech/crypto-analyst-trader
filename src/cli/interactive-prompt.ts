@@ -27,10 +27,10 @@ export function promptVisible(
     timeoutMs?: number;
     signal?: AbortSignal;
     input?: NodeJS.ReadableStream & { isTTY?: boolean };
-    output?: NodeJS.WritableStream;
+    output?: NodeJS.WritableStream & { isTTY?: boolean };
   } = {},
 ): Promise<string> {
-  if (!input.isTTY) {
+  if (!input.isTTY || !output.isTTY) {
     throw new Error(nonInteractiveMessage);
   }
   const readline = createInterface({ input, output });

@@ -19,12 +19,17 @@ import {
 import { deepFreeze } from "../shared/deep-freeze.js";
 import { domainError } from "../shared/errors.js";
 import { fail, ok, type Result } from "../shared/result.js";
-import { parseUtcTimestamp, type UtcTimestamp } from "../shared/time.js";
+import {
+  parseUtcTimestamp,
+  timestampToEpochMs,
+  type UtcTimestamp,
+} from "../shared/time.js";
 import {
   isRecord,
   requireHash,
   requireIdentifier,
 } from "../shared/validation.js";
+import { closedRecord } from "../planning/planning-validation.js";
 
 export const OPERATOR_MAINNET_QUOTE_SCHEMA_VERSION =
   "bybit-linear-operator-quote/v1" as const;
@@ -202,20 +207,8 @@ function exactRecord(
 }
 
 function closedConstraintRecord(value: unknown): boolean {
-  if (
-    !isRecord(value) ||
-    (Object.getPrototypeOf(value) !== Object.prototype &&
-      Object.getPrototypeOf(value) !== null)
-  )
-    return false;
-  const keys = Reflect.ownKeys(value);
   return (
-    keys.every(
-      (key) =>
-        typeof key === "string" &&
-        CONSTRAINT_FIELDS.includes(key as (typeof CONSTRAINT_FIELDS)[number]) &&
-        Object.hasOwn(Object.getOwnPropertyDescriptor(value, key)!, "value"),
-    ) &&
+    closedRecord(value, CONSTRAINT_FIELDS) &&
     [
       "instrument",
       "version",
@@ -343,9 +336,9 @@ export function createOperatorMainnetQuote(
     !last.ok
   )
     return invalidQuote("quote contains malformed provider facts");
-  const startedMs = Date.parse(collectionStartedAt.value);
-  const completedMs = Date.parse(collectionCompletedAt.value);
-  const observedMs = Date.parse(observedAt.value);
+  const startedMs = timestampToEpochMs(collectionStartedAt.value);
+  const completedMs = timestampToEpochMs(collectionCompletedAt.value);
+  const observedMs = timestampToEpochMs(observedAt.value);
   if (
     startedMs > completedMs ||
     completedMs - startedMs > OPERATOR_MAINNET_QUOTE_FRESHNESS_MS ||
@@ -519,11 +512,13 @@ function canonicalizePlanInput(
       "quote, symbol and complete venue min/max/notional constraints must match",
     );
   const freshnessAge =
-    Date.parse(preparedAt.value) - Date.parse(quote.value.observedAt);
+    timestampToEpochMs(preparedAt.value) -
+    timestampToEpochMs(quote.value.observedAt);
   if (
     freshnessAge < 0 ||
     freshnessAge > OPERATOR_MAINNET_QUOTE_FRESHNESS_MS ||
-    Date.parse(quote.value.collectionCompletedAt) > Date.parse(preparedAt.value)
+    timestampToEpochMs(quote.value.collectionCompletedAt) >
+      timestampToEpochMs(preparedAt.value)
   )
     return fail(
       domainError(
@@ -771,11 +766,13 @@ export function validateOperatorMainnetQuoteForPlan(
     return invalidQuote(
       "fresh quote does not match the approved Bybit linear scope",
     );
-  const age = Date.parse(at.value) - Date.parse(quote.value.observedAt);
+  const age =
+    timestampToEpochMs(at.value) - timestampToEpochMs(quote.value.observedAt);
   if (
     age < 0 ||
     age > plan.value.quoteFreshnessMs ||
-    Date.parse(quote.value.collectionCompletedAt) > Date.parse(at.value)
+    timestampToEpochMs(quote.value.collectionCompletedAt) >
+      timestampToEpochMs(at.value)
   )
     return fail(
       domainError("STALE_EVIDENCE", "fresh quote is stale or future dated"),
@@ -817,13 +814,14 @@ function canonicalizeApproval(
     !actor.ok ||
     !approvedAt.ok ||
     plan.value.contentHash !== planHash.value ||
-    Date.parse(approvedAt.value) < Date.parse(plan.value.preparedAt)
+    timestampToEpochMs(approvedAt.value) <
+      timestampToEpochMs(plan.value.preparedAt)
   )
     return invalidApproval(
       "approval must bind the exact plan and follow its preparation",
     );
   const expiresAt = new Date(
-    Date.parse(approvedAt.value) + OPERATOR_MAINNET_APPROVAL_TTL_MS,
+    timestampToEpochMs(approvedAt.value) + OPERATOR_MAINNET_APPROVAL_TTL_MS,
   ).toISOString() as UtcTimestamp;
   const planArtifactHash = hashCanonical(plan.value);
   if (!planArtifactHash.ok) return planArtifactHash;
@@ -913,8 +911,9 @@ export function validateOperatorMainnetTestApproval(
   )
     return invalidApproval("exact approval and plan identity are required");
   if (
-    Date.parse(at.value) < Date.parse(approval.value.approvedAt) ||
-    Date.parse(at.value) >= Date.parse(approval.value.expiresAt)
+    timestampToEpochMs(at.value) <
+      timestampToEpochMs(approval.value.approvedAt) ||
+    timestampToEpochMs(at.value) >= timestampToEpochMs(approval.value.expiresAt)
   )
     return fail(
       domainError("PLAN_EXPIRED", "operator approval is not currently valid"),

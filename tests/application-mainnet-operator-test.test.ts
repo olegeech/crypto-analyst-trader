@@ -19,6 +19,7 @@ import {
   createOperatorMainnetTestPlan,
   deriveOperatorMainnetTestSourceId,
 } from "../src/domain/execution/operator-mainnet-test-plan.js";
+import { createExchangeOrder } from "../src/domain/execution/exchange-order.js";
 import { createEvidenceRef } from "../src/domain/evidence/evidence-ref.js";
 import {
   hashCanonical,
@@ -41,6 +42,10 @@ import {
   executeMainnetOperatorTest,
   type MainnetOperatorTestDependencies,
 } from "../src/application/mainnet-operator-test.js";
+import {
+  runMainnetOperatorTestStatus,
+  type MainnetOperatorTestStatusObservation,
+} from "../src/application/mainnet-operator-test-status.js";
 import type { BybitInstrumentInfo } from "../src/adapters/bybit-v5/read-mappers.js";
 import type { OperatorMainnetTestAuthorizationPort } from "../src/ports/operator-mainnet-test-authorization.js";
 import type { PersistenceScope } from "../src/ports/persistence.js";
@@ -596,6 +601,170 @@ test("one durable exact CREATE intent exists before the only exchange dispatch",
   assert.equal(unwrap(restart).kind, "recovery");
   assert.equal(harness.createObservations.length, 1);
   reopened.close();
+});
+
+// Production preparation binds OS Keychain and Bybit reads; persist the same
+// canonical prepared artifact here, then exercise app-level CREATE and status
+// with fake exchange ports and a reopened SQLite connection.
+test("temporary SQLite prepared plan survives reopen between one fake CREATE and TP cleanup status", async () => {
+  const harness = setup();
+  assert.equal(harness.journal.persistPreparedPlan(harness.valuePlan).ok, true);
+  const prepared = unwrap(
+    harness.journal.readPreparedPlan(harness.valuePlan.contentHash),
+  );
+  assert.equal(prepared?.contentHash, harness.valuePlan.contentHash);
+
+  const execute = unwrap(await harness.run());
+  assert.equal(execute.kind, "attempted");
+  assert.equal(execute.attemptOutcome, "accepted");
+  assert.equal(harness.createObservations.length, 1);
+  assert.deepEqual(harness.createObservations, [
+    { durableIntent: true, payloadMatches: true },
+  ]);
+
+  const observedAt = at(Date.parse(NOW) + 2_000);
+  harness.clock.now = observedAt;
+  harness.persistence.close();
+  const reopenedPersistence = unwrap(
+    openSqlitePersistence({
+      environment: "mainnet",
+      databasePath: harness.databasePath,
+      scope: scope(harness.valuePlan.accountIdentityHash),
+      runtime,
+      clock: { now: () => harness.clock.now },
+    }),
+  );
+  const reopenedJournal = reopenedPersistence.operatorMainnetTest;
+  assert.ok(reopenedJournal);
+  const entryOrder = unwrap(
+    createExchangeOrder({
+      exchangeOrderId: "test-exchange-order-1",
+      clientOrderId: harness.valuePlan.clientOrderId,
+      instrument: harness.valuePlan.symbol,
+      side: "buy",
+      requestedQuantity: harness.valuePlan.entry.quantity.toString(),
+      filledQuantity: harness.valuePlan.entry.quantity.toString(),
+      status: "filled",
+      observedAt,
+      source: "bybit-mainnet/order/realtime",
+      category: "linear",
+      orderType: "limit",
+      price: harness.valuePlan.entry.limitPrice.toString(),
+      timeInForce: "GTC",
+      takeProfit: harness.valuePlan.entry.takeProfit.triggerPrice.toString(),
+      stopLoss: null,
+      reduceOnly: false,
+      positionIdx: 0,
+      providerCreatedAt: at(Date.parse(NOW) + 100),
+      providerUpdatedAt: at(Date.parse(NOW) + 1_500),
+    }),
+  );
+  const tpOrder = unwrap(
+    createExchangeOrder({
+      exchangeOrderId: "test-exchange-tp-order-1",
+      clientOrderId: "test-exchange-tp-client-1",
+      providerOrderLinkId: "test-exchange-tp-client-1",
+      parentOrderLinkId: harness.valuePlan.clientOrderId,
+      instrument: harness.valuePlan.symbol,
+      side: "sell",
+      requestedQuantity: harness.valuePlan.entry.quantity.toString(),
+      filledQuantity: harness.valuePlan.entry.quantity.toString(),
+      status: "filled",
+      observedAt,
+      source: "bybit-mainnet/protection/order/realtime",
+      category: "linear",
+      orderType: "market",
+      triggerPrice: harness.valuePlan.entry.takeProfit.triggerPrice.toString(),
+      protectionType: "take-profit",
+      providerStopOrderType: "PartialTakeProfit",
+      providerTpslMode: "Partial",
+      triggerBy: "LastPrice",
+      takeProfitTriggerBy: "LastPrice",
+      stopLoss: null,
+      reduceOnly: true,
+      positionIdx: 0,
+      providerCreatedAt: at(Date.parse(NOW) + 1_000),
+      providerUpdatedAt: at(Date.parse(NOW) + 1_500),
+    }),
+  );
+  const entryFill = {
+    executionId: "test-entry-execution-1",
+    exchangeOrderId: entryOrder.exchangeOrderId,
+    clientOrderId: harness.valuePlan.clientOrderId,
+    instrument: harness.valuePlan.symbol,
+    side: "buy" as const,
+    quantity: harness.valuePlan.entry.quantity,
+    price: harness.valuePlan.entry.limitPrice,
+    executedAt: at(Date.parse(NOW) + 500),
+    source: "bybit-mainnet/execution",
+  };
+  const exitFill = {
+    executionId: "test-tp-execution-1",
+    exchangeOrderId: tpOrder.exchangeOrderId,
+    clientOrderId: tpOrder.clientOrderId,
+    instrument: harness.valuePlan.symbol,
+    side: "sell" as const,
+    quantity: harness.valuePlan.entry.quantity,
+    price: harness.valuePlan.entry.takeProfit.triggerPrice,
+    executedAt: at(Date.parse(NOW) + 1_500),
+    source: "bybit-mainnet/execution",
+  };
+  let statusReads = 0;
+  const observation: MainnetOperatorTestStatusObservation = {
+    observedAt,
+    parentLookupComplete: true,
+    parent: entryOrder,
+    entryFills: [entryFill],
+    children: [tpOrder],
+    childFills: [
+      {
+        exchangeOrderId: tpOrder.exchangeOrderId,
+        clientOrderId: tpOrder.clientOrderId,
+        fills: [exitFill],
+      },
+    ],
+    position: {
+      instrument: harness.valuePlan.symbol,
+      side: "flat",
+      quantity: decimal("0"),
+    },
+    activeOrders: [],
+    exchangeReads: 9,
+  };
+  const sourceId = unwrap(
+    deriveOperatorMainnetTestSourceId(harness.valuePlan.contentHash),
+  );
+  const status = unwrap(
+    await runMainnetOperatorTestStatus(
+      { sourceId },
+      {
+        persistence: reopenedPersistence,
+        journal: reopenedJournal,
+        exchange: {
+          async observe() {
+            statusReads += 1;
+            return { ok: true, value: observation };
+          },
+        },
+        clock: { now: () => harness.clock.now },
+      },
+    ),
+  );
+  assert.equal(statusReads, 1);
+  assert.equal(status.exchangeReads, 9);
+  assert.equal(status.lifecycleOutcome, "TP_LIFECYCLE_PASS");
+  assert.equal(status.cleanupStatus, "verified-clean");
+  assert.equal(status.latestSnapshot.reconciliations.length, 1);
+  assert.equal(harness.createObservations.length, 1);
+  const durableSource = unwrap(
+    reopenedJournal.readOperatorMainnetTestSource(sourceId),
+  );
+  assert.equal(durableSource?.attempt?.outcome, "accepted");
+  assert.equal(
+    status.latestSnapshot.source.payloadHash,
+    durableSource?.source.payloadHash,
+  );
+  reopenedPersistence.close();
 });
 
 test("IP-unbound is admitted only as the same explicit plan warning", async () => {

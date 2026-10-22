@@ -65,6 +65,9 @@ export interface MainnetOperatorTestOutcome {
   readonly attemptOutcome?: OperatorMainnetTestAttemptOutcome;
   readonly attemptJournaled: boolean;
   readonly reasonCode?: string;
+  /** Production composition counts actual Mainnet HTTP requests per invocation. */
+  readonly exchangeReads?: number;
+  readonly exchangeWrites?: number;
 }
 
 function blocked(
@@ -387,7 +390,6 @@ export async function executeMainnetOperatorTest(
   if (typeof capability !== "object" || capability === null)
     return blocked("CREATE_AUTHORIZATION_UNAVAILABLE");
 
-  let intentPersisted = false;
   const prepared = dependencies.journal.prepareCreateIntent({
     authority,
     runId: runId.value,
@@ -398,7 +400,6 @@ export async function executeMainnetOperatorTest(
     preparedAt: providerTime.value,
   });
   if (!prepared.ok) return prepared;
-  intentPersisted = true;
 
   const elapsedNow = () => {
     let monotonicNow: number;
@@ -429,8 +430,7 @@ export async function executeMainnetOperatorTest(
   };
 
   const elapsed = elapsedNow();
-  if (!elapsed.ok || !intentPersisted)
-    return rejectAfterIntent("POST_INTENT_RECHECK_UNAVAILABLE");
+  if (!elapsed.ok) return rejectAfterIntent("POST_INTENT_RECHECK_UNAVAILABLE");
   const currentProviderTime = effectiveProviderTime(
     providerTime.value,
     elapsed.value,
