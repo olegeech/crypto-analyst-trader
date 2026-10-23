@@ -524,8 +524,14 @@ export async function runMainnetOperatorTestCli(
         maxDeviationBps: parsed.maxDeviationBps,
       });
       if (!prepared.ok) {
+        const reasonCode = mapErrorCode(prepared);
         line(output, "VERDICT=BLOCKED");
-        line(output, `REASON_CODE=${mapErrorCode(prepared)}`);
+        line(output, `REASON_CODE=${reasonCode}`);
+        if (reasonCode === "INSTRUMENT_CONSTRAINTS_INCOMPLETE_OR_MISMATCHED")
+          line(
+            output,
+            "REASON_DETAIL=quote/symbol must match and venue minNotional, minPrice, maxPrice, maxLimitQuantity must be present and valid",
+          );
         line(
           output,
           `EXCHANGE_READS=${resultCount(prepared, "exchangeReads")}`,
@@ -536,7 +542,9 @@ export async function runMainnetOperatorTestCli(
         );
         line(
           output,
-          "NEXT_ACTION=correct the explicit preparation input or readiness issue",
+          reasonCode === "INSTRUMENT_CONSTRAINTS_INCOMPLETE_OR_MISMATCHED"
+            ? "NEXT_ACTION=verify complete same-symbol instruments-info mapping; do not execute until preparation succeeds"
+            : "NEXT_ACTION=correct the explicit preparation input or readiness issue",
         );
         return 4;
       }

@@ -508,8 +508,12 @@ function canonicalizePlanInput(
     constraints.value.maxPrice === undefined ||
     constraints.value.maxLimitQuantity === undefined
   )
-    return invalidPlan(
-      "quote, symbol and complete venue min/max/notional constraints must match",
+    return fail(
+      domainError(
+        "INVALID_PLAN",
+        "quote, symbol and complete venue min/max/notional constraints must match",
+        { reasonCode: "INSTRUMENT_CONSTRAINTS_INCOMPLETE_OR_MISMATCHED" },
+      ),
     );
   const freshnessAge =
     timestampToEpochMs(preparedAt.value) -

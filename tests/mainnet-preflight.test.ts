@@ -232,10 +232,15 @@ function productionMainnetFetchFixture(delayAfterInstrumentMs = 0) {
                 contractType: "LinearPerpetual",
                 quoteCoin: "USDT",
                 settleCoin: "USDT",
-                priceFilter: { tickSize: "0.1" },
+                priceFilter: {
+                  tickSize: "0.1",
+                  minPrice: "0.1",
+                  maxPrice: "1000000",
+                },
                 lotSizeFilter: {
                   qtyStep: "0.001",
                   minOrderQty: "0.001",
+                  maxOrderQty: "100000",
                   minNotionalValue: "5",
                 },
               },
@@ -444,10 +449,15 @@ test("preflight freshness uses provider time after instrument lookup", async () 
                   contractType: "LinearPerpetual",
                   quoteCoin: "USDT",
                   settleCoin: "USDT",
-                  priceFilter: { tickSize: "0.1" },
+                  priceFilter: {
+                    tickSize: "0.1",
+                    minPrice: "0.1",
+                    maxPrice: "1000000",
+                  },
                   lotSizeFilter: {
                     qtyStep: "0.001",
                     minOrderQty: "0.001",
+                    maxOrderQty: "100000",
                     minNotionalValue: "5",
                   },
                 },

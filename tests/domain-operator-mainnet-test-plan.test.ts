@@ -427,3 +427,19 @@ test("canonical operator quote identity changes when provider facts change", () 
   assert.notEqual(original.contentHash, changed.contentHash);
   assert.equal(original.symbol, "DOGEUSDT");
 });
+
+test("missing venue bounds block the operator plan with a safe diagnostic code", () => {
+  for (const field of ["minPrice", "maxPrice", "maxLimitQuantity"] as const) {
+    const venue = { ...constraints() };
+    delete venue[field];
+    const result = validPlan({ constraints: venue });
+    assert.equal(result.ok, false);
+    if (!result.ok) {
+      assert.equal(result.error.code, "INVALID_PLAN");
+      assert.equal(
+        result.error.details?.reasonCode,
+        "INSTRUMENT_CONSTRAINTS_INCOMPLETE_OR_MISMATCHED",
+      );
+    }
+  }
+});

@@ -499,3 +499,46 @@ test("status records manual-action declarations and sanitizes terminal fields", 
   assert.match(terminal.text(), /EXCHANGE_WRITES=0/u);
   assert.equal(terminal.text().includes("\nINJECTED\n"), false);
 });
+
+test("incomplete venue bounds produce actionable allowlisted diagnostics without raw error text", async () => {
+  const terminal = streams(false);
+  const code = await runMainnetOperatorTestCli(
+    [
+      "prepare",
+      "--symbol",
+      "DOGEUSDT",
+      "--allocation",
+      "10",
+      "--gross-cap",
+      "10",
+      "--max-deviation-bps",
+      "10",
+    ],
+    {
+      ...terminal,
+      prepare: async () =>
+        fail(
+          domainError(
+            "INVALID_PLAN",
+            "PRIVATE_PROVIDER_SECRET\nINJECTED=unsafe",
+            {
+              reasonCode: "INSTRUMENT_CONSTRAINTS_INCOMPLETE_OR_MISMATCHED",
+              exchangeReads: 68,
+              exchangeWrites: 0,
+            },
+          ),
+        ),
+    },
+  );
+  assert.equal(code, 4);
+  assert.match(
+    terminal.text(),
+    /REASON_DETAIL=.*minPrice, maxPrice, maxLimitQuantity/u,
+  );
+  assert.match(
+    terminal.text(),
+    /NEXT_ACTION=verify complete same-symbol instruments-info mapping/u,
+  );
+  assert.match(terminal.text(), /EXCHANGE_WRITES=0/u);
+  assert.doesNotMatch(terminal.text(), /PRIVATE_PROVIDER_SECRET|INJECTED/u);
+});

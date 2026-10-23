@@ -44,10 +44,15 @@ function transportFor(overrides: Record<string, Record<string, unknown>> = {}) {
             list: [
               {
                 status: "Trading",
-                priceFilter: { tickSize: "0.0001" },
+                priceFilter: {
+                  tickSize: "0.0001",
+                  minPrice: "0.0001",
+                  maxPrice: "1000000",
+                },
                 lotSizeFilter: {
                   qtyStep: "1",
                   minOrderQty: "1",
+                  maxOrderQty: "100000",
                   minNotionalValue: "5",
                 },
               },
@@ -221,10 +226,15 @@ test("minimum notional above 10 USDT fails before any write path", async () => {
       list: [
         {
           status: "Trading",
-          priceFilter: { tickSize: "0.01" },
+          priceFilter: {
+            tickSize: "0.01",
+            minPrice: "0.01",
+            maxPrice: "1000000",
+          },
           lotSizeFilter: {
             qtyStep: "1",
             minOrderQty: "1",
+            maxOrderQty: "100000",
             minNotionalValue: "11",
           },
         },
@@ -250,10 +260,15 @@ test("PendingOpen, hedge mode, dirty baseline, and low balance are all hard stop
           list: [
             {
               status: "PendingOpen",
-              priceFilter: { tickSize: "0.01" },
+              priceFilter: {
+                tickSize: "0.01",
+                minPrice: "0.01",
+                maxPrice: "1000000",
+              },
               lotSizeFilter: {
                 qtyStep: "1",
                 minOrderQty: "1",
+                maxOrderQty: "100000",
                 minNotionalValue: "5",
               },
             },
