@@ -527,6 +527,21 @@ export async function runMainnetOperatorTestCli(
         const reasonCode = mapErrorCode(prepared);
         line(output, "VERDICT=BLOCKED");
         line(output, `REASON_CODE=${reasonCode}`);
+        if (reasonCode === "PROVIDER_TIME_PRECISION_INSUFFICIENT")
+          line(
+            output,
+            "REASON_DETAIL=Bybit supplied only second-resolution time; millisecond precision is required for quote collection",
+          );
+        if (reasonCode === "PROVIDER_TIME_INVALID_OR_INCONSISTENT")
+          line(
+            output,
+            "REASON_DETAIL=Bybit time fields are malformed or contradictory; preparation remains blocked",
+          );
+        if (reasonCode === "PUBLIC_MARKET_PRECONDITION")
+          line(
+            output,
+            "REASON_DETAIL=public market evidence failed its source, price or collection-time contract; preparation remains blocked",
+          );
         if (reasonCode === "INSTRUMENT_CONSTRAINTS_INCOMPLETE_OR_MISMATCHED")
           line(
             output,

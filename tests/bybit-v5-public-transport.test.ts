@@ -32,7 +32,7 @@ test("public transport sends unsigned GET requests to the pinned mainnet origin"
     },
   });
 
-  assert.equal(await transport.getExchangeTime(), 1_720_000_000_000);
+  assert.equal(await transport.getExchangeTime(), 1_720_000_000_123);
   assert.equal(requests[0]?.url, `${BYBIT_PUBLIC_ORIGIN}/v5/market/time`);
   assert.equal(requests[0]?.method, "GET");
   assert.equal(requests[0]?.headers.has("X-BAPI-API-KEY"), false);
@@ -117,4 +117,96 @@ test("public transport classifies provider rate limits without retrying unbounde
       error.retCode === 10006,
   );
   assert.equal(calls, 1);
+});
+
+test("provider time preserves nanoseconds as exact milliseconds and checks redundant fields", () => {
+  for (const [result, time, expected] of [
+    [
+      { timeSecond: "1792754592", timeNano: "1792754592968361437" },
+      1792754592968,
+      1792754592968,
+    ],
+    [
+      { timeSecond: "1792754592", timeNano: "1792754592999999999" },
+      1792754593000,
+      1792754592999,
+    ],
+    [{ timeSecond: "1792754592" }, 1792754592968, 1792754592968],
+    [{}, 1792754592968, 1792754592968],
+  ] as const) {
+    assert.equal(
+      responseServerTimeMs({ retCode: 0, retMsg: "OK", result, time }),
+      expected,
+    );
+  }
+  for (const result of [
+    { timeNano: "bad", timeSecond: "1792754592" },
+    { timeNano: 1792754592968361437 },
+    { timeNano: "9007199254740992000000" },
+    { timeNano: "0" },
+    { timeNano: "-1" },
+    { timeSecond: "bad" },
+    { timeSecond: "9007199254740992" },
+    { timeSecond: "1792754591", timeNano: "1792754592968361437" },
+    { timeSecond: "1792754591" },
+    { timeNano: "1792754590968361437" },
+  ]) {
+    assert.equal(
+      responseServerTimeMs({
+        retCode: 0,
+        retMsg: "OK",
+        result,
+        time: 1792754592968,
+      }),
+      undefined,
+    );
+  }
+  for (const time of ["bad", null, -1, 0, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+    assert.throws(() =>
+      validateBybitPublicResponse({
+        retCode: 0,
+        retMsg: "OK",
+        result: { timeNano: "1792754592968361437" },
+        time,
+      }),
+    );
+  }
+});
+
+test("public quote-time reads explicitly reject second-only precision and contradictory time", async () => {
+  for (const [result, time, reasonCode] of [
+    [
+      { timeSecond: "1792754592" },
+      undefined,
+      "PROVIDER_TIME_PRECISION_INSUFFICIENT",
+    ],
+    [
+      { timeSecond: "1792754591", timeNano: "1792754592968361437" },
+      1792754592968,
+      "PROVIDER_TIME_INVALID_OR_INCONSISTENT",
+    ],
+    [
+      { timeNano: "bad" },
+      1792754592968,
+      "PROVIDER_TIME_INVALID_OR_INCONSISTENT",
+    ],
+  ] as const) {
+    const transport = createBybitPublicTransport({
+      request: async () =>
+        new Response(
+          JSON.stringify({
+            retCode: 0,
+            retMsg: "OK",
+            result,
+            ...(time === undefined ? {} : { time }),
+          }),
+        ),
+    });
+    await assert.rejects(
+      transport.getExchangeTime(),
+      (error) =>
+        error instanceof BybitPublicTransportError &&
+        error.reasonCode === reasonCode,
+    );
+  }
 });

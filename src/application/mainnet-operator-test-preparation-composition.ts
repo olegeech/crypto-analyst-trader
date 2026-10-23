@@ -5,7 +5,11 @@ import { BybitAccountReadTransport } from "../adapters/bybit-v5/account-read-tra
 import { BybitAccountReadClient } from "../adapters/bybit-v5/account-read-client.js";
 import { BybitMainnetReadCapabilityFacade } from "../adapters/bybit-v5/read-capability-facade.js";
 import { BybitPublicMarketClient } from "../adapters/bybit-v5/public-market-client.js";
-import { BybitPublicTransport } from "../adapters/bybit-v5/public-transport.js";
+import {
+  BybitPublicTransport,
+  BybitPublicTransportError,
+} from "../adapters/bybit-v5/public-transport.js";
+import { BybitPublicMarketMappingError } from "../adapters/bybit-v5/public-market-mappers.js";
 import { openSqlitePersistence } from "../adapters/sqlite/sqlite-persistence.js";
 import type { AccountEvidenceCollectionResult } from "../domain/account/account-evidence-bundle.js";
 import {
@@ -219,9 +223,16 @@ export async function prepareMainnetOperatorTest(
     } finally {
       persistence.value.close();
     }
-  } catch {
+  } catch (error) {
     return withExchangeCounts(
-      failed("PREPARATION_FAILED_CLOSED"),
+      failed(
+        error instanceof BybitPublicTransportError
+          ? (error.reasonCode ??
+              `PUBLIC_${error.kind.toUpperCase().replaceAll("-", "_")}`)
+          : error instanceof BybitPublicMarketMappingError
+            ? `PUBLIC_MARKET_${error.kind.toUpperCase().replaceAll("-", "_")}`
+            : "PREPARATION_FAILED_CLOSED",
+      ),
       exchangeReads,
       0,
     );

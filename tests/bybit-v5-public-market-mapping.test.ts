@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { createBybitPublicTransport } from "../src/adapters/bybit-v5/public-transport.js";
+import { createOperatorMainnetTestPlan } from "../src/domain/execution/operator-mainnet-test-plan.js";
 
 import type { BybitPublicResponse } from "../src/adapters/bybit-v5/public-response.js";
 import {
@@ -294,4 +296,80 @@ test("operator quote client binds the linear ticker to Bybit mainnet and provide
   assert.equal(quote.collectionStartedAt, "2026-10-22T10:00:00.000Z");
   assert.equal(quote.collectionCompletedAt, "2026-10-22T10:00:00.020Z");
   assert.match(quote.contentHash, /^sha256:[0-9a-f]{64}$/u);
+});
+
+test("real public time envelopes preserve subsecond quote bounds through operator-plan construction", async () => {
+  const base = Date.parse("2026-10-23T12:00:00.000Z");
+  for (const [start, tick, end, valid] of [
+    [100, 350, 500, true],
+    [900, 1050, 1100, true],
+    [100, 600, 500, false],
+    [350, 100, 500, false],
+    [0, 100, 6000, false],
+  ] as const) {
+    let timeReads = 0;
+    let requests = 0;
+    const client = new BybitPublicMarketClient({
+      transport: createBybitPublicTransport({
+        request: async (input, init) => {
+          requests++;
+          assert.equal(init?.method, "GET");
+          const isTime = new URL(String(input)).pathname === "/v5/market/time";
+          const at = base + (isTime ? (timeReads++ === 0 ? start : end) : tick);
+          return new Response(
+            JSON.stringify({
+              retCode: 0,
+              retMsg: "OK",
+              time: at,
+              result: isTime
+                ? {
+                    timeSecond: String(Math.floor(at / 1000)),
+                    timeNano: String(BigInt(at) * 1000000n + 361437n),
+                  }
+                : {
+                    category: "linear",
+                    list: [
+                      {
+                        symbol: "DOGEUSDT",
+                        bid1Price: "0.0886",
+                        ask1Price: "0.0887",
+                        lastPrice: "0.0886",
+                      },
+                    ],
+                  },
+            }),
+          );
+        },
+      }),
+    });
+    if (!valid) {
+      await assert.rejects(
+        client.readOperatorQuote("DOGEUSDT"),
+        (error) =>
+          error instanceof BybitPublicMarketMappingError &&
+          error.kind === "precondition",
+      );
+    } else {
+      const quote = await client.readOperatorQuote("DOGEUSDT");
+      assert.equal(Date.parse(quote.collectionStartedAt), base + start);
+      assert.equal(Date.parse(quote.collectionCompletedAt), base + end);
+      const plan = createOperatorMainnetTestPlan({
+        accountIdentityHash: `sha256:${"a".repeat(64)}`,
+        symbol: "DOGEUSDT",
+        nonce: "time-precision-integration",
+        allocation: "10",
+        grossNotionalCap: "10",
+        maxDeviationBps: "10",
+        quote,
+        constraints: mapInstrumentInfo(instrumentResponse(), "DOGEUSDT")
+          .constraints,
+        warningCodes: [],
+        preparedAt: new Date(base + end + 100).toISOString(),
+      });
+      assert.ok(plan.ok, plan.ok ? undefined : plan.error.message);
+      assert.equal(plan.value.quoteFreshnessMs, 5000);
+      assert.equal(plan.value.entry.orderType, "Limit");
+    }
+    assert.equal(requests, 3);
+  }
 });

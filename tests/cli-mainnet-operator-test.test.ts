@@ -542,3 +542,42 @@ test("incomplete venue bounds produce actionable allowlisted diagnostics without
   assert.match(terminal.text(), /EXCHANGE_WRITES=0/u);
   assert.doesNotMatch(terminal.text(), /PRIVATE_PROVIDER_SECRET|INJECTED/u);
 });
+
+test("quote precision failures expose a safe reason without printing raw provider errors", async () => {
+  for (const reasonCode of [
+    "PROVIDER_TIME_PRECISION_INSUFFICIENT",
+    "PROVIDER_TIME_INVALID_OR_INCONSISTENT",
+    "PUBLIC_MARKET_PRECONDITION",
+  ]) {
+    const terminal = streams(false);
+    const code = await runMainnetOperatorTestCli(
+      [
+        "prepare",
+        "--symbol",
+        "DOGEUSDT",
+        "--allocation",
+        "10",
+        "--gross-cap",
+        "10",
+        "--max-deviation-bps",
+        "10",
+      ],
+      {
+        ...terminal,
+        prepare: async () =>
+          fail(
+            domainError(
+              "INVALID_EVIDENCE",
+              "PRIVATE_RESPONSE_SECRET\nINJECTED=1",
+              { reasonCode, exchangeReads: 67, exchangeWrites: 0 },
+            ),
+          ),
+      },
+    );
+    assert.equal(code, 4);
+    assert.match(terminal.text(), new RegExp(`REASON_CODE=${reasonCode}`, "u"));
+    assert.match(terminal.text(), /REASON_DETAIL=/u);
+    assert.match(terminal.text(), /EXCHANGE_WRITES=0/u);
+    assert.doesNotMatch(terminal.text(), /PRIVATE_RESPONSE_SECRET|INJECTED/u);
+  }
+});

@@ -44,6 +44,8 @@ export function validateBybitPublicResponse(
     );
   }
   const time = responseTime(object?.time);
+  if (object?.time !== undefined && (time === undefined || time <= 0))
+    throw new Error("Bybit public response has an invalid provider timestamp.");
   return time === undefined
     ? { retCode, retMsg, result }
     : { retCode, retMsg, result, time };
@@ -61,28 +63,65 @@ export function responseList(
   return records.length === list.length ? records : undefined;
 }
 
+/** Parse only positive exact integers; nanoseconds remain BigInt until division. */
+function providerInteger(value: unknown): bigint | undefined {
+  if (typeof value === "number")
+    return Number.isSafeInteger(value) && value > 0 ? BigInt(value) : undefined;
+  if (typeof value !== "string" || !/^\d{1,32}$/u.test(value)) return undefined;
+  const parsed = BigInt(value);
+  return parsed > 0n ? parsed : undefined;
+}
+
 export function responseServerTimeMs(
   response: BybitPublicResponse,
 ): number | undefined {
-  const seconds = response.result.timeSecond;
+  const nanoInput = response.result.timeNano;
+  const secondsInput = response.result.timeSecond;
+  const nano = nanoInput === undefined ? undefined : providerInteger(nanoInput);
+  const seconds =
+    secondsInput === undefined ? undefined : providerInteger(secondsInput);
+  const envelope =
+    response.time === undefined ? undefined : providerInteger(response.time);
   if (
-    (typeof seconds === "number" && Number.isSafeInteger(seconds)) ||
-    (typeof seconds === "string" && /^\d+$/u.test(seconds))
-  ) {
-    const milliseconds = BigInt(String(seconds)) * 1_000n;
-    if (milliseconds <= BigInt(Number.MAX_SAFE_INTEGER)) {
-      return Number(milliseconds);
-    }
-  }
-  const nanoseconds = response.result.timeNano;
+    (nanoInput !== undefined && nano === undefined) ||
+    (secondsInput !== undefined && seconds === undefined) ||
+    (response.time !== undefined && envelope === undefined)
+  )
+    return undefined;
+
+  const nanoMs = nano === undefined ? undefined : nano / 1_000_000n;
+  const max = BigInt(Number.MAX_SAFE_INTEGER);
   if (
-    (typeof nanoseconds === "number" && Number.isSafeInteger(nanoseconds)) ||
-    (typeof nanoseconds === "string" && /^\d+$/u.test(nanoseconds))
-  ) {
-    const milliseconds = BigInt(String(nanoseconds)) / 1_000_000n;
-    if (milliseconds <= BigInt(Number.MAX_SAFE_INTEGER)) {
-      return Number(milliseconds);
-    }
-  }
-  return response.time;
+    (nanoMs !== undefined && (nanoMs <= 0n || nanoMs > max)) ||
+    (seconds !== undefined && seconds * 1_000n > max)
+  )
+    return undefined;
+  if (
+    nano !== undefined &&
+    seconds !== undefined &&
+    nano / 1_000_000_000n !== seconds
+  )
+    return undefined;
+  // The envelope may be stamped after the result, including across a second
+  // boundary. A discrepancy of a full second is contradictory provider data.
+  if (
+    nanoMs !== undefined &&
+    envelope !== undefined &&
+    (nanoMs - envelope >= 1_000n || envelope - nanoMs >= 1_000n)
+  )
+    return undefined;
+  if (
+    nanoMs === undefined &&
+    seconds !== undefined &&
+    envelope !== undefined &&
+    envelope / 1_000n !== seconds
+  )
+    return undefined;
+  const milliseconds =
+    nanoMs ??
+    envelope ??
+    (seconds === undefined ? undefined : seconds * 1_000n);
+  return milliseconds !== undefined && milliseconds > 0n && milliseconds <= max
+    ? Number(milliseconds)
+    : undefined;
 }
