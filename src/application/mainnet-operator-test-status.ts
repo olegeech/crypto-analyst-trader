@@ -215,7 +215,6 @@ function childMatchesPlan(
     Number.isFinite(updatedAt) &&
     createdAt <= updatedAt &&
     updatedAt <= observed &&
-    observed - updatedAt <= MAX_OBSERVATION_AGE_MS &&
     (child.status === "open" ||
       child.status === "partially-filled" ||
       child.status === "filled" ||
@@ -235,9 +234,10 @@ function freshOrder(
   return (
     timestampToEpochMs(order.observedAt) <= observed &&
     observed - timestampToEpochMs(order.observedAt) <= MAX_OBSERVATION_AGE_MS &&
+    // Provider timestamps describe order events, which may precede this fresh
+    // REST observation by minutes or longer for historical or unchanged orders.
     providerCreated <= providerUpdated &&
-    providerUpdated <= observed &&
-    observed - providerUpdated <= MAX_OBSERVATION_AGE_MS
+    providerUpdated <= observed
   );
 }
 

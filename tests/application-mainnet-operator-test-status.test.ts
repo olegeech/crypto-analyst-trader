@@ -201,6 +201,7 @@ function fill(options: {
 }
 
 function observation(input: {
+  readonly observedAt?: UtcTimestamp;
   readonly parent?: ExchangeOrderObservation;
   readonly entry?: readonly ReturnType<typeof fill>[];
   readonly children?: readonly ExchangeOrderObservation[];
@@ -215,7 +216,7 @@ function observation(input: {
   const children = input.children ?? [];
   const exits = input.exits ?? [];
   return {
-    observedAt: OBSERVED,
+    observedAt: input.observedAt ?? OBSERVED,
     parentLookupComplete: true,
     ...(input.parent === undefined ? {} : { parent: input.parent }),
     entryFills: input.entry ?? [],
@@ -239,7 +240,10 @@ function observation(input: {
 
 function harness(
   observed: Result<MainnetOperatorTestStatusObservation>,
-  options: { readonly expiredLease?: boolean } = {},
+  options: {
+    readonly expiredLease?: boolean;
+    readonly now?: UtcTimestamp;
+  } = {},
 ) {
   let snapshot: OperatorMainnetTestSnapshot = {
     source: {
@@ -397,7 +401,7 @@ function harness(
           persistence,
           journal,
           exchange,
-          clock: { now: () => OBSERVED },
+          clock: { now: () => options.now ?? OBSERVED },
         },
       ),
     get snapshot() {
@@ -422,6 +426,115 @@ test("zero entry fill with an open GTC parent is NOT_EXERCISED and cleanup pendi
   assert.equal(result.lifecycleOutcome, "NOT_EXERCISED");
   assert.equal(result.cleanupStatus, "pending");
   assert.equal(result.latestSnapshot.reconciliations.length, 1);
+});
+
+test("fresh REST proof of an unchanged GTC entry remains pending after ten minutes", async () => {
+  const observedAt = "2026-10-23T12:10:00.000Z" as UtcTimestamp;
+  const entry = { ...parent({ filled: "0", status: "open" }), observedAt };
+  const h = harness(
+    ok(observation({ observedAt, parent: entry, activeOrders: [entry] })),
+    { now: observedAt },
+  );
+  const result = unwrap(await h.run());
+  assert.equal(result.lifecycleOutcome, "NOT_EXERCISED");
+  assert.equal(result.cleanupStatus, "pending");
+  assert.deepEqual(result.reasons, []);
+});
+
+test("fresh REST proof of historical full TP execution passes after ten minutes", async () => {
+  const observedAt = "2026-10-23T12:10:00.000Z" as UtcTimestamp;
+  const entry = { ...parent({ filled: "0.08", status: "filled" }), observedAt };
+  const tp = {
+    ...child({ requested: "0.08", filled: "0.08", status: "filled" }),
+    observedAt,
+    providerUpdatedAt: "2026-10-23T12:05:00.000Z" as UtcTimestamp,
+  };
+  const h = harness(
+    ok(
+      observation({
+        observedAt,
+        parent: entry,
+        entry: [
+          fill({
+            id: "historical-entry",
+            orderId: entry.exchangeOrderId,
+            side: "buy",
+            quantity: "0.08",
+          }),
+        ],
+        children: [tp],
+        exits: [
+          fill({
+            id: "historical-exit",
+            orderId: tp.exchangeOrderId,
+            side: "sell",
+            quantity: "0.08",
+            executedAt: "2026-10-23T12:05:00.000Z",
+          }),
+        ],
+      }),
+    ),
+    { now: observedAt },
+  );
+  const result = unwrap(await h.run());
+  assert.equal(result.lifecycleOutcome, "TP_LIFECYCLE_PASS");
+  assert.equal(result.cleanupStatus, "verified-clean");
+  assert.deepEqual(result.reasons, []);
+});
+
+test("stale or future REST order observations and inconsistent event times stay UNKNOWN", async () => {
+  const invalidTimes: readonly Partial<ExchangeOrderObservation>[] = [
+    { observedAt: "2026-10-23T11:58:00.000Z" as UtcTimestamp },
+    { observedAt: "2026-10-23T12:00:02.000Z" as UtcTimestamp },
+    { providerCreatedAt: "2026-10-23T12:00:00.800Z" as UtcTimestamp },
+    { providerUpdatedAt: "2026-10-23T12:00:02.000Z" as UtcTimestamp },
+  ];
+  for (const invalidTime of invalidTimes) {
+    for (const target of ["parent", "child"] as const) {
+      const entry = {
+        ...parent({ filled: "0.08", status: "filled" }),
+        ...(target === "parent" ? invalidTime : {}),
+      };
+      const tp = {
+        ...child({ requested: "0.08", filled: "0.08", status: "filled" }),
+        ...(target === "child" ? invalidTime : {}),
+      };
+      const h = harness(
+        ok(
+          observation({
+            parent: entry,
+            entry: [
+              fill({
+                id: "entry-1",
+                orderId: entry.exchangeOrderId,
+                side: "buy",
+                quantity: "0.08",
+              }),
+            ],
+            children: [tp],
+            exits: [
+              fill({
+                id: "exit-1",
+                orderId: tp.exchangeOrderId,
+                side: "sell",
+                quantity: "0.08",
+              }),
+            ],
+          }),
+        ),
+      );
+      const result = unwrap(await h.run());
+      assert.equal(result.lifecycleOutcome, "UNKNOWN");
+      assert.equal(result.cleanupStatus, "unknown");
+      assert.ok(
+        result.reasons.includes(
+          target === "parent"
+            ? "PARENT_PROOF_INVALID_OR_STALE"
+            : "TP_CHILD_PROOF_INVALID_OR_DUPLICATE",
+        ),
+      );
+    }
+  }
 });
 
 test("partial entry with the exact active TP is PARTIAL_EVIDENCE", async () => {
