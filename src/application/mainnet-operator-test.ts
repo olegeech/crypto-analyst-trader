@@ -40,6 +40,8 @@ import {
   type MainnetOperatorTestEvidencePort,
 } from "./mainnet-entry-evidence.js";
 
+import { OperatorEvidenceReadError } from "./mainnet-operator-test-evidence.js";
+
 const LEASE_TTL_MS = 60_000;
 
 export interface MainnetOperatorTestDependencies {
@@ -330,8 +332,12 @@ export async function executeMainnetOperatorTest(
   let fresh: Awaited<ReturnType<MainnetOperatorTestEvidencePort["collect"]>>;
   try {
     fresh = await dependencies.evidence.collect(plan.value.symbol);
-  } catch {
-    return blocked("FRESH_MAINNET_EVIDENCE_UNAVAILABLE");
+  } catch (error) {
+    return blocked(
+      error instanceof OperatorEvidenceReadError
+        ? error.reasonCode
+        : "FRESH_MAINNET_EVIDENCE_UNAVAILABLE",
+    );
   }
   const evidence = validateMainnetOperatorTestEvidence(plan.value, fresh);
   if (!evidence.ok) return evidence;

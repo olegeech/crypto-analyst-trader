@@ -190,6 +190,14 @@ routes to status recovery; execute will not resend it. After any attempt, run
 `status` and follow the displayed next action. A successful CREATE response is
 not a TP lifecycle pass.
 
+If fresh admission fails before a durable intent exists, execute reports
+`EXECUTION_STATE=EXECUTION_NOT_STARTED` only after a journal check and zero
+exchange writes. Diagnose the printed fee-rate, quote, target-state or
+validation reason with GET-only reads; there is no source for `status` yet.
+Do not invoke execute to diagnose data collection. An existing intent, failed
+journal read or uncertain write count retains `RECOVERY_ONLY` and the status
+instruction.
+
 Status uses bounded authenticated GET reads and appends the fresh evidence to
 the local scoped journal. It never retries an exchange write, cancels an order,
 closes a position or clears HALT. In an attended terminal it asks whether the

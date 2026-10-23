@@ -784,14 +784,30 @@ export async function runMainnetOperatorTestCli(
         );
         return 5;
       }
+      // Re-read the journal after the failed attempt. Zero writes alone cannot
+      // prove that recovery is unnecessary: an intent may already be durable.
+      const persisted = (dependencies.hasDurableIntent ?? hasDurableIntent)(
+        scope,
+        sourceIdResult.value,
+      );
+      const notStarted =
+        persisted.ok &&
+        !persisted.value &&
+        resultCount(result, "exchangeWrites") === "0";
       line(output, "VERDICT=BLOCKED");
+      line(
+        output,
+        `EXECUTION_STATE=${notStarted ? "EXECUTION_NOT_STARTED" : "RECOVERY_ONLY"}`,
+      );
       line(output, `REASON_CODE=${mapErrorCode(result)}`);
       line(output, `SOURCE_ID=${sourceIdResult.value}`);
       line(output, `EXCHANGE_READS=${resultCount(result, "exchangeReads")}`);
       line(output, `EXCHANGE_WRITES=${resultCount(result, "exchangeWrites")}`);
       line(
         output,
-        "NEXT_ACTION=run mainnet:test status with the source ID; do not retry execute",
+        notStarted
+          ? "NEXT_ACTION=diagnose the blocked pre-intent stage from REASON_CODE; preserve any HALT or lease restriction; use GET-only reads for data failures; no source exists for status; do not retry execute for diagnosis"
+          : "NEXT_ACTION=run mainnet:test status with the source ID; do not retry execute",
       );
       return 5;
     } catch {

@@ -388,6 +388,11 @@ test("failed execution reports per-invocation exchange counts from its error", a
 
   assert.equal(code, 5);
   assert.match(terminal.text(), /READINESS_BLOCKED/u);
+  assert.match(terminal.text(), /EXECUTION_STATE=EXECUTION_NOT_STARTED/u);
+  assert.match(
+    terminal.text(),
+    /NEXT_ACTION=diagnose the blocked pre-intent stage from REASON_CODE/u,
+  );
   assert.match(terminal.text(), /EXCHANGE_READS=8/u);
   assert.match(terminal.text(), /EXCHANGE_WRITES=0/u);
 });
@@ -579,5 +584,53 @@ test("quote precision failures expose a safe reason without printing raw provide
     assert.match(terminal.text(), /REASON_DETAIL=/u);
     assert.match(terminal.text(), /EXCHANGE_WRITES=0/u);
     assert.doesNotMatch(terminal.text(), /PRIVATE_RESPONSE_SECRET|INJECTED/u);
+  }
+});
+
+test("failed execution retains recovery instructions when intent or dispatch evidence is uncertain", async () => {
+  for (const scenario of [
+    "intent",
+    "journal-failed",
+    "writes-unknown",
+    "writes-positive",
+    "thrown",
+  ] as const) {
+    const terminal = streams(true);
+    let reads = 0;
+    const code = await runMainnetOperatorTestCli(
+      ["execute", "--plan-hash", plan.contentHash],
+      {
+        ...terminal,
+        resolvePlan: () => resolvedPlan(),
+        hasDurableIntent: () => {
+          if (++reads === 1) return ok(false);
+          if (scenario === "journal-failed")
+            return fail(domainError("PERSISTENCE_SCHEMA", "unavailable"));
+          return ok(scenario === "intent");
+        },
+        prompt: async () => "yes",
+        clock: () => Date.parse(NOW),
+        actor: () => "operator-test",
+        execute: async () => {
+          if (scenario === "thrown") throw new Error("secret provider body");
+          return fail(
+            domainError("INVALID_CAPABILITY", "secret provider body", {
+              reasonCode: "FEE_RATE_RESPONSE_INVALID",
+              exchangeReads: 8,
+              ...(scenario === "writes-unknown"
+                ? {}
+                : { exchangeWrites: scenario === "writes-positive" ? 1 : 0 }),
+            }),
+          );
+        },
+      },
+    );
+    assert.equal(code, 5);
+    assert.match(terminal.text(), /(?:EXECUTION_STATE|VERDICT)=RECOVERY_ONLY/u);
+    assert.match(terminal.text(), /NEXT_ACTION=run mainnet:test status/u);
+    assert.doesNotMatch(
+      terminal.text(),
+      /EXECUTION_NOT_STARTED|secret provider/u,
+    );
   }
 });

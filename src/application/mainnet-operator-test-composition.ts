@@ -5,10 +5,7 @@ import { BybitAccountReadTransport } from "../adapters/bybit-v5/account-read-tra
 import { BybitAccountReadClient } from "../adapters/bybit-v5/account-read-client.js";
 import { BybitMainnetExecutionAdapter } from "../adapters/bybit-v5/execution-adapter.js";
 import { mapCreateOrderRequest } from "../adapters/bybit-v5/order-mappers.js";
-import {
-  BybitPrivateTransport,
-  responseList,
-} from "../adapters/bybit-v5/transport.js";
+import { BybitPrivateTransport } from "../adapters/bybit-v5/transport.js";
 import { BybitPublicMarketClient } from "../adapters/bybit-v5/public-market-client.js";
 import { BybitPublicTransport } from "../adapters/bybit-v5/public-transport.js";
 import { BybitMainnetReadCapabilityFacade } from "../adapters/bybit-v5/read-capability-facade.js";
@@ -51,7 +48,6 @@ import type {
 import { executeMainnetOperatorTest } from "./mainnet-operator-test.js";
 import { collectAccountEvidence } from "./account-evidence-collection.js";
 import {
-  createOperatorMainnetFeeRateEvidence,
   revalidateMainnetOperatorEvidenceAge,
   validateMainnetOperatorTestEvidence,
   type MainnetOperatorTestEvidencePort,
@@ -62,6 +58,11 @@ import {
   snapshotExchangeCredentials,
   withExchangeCounts,
 } from "./mainnet-composition-helpers.js";
+
+import {
+  collectOperatorAdmissionEvidence,
+  OperatorEvidenceReadError,
+} from "./mainnet-operator-test-evidence.js";
 
 const ACCOUNT_FEE_RATE_PATH = "/v5/account/fee-rate";
 const CREATE_ORDER_PATH = "/v5/order/create";
@@ -207,53 +208,6 @@ function scopeFor(plan: OperatorMainnetTestPlan): PersistenceScope {
     category: "linear",
     positionMode: "one-way",
   };
-}
-
-function plainObject(value: unknown): value is Record<string, unknown> {
-  return (
-    typeof value === "object" &&
-    value !== null &&
-    !Array.isArray(value) &&
-    [Object.prototype, null].includes(Object.getPrototypeOf(value)) &&
-    Object.values(Object.getOwnPropertyDescriptors(value)).every((property) =>
-      Object.hasOwn(property, "value"),
-    )
-  );
-}
-
-function extractFeeRate(
-  response: Awaited<ReturnType<BybitPrivateTransport["get"]>>,
-  symbol: string,
-) {
-  const rows = responseList(response);
-  if (
-    !rows ||
-    rows.length !== 1 ||
-    response.time === undefined ||
-    !Number.isSafeInteger(response.time) ||
-    response.time <= 0
-  )
-    return undefined;
-  const row = rows[0];
-  if (
-    !row ||
-    !plainObject(row) ||
-    Reflect.ownKeys(row).length !== 3 ||
-    row.symbol !== symbol ||
-    typeof row.makerFeeRate !== "string" ||
-    typeof row.takerFeeRate !== "string"
-  )
-    return undefined;
-  const observedAt = timestampFromEpochMs(response.time);
-  if (!observedAt.ok) return undefined;
-  const fee = createOperatorMainnetFeeRateEvidence({
-    schemaVersion: "bybit-mainnet-operator-fee-rate/v1",
-    symbol,
-    makerFeeRate: row.makerFeeRate,
-    takerFeeRate: row.takerFeeRate,
-    observedAt: observedAt.value,
-  });
-  return fee.ok ? fee.value : undefined;
 }
 
 function providerTime(
@@ -547,38 +501,23 @@ export async function runMainnetOperatorTestComposition(
       collect: async (symbol) => {
         if (symbol !== admitted.plan.symbol)
           throw new Error("operator source symbol mismatch");
-        const feeResponse = await privateTransport.get(ACCOUNT_FEE_RATE_PATH, {
-          category: "linear",
-          symbol,
-        });
-        const feeRate = extractFeeRate(feeResponse, symbol);
-        if (!feeRate) throw new Error("symbol fee-rate evidence unavailable");
-        const quote = await publicMarkets.readOperatorQuote(symbol);
-        const state = await exchangeAdapter.readState({ instrument: symbol });
-        if (!state.ok)
-          throw new Error("current Mainnet target state unavailable");
-        const fresh: MainnetOperatorTestFreshEvidence = {
-          account: accountResult.bundle,
-          readiness,
-          state: state.value,
-          instrument,
-          quote,
-          feeRate,
-        };
-        const validated = validateMainnetOperatorTestEvidence(
+        const { fresh, ages } = await collectOperatorAdmissionEvidence(
           admitted.plan,
-          fresh,
+          { account: accountResult.bundle, readiness, instrument },
+          {
+            fee: () =>
+              privateTransport.get(ACCOUNT_FEE_RATE_PATH, {
+                category: "linear",
+                symbol,
+              }),
+            quote: () => publicMarkets.readOperatorQuote(symbol),
+            state: () => exchangeAdapter.readState({ instrument: symbol }),
+          },
         );
         const evidenceAtMonotonic = monotonic();
-        if (!validated.ok || !Number.isFinite(evidenceAtMonotonic))
-          throw new Error(
-            "current Mainnet evidence did not pass the operator gate",
-          );
-        latestAdmission = {
-          evidence: fresh,
-          evidenceAtMonotonic,
-          ages: validated.value,
-        };
+        if (!Number.isFinite(evidenceAtMonotonic))
+          throw new OperatorEvidenceReadError("MONOTONIC_CLOCK_INVALID");
+        latestAdmission = { evidence: fresh, evidenceAtMonotonic, ages };
         return fresh;
       },
     };

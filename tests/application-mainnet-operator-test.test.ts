@@ -37,6 +37,10 @@ import {
   createOperatorMainnetFeeRateEvidence,
   type MainnetOperatorTestFreshEvidence,
 } from "../src/application/mainnet-entry-evidence.js";
+import {
+  extractOperatorFeeRate,
+  collectOperatorAdmissionEvidence,
+} from "../src/application/mainnet-operator-test-evidence.js";
 import { deriveMainnetExecutionReadiness } from "../src/application/mainnet-execution-readiness.js";
 import {
   executeMainnetOperatorTest,
@@ -984,4 +988,179 @@ test("post-dispatch journal failure remains ambiguous and restart cannot resend"
   assert.equal(unwrap(restart).kind, "recovery");
   assert.equal(harness.createObservations.length, 1);
   harness.persistence.close();
+});
+
+test("Bybit fee-rate contract accepts legacy and additive RPI rows without changing the fee reserve", () => {
+  const row = {
+    symbol: "BTCUSDT",
+    makerFeeRate: "0.0002",
+    takerFeeRate: "0.00055",
+  };
+  const response = (value: unknown) => ({
+    retCode: 0,
+    retMsg: "OK",
+    result: { list: [value] },
+    time: Date.parse(NOW),
+  });
+  const legacy = extractOperatorFeeRate(response(row), "BTCUSDT");
+  assert.ok(legacy.ok);
+  for (const rpiMakerFeeRate of ["0.0001", "0", "-0.0001", ""]) {
+    const current = extractOperatorFeeRate(
+      response({ ...row, rpiMakerFeeRate }),
+      "BTCUSDT",
+    );
+    assert.deepEqual(current, legacy);
+  }
+  for (const patch of [
+    { symbol: "DOGEUSDT" },
+    { makerFeeRate: undefined },
+    { makerFeeRate: "-0.1" },
+    { makerFeeRate: "0.5" },
+    { takerFeeRate: "0" },
+    { takerFeeRate: "1" },
+    { takerFeeRate: "NaN" },
+    { rpiMakerFeeRate: null },
+    { rpiMakerFeeRate: 0.001 },
+    { rpiMakerFeeRate: "NaN" },
+    { rpiMakerFeeRate: "1" },
+    { rpiMakerFeeRate: "-1" },
+  ])
+    assert.equal(
+      extractOperatorFeeRate(response({ ...row, ...patch }), "BTCUSDT").ok,
+      false,
+    );
+  assert.equal(
+    extractOperatorFeeRate(
+      { retCode: 0, retMsg: "OK", result: { list: [row] } },
+      "BTCUSDT",
+    ).ok,
+    false,
+  );
+  for (const time of [0, -1, 1.5, Number.MAX_SAFE_INTEGER])
+    assert.equal(
+      extractOperatorFeeRate(
+        { ...response(row), ...(time === undefined ? {} : { time }) },
+        "BTCUSDT",
+      ).ok,
+      false,
+    );
+  assert.equal(
+    extractOperatorFeeRate(
+      { ...response(row), result: { list: [row, row] } },
+      "BTCUSDT",
+    ).ok,
+    false,
+  );
+});
+
+test("admission collection preserves a safe stage reason and never creates an intent on failure", async () => {
+  for (const stage of [
+    "fee",
+    "quote",
+    "state",
+    "validation",
+    "unexpected",
+  ] as const) {
+    const harness = setup();
+    const fresh = freshEvidence(harness.valuePlan);
+    const failure = () => {
+      throw new Error("secret private provider payload");
+    };
+    harness.dependencies.evidence.collect = async () => {
+      if (stage === "unexpected") return failure();
+      return (
+        await collectOperatorAdmissionEvidence(
+          harness.valuePlan,
+          {
+            account: fresh.account,
+            readiness: fresh.readiness,
+            instrument: fresh.instrument,
+          },
+          {
+            fee: async () =>
+              stage === "fee"
+                ? failure()
+                : {
+                    retCode: 0,
+                    retMsg: "OK",
+                    result: {
+                      list: [
+                        {
+                          symbol: fresh.feeRate.symbol,
+                          makerFeeRate: "0.0002",
+                          takerFeeRate: "0.00055",
+                          rpiMakerFeeRate: "0.0001",
+                        },
+                      ],
+                    },
+                    time: Date.parse(NOW),
+                  },
+            quote: async () => (stage === "quote" ? failure() : fresh.quote),
+            state: async () =>
+              stage === "state"
+                ? failure()
+                : {
+                    ok: true,
+                    value:
+                      stage === "validation"
+                        ? {
+                            ...fresh.state,
+                            serverTime: at(Date.parse(NOW) + 60_000),
+                          }
+                        : fresh.state,
+                  },
+          },
+        )
+      ).fresh;
+    };
+    const result = await harness.run();
+    assert.equal(result.ok, false);
+    if (!result.ok) {
+      const code = result.error.details?.reasonCode;
+      if (stage === "fee") assert.equal(code, "FEE_RATE_READ_FAILED");
+      if (stage === "quote") assert.equal(code, "QUOTE_READ_FAILED");
+      if (stage === "state") assert.equal(code, "TARGET_STATE_READ_FAILED");
+      if (stage === "unexpected")
+        assert.equal(code, "FRESH_MAINNET_EVIDENCE_UNAVAILABLE");
+      assert.doesNotMatch(JSON.stringify(result), /secret|private provider/u);
+    }
+    assert.equal(harness.createObservations.length, 0);
+    assert.equal(harness.authorization.consumeCalls, 0);
+    assert.equal(
+      unwrap(
+        harness.journal.readOperatorMainnetTestSource(
+          unwrap(
+            deriveOperatorMainnetTestSourceId(harness.valuePlan.contentHash),
+          ),
+        ),
+      ),
+      undefined,
+    );
+    harness.persistence.close();
+  }
+});
+
+test("real fee-rate response with RPI passes the complete production admission validator", async () => {
+  const valuePlan = plan();
+  const fresh = freshEvidence(valuePlan);
+  const result = await collectOperatorAdmissionEvidence(valuePlan, fresh, {
+    fee: async () => ({
+      retCode: 0,
+      retMsg: "OK",
+      result: {
+        list: [
+          {
+            symbol: valuePlan.symbol,
+            makerFeeRate: "0.0002",
+            takerFeeRate: "0.00055",
+            rpiMakerFeeRate: "",
+          },
+        ],
+      },
+      time: Date.parse(NOW),
+    }),
+    quote: async () => fresh.quote,
+    state: async () => ({ ok: true, value: fresh.state }),
+  });
+  assert.deepEqual(result.fresh.feeRate, fresh.feeRate);
 });
