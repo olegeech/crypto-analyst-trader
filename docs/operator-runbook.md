@@ -73,11 +73,16 @@ trustworthy account-bound risk BLOCK can be saved as a BLOCKED review artifact.
 
 The forward release evidence is deterministic and fault-injection/replay
 verification followed by explicit read-only Mainnet readiness checks against
-the isolated AI Subaccount. The first deliberately authorized Mainnet write is
-the bounded canary in [issue #31](https://github.com/olegeech/crypto-analyst-trader/issues/31),
-after the #31 implementation is reviewed and released, a fresh read-only
-preflight is READY, every mandatory runtime safety gate passes, and the operator
-separately approves the exact attended order. Completion of #30's integrated
+the isolated AI Subaccount. The first deliberately authorized Mainnet write is the bounded canary in
+[issue #31](https://github.com/olegeech/crypto-analyst-trader/issues/31).
+**For this one attended happy-path acceptance experiment, merge to `main`,
+tagging, publication and deployment are NOT prerequisites.** An exact reviewed
+PR-branch commit with passing same-SHA release checks and CI is eligible for
+the test while the PR remains open. A fresh read-only preflight must be READY,
+every mandatory runtime safety gate must pass, and the operator must separately
+approve the exact attended order. Record the actual exchange result and
+reconciliation evidence to decide whether to merge or fix the PR. A green
+build is not live trading authorization. Completion of #30's integrated
 daily-strategy data gate is not a prerequisite for this one execution-contract
 experiment; this exception does not establish daily-strategy readiness or waive
 account, permission, capacity, ownership, position or HALT checks. The daily
@@ -126,8 +131,9 @@ The test-only authority fixture is not part of any operator entry point.
 `daily:approve` remains decision-only; a typed Mainnet writer in source is not
 operator authority or `LIVE_PROVEN` evidence. Do not invoke or synthesize write
 authority outside the #31-owned bounded canary. #31 remains the first
-deliberately authorized Mainnet write after its own implementation/release,
-fresh readiness checks and applicable runtime safety gates pass. The #30
+deliberately authorized Mainnet write from an exact reviewed, CI-green
+#31 commit (including an unmerged PR branch), after fresh readiness checks
+and applicable runtime safety gates pass. The #30
 integrated daily-data release gate is not a prerequisite for this single
 supervised execution-contract experiment. #21/#46 require no live write or
 Testnet step.
@@ -171,9 +177,11 @@ operator command or authorize a Mainnet write.
 
 ### Supervised Mainnet lifecycle check (issue #31 U3)
 
-The attended CLI exposes three commands. Preparation performs bounded GET-only
-account/market checks, freezes the approved symbol, allocation, gross entry
-notional cap and quote-deviation band, and saves the exact plan by hash:
+The attended CLI exposes three commands. **The first supervised #31 happy-path
+test is intentionally allowed on the reviewed, same-SHA CI-green PR branch,
+before any merge, to inform merge-versus-fix.** Preparation performs bounded
+GET-only account/market checks, freezes the approved symbol, allocation, gross
+entry notional cap and quote-deviation band, and saves the exact plan by hash:
 
 ```bash
 npm run mainnet:test -- prepare --symbol BTCUSDT --allocation 10 --gross-cap 8 --max-deviation-bps 10
@@ -572,18 +580,23 @@ The facade read model is evidence for recovery, not permission to bypass the
 plan hash, approval, lease, ownership or reconciliation gates.
 
 CLI names in this document describe application use cases. Invoke only commands
-implemented by the current `package.json` and released for the selected
-environment. A missing capability is `CAPABILITY_NOT_RELEASED`; do not replace
-it with an ad hoc API call.
+implemented by the current `package.json` and available for the selected
+environment. For the single attended #31 acceptance experiment, an exact
+reviewed PR-branch build with passing same-SHA tests/CI is sufficient: the
+command need not have been merged, published or otherwise released. This
+exception does not enable an unavailable daily execution mode. A missing
+capability is `CAPABILITY_NOT_RELEASED`; do not replace it with an ad hoc API
+call.
 
 ## Current execution scope
 
 The released daily CLI supports prepare, review and decision-only approval; no
 generic `daily:execute` command or `TESTNET_EXECUTE` / `MAINNET_EXECUTE` daily
 mode is released. The Testnet and Demo probes documented below are separate,
-opt-in capability checks. The first deliberately authorized Mainnet write is
-the bounded #31 canary after its release, readiness and live-risk gates; that
-authority does not imply a general Mainnet execution mode. No future mode may
+opt-in capability checks. The first deliberately authorized Mainnet write is the bounded #31 canary
+from its reviewed, CI-green exact commit, **even before merge/release**, after
+fresh readiness and live-risk gates; this does not imply a general Mainnet
+execution mode. No future mode may
 override a `BLOCK` or `HALT`.
 
 ## Market window
@@ -639,13 +652,15 @@ that override.
    unavailable phase.
 3. Require release-check evidence for the exact commit. Reuse a durable
    attestation when available; otherwise run `npm run test:release`.
+   For the attended #31 canary, the tested commit may be the open PR HEAD;
+   do not demand a prior merge, tag or release.
 4. Confirm no earlier run owns the account lock and no unresolved
    `PARTIAL`, `FAILED` or ambiguous execution remains.
 5. Confirm credentials are available through the approved secret boundary
    without printing or copying them into artifacts.
 
-Any uncertainty about environment, account, release state or credentials stops
-before private writes.
+Any uncertainty about environment, account, exact tested code or credentials
+stops before private writes. An open #31 PR is not such an uncertainty by itself.
 
 ### 2. Refresh evidence
 
