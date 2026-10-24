@@ -117,8 +117,11 @@ re-POST when dispatch might have occurred. A genuine ambiguous submission
 still requires human inspection before further exposure; an existing incident
 HALT must not be deleted or silently ignored. This newer direction supersedes
 the legacy lease admission clause in #31 and the #9 generic persistence plan
-**only for this bounded operator flow**. The implementation still needs a
-reviewed change before this behavior is released.
+**only for this bounded operator flow**. This operator experiment may exercise
+its happy path on the exact reviewed PR-branch commit with green same-SHA
+release tests and CI **before merge or publication**. Keep explicit attended
+approval, mandatory exchange/account gates and genuine incident HALT handling.
+The observed result should inform whether the PR is merged or revised.
 
 **Guardrail design rule.** Reject speculative operational complexity:
 new preflight conditions, confirmations, persistent locks, recovery rituals,
