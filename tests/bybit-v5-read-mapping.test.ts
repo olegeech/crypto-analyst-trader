@@ -32,10 +32,15 @@ function instrumentResponse(
         contractType: "LinearPerpetual",
         quoteCoin: "USDT",
         settleCoin: "USDT",
-        priceFilter: { tickSize: "0.0001" },
+        priceFilter: {
+          tickSize: "0.0001",
+          minPrice: "0.0001",
+          maxPrice: "1000000",
+        },
         lotSizeFilter: {
           qtyStep: "1",
           minOrderQty: "1",
+          maxOrderQty: "100000",
           minNotionalValue: "5",
         },
         ...overrides,
@@ -66,6 +71,9 @@ test("strict read mappers normalize the supported Demo linear one-way scope", ()
   const instrument = mapInstrumentInfo(instrumentResponse(), "DOGEUSDT");
   assert.equal(instrument.constraints.priceTickSize.toString(), "0.0001");
   assert.equal(instrument.constraints.minNotional?.toString(), "5");
+  assert.equal(instrument.constraints.minPrice?.toString(), "0.0001");
+  assert.equal(instrument.constraints.maxPrice?.toString(), "1000000");
+  assert.equal(instrument.constraints.maxLimitQuantity?.toString(), "100000");
 
   const ticker = mapTicker(
     response({

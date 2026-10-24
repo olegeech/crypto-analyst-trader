@@ -118,12 +118,20 @@ import {
   rehydratePreparedPlanApproval,
   type PreparedPlanApproval,
 } from "../review/prepared-plan-approval.js";
+import {
+  rehydrateOperatorMainnetTestPlan,
+  rehydrateOperatorMainnetTestApproval,
+  type OperatorMainnetTestPlan,
+  type OperatorMainnetTestApproval,
+} from "../execution/operator-mainnet-test-plan.js";
 
 export const ARTIFACT_SCHEMA_VERSION = "artifact/v1" as const;
 
 export type ArtifactKind =
   | "prepared-daily-plan"
   | "prepared-plan-approval"
+  | "operator-mainnet-execution-test"
+  | "operator-mainnet-execution-approval"
   | "evidence-ref"
   | "instrument-constraints"
   | "strategy-config"
@@ -161,6 +169,8 @@ export interface CanonicalArtifactEnvelope {
 export type RehydratedArtifact =
   | PreparedDailyPlan
   | PreparedPlanApproval
+  | OperatorMainnetTestPlan
+  | OperatorMainnetTestApproval
   | EvidenceRef
   | InstrumentConstraints
   | StrategyConfig
@@ -1078,6 +1088,14 @@ const schemas: ReadonlyMap<ArtifactKind, Schema> = new Map([
     "prepared-plan-approval",
     { kind: "validated", validate: rehydratePreparedPlanApproval },
   ],
+  [
+    "operator-mainnet-execution-test",
+    { kind: "validated", validate: rehydrateOperatorMainnetTestPlan },
+  ],
+  [
+    "operator-mainnet-execution-approval",
+    { kind: "validated", validate: rehydrateOperatorMainnetTestApproval },
+  ],
   // The constructor owns closed validation of every nested account fact and
   // rechecks derived consistency and provenance. Do not duplicate that schema.
   [
@@ -1524,6 +1542,14 @@ export function rehydrateArtifact(
   envelope: unknown,
 ): Result<PreparedPlanApproval>;
 export function rehydrateArtifact(
+  artifactKind: "operator-mainnet-execution-test",
+  envelope: unknown,
+): Result<OperatorMainnetTestPlan>;
+export function rehydrateArtifact(
+  artifactKind: "operator-mainnet-execution-approval",
+  envelope: unknown,
+): Result<OperatorMainnetTestApproval>;
+export function rehydrateArtifact(
   artifactKind: "account-evidence-bundle",
   envelope: unknown,
 ): Result<AccountEvidenceBundle>;
@@ -1582,6 +1608,10 @@ export function rehydrateArtifact(
       return rehydratePreparedDailyPlan(decoded.value);
     case "prepared-plan-approval":
       return rehydratePreparedPlanApproval(decoded.value);
+    case "operator-mainnet-execution-test":
+      return rehydrateOperatorMainnetTestPlan(decoded.value);
+    case "operator-mainnet-execution-approval":
+      return rehydrateOperatorMainnetTestApproval(decoded.value);
     case "account-evidence-bundle":
       // Decoded decimal tags remain DecimalValue instances. The constructor
       // preserves historical binding claims; it never authenticates a new run.

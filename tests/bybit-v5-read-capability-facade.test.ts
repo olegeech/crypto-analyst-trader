@@ -3,6 +3,10 @@ import { readFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import test from "node:test";
 import ts from "typescript";
+import {
+  createOperatorMainnetQuote,
+  createOperatorMainnetTestPlan,
+} from "../src/domain/execution/operator-mainnet-test-plan.js";
 
 import { BybitMainnetReadCapabilityFacade } from "../src/adapters/bybit-v5/read-capability-facade.js";
 import {
@@ -23,10 +27,15 @@ function instrument(overrides: Record<string, unknown> = {}) {
     contractType: "LinearPerpetual",
     quoteCoin: "USDT",
     settleCoin: "USDT",
-    priceFilter: { tickSize: "0.0001" },
+    priceFilter: {
+      tickSize: "0.0001",
+      minPrice: "0.0001",
+      maxPrice: "1000000",
+    },
     lotSizeFilter: {
       qtyStep: "1",
       minOrderQty: "1",
+      maxOrderQty: "100000",
       minNotionalValue: "5",
     },
     ...overrides,
@@ -197,4 +206,76 @@ test("Mainnet GET facade import graph cannot reach mixed private/write adapters"
   assert.ok(
     visited.has(resolve("src/adapters/bybit-v5/account-read-transport.ts")),
   );
+});
+
+test("production instrument read retains venue bounds for operator-test preparation", async () => {
+  const fixture = facadeFixture();
+  const selected = await fixture.facade.readInstrument("DOGEUSDT");
+  const quote = createOperatorMainnetQuote({
+    exchange: "bybit",
+    environment: "mainnet",
+    category: "linear",
+    origin: "https://api.bybit.com",
+    symbol: "DOGEUSDT",
+    observedAt: "2026-10-07T12:00:00.000Z",
+    collectionStartedAt: "2026-10-07T11:59:59.900Z",
+    collectionCompletedAt: "2026-10-07T12:00:00.100Z",
+    bid: "0.0886",
+    ask: "0.0887",
+    last: "0.0886",
+  });
+  assert.ok(quote.ok);
+  const plan = createOperatorMainnetTestPlan({
+    accountIdentityHash: `sha256:${"a".repeat(64)}`,
+    symbol: "DOGEUSDT",
+    nonce: "read-instrument-regression",
+    allocation: "10",
+    grossNotionalCap: "10",
+    maxDeviationBps: "10",
+    quote: quote.value,
+    constraints: selected.constraints,
+    warningCodes: [],
+    preparedAt: "2026-10-07T12:00:00.200Z",
+  });
+  assert.ok(plan.ok, plan.ok ? undefined : plan.error.message);
+  assert.equal(plan.value.entry.quantity.toString(), "112");
+  assert.equal(plan.value.entry.takeProfit.triggerPrice.toString(), "0.0888");
+  assert.equal(plan.value.constraints.minPrice?.toString(), "0.0001");
+  assert.equal(plan.value.constraints.maxPrice?.toString(), "1000000");
+  assert.equal(plan.value.constraints.maxLimitQuantity?.toString(), "100000");
+  assert.equal(fixture.calls.length, 1);
+});
+
+test("production instrument read blocks absent, malformed, nonpositive and contradictory venue bounds", async () => {
+  for (const field of ["minPrice", "maxPrice", "maxOrderQty"]) {
+    for (const invalid of [undefined, "-1", "0", "invalid"]) {
+      const row = instrument();
+      const filter: Record<string, unknown> =
+        field === "maxOrderQty" ? row.lotSizeFilter : row.priceFilter;
+      if (invalid === undefined) delete filter[field];
+      else filter[field] = invalid;
+      await assert.rejects(
+        facadeFixture({ result: { list: [row] } }).facade.readInstrument(
+          "DOGEUSDT",
+        ),
+      );
+    }
+  }
+  for (const overrides of [
+    { priceFilter: { tickSize: "0.0001", minPrice: "2", maxPrice: "1" } },
+    {
+      lotSizeFilter: {
+        qtyStep: "1",
+        minOrderQty: "2",
+        maxOrderQty: "1",
+        minNotionalValue: "5",
+      },
+    },
+  ]) {
+    await assert.rejects(
+      facadeFixture({
+        result: { list: [instrument(overrides)] },
+      }).facade.readInstrument("DOGEUSDT"),
+    );
+  }
 });

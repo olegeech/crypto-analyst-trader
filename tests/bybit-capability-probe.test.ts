@@ -79,10 +79,15 @@ function fixtureTransport(options: ProbeFixtureOptions = {}) {
           list: [
             {
               status: options.pendingOpen ? "PendingOpen" : "Trading",
-              priceFilter: { tickSize: "0.0001" },
+              priceFilter: {
+                tickSize: "0.0001",
+                minPrice: "0.0001",
+                maxPrice: "1000000",
+              },
               lotSizeFilter: {
                 qtyStep: "1",
                 minOrderQty: "1",
+                maxOrderQty: "100000",
                 minNotionalValue: "5",
               },
             },

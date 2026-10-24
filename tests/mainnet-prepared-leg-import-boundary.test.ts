@@ -6,10 +6,28 @@ import ts from "typescript";
 
 const repositoryRoot = resolve(process.cwd());
 const testRoot = resolve(repositoryRoot, "tests");
-const authorizationPort = resolve(
-  repositoryRoot,
-  "src/ports/prepared-leg-write-authorization.ts",
-);
+const authorizationPorts = new Map([
+  [
+    resolve(repositoryRoot, "src/ports/prepared-leg-write-authorization.ts"),
+    [
+      resolve(
+        repositoryRoot,
+        "src/application/mainnet-prepared-leg-boundary.ts",
+      ),
+      resolve(repositoryRoot, "src/application/mainnet-prepared-leg-cancel.ts"),
+    ],
+  ],
+  [
+    resolve(repositoryRoot, "src/ports/operator-mainnet-test-authorization.ts"),
+    [
+      resolve(repositoryRoot, "src/application/mainnet-operator-test.ts"),
+      resolve(
+        repositoryRoot,
+        "src/application/mainnet-operator-test-composition.ts",
+      ),
+    ],
+  ],
+]);
 const mainnetWriters = [
   resolve(repositoryRoot, "src/application/mainnet-prepared-leg-boundary.ts"),
   resolve(repositoryRoot, "src/application/mainnet-prepared-leg-cancel.ts"),
@@ -101,7 +119,9 @@ async function resolveLocalImport(
   return undefined;
 }
 
-async function operatorEntrypoints(): Promise<string[]> {
+async function operatorEntrypoints(): Promise<
+  readonly { readonly script: string; readonly path: string }[]
+> {
   const packageJson = JSON.parse(
     await readFile(resolve(repositoryRoot, "package.json"), "utf8"),
   ) as { private?: boolean; scripts?: Record<string, string> };
@@ -110,7 +130,7 @@ async function operatorEntrypoints(): Promise<string[]> {
     true,
     "the repository package stays private",
   );
-  const roots: string[] = [];
+  const roots: { script: string; path: string }[] = [];
   for (const [name, command] of Object.entries(packageJson.scripts ?? {})) {
     if (name === "test" || name === "test:release") continue;
     for (const match of command.matchAll(
@@ -118,19 +138,34 @@ async function operatorEntrypoints(): Promise<string[]> {
     )) {
       const entrypoint = match[1];
       assert.ok(entrypoint, `${name}: command entrypoint is present`);
-      roots.push(resolve(repositoryRoot, entrypoint));
+      roots.push({ script: name, path: resolve(repositoryRoot, entrypoint) });
     }
   }
-  assert.ok(roots.includes(resolve(repositoryRoot, "src/cli/daily.ts")));
   assert.ok(
-    roots.includes(resolve(repositoryRoot, "src/cli/mainnet-preflight.ts")),
+    roots.some(
+      (root) => root.path === resolve(repositoryRoot, "src/cli/daily.ts"),
+    ),
   );
-  return [...new Set(roots)];
+  assert.ok(
+    roots.some(
+      (root) =>
+        root.path === resolve(repositoryRoot, "src/cli/mainnet-preflight.ts"),
+    ),
+  );
+  const operatorTestRoots = roots.filter(
+    (root) => root.script === "mainnet:test",
+  );
+  assert.deepEqual(
+    operatorTestRoots.map((root) => root.path),
+    [resolve(repositoryRoot, "src/cli/mainnet-operator-test.ts")],
+    "only the explicit mainnet:test package entry point may expose the #31 operator flow",
+  );
+  return roots;
 }
 
 test("operator package entry points cannot reach #21 Mainnet writers or test authority", async () => {
   const roots = await operatorEntrypoints();
-  const pending = [...roots];
+  const pending = roots.map((root) => root.path);
   const visited = new Set<string>();
   while (pending.length > 0) {
     const file = pending.pop();
@@ -154,7 +189,9 @@ test("operator package entry points cannot reach #21 Mainnet writers or test aut
   }
 
   const productionFiles = await sourceFiles(resolve(repositoryRoot, "src"));
-  const authorizationPortImporters: string[] = [];
+  const authorizationPortImporters = new Map<string, string[]>();
+  for (const authorizationPort of authorizationPorts.keys())
+    authorizationPortImporters.set(authorizationPort, []);
   for (const file of productionFiles) {
     const source = await readFile(file, "utf8");
     for (const specifier of imports(source, file)) {
@@ -165,18 +202,14 @@ test("operator package entry points cannot reach #21 Mainnet writers or test aut
         false,
         `${file}: production source must not import test-only modules`,
       );
-      if (target === authorizationPort) authorizationPortImporters.push(file);
+      const importers = authorizationPortImporters.get(target);
+      if (importers) importers.push(file);
     }
   }
-  assert.deepEqual(
-    authorizationPortImporters.sort(),
-    [
-      resolve(
-        repositoryRoot,
-        "src/application/mainnet-prepared-leg-boundary.ts",
-      ),
-      resolve(repositoryRoot, "src/application/mainnet-prepared-leg-cancel.ts"),
-    ].sort(),
-    "only the injected #21 boundaries may depend on the write-authorization port",
-  );
+  for (const [authorizationPort, expectedImporters] of authorizationPorts)
+    assert.deepEqual(
+      authorizationPortImporters.get(authorizationPort)?.sort(),
+      expectedImporters.sort(),
+      `${authorizationPort}: write authorization stays limited to the operator use case and its explicit composition boundary`,
+    );
 });

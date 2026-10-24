@@ -597,6 +597,13 @@ export function mapInstrumentInfo(
     quantityStep: lotSizeFilter.qtyStep,
     minQuantity: lotSizeFilter.minOrderQty,
     minNotional: parseMinNotional(lotSizeFilter, "instruments-info").toString(),
+    minPrice: positiveDecimal(priceFilter, "minPrice", "instruments-info"),
+    maxPrice: positiveDecimal(priceFilter, "maxPrice", "instruments-info"),
+    maxLimitQuantity: positiveDecimal(
+      lotSizeFilter,
+      "maxOrderQty",
+      "instruments-info",
+    ),
   });
   if (!constraintsResult.ok) {
     invalid("Bybit instrument constraints are invalid.");

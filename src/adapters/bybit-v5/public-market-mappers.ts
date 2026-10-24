@@ -247,6 +247,20 @@ export function mapTicker(
   expectedSymbol: string,
 ): MarketTickerEvidence {
   const symbol = configuredSymbol(expectedSymbol);
+  if (
+    response.result.symbol !== undefined &&
+    text(response.result, "symbol", "tickers") !== symbol
+  ) {
+    precondition(
+      `Bybit ticker response returned the wrong symbol for ${symbol}.`,
+    );
+  }
+  if (
+    response.result.category !== undefined &&
+    text(response.result, "category", "tickers") !== "linear"
+  ) {
+    precondition("Bybit ticker response returned the wrong category.");
+  }
   const list = records(response, "tickers");
   const matches = list.filter((item) => item.symbol === symbol);
   if (matches.length === 0) missing(`Bybit did not return ticker ${symbol}.`);

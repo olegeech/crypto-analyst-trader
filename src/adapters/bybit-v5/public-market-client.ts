@@ -27,9 +27,14 @@ import {
   type OpenInterestObservation,
 } from "../../domain/market/market-evidence-bundle.js";
 import {
+  createOperatorMainnetQuote,
+  type OperatorMainnetQuote,
+} from "../../domain/execution/operator-mainnet-test-plan.js";
+import {
   timestampFromEpochMs,
   type UtcTimestamp,
 } from "../../domain/shared/time.js";
+import { BYBIT_PUBLIC_ORIGIN } from "./public-transport.js";
 
 export const BYBIT_LINEAR_CATEGORY = "linear" as const;
 export const PUBLIC_INSTRUMENTS_INFO_PATH = "/v5/market/instruments-info";
@@ -96,6 +101,35 @@ export class BybitPublicMarketClient {
       symbol,
     });
     return mapTicker(response, symbol);
+  }
+
+  /** Read one ticker and bind it to the fixed linear Mainnet source and provider-time bracket. */
+  async readOperatorQuote(
+    symbol: MarketEvidenceSymbol,
+  ): Promise<OperatorMainnetQuote> {
+    const collectionStartedAt = await this.readExchangeTime();
+    const ticker = await this.readTicker(symbol);
+    const collectionCompletedAt = await this.readExchangeTime();
+    const quote = createOperatorMainnetQuote({
+      exchange: "bybit",
+      environment: "mainnet",
+      category: BYBIT_LINEAR_CATEGORY,
+      origin: BYBIT_PUBLIC_ORIGIN,
+      symbol,
+      observedAt: ticker.observedAt,
+      collectionStartedAt,
+      collectionCompletedAt,
+      bid: ticker.bid,
+      ask: ticker.ask,
+      last: ticker.last,
+    });
+    if (!quote.ok) {
+      throw new BybitPublicMarketMappingError(
+        "precondition",
+        "Bybit operator quote did not satisfy its source and time contract.",
+      );
+    }
+    return quote.value;
   }
 
   async readOhlcv(

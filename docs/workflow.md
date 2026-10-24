@@ -111,9 +111,19 @@ owner action needed to refresh the paused workflow.
 - live changes include deterministic fault-test evidence, explicit read-only
   Mainnet readiness checks, disable/rollback and reconciliation; Testnet or an
   earlier Mainnet write is not a release prerequisite;
+- the single supervised execution-contract experiment in [issue #31](https://github.com/olegeech/crypto-analyst-trader/issues/31)
+  is an **optional pre-merge happy-path acceptance test** on an exact reviewed
+  PR-branch commit with same-SHA green release tests/CI; no merge into `main`,
+  tag or publication is needed before it. It still needs fresh read-only
+  Mainnet preflight, all mandatory runtime safety gates and separate explicit
+  attended order approval. Its actual CREATE/status/TP/cleanup evidence
+  informs the merge-versus-rework decision; incomplete AC7 stays explicitly
+  open. This does not promote daily-strategy readiness or bypass #30 for
+  normal daily strategy;
 - contracts or operator behavior are documented;
 - no secret or private account artifact is committed;
-- the pull request closes the issue;
+- the pull request closes the issue when all acceptance criteria are complete;
+  implementation-only pull requests keep separately gated live criteria open;
 - residual work is a separate issue.
 
 ## Context budget

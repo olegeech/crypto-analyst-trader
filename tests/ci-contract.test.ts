@@ -115,6 +115,19 @@ test("the write probe is absent from release execution", () => {
   assert.doesNotMatch(releaseScript, /scripts\/bybit-capability-probe\.ts/);
 });
 
+test("the supervised Mainnet operator command is explicit and excluded from default execution", () => {
+  assert.match(
+    packageJson.scripts["mainnet:test"] ?? "",
+    /node --import tsx src\/cli\/mainnet-operator-test\.ts/u,
+  );
+  assert.doesNotMatch(releaseScript, /mainnet:test|mainnet-operator-test/u);
+  assert.doesNotMatch(ciWorkflow, /mainnet:test|mainnet-operator-test/u);
+  assert.doesNotMatch(
+    packageJson.scripts.test ?? "",
+    /mainnet:test|mainnet-operator-test\.ts/u,
+  );
+});
+
 test("Demo adapter verification is explicit, Demo-only and excluded from CI/release", () => {
   assert.match(
     packageJson.scripts["verify:bybit:demo-adapter"] ?? "",

@@ -27,17 +27,28 @@ export class BybitPublicTransportError extends Error {
   readonly kind: PublicTransportFailureKind;
   readonly retCode: number | undefined;
   readonly httpStatus: number | undefined;
+  readonly reasonCode:
+    | "PROVIDER_TIME_INVALID_OR_INCONSISTENT"
+    | "PROVIDER_TIME_PRECISION_INSUFFICIENT"
+    | undefined;
 
   constructor(
     kind: PublicTransportFailureKind,
     message: string,
-    options: { retCode?: number; httpStatus?: number } = {},
+    options: {
+      retCode?: number;
+      httpStatus?: number;
+      reasonCode?:
+        | "PROVIDER_TIME_INVALID_OR_INCONSISTENT"
+        | "PROVIDER_TIME_PRECISION_INSUFFICIENT";
+    } = {},
   ) {
     super(message);
     this.name = "BybitPublicTransportError";
     this.kind = kind;
     this.retCode = options.retCode;
     this.httpStatus = options.httpStatus;
+    this.reasonCode = options.reasonCode;
   }
 }
 
@@ -126,8 +137,15 @@ export class BybitPublicTransport {
       throw new BybitPublicTransportError(
         "invalid-response",
         "Bybit public time response did not contain a valid exchange timestamp.",
+        { reasonCode: "PROVIDER_TIME_INVALID_OR_INCONSISTENT" },
       );
     }
+    if (response.result.timeNano === undefined && response.time === undefined)
+      throw new BybitPublicTransportError(
+        "invalid-response",
+        "Bybit public time response provides only seconds; millisecond precision is required for quote collection.",
+        { reasonCode: "PROVIDER_TIME_PRECISION_INSUFFICIENT" },
+      );
     return epoch;
   }
 

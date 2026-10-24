@@ -73,9 +73,20 @@ trustworthy account-bound risk BLOCK can be saved as a BLOCKED review artifact.
 
 The forward release evidence is deterministic and fault-injection/replay
 verification followed by explicit read-only Mainnet readiness checks against
-the isolated AI Subaccount. The first deliberately authorized Mainnet write is
-the bounded canary in [issue #31](https://github.com/olegeech/crypto-analyst-trader/issues/31),
-after the #30 release gate and the applicable live-risk gate pass.
+the isolated AI Subaccount. The first deliberately authorized Mainnet write is the bounded canary in
+[issue #31](https://github.com/olegeech/crypto-analyst-trader/issues/31).
+**For this one attended happy-path acceptance experiment, merge to `main`,
+tagging, publication and deployment are NOT prerequisites.** An exact reviewed
+PR-branch commit with passing same-SHA release checks and CI is eligible for
+the test while the PR remains open. A fresh read-only preflight must be READY,
+every mandatory runtime safety gate must pass, and the operator must separately
+approve the exact attended order. Record the actual exchange result and
+reconciliation evidence to decide whether to merge or fix the PR. A green
+build is not live trading authorization. Completion of #30's integrated
+daily-strategy data gate is not a prerequisite for this one execution-contract
+experiment; this exception does not establish daily-strategy readiness or waive
+account, permission, capacity, ownership, position or HALT checks. The daily
+execution paths retain their lease rules; the attended #31 flow uses no lease.
 
 Testnet is not a release prerequisite. The bounded Testnet and Demo probes
 below remain opt-in, environment-scoped capability checks; their observations
@@ -120,8 +131,12 @@ The test-only authority fixture is not part of any operator entry point.
 `daily:approve` remains decision-only; a typed Mainnet writer in source is not
 operator authority or `LIVE_PROVEN` evidence. Do not invoke or synthesize write
 authority outside the #31-owned bounded canary. #31 remains the first
-deliberately authorized Mainnet write after the #30 release gate and applicable
-live-risk gate pass. #21/#46 require no live write or Testnet step.
+deliberately authorized Mainnet write from an exact reviewed, CI-green
+#31 commit (including an unmerged PR branch), after fresh readiness checks
+and applicable runtime safety gates pass. The #30
+integrated daily-data release gate is not a prerequisite for this single
+supervised execution-contract experiment. #21/#46 require no live write or
+Testnet step.
 
 Issue [#23](https://github.com/olegeech/crypto-analyst-trader/issues/23)
 adds per-leg protection reconciliation to those internal boundaries. A new M1
@@ -159,6 +174,81 @@ For an unresolved Mainnet incident, follow the runtime containment steps in
 protective orders, act only on verified ownership, and reconcile again before
 any explicit `HALT` clearance. These internal boundaries do not expose an
 operator command or authorize a Mainnet write.
+
+### Supervised Mainnet lifecycle check (issue #31 U3)
+
+The attended CLI exposes three commands. **The first supervised #31 happy-path
+test is intentionally allowed on the reviewed, same-SHA CI-green PR branch,
+before any merge, to inform merge-versus-fix.** Preparation performs bounded
+GET-only account/market checks, freezes the approved symbol, allocation, gross
+entry notional cap and quote-deviation band, and saves the exact plan by hash:
+
+```bash
+npm run mainnet:test -- prepare --symbol BTCUSDT --allocation 10 --gross-cap 8 --max-deviation-bps 10
+npm run mainnet:test -- execute --plan-hash sha256:<exact-64-hex>
+# Copy the exact SOURCE_ID printed by prepare into this command.
+npm run mainnet:test -- status --source-id "$SOURCE_ID"
+```
+
+Review the frozen entry Limit/GTC price, quantity, Partial Market LastPrice TP,
+quote age, deviation range, allocation and gross cap before executing. The cap
+limits gross entry notional only; it is not a cap on fees, slippage, funding or
+total loss. Execute requires an interactive terminal and the exact lowercase
+answer `yes` for one bounded CREATE attempt. Any durable intent or restart
+routes to status recovery; execute will not resend it. After any attempt, run
+`status` and follow the displayed next action. A successful CREATE response is
+not a TP lifecycle pass.
+
+This flow assumes one attending operator and one local process. CREATE and
+status neither acquire an account lease nor trigger takeover HALT. A failed
+read before intent leaves no operator lease to expire; a later attended run
+can obtain fresh consent and data. Existing incident HALT still blocks entry.
+After a possible submission or crash, inspect the exact client order ID,
+orders, fills and position in Bybit UI, then use GET-only status. Do not resend
+the same durable source or edit SQLite to bypass an incident.
+
+If fresh admission fails before a durable intent exists, execute reports
+`EXECUTION_STATE=EXECUTION_NOT_STARTED` only after a journal check and zero
+exchange writes. Diagnose the printed fee-rate, quote, target-state or
+validation reason with GET-only reads; there is no source for `status` yet.
+Do not invoke execute to diagnose data collection. An existing intent, failed
+journal read or uncertain write count retains `RECOVERY_ONLY` and the status
+instruction.
+
+Status uses bounded authenticated GET reads and appends the fresh evidence to
+the local scoped journal. It never retries an exchange write, cancels an order,
+closes a position or clears HALT. In an attended terminal it asks whether the
+operator acted in Bybit UI since the prior check (`none`, `cancel`, `close` or
+`other`). That answer is append-only provenance, not exchange proof. A manual
+entry remainder cancellation can still reach TP pass after a later fresh proof;
+a manual position close or mixed/manual exit remains `MANUAL_CLEANUP`.
+
+`NOT_EXERCISED` means fresh evidence proves zero entry fills; an open GTC entry
+still reports cleanup pending. `PARTIAL_EVIDENCE` means the lifecycle is
+incomplete but the known evidence remains attributable. `TP_LIFECYCLE_PASS`
+requires every entry fill to be closed by the exact TP child's execution fills,
+with no open parent/child order and a flat position. `UNKNOWN` means fresh
+proof is incomplete or contradictory and retains HALT. For pending cleanup,
+manual cleanup or UNKNOWN, inspect the exact orders and position in Bybit UI,
+perform any necessary action yourself, then rerun `status` to record fresh
+exchange proof. Do not treat the manual declaration itself as proof or use it
+to clear HALT.
+
+The command output is a sanitized, machine-readable evidence record. Keep the
+reviewed build HEAD (`git rev-parse HEAD`) with the plan schema/hash, policy
+version and identity hash, approval and payload hashes, per-invocation GET and
+POST counts, lifecycle/cleanup result, known entry/exit/position quantities,
+reason codes and uncertainty field. Status is GET-only and always reports zero
+exchange POSTs. The scoped artifacts and append-only journal stay in the existing
+private Mainnet SQLite database; do not copy account identifiers, credentials,
+raw provider responses or private account snapshots into PRs or public logs.
+No live outcome exists until a separately authorized attended run has been
+performed and reconciled; offline tests and this code PR do not complete AC7.
+
+Exit codes: 0 means preparation succeeded or status is verified clean (including
+`NOT_EXERCISED`); 2 means invalid input, 3 means execution was declined or the
+terminal was unattended, 4 means preparation/admission was blocked, and 5
+means status/reconciliation is needed or the exchange outcome is unresolved.
 
 ## Bybit public market evidence smoke (issue #11)
 
@@ -460,6 +550,20 @@ verified pre-migration backup before deploying the v4 adapter. On a copied
 backup, verify the schema marker and that existing execution attempts remain
 present before returning the journal to service.
 
+Migration 008 is also additive and advances the journal to schema version 8
+for supervised Mainnet test records. A v7 adapter must fail closed on this
+database. Do not lower the marker or remove the operator-test tables manually.
+Before any #31 source exists, a rollback can use a verified pre-migration v7
+backup; after a source or exchange attempt exists, preserve the database and
+its `-wal` file and use a v8-aware forward fix while reconciling any exchange
+exposure. Restoring a v7 backup after that point would discard durable recovery
+evidence.
+
+Migration 009 removes the operator intent's lease columns and advances the
+journal to v9. Historical v1 intent JSON and hashes remain unchanged; new v2
+intents contain no lease fields. Use a v9-aware binary after migration; do not
+lower the schema marker. General daily leases and incident HALT are unchanged.
+
 The persistence port returns machine-readable recovery metadata that the
 operator CLI will render. The safe default for every failure is no new
 exposure:
@@ -476,18 +580,23 @@ The facade read model is evidence for recovery, not permission to bypass the
 plan hash, approval, lease, ownership or reconciliation gates.
 
 CLI names in this document describe application use cases. Invoke only commands
-implemented by the current `package.json` and released for the selected
-environment. A missing capability is `CAPABILITY_NOT_RELEASED`; do not replace
-it with an ad hoc API call.
+implemented by the current `package.json` and available for the selected
+environment. For the single attended #31 acceptance experiment, an exact
+reviewed PR-branch build with passing same-SHA tests/CI is sufficient: the
+command need not have been merged, published or otherwise released. This
+exception does not enable an unavailable daily execution mode. A missing
+capability is `CAPABILITY_NOT_RELEASED`; do not replace it with an ad hoc API
+call.
 
 ## Current execution scope
 
 The released daily CLI supports prepare, review and decision-only approval; no
 generic `daily:execute` command or `TESTNET_EXECUTE` / `MAINNET_EXECUTE` daily
 mode is released. The Testnet and Demo probes documented below are separate,
-opt-in capability checks. The first deliberately authorized Mainnet write is
-the bounded #31 canary after its release, readiness and live-risk gates; that
-authority does not imply a general Mainnet execution mode. No future mode may
+opt-in capability checks. The first deliberately authorized Mainnet write is the bounded #31 canary
+from its reviewed, CI-green exact commit, **even before merge/release**, after
+fresh readiness and live-risk gates; this does not imply a general Mainnet
+execution mode. No future mode may
 override a `BLOCK` or `HALT`.
 
 ## Market window
@@ -543,13 +652,15 @@ that override.
    unavailable phase.
 3. Require release-check evidence for the exact commit. Reuse a durable
    attestation when available; otherwise run `npm run test:release`.
+   For the attended #31 canary, the tested commit may be the open PR HEAD;
+   do not demand a prior merge, tag or release.
 4. Confirm no earlier run owns the account lock and no unresolved
    `PARTIAL`, `FAILED` or ambiguous execution remains.
 5. Confirm credentials are available through the approved secret boundary
    without printing or copying them into artifacts.
 
-Any uncertainty about environment, account, release state or credentials stops
-before private writes.
+Any uncertainty about environment, account, exact tested code or credentials
+stops before private writes. An open #31 PR is not such an uncertainty by itself.
 
 ### 2. Refresh evidence
 
