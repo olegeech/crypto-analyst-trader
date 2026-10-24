@@ -105,6 +105,29 @@ Prefer the shortest safe path to a useful end-to-end product:
 
 ### First mainnet canary
 
+**Product-owner scope refinement — 2026-10-24.** The first operator
+Mainnet experiment is a single attended local process. The owner does not
+run concurrent executors and accepts responsibility for inspecting Bybit
+orders/positions manually after a crash. Do not impose persisted run-lease
+ownership, expired-lease takeover reconciliation or lease-only automatic
+HALT on this supervised path. These are deferred capabilities for a real
+multi-process/autonomous requirement. Preserve order authorization, capital
+limits, fresh account/venue proof, durable unique CREATE identity and no blind
+re-POST when dispatch might have occurred. A genuine ambiguous submission
+still requires human inspection before further exposure; an existing incident
+HALT must not be deleted or silently ignored. This newer direction supersedes
+the legacy lease admission clause in #31 and the #9 generic persistence plan
+**only for this bounded operator flow**. The implementation still needs a
+reviewed change before this behavior is released.
+
+**Guardrail design rule.** Reject speculative operational complexity:
+new preflight conditions, confirmations, persistent locks, recovery rituals,
+state machines or tests must justify a current demonstrated risk and show why
+the simpler existing control is insufficient. Start with the smallest
+end-to-end working path, instrument genuine failures, then add the narrowest
+necessary safeguard. This principle does not waive the minimum integrity and
+write-identity contracts already required for real orders.
+
 [Issue #31](https://github.com/olegeech/crypto-analyst-trader/issues/31) owns the
 canonical production-canary scope and acceptance criteria. Its first supervised
 experiment is an execution-contract check on a dedicated subaccount: one
@@ -113,8 +136,8 @@ notional cap. It is not a daily-strategy recommendation, a daily-data quality
 approval, a guaranteed-profit system or evidence that the strategy is ready.
 This one experiment does not depend on completion of #30's integrated daily-data
 gate. It still requires the fresh #31 Mainnet preflight and every mandatory
-runtime account, permission, capacity, ownership, position, lease, approval and
-HALT check. Any broader strategy canary or expansion to multiple symbols needs
+runtime account, permission, capacity, ownership, position and approval check,
+plus incident HALT handling when there is an actual unresolved exchange operation. Any broader strategy canary or expansion to multiple symbols needs
 its own issue and approval.
 
 Before approval, the operator should see at least:
