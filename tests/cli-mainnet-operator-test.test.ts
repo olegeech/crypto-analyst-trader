@@ -405,6 +405,66 @@ test("failed execution reports per-invocation exchange counts from its error", a
   assert.match(terminal.text(), /EXCHANGE_WRITES=0/u);
 });
 
+test("insufficient-funds admission prints only safe capacity details and next steps", async () => {
+  const terminal = streams(true);
+  const code = await runMainnetOperatorTestCli(
+    ["execute", "--plan-hash", plan.contentHash],
+    {
+      ...terminal,
+      resolvePlan: () => resolvedPlan(),
+      hasDurableIntent: () => ok(false),
+      prompt: async () => "yes",
+      clock: () => Date.parse(NOW),
+      actor: () => "operator-test",
+      execute: async () =>
+        fail(
+          domainError("INVALID_EVIDENCE", "blocked by available balance", {
+            reasonCode: "AVAILABLE_MARGIN_OR_FEE_RESERVE_INSUFFICIENT",
+            exchangeReads: 77,
+            exchangeWrites: 0,
+            availableBalance: "1.25",
+            orderNotional: "8",
+            entryFeeReserve: "0.0044",
+            exitFeeReserve: "0.0045",
+            totalReserve: "0.0089",
+            requiredAvailableBalance: "8.0089",
+            shortfall: "6.7589",
+            accountIdentityHash: "must-not-be-printed",
+          }),
+        ),
+    },
+  );
+
+  assert.equal(code, 5);
+  assert.match(
+    terminal.text(),
+    /DIAGNOSTIC=Insufficient funds — недостаточно доступных USDT/u,
+  );
+  assert.match(terminal.text(), /ORDER_NOTIONAL_USDT=8/u);
+  assert.match(terminal.text(), /AVAILABLE_BALANCE_USDT=1\.25/u);
+  assert.match(terminal.text(), /ENTRY_FEE_RESERVE_USDT=0\.0044/u);
+  assert.match(terminal.text(), /EXIT_FEE_RESERVE_USDT=0\.0045/u);
+  assert.match(terminal.text(), /TOTAL_FEE_RESERVE_USDT=0\.0089/u);
+  assert.match(terminal.text(), /REQUIRED_AVAILABLE_BALANCE_USDT=8\.0089/u);
+  assert.match(terminal.text(), /SHORTFALL_USDT=6\.7589/u);
+  assert.match(
+    terminal.text(),
+    /CAPACITY_EXPLANATION=.*order notional plus entry and exit fee reserve/u,
+  );
+  assert.match(
+    terminal.text(),
+    /REASON_CODE=AVAILABLE_MARGIN_OR_FEE_RESERVE_INSUFFICIENT/u,
+  );
+  assert.match(terminal.text(), /EXECUTION_STATE=EXECUTION_NOT_STARTED/u);
+  assert.match(terminal.text(), /EXCHANGE_READS=77/u);
+  assert.match(terminal.text(), /EXCHANGE_WRITES=0/u);
+  assert.match(
+    terminal.text(),
+    /NEXT_ACTION=top up the isolated subaccount or reduce the order size; verify the current account state; prepare a fresh plan and obtain fresh exact-plan confirmation before another attempt/u,
+  );
+  assert.doesNotMatch(terminal.text(), /must-not-be-printed/u);
+});
+
 test("status records manual-action declarations and sanitizes terminal fields", async () => {
   const terminal = streams(true);
   let capturedAction: string | undefined;

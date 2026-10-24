@@ -5,6 +5,7 @@ import { pathToFileURL } from "node:url";
 
 import { domainError } from "../domain/shared/errors.js";
 import { fail, ok, type Result } from "../domain/shared/result.js";
+import { DecimalValue } from "../domain/shared/decimal.js";
 import type { PersistenceScope } from "../ports/persistence.js";
 import {
   createOperatorMainnetTestApproval,
@@ -271,6 +272,94 @@ function mapErrorCode(value: unknown): string {
   return typeof code === "string" && /^[A-Z0-9_:-]{1,100}$/u.test(code)
     ? code
     : "OPERATION_FAILED";
+}
+
+interface OperatorCapacityDiagnostic {
+  readonly availableBalance: string;
+  readonly orderNotional: string;
+  readonly entryFeeReserve: string;
+  readonly exitFeeReserve: string;
+  readonly totalReserve: string;
+  readonly requiredAvailableBalance: string;
+  readonly shortfall: string;
+}
+
+function operatorCapacityDiagnostic(
+  value: unknown,
+): OperatorCapacityDiagnostic | undefined {
+  if (typeof value !== "object" || value === null || !("error" in value))
+    return undefined;
+  const error = value.error;
+  if (typeof error !== "object" || error === null || !("details" in error))
+    return undefined;
+  const details = evidenceRecord(error.details);
+  if (
+    !details ||
+    details.reasonCode !== "AVAILABLE_MARGIN_OR_FEE_RESERVE_INSUFFICIENT"
+  )
+    return undefined;
+
+  const readAmount = (key: keyof OperatorCapacityDiagnostic) => {
+    const amount = key in details ? details[key] : undefined;
+    if (
+      typeof amount !== "string" ||
+      amount.length > 128 ||
+      !/^-?\d+(?:\.\d+)?$/u.test(amount)
+    )
+      return undefined;
+    const parsed = DecimalValue.fromString(amount);
+    return parsed.ok ? parsed.value : undefined;
+  };
+  const availableBalance = readAmount("availableBalance");
+  const orderNotional = readAmount("orderNotional");
+  const entryFeeReserve = readAmount("entryFeeReserve");
+  const exitFeeReserve = readAmount("exitFeeReserve");
+  const totalReserve = readAmount("totalReserve");
+  const requiredAvailableBalance = readAmount("requiredAvailableBalance");
+  const shortfall = readAmount("shortfall");
+  if (
+    !availableBalance ||
+    !orderNotional ||
+    !entryFeeReserve ||
+    !exitFeeReserve ||
+    !totalReserve ||
+    !requiredAvailableBalance ||
+    !shortfall ||
+    !shortfall.isPositive()
+  )
+    return undefined;
+  return {
+    availableBalance: availableBalance.toString(),
+    orderNotional: orderNotional.toString(),
+    entryFeeReserve: entryFeeReserve.toString(),
+    exitFeeReserve: exitFeeReserve.toString(),
+    totalReserve: totalReserve.toString(),
+    requiredAvailableBalance: requiredAvailableBalance.toString(),
+    shortfall: shortfall.toString(),
+  };
+}
+
+function printOperatorCapacityDiagnostic(
+  output: OutputStream,
+  diagnostic: OperatorCapacityDiagnostic | undefined,
+): void {
+  line(output, "DIAGNOSTIC=Insufficient funds — недостаточно доступных USDT");
+  if (diagnostic) {
+    line(output, `ORDER_NOTIONAL_USDT=${diagnostic.orderNotional}`);
+    line(output, `AVAILABLE_BALANCE_USDT=${diagnostic.availableBalance}`);
+    line(output, `ENTRY_FEE_RESERVE_USDT=${diagnostic.entryFeeReserve}`);
+    line(output, `EXIT_FEE_RESERVE_USDT=${diagnostic.exitFeeReserve}`);
+    line(output, `TOTAL_FEE_RESERVE_USDT=${diagnostic.totalReserve}`);
+    line(
+      output,
+      `REQUIRED_AVAILABLE_BALANCE_USDT=${diagnostic.requiredAvailableBalance}`,
+    );
+    line(output, `SHORTFALL_USDT=${diagnostic.shortfall}`);
+  }
+  line(
+    output,
+    "CAPACITY_EXPLANATION=available USDT must cover order notional plus entry and exit fee reserve",
+  );
 }
 
 function printStatusResult(output: OutputStream, result: unknown): number {
@@ -798,20 +887,31 @@ export async function runMainnetOperatorTestCli(
         persisted.ok &&
         !persisted.value &&
         resultCount(result, "exchangeWrites") === "0";
+      const reasonCode = mapErrorCode(result);
       line(output, "VERDICT=BLOCKED");
       line(
         output,
         `EXECUTION_STATE=${notStarted ? "EXECUTION_NOT_STARTED" : "RECOVERY_ONLY"}`,
       );
-      line(output, `REASON_CODE=${mapErrorCode(result)}`);
+      line(output, `REASON_CODE=${reasonCode}`);
       line(output, `SOURCE_ID=${sourceIdResult.value}`);
       line(output, `EXCHANGE_READS=${resultCount(result, "exchangeReads")}`);
       line(output, `EXCHANGE_WRITES=${resultCount(result, "exchangeWrites")}`);
+      const insufficientCapacity =
+        notStarted &&
+        reasonCode === "AVAILABLE_MARGIN_OR_FEE_RESERVE_INSUFFICIENT";
+      if (insufficientCapacity)
+        printOperatorCapacityDiagnostic(
+          output,
+          operatorCapacityDiagnostic(result),
+        );
       line(
         output,
-        notStarted
-          ? "NEXT_ACTION=diagnose the blocked pre-intent stage from REASON_CODE; preserve any HALT; use GET-only reads for data failures; no source exists for status; do not retry execute for diagnosis"
-          : "NEXT_ACTION=run mainnet:test status with the source ID; inspect Bybit UI orders, fills and position using CLIENT_ORDER_ID before another submission; do not retry execute",
+        insufficientCapacity
+          ? "NEXT_ACTION=top up the isolated subaccount or reduce the order size; verify the current account state; prepare a fresh plan and obtain fresh exact-plan confirmation before another attempt"
+          : notStarted
+            ? "NEXT_ACTION=diagnose the blocked pre-intent stage from REASON_CODE; preserve any HALT; use GET-only reads for data failures; no source exists for status; do not retry execute for diagnosis"
+            : "NEXT_ACTION=run mainnet:test status with the source ID; inspect Bybit UI orders, fills and position using CLIENT_ORDER_ID before another submission; do not retry execute",
       );
       return 5;
     } catch {

@@ -832,6 +832,61 @@ test("account, credentials, capacity, position, orders, leverage and instrument 
   }
 });
 
+test("insufficient available balance returns exact capacity amounts and positive shortfall", async () => {
+  const valuePlan = plan({ nonce: "insufficient-capacity-details" });
+  const availableBalance = decimal("1.25");
+  const harness = setup({
+    valuePlan,
+    evidence: freshEvidence(valuePlan, {
+      availableBalance: availableBalance.toString(),
+    }),
+  });
+
+  const result = await harness.run();
+
+  assert.equal(result.ok, false);
+  if (result.ok) return;
+  const details = result.error.details;
+  assert.equal(
+    details?.reasonCode,
+    "AVAILABLE_MARGIN_OR_FEE_RESERVE_INSUFFICIENT",
+  );
+  assert.equal(details?.availableBalance, availableBalance.toString());
+  assert.equal(
+    details?.orderNotional,
+    valuePlan.effectiveGrossNotional.toString(),
+  );
+  const entryFeeReserve = valuePlan.effectiveGrossNotional.multiply(
+    decimal("0.00055"),
+  );
+  const exitFeeReserve = valuePlan.entry.takeProfit.triggerPrice
+    .multiply(valuePlan.entry.quantity)
+    .multiply(decimal("0.00055"));
+  const totalReserve = entryFeeReserve.add(exitFeeReserve);
+  const requiredAvailableBalance =
+    valuePlan.effectiveGrossNotional.add(totalReserve);
+  assert.equal(details?.entryFeeReserve, entryFeeReserve.toString());
+  assert.equal(details?.exitFeeReserve, exitFeeReserve.toString());
+  assert.equal(details?.totalReserve, totalReserve.toString());
+  assert.equal(
+    details?.requiredAvailableBalance,
+    requiredAvailableBalance.toString(),
+  );
+  assert.equal(
+    details?.shortfall,
+    requiredAvailableBalance.subtract(availableBalance).toString(),
+  );
+  assert.equal(harness.createObservations.length, 0);
+  const sourceId = unwrap(
+    deriveOperatorMainnetTestSourceId(valuePlan.contentHash),
+  );
+  assert.equal(
+    unwrap(harness.journal.readOperatorMainnetTestSource(sourceId)),
+    undefined,
+  );
+  harness.persistence.close();
+});
+
 test("persistence scope mismatch, approval expiry, stale quote and HALT all block before dispatch", async () => {
   const wrongScope = setup({ persistenceAccount: `sha256:${"c".repeat(64)}` });
   const scopeResult = await wrongScope.run();

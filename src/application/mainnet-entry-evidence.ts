@@ -14,7 +14,10 @@ import {
 import { createOrderIntent } from "../domain/planning/order-intent.js";
 import { hashCanonical } from "../domain/identity/canonical-serialization.js";
 import { DecimalValue } from "../domain/shared/decimal.js";
-import { domainError } from "../domain/shared/errors.js";
+import {
+  domainError,
+  type DomainErrorDetails,
+} from "../domain/shared/errors.js";
 import { fail, ok, type Result } from "../domain/shared/result.js";
 import {
   parseUtcTimestamp,
@@ -77,8 +80,14 @@ const zero = DecimalValue.fromString("0");
 function blocked(
   code: string,
   message = "operator Mainnet admission is blocked",
+  details: DomainErrorDetails = {},
 ) {
-  return fail(domainError("INVALID_EVIDENCE", message, { reasonCode: code }));
+  return fail(
+    domainError("INVALID_EVIDENCE", message, {
+      reasonCode: code,
+      ...details,
+    }),
+  );
 }
 
 function plainDataRecord(value: unknown): value is Record<string, unknown> {
@@ -279,8 +288,22 @@ export function calculateOperatorMainnetTestCapacity(
   const totalReserve = entryFeeReserve.add(exitFeeReserve);
   const requiredAvailableBalance =
     plan.effectiveGrossNotional.add(totalReserve);
-  if (availableBalance.compare(requiredAvailableBalance) < 0)
-    return blocked("AVAILABLE_MARGIN_OR_FEE_RESERVE_INSUFFICIENT");
+  if (availableBalance.compare(requiredAvailableBalance) < 0) {
+    const shortfall = requiredAvailableBalance.subtract(availableBalance);
+    return blocked(
+      "AVAILABLE_MARGIN_OR_FEE_RESERVE_INSUFFICIENT",
+      "available USDT is insufficient for the order and fee reserve",
+      {
+        availableBalance: availableBalance.toString(),
+        orderNotional: plan.effectiveGrossNotional.toString(),
+        entryFeeReserve: entryFeeReserve.toString(),
+        exitFeeReserve: exitFeeReserve.toString(),
+        totalReserve: totalReserve.toString(),
+        requiredAvailableBalance: requiredAvailableBalance.toString(),
+        shortfall: shortfall.toString(),
+      },
+    );
+  }
   return ok(
     Object.freeze({
       availableBalance,
