@@ -243,6 +243,7 @@ function harness(
   options: {
     readonly expiredLease?: boolean;
     readonly now?: UtcTimestamp;
+    readonly incidentHalt?: boolean;
   } = {},
 ) {
   let snapshot: OperatorMainnetTestSnapshot = {
@@ -265,8 +266,6 @@ function harness(
       sourceId,
       operation: "CREATE",
       runId: "operator-run-1",
-      leaseOwnerRunId: "operator-run-1",
-      leaseEpoch: 1,
       canonicalJson: "{}",
       canonicalHash: hash(`sha256:${"c".repeat(64)}`),
       preparedAt: NOW,
@@ -284,14 +283,14 @@ function harness(
     manualActions: [],
     halt: {
       scope,
-      active: true,
+      active: options.incidentHalt !== false,
       revision: 1,
       reason: "awaiting operator status",
       raisedAt: NOW,
       reconciliationRequired: true,
     },
   };
-  let lease = {
+  const lease = {
     scope,
     ownerRunId: "operator-run-1",
     epoch: 1,
@@ -308,6 +307,7 @@ function harness(
         OperatorMainnetTestPersistencePort["appendManualAction"]
       >[0],
     ) => {
+      assert.equal("authority" in request, false);
       const record = {
         actionId: `manual-${snapshot.manualActions.length + 1}`,
         sourceId,
@@ -328,6 +328,7 @@ function harness(
         OperatorMainnetTestPersistencePort["appendReconciliation"]
       >[0],
     ) => {
+      assert.equal("authority" in request, false);
       const revision = snapshot.reconciliations.length + 1;
       const record = {
         reconciliationId: `reconciliation-${revision}`,
@@ -345,41 +346,29 @@ function harness(
       };
       return ok(record);
     },
+    raiseHalt: (haltSourceId: string, reason: string, at: UtcTimestamp) => {
+      assert.equal(haltSourceId, sourceId);
+      if (!snapshot.halt.active) {
+        snapshot = {
+          ...snapshot,
+          halt: { ...snapshot.halt, active: true, reason, raisedAt: at },
+        };
+      }
+      return ok(snapshot.halt);
+    },
   } as unknown as OperatorMainnetTestPersistencePort;
   const persistence = {
     scope,
     readScopeSnapshot: () =>
       ok({ scope, lease, halt: snapshot.halt, accountingFacts: [] }),
-    renewLease: (request: {
-      readonly scope: PersistenceScope;
-      readonly ownerRunId: string;
-      readonly now: UtcTimestamp;
-      readonly ttlMs: number;
-      readonly authority: {
-        readonly ownerRunId: string;
-        readonly epoch: number;
-      };
-    }) => {
-      lease = {
-        ...lease,
-        expiresAt: new Date(
-          Date.parse(request.now) + request.ttlMs,
-        ).toISOString() as UtcTimestamp,
-      };
-      return ok(lease);
+    renewLease: () => {
+      throw new Error("operator status must not renew an account lease");
     },
     acquireLease: () => {
-      lease = {
-        ...lease,
-        ownerRunId: "operator-status-test",
-        epoch: lease.epoch + 1,
-        reconciliationRequired: true,
-      };
-      return ok(lease);
+      throw new Error("operator status must not acquire an account lease");
     },
     raiseHalt: () => {
-      snapshot = { ...snapshot, halt: { ...snapshot.halt, active: true } };
-      return ok(snapshot.halt);
+      throw new Error("operator status must use its source journal for HALT");
     },
     readHalt: () => ok(snapshot.halt),
   } as unknown as PersistencePort;
@@ -968,17 +957,52 @@ test("failed or incomplete status reads append UNKNOWN and preserve active HALT"
   assert.equal(evidence.evidence.failedStage, "PAGE_BUDGET_EXHAUSTED");
 });
 
-test("status appends after lease takeover while reconciliation-required HALT stays active", async () => {
+test("status appends after lease expiry without takeover and preserves incident HALT", async () => {
   const entry = parent({ filled: "0", status: "open" });
   const h = harness(ok(observation({ parent: entry, activeOrders: [entry] })), {
     expiredLease: true,
   });
+  const existingHalt = h.snapshot.halt;
   const result = unwrap(await h.run());
   assert.equal(result.lifecycleOutcome, "NOT_EXERCISED");
   assert.equal(result.cleanupStatus, "pending");
-  assert.equal(h.lease.ownerRunId, "operator-status-test");
-  assert.equal(h.lease.reconciliationRequired, true);
+  assert.deepEqual(result.halt, existingHalt);
+  assert.equal(h.lease.ownerRunId, "operator-run-1");
+  assert.equal(h.lease.reconciliationRequired, false);
   assert.equal(result.halt.active, true);
   assert.equal(result.halt.reconciliationRequired, true);
   assert.equal(result.latestSnapshot.reconciliations.length, 1);
+});
+
+test("status after an expired lease neither creates a lease incident nor stores lease authority", async () => {
+  const entry = parent({ filled: "0", status: "open" });
+  const h = harness(ok(observation({ parent: entry, activeOrders: [entry] })), {
+    expiredLease: true,
+    incidentHalt: false,
+  });
+  const result = unwrap(await h.run("other"));
+  assert.equal(result.lifecycleOutcome, "NOT_EXERCISED");
+  assert.equal(result.halt.active, false);
+  assert.equal(h.snapshot.manualActions.length, 1);
+  assert.equal(h.snapshot.reconciliations.length, 1);
+  assert.doesNotMatch(
+    h.snapshot.reconciliations[0]!.canonicalJson,
+    /lease|statusAuthority/iu,
+  );
+  assert.equal(h.lease.epoch, 1);
+});
+
+test("read failure after lease expiry records truthful UNKNOWN without acquiring authority", async () => {
+  const h = harness(fail(domainError("INVALID_VALUE", "read failed")), {
+    expiredLease: true,
+    incidentHalt: false,
+  });
+  const result = unwrap(await h.run());
+  assert.equal(result.lifecycleOutcome, "UNKNOWN");
+  assert.deepEqual(result.reasons, ["INVALID_VALUE"]);
+  assert.equal(result.halt.active, true);
+  assert.equal(result.halt.reason, "operator Mainnet status is unknown");
+  assert.equal(result.exchangeReads, 0);
+  assert.equal(h.lease.epoch, 1);
+  assert.equal(h.snapshot.reconciliations.length, 1);
 });

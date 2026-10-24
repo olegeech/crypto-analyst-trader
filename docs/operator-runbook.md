@@ -80,7 +80,8 @@ preflight is READY, every mandatory runtime safety gate passes, and the operator
 separately approves the exact attended order. Completion of #30's integrated
 daily-strategy data gate is not a prerequisite for this one execution-contract
 experiment; this exception does not establish daily-strategy readiness or waive
-account, permission, capacity, ownership, position, lease or HALT checks.
+account, permission, capacity, ownership, position or HALT checks. The daily
+execution paths retain their lease rules; the attended #31 flow uses no lease.
 
 Testnet is not a release prerequisite. The bounded Testnet and Demo probes
 below remain opt-in, environment-scoped capability checks; their observations
@@ -189,6 +190,14 @@ answer `yes` for one bounded CREATE attempt. Any durable intent or restart
 routes to status recovery; execute will not resend it. After any attempt, run
 `status` and follow the displayed next action. A successful CREATE response is
 not a TP lifecycle pass.
+
+This flow assumes one attending operator and one local process. CREATE and
+status neither acquire an account lease nor trigger takeover HALT. A failed
+read before intent leaves no operator lease to expire; a later attended run
+can obtain fresh consent and data. Existing incident HALT still blocks entry.
+After a possible submission or crash, inspect the exact client order ID,
+orders, fills and position in Bybit UI, then use GET-only status. Do not resend
+the same durable source or edit SQLite to bypass an incident.
 
 If fresh admission fails before a durable intent exists, execute reports
 `EXECUTION_STATE=EXECUTION_NOT_STARTED` only after a journal check and zero
@@ -541,6 +550,11 @@ backup; after a source or exchange attempt exists, preserve the database and
 its `-wal` file and use a v8-aware forward fix while reconciling any exchange
 exposure. Restoring a v7 backup after that point would discard durable recovery
 evidence.
+
+Migration 009 removes the operator intent's lease columns and advances the
+journal to v9. Historical v1 intent JSON and hashes remain unchanged; new v2
+intents contain no lease fields. Use a v9-aware binary after migration; do not
+lower the schema marker. General daily leases and incident HALT are unchanged.
 
 The persistence port returns machine-readable recovery metadata that the
 operator CLI will render. The safe default for every failure is no new

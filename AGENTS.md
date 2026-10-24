@@ -35,7 +35,7 @@ Bybit manually if a process crashes or an order outcome is uncertain.
   an existing simpler control does not address it, and the smallest fix.
   Hypothetical future concurrency or autonomy is not sufficient justification.
 - **#31 owner decision:** Remove the account-scoped run lease as an admission
-  prerequisite for this *attended, single-process operator experiment*; do not
+  prerequisite for this _attended, single-process operator experiment_; do not
   turn an expired/abandoned pre-intent lease into automatic HALT or require
   incident reconciliation when no CREATE could have been submitted. This
   explicitly supersedes older #9/#31 lease-by-default planning **for this

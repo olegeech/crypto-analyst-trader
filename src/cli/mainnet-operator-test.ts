@@ -642,9 +642,10 @@ export async function runMainnetOperatorTestCli(
       line(output, "VERDICT=RECOVERY_ONLY");
       line(output, "REASON_CODE=DURABLE_INTENT_ALREADY_EXISTS");
       line(output, `SOURCE_ID=${sourceIdResult.value}`);
+      line(output, `CLIENT_ORDER_ID=${plan.clientOrderId}`);
       line(
         output,
-        "NEXT_ACTION=run mainnet:test status with this source ID; execute will never resend it",
+        "NEXT_ACTION=run mainnet:test status with this source ID; inspect Bybit UI orders, fills and position using CLIENT_ORDER_ID; execute will never resend it",
       );
       try {
         return printStatusResult(
@@ -780,7 +781,10 @@ export async function runMainnetOperatorTestCli(
         line(output, `ATTEMPT_OUTCOME=${outcome?.attemptOutcome ?? "unknown"}`);
         line(
           output,
-          "NEXT_ACTION=run mainnet:test status with the source ID; inspect Bybit UI if cleanup remains pending",
+          outcome?.kind === "recovery" ||
+            outcome?.attemptOutcome === "ambiguous"
+            ? "NEXT_ACTION=run mainnet:test status with the source ID; inspect Bybit UI orders, fills and position using CLIENT_ORDER_ID before another submission; do not resend this source"
+            : "NEXT_ACTION=run mainnet:test status with the source ID; inspect Bybit UI if cleanup remains pending",
         );
         return 5;
       }
@@ -806,8 +810,8 @@ export async function runMainnetOperatorTestCli(
       line(
         output,
         notStarted
-          ? "NEXT_ACTION=diagnose the blocked pre-intent stage from REASON_CODE; preserve any HALT or lease restriction; use GET-only reads for data failures; no source exists for status; do not retry execute for diagnosis"
-          : "NEXT_ACTION=run mainnet:test status with the source ID; do not retry execute",
+          ? "NEXT_ACTION=diagnose the blocked pre-intent stage from REASON_CODE; preserve any HALT; use GET-only reads for data failures; no source exists for status; do not retry execute for diagnosis"
+          : "NEXT_ACTION=run mainnet:test status with the source ID; inspect Bybit UI orders, fills and position using CLIENT_ORDER_ID before another submission; do not retry execute",
       );
       return 5;
     } catch {
@@ -824,7 +828,7 @@ export async function runMainnetOperatorTestCli(
       );
       line(
         output,
-        "NEXT_ACTION=run mainnet:test status with the source ID; do not retry execute",
+        "NEXT_ACTION=run mainnet:test status with the source ID; inspect Bybit UI orders, fills and position using CLIENT_ORDER_ID before another submission; do not retry execute",
       );
       return 5;
     }

@@ -44,15 +44,9 @@ import type {
   PrepareOperatorMainnetTestCreateRequest,
   RecordOperatorMainnetTestAttemptRequest,
 } from "../../ports/operator-mainnet-test-persistence.js";
-import type { PersistenceScope } from "../../ports/persistence.js";
+import type { HaltState, PersistenceScope } from "../../ports/persistence.js";
 import type { SqliteConnection } from "./connection.js";
-import {
-  assertCurrentAuthorityWithinTransaction,
-  haltRow,
-  leaseRow,
-  leaseState,
-  raiseHaltWithinTransaction,
-} from "./sqlite-authority.js";
+import { haltRow, raiseHaltWithinTransaction } from "./sqlite-authority.js";
 import {
   AUTHORITY_SCOPE_WHERE,
   deterministicId,
@@ -506,21 +500,17 @@ export class SqliteOperatorMainnetTestStore implements OperatorMainnetTestPersis
     const writeIntentId = storedIdentifier(row, "write_intent_id");
     const sourceId = storedIdentifier(row, "source_id");
     const runId = storedIdentifier(row, "run_id");
-    const leaseOwnerRunId = storedIdentifier(row, "lease_owner_run_id");
     const canonicalJson = storedString(row, "canonical_json");
     const canonicalHash = storedHash(row, "canonical_hash");
     const preparedAt = storedTimestamp(row, "prepared_at");
-    const epoch = requireFiniteInteger(row.lease_epoch, "lease_epoch", 1);
     if (
       row.operation !== "CREATE" ||
       !writeIntentId.ok ||
       !sourceId.ok ||
       !runId.ok ||
-      !leaseOwnerRunId.ok ||
       !canonicalJson.ok ||
       !canonicalHash.ok ||
-      !preparedAt.ok ||
-      !epoch.ok
+      !preparedAt.ok
     )
       return persistenceFailure("persisted operator CREATE intent is invalid");
     const parsed = parseJsonHash(canonicalJson.value, canonicalHash.value);
@@ -533,19 +523,25 @@ export class SqliteOperatorMainnetTestStore implements OperatorMainnetTestPersis
       parsed.value === null ||
       (parsed.value as Record<string, unknown>).sourceId !== sourceId.value ||
       (parsed.value as Record<string, unknown>).operation !== "CREATE" ||
-      (parsed.value as Record<string, unknown>).runId !== runId.value ||
-      (parsed.value as Record<string, unknown>).leaseOwnerRunId !==
-        leaseOwnerRunId.value ||
-      (parsed.value as Record<string, unknown>).leaseEpoch !== epoch.value
+      (parsed.value as Record<string, unknown>).runId !== runId.value
     )
       return persistenceFailure("operator CREATE intent identity is invalid");
+    const value = parsed.value as Record<string, unknown>;
+    if (
+      (value.schemaVersion !== "operator-mainnet-test-create-intent/v1" &&
+        value.schemaVersion !== "operator-mainnet-test-create-intent/v2") ||
+      (value.schemaVersion === "operator-mainnet-test-create-intent/v1" &&
+        (!requireIdentifier(value.leaseOwnerRunId, "leaseOwnerRunId").ok ||
+          !requireFiniteInteger(value.leaseEpoch, "leaseEpoch", 1).ok)) ||
+      (value.schemaVersion === "operator-mainnet-test-create-intent/v2" &&
+        ("leaseOwnerRunId" in value || "leaseEpoch" in value))
+    )
+      return persistenceFailure("operator CREATE intent version is invalid");
     return ok({
       writeIntentId: writeIntentId.value,
       sourceId: sourceId.value,
       operation: "CREATE",
       runId: runId.value,
-      leaseOwnerRunId: leaseOwnerRunId.value,
-      leaseEpoch: epoch.value,
       canonicalJson: canonicalJson.value,
       canonicalHash: canonicalHash.value as PlanHash,
       preparedAt: preparedAt.value,
@@ -779,8 +775,6 @@ export class SqliteOperatorMainnetTestStore implements OperatorMainnetTestPersis
     if (!manualActions.ok) return manualActions;
     const halt = haltRow(database, this.scope);
     if (!halt.ok) return halt;
-    const lease = leaseRow(database, this.scope);
-    if (!lease.ok) return lease;
     return ok({
       source: source.value,
       plan: plan.value,
@@ -790,9 +784,6 @@ export class SqliteOperatorMainnetTestStore implements OperatorMainnetTestPersis
       reconciliations: reconciliations.value,
       manualActions: manualActions.value,
       halt: halt.value,
-      ...(lease.value === undefined
-        ? {}
-        : { lease: leaseState(this.scope, lease.value) }),
     });
   }
 
@@ -833,31 +824,13 @@ export class SqliteOperatorMainnetTestStore implements OperatorMainnetTestPersis
     }
   }
 
-  findPendingOperatorMainnetTestSource(
-    authority: { readonly ownerRunId: string; readonly epoch: number },
-    now: UtcTimestamp,
-  ): Result<OperatorMainnetTestSourceRecord | undefined> {
-    const at = parseUtcTimestamp(now);
-    if (!validScope(this.scope) || !at.ok) return invalid();
+  findPendingOperatorMainnetTestSource(): Result<
+    OperatorMainnetTestSourceRecord | undefined
+  > {
+    if (!validScope(this.scope)) return invalid();
     return runInTransaction(
       this.db,
-      (database) => {
-        const current = assertCurrentAuthorityWithinTransaction(
-          database,
-          this.scope,
-          authority,
-          at.value,
-        );
-        if (!current.ok) return current;
-        if (current.value.reconciliationRequired)
-          return fail(
-            domainError(
-              "UNRESOLVED_STATE",
-              "lease takeover requires reconciliation",
-            ),
-          );
-        return this.pendingSourceRow(database);
-      },
+      (database) => this.pendingSourceRow(database),
       "PERSISTENCE_INTEGRITY",
     );
   }
@@ -901,12 +874,10 @@ export class SqliteOperatorMainnetTestStore implements OperatorMainnetTestPersis
       `${sourceId}:CREATE`,
     );
     const intentValue = {
-      schemaVersion: "operator-mainnet-test-create-intent/v1",
+      schemaVersion: "operator-mainnet-test-create-intent/v2",
       operation: "CREATE" as const,
       sourceId,
       runId: runId.value,
-      leaseOwnerRunId: request.authority.ownerRunId,
-      leaseEpoch: request.authority.epoch,
       planHash: artifacts.value.plan.contentHash,
       approvalHash: artifacts.value.approval.contentHash,
       accountIdentityHash: artifacts.value.plan.accountIdentityHash,
@@ -921,20 +892,6 @@ export class SqliteOperatorMainnetTestStore implements OperatorMainnetTestPersis
     return runInTransaction(
       this.db,
       (database) => {
-        const current = assertCurrentAuthorityWithinTransaction(
-          database,
-          this.scope,
-          request.authority,
-          at.value,
-        );
-        if (!current.ok) return current;
-        if (current.value.reconciliationRequired)
-          return fail(
-            domainError(
-              "UNRESOLVED_STATE",
-              "lease takeover requires reconciliation",
-            ),
-          );
         const halt = haltRow(database, this.scope);
         if (!halt.ok) return halt;
         if (halt.value.active)
@@ -1001,16 +958,13 @@ export class SqliteOperatorMainnetTestStore implements OperatorMainnetTestPersis
         database
           .prepare(
             `INSERT INTO operator_mainnet_test_write_intents
-             (write_intent_id, source_id, operation, run_id, lease_owner_run_id,
-              lease_epoch, canonical_json, canonical_hash, prepared_at)
-             VALUES (?, ?, 'CREATE', ?, ?, ?, ?, ?, ?)`,
+             (write_intent_id, source_id, operation, run_id, canonical_json, canonical_hash, prepared_at)
+             VALUES (?, ?, 'CREATE', ?, ?, ?, ?)`,
           )
           .run(
             writeIntentId,
             sourceId,
             runId.value,
-            request.authority.ownerRunId,
-            request.authority.epoch,
             intent.value.json,
             intent.value.hash,
             at.value,
@@ -1031,6 +985,7 @@ export class SqliteOperatorMainnetTestStore implements OperatorMainnetTestPersis
   ): Result<OperatorMainnetTestSnapshot> {
     const sourceId = requireIdentifier(request.sourceId, "sourceId");
     const attemptId = requireIdentifier(request.attemptId, "attemptId");
+    const runId = requireIdentifier(request.runId, "runId");
     const at = parseUtcTimestamp(request.recordedAt);
     const providerReasonCode =
       request.providerReasonCode === undefined
@@ -1043,6 +998,7 @@ export class SqliteOperatorMainnetTestStore implements OperatorMainnetTestPersis
     if (
       !sourceId.ok ||
       !attemptId.ok ||
+      !runId.ok ||
       !at.ok ||
       !providerReasonCode.ok ||
       !exchangeOrderId.ok ||
@@ -1052,13 +1008,6 @@ export class SqliteOperatorMainnetTestStore implements OperatorMainnetTestPersis
     return runInTransaction(
       this.db,
       (database) => {
-        const current = assertCurrentAuthorityWithinTransaction(
-          database,
-          this.scope,
-          request.authority,
-          at.value,
-        );
-        if (!current.ok) return current;
         const sourceRow = this.sourceRow(sourceId.value, database);
         if (!sourceRow)
           return fail(
@@ -1078,14 +1027,11 @@ export class SqliteOperatorMainnetTestStore implements OperatorMainnetTestPersis
           );
         const intent = this.intentFromRow(intentRow);
         if (!intent.ok) return intent;
-        if (
-          intent.value.leaseOwnerRunId !== request.authority.ownerRunId ||
-          intent.value.leaseEpoch !== request.authority.epoch
-        )
+        if (intent.value.runId !== runId.value)
           return fail(
             domainError(
-              "RUN_LEASE_LOST",
-              "operator CREATE attempt is fenced by another lease",
+              "PERSISTENCE_CONFLICT",
+              "operator CREATE attempt belongs to another run",
             ),
           );
         if (
@@ -1148,6 +1094,40 @@ export class SqliteOperatorMainnetTestStore implements OperatorMainnetTestPersis
     );
   }
 
+  raiseHalt(
+    sourceId: string,
+    reason: string,
+    at: UtcTimestamp,
+  ): Result<HaltState> {
+    const id = requireIdentifier(sourceId, "sourceId");
+    const time = parseUtcTimestamp(at);
+    const safeReason = requireSafeText(reason, "reason");
+    if (!id.ok || !time.ok || !safeReason.ok || !validScope(this.scope))
+      return invalid();
+    return runInTransaction(
+      this.db,
+      (database) => {
+        const source = this.sourceRow(id.value, database);
+        if (!source)
+          return fail(
+            domainError(
+              "PERSISTENCE_CONFLICT",
+              "operator source does not exist",
+            ),
+          );
+        const snapshot = this.snapshot(source, database);
+        if (!snapshot.ok) return snapshot;
+        return raiseHaltWithinTransaction(
+          database,
+          this.scope,
+          safeReason.value,
+          time.value,
+        );
+      },
+      "PERSISTENCE_CONFLICT",
+    );
+  }
+
   appendReconciliation(
     request: AppendOperatorMainnetTestReconciliationRequest,
   ): Result<OperatorMainnetTestSnapshot["reconciliations"][number]> {
@@ -1167,13 +1147,6 @@ export class SqliteOperatorMainnetTestStore implements OperatorMainnetTestPersis
     return runInTransaction(
       this.db,
       (database) => {
-        const current = assertCurrentAuthorityWithinTransaction(
-          database,
-          this.scope,
-          request.authority,
-          at.value,
-        );
-        if (!current.ok) return current;
         const source = this.sourceRow(sourceId.value, database);
         if (!source)
           return fail(
@@ -1241,13 +1214,6 @@ export class SqliteOperatorMainnetTestStore implements OperatorMainnetTestPersis
     return runInTransaction(
       this.db,
       (database) => {
-        const current = assertCurrentAuthorityWithinTransaction(
-          database,
-          this.scope,
-          request.authority,
-          at.value,
-        );
-        if (!current.ok) return current;
         const source = this.sourceRow(sourceId.value, database);
         if (!source)
           return fail(

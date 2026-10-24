@@ -82,8 +82,8 @@ test("fresh and reopened journals configure verified SQLite durability state", (
   assert.equal(statSync(root).isDirectory(), true);
 });
 
-test("operator Mainnet journal is an additive v8 schema with empty tables", () => {
-  assert.equal(CURRENT_SCHEMA_VERSION, 8);
+test("operator Mainnet journal uses v9 lease-free schema with empty tables", () => {
+  assert.equal(CURRENT_SCHEMA_VERSION, 9);
   const { path } = temporaryDatabase();
   const opened = openSqliteConnection({
     environment: "mainnet",
@@ -120,6 +120,12 @@ test("operator Mainnet journal is an additive v8 schema with empty tables", () =
       .get()?.count,
     0,
   );
+  const intentColumns = db
+    .prepare("PRAGMA table_info(operator_mainnet_test_write_intents)")
+    .all()
+    .map((column) => column.name);
+  assert.equal(intentColumns.includes("lease_owner_run_id"), false);
+  assert.equal(intentColumns.includes("lease_epoch"), false);
   assert.deepEqual(db.prepare("PRAGMA foreign_key_check").all(), []);
   opened.value.close();
 });

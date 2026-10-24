@@ -15,7 +15,10 @@ import {
   deriveOperatorMainnetTestSourceId,
 } from "../src/domain/execution/operator-mainnet-test-plan.js";
 import { createInstrumentConstraints } from "../src/domain/market/instrument-constraints.js";
-import type { PlanHash } from "../src/domain/identity/canonical-serialization.js";
+import {
+  canonicalSerialize,
+  type PlanHash,
+} from "../src/domain/identity/canonical-serialization.js";
 import {
   parseUtcTimestamp,
   type UtcTimestamp,
@@ -146,15 +149,7 @@ function setup() {
   };
   const execution = value(createSqliteExecutionStore(connection, scope));
   const store = value(createSqliteOperatorMainnetTestStore(connection, scope));
-  const lease = value(
-    execution.acquireLease({
-      scope,
-      ownerRunId: "operator-run-01",
-      now: NOW,
-      ttlMs: 60_000,
-    }),
-  );
-  return { root, path, clock, connection, scope, execution, store, lease };
+  return { root, path, clock, connection, scope, execution, store };
 }
 
 function prepare(
@@ -164,11 +159,7 @@ function prepare(
 ) {
   const payload = exactPayload(valuePlan);
   return fixture.store.prepareCreateIntent({
-    authority: {
-      ownerRunId: fixture.lease.ownerRunId,
-      epoch: fixture.lease.epoch,
-    },
-    runId: fixture.lease.ownerRunId,
+    runId: "operator-run-01",
     plan: valuePlan,
     approval: valueApproval,
     payloadJson: payload,
@@ -192,7 +183,12 @@ test("operator create intent, canonical artifacts and exact payload commit atomi
     payloadHash(source.source.payloadJson),
   );
   assert.equal(source.intent.operation, "CREATE");
-  assert.equal(source.intent.leaseEpoch, fixture.lease.epoch);
+  assert.equal(
+    JSON.parse(source.intent.canonicalJson).schemaVersion,
+    "operator-mainnet-test-create-intent/v2",
+  );
+  assert.equal("leaseEpoch" in JSON.parse(source.intent.canonicalJson), false);
+  assert.equal("lease" in source, false);
   assert.equal(source.attempt, undefined);
   assert.equal(source.halt.active, false);
   assert.equal(
@@ -217,7 +213,7 @@ test("operator create intent, canonical artifacts and exact payload commit atomi
       .get()?.count,
     2,
   );
-  assert.equal(CURRENT_SCHEMA_VERSION, 8);
+  assert.equal(CURRENT_SCHEMA_VERSION, 9);
 });
 
 test("prepared plan is durable and readable before any CREATE intent", () => {
@@ -261,12 +257,7 @@ test("pending operator source for the same account blocks a different nonce and 
   const firstPlan = plan("operator-test-01");
   value(prepare(fixture, firstPlan));
 
-  const pending = value(
-    fixture.store.findPendingOperatorMainnetTestSource(
-      { ownerRunId: fixture.lease.ownerRunId, epoch: fixture.lease.epoch },
-      fixture.clock.value,
-    ),
-  );
+  const pending = value(fixture.store.findPendingOperatorMainnetTestSource());
   assert.equal(pending?.planHash, firstPlan.contentHash);
   const secondPlan = plan("operator-test-02");
   assert.notEqual(secondPlan.contentHash, firstPlan.contentHash);
@@ -289,10 +280,6 @@ test("corrupt latest cleanup evidence cannot release an account-scoped pending s
   const sourceId = source.source.sourceId;
   value(
     fixture.store.appendReconciliation({
-      authority: {
-        ownerRunId: fixture.lease.ownerRunId,
-        epoch: fixture.lease.epoch,
-      },
       sourceId,
       lifecycleOutcome: "UNKNOWN",
       cleanupStatus: "pending",
@@ -310,10 +297,7 @@ test("corrupt latest cleanup evidence cannot release an account-scoped pending s
     )
     .run(sourceId);
 
-  const pending = fixture.store.findPendingOperatorMainnetTestSource(
-    { ownerRunId: fixture.lease.ownerRunId, epoch: fixture.lease.epoch },
-    fixture.clock.value,
-  );
+  const pending = fixture.store.findPendingOperatorMainnetTestSource();
   assert.equal(pending.ok, false);
   fixture.connection.close();
 });
@@ -353,15 +337,12 @@ test("intent source is recovery-only across close and reopen", () => {
   reopened.close();
 });
 
-test("attempt and unknown-protection HALT are one fenced atomic write", () => {
+test("attempt and unknown-protection HALT are one run-owned atomic write", () => {
   const fixture = setup();
   const created = value(prepare(fixture));
   const recorded = value(
     fixture.store.recordAttemptAndHalt({
-      authority: {
-        ownerRunId: fixture.lease.ownerRunId,
-        epoch: fixture.lease.epoch,
-      },
+      runId: "operator-run-01",
       sourceId: created.source.sourceId,
       attemptId: "operator-attempt-01",
       outcome: "ambiguous",
@@ -416,13 +397,8 @@ test("failed intent transaction leaves no source, intent or operator artifact", 
 test("reconciliation and manual action provenance append without rewriting prior rows", () => {
   const fixture = setup();
   const created = value(prepare(fixture));
-  const authority = {
-    ownerRunId: fixture.lease.ownerRunId,
-    epoch: fixture.lease.epoch,
-  };
   const first = value(
     fixture.store.appendReconciliation({
-      authority,
       sourceId: created.source.sourceId,
       lifecycleOutcome: "PARTIAL_EVIDENCE",
       cleanupStatus: "pending",
@@ -432,7 +408,6 @@ test("reconciliation and manual action provenance append without rewriting prior
   );
   const action = value(
     fixture.store.appendManualAction({
-      authority,
       sourceId: created.source.sourceId,
       action: "entry-remainder-cancelled",
       provenance: { actor: "operator-01", source: "Bybit UI" },
@@ -442,7 +417,6 @@ test("reconciliation and manual action provenance append without rewriting prior
   fixture.clock.value = timestamp("2026-10-22T10:01:01.000Z");
   const second = value(
     fixture.store.appendReconciliation({
-      authority,
       sourceId: created.source.sourceId,
       lifecycleOutcome: "NOT_EXERCISED",
       cleanupStatus: "verified-clean",
@@ -465,25 +439,17 @@ test("reconciliation and manual action provenance append without rewriting prior
     [action.actionId],
   );
   assert.equal(
-    value(
-      fixture.store.findPendingOperatorMainnetTestSource(
-        authority,
-        fixture.clock.value,
-      ),
-    ),
+    value(fixture.store.findPendingOperatorMainnetTestSource()),
     undefined,
   );
 });
 
-test("status reconciliation can append after lease takeover without clearing HALT", () => {
+test("status reconciliation appends without a lease and preserves real HALT", () => {
   const fixture = setup();
   const created = value(prepare(fixture));
   value(
     fixture.store.recordAttemptAndHalt({
-      authority: {
-        ownerRunId: fixture.lease.ownerRunId,
-        epoch: fixture.lease.epoch,
-      },
+      runId: "operator-run-01",
       sourceId: created.source.sourceId,
       attemptId: "operator-attempt-recovery",
       outcome: "accepted",
@@ -493,23 +459,10 @@ test("status reconciliation can append after lease takeover without clearing HAL
   );
 
   fixture.clock.value = timestamp("2026-10-22T10:02:01.000Z");
-  const recoveryLease = value(
-    fixture.execution.acquireLease({
-      scope: fixture.scope,
-      ownerRunId: "operator-status-recovery",
-      now: fixture.clock.value,
-      ttlMs: 60_000,
-    }),
-  );
-  assert.equal(recoveryLease.reconciliationRequired, true);
   assert.equal(value(fixture.execution.readHalt()).active, true);
 
   const appended = value(
     fixture.store.appendReconciliation({
-      authority: {
-        ownerRunId: recoveryLease.ownerRunId,
-        epoch: recoveryLease.epoch,
-      },
       sourceId: created.source.sourceId,
       lifecycleOutcome: "UNKNOWN",
       cleanupStatus: "unknown",
@@ -523,10 +476,209 @@ test("status reconciliation can append after lease takeover without clearing HAL
       ?.reconciliations.length,
     1,
   );
-  assert.equal(
-    value(fixture.execution.readLease())?.reconciliationRequired,
-    true,
-  );
+  assert.equal(value(fixture.execution.readLease()), undefined);
   assert.equal(value(fixture.execution.readHalt()).active, true);
   fixture.connection.close();
+});
+
+test("an abandoned pre-intent lease does not block operator journal or raise HALT", () => {
+  const fixture = setup();
+  value(
+    fixture.execution.acquireLease({
+      scope: fixture.scope,
+      ownerRunId: "abandoned-pre-intent",
+      now: timestamp("2026-10-22T09:59:00.000Z"),
+      ttlMs: 1_000,
+    }),
+  );
+  assert.equal(
+    value(fixture.store.findPendingOperatorMainnetTestSource()),
+    undefined,
+  );
+  const created = value(prepare(fixture));
+  assert.equal(created.halt.active, false);
+  assert.equal(
+    value(fixture.execution.readLease())?.ownerRunId,
+    "abandoned-pre-intent",
+  );
+  assert.equal(
+    fixture.connection.db
+      .prepare("SELECT COUNT(*) AS count FROM halt_events")
+      .get()?.count,
+    0,
+  );
+  fixture.connection.close();
+});
+
+test("attempt recording requires the persisted run identity without a lease", () => {
+  const fixture = setup();
+  const created = value(prepare(fixture));
+  const result = fixture.store.recordAttemptAndHalt({
+    runId: "another-process",
+    sourceId: created.source.sourceId,
+    attemptId: "wrong-run-attempt",
+    outcome: "ambiguous",
+    recordedAt: NOW,
+  });
+  assert.equal(result.ok, false);
+  assert.equal(
+    value(fixture.store.readOperatorMainnetTestSource(created.source.sourceId))
+      ?.attempt,
+    undefined,
+  );
+  assert.equal(value(fixture.execution.readHalt()).active, false);
+  fixture.connection.close();
+});
+
+test("source-bound HALT rejects absent or foreign sources and preserves a real incident", () => {
+  const fixture = setup();
+  assert.equal(
+    fixture.store.raiseHalt("nonexistent-source", "unknown exchange state", NOW)
+      .ok,
+    false,
+  );
+  assert.equal(value(fixture.execution.readHalt()).active, false);
+  const created = value(prepare(fixture));
+  const foreignStore = value(
+    createSqliteOperatorMainnetTestStore(fixture.connection, {
+      ...fixture.scope,
+      accountId: `sha256:${"b".repeat(64)}`,
+    }),
+  );
+  assert.equal(
+    foreignStore.raiseHalt(
+      created.source.sourceId,
+      "unknown exchange state",
+      NOW,
+    ).ok,
+    false,
+  );
+  const raised = value(
+    fixture.store.raiseHalt(
+      created.source.sourceId,
+      "unknown exchange state",
+      NOW,
+    ),
+  );
+  assert.equal(raised.active, true);
+  value(
+    fixture.store.appendReconciliation({
+      sourceId: created.source.sourceId,
+      lifecycleOutcome: "NOT_EXERCISED",
+      cleanupStatus: "verified-clean",
+      evidence: { noExchangeOrder: true },
+      observedAt: NOW,
+    }),
+  );
+  const next = prepare(fixture, plan("blocked-by-real-incident"));
+  assert.equal(next.ok, false);
+  if (!next.ok) assert.equal(next.error.code, "HALT_ACTIVE");
+  assert.equal(
+    value(fixture.execution.readHalt()).reason,
+    "unknown exchange state",
+  );
+  fixture.connection.close();
+});
+
+test("v9 migration preserves populated historical v1 intent bytes and recovery records", () => {
+  const fixture = setup();
+  const created = value(prepare(fixture));
+  value(
+    fixture.store.recordAttemptAndHalt({
+      runId: "operator-run-01",
+      sourceId: created.source.sourceId,
+      attemptId: "historical-attempt",
+      outcome: "ambiguous",
+      recordedAt: NOW,
+    }),
+  );
+  // Reconstitute the v8 projections and canonical v1 record before opening it
+  // with the v9 adapter. No migration rewrites canonical history.
+  fixture.connection.db.exec(`
+    ALTER TABLE operator_mainnet_test_write_intents ADD COLUMN lease_owner_run_id TEXT NOT NULL DEFAULT 'historic-run';
+    ALTER TABLE operator_mainnet_test_write_intents ADD COLUMN lease_epoch INTEGER NOT NULL DEFAULT 1 CHECK (lease_epoch > 0);
+    UPDATE schema_meta SET schema_version = 8;
+  `);
+  const historical = value(
+    canonicalSerialize({
+      ...JSON.parse(created.intent.canonicalJson),
+      schemaVersion: "operator-mainnet-test-create-intent/v1",
+      leaseOwnerRunId: "historic-run",
+      leaseEpoch: 7,
+    }),
+  );
+  const historicalHash = payloadHash(historical);
+  fixture.connection.db
+    .prepare(
+      `UPDATE operator_mainnet_test_write_intents
+    SET canonical_json = ?, canonical_hash = ?, lease_epoch = 7`,
+    )
+    .run(historical, historicalHash);
+  const attempts = fixture.connection.db
+    .prepare("SELECT * FROM operator_mainnet_test_attempts")
+    .all();
+  const artifacts = fixture.connection.db
+    .prepare("SELECT * FROM artifacts ORDER BY artifact_id")
+    .all();
+  fixture.connection.close();
+  const migrated = value(
+    openSqliteConnection({
+      environment: "mainnet",
+      databasePath: fixture.path,
+      runtime,
+      clock: { now: () => NOW },
+    }),
+  );
+  const store = value(
+    createSqliteOperatorMainnetTestStore(migrated, fixture.scope),
+  );
+  const recovered = value(
+    store.readOperatorMainnetTestSource(created.source.sourceId),
+  );
+  assert.equal(recovered?.intent.canonicalJson, historical);
+  assert.equal(recovered?.intent.canonicalHash, historicalHash);
+  assert.equal(recovered?.attempt?.outcome, "ambiguous");
+  assert.equal(recovered?.halt.active, true);
+  assert.equal("leaseEpoch" in recovered!.intent, false);
+  assert.equal("lease" in recovered!, false);
+  assert.deepEqual(
+    migrated.db.prepare("SELECT * FROM operator_mainnet_test_attempts").all(),
+    attempts,
+  );
+  assert.deepEqual(
+    migrated.db.prepare("SELECT * FROM artifacts ORDER BY artifact_id").all(),
+    artifacts,
+  );
+  assert.deepEqual(migrated.db.prepare("PRAGMA foreign_key_check").all(), []);
+  const columns = migrated.db
+    .prepare("PRAGMA table_info(operator_mainnet_test_write_intents)")
+    .all()
+    .map((row) => row.name);
+  assert.equal(columns.includes("lease_owner_run_id"), false);
+  assert.equal(columns.includes("lease_epoch"), false);
+  assert.equal(
+    store.prepareCreateIntent({
+      runId: "new-run",
+      plan: recovered!.plan,
+      approval: recovered!.approval,
+      payloadJson: recovered!.source.payloadJson,
+      payloadHash: recovered!.source.payloadHash,
+      preparedAt: NOW,
+    }).ok,
+    false,
+  );
+  // Historical lease values are still validated from immutable canonical JSON.
+  const corrupt = value(
+    canonicalSerialize({ ...JSON.parse(historical), leaseEpoch: 0 }),
+  );
+  migrated.db
+    .prepare(
+      "UPDATE operator_mainnet_test_write_intents SET canonical_json = ?, canonical_hash = ?",
+    )
+    .run(corrupt, payloadHash(corrupt));
+  assert.equal(
+    store.readOperatorMainnetTestSource(created.source.sourceId).ok,
+    false,
+  );
+  migrated.close();
 });

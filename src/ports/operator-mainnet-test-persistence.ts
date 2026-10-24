@@ -5,12 +5,7 @@ import type {
 import type { PlanHash } from "../domain/identity/canonical-serialization.js";
 import type { Result } from "../domain/shared/result.js";
 import type { UtcTimestamp } from "../domain/shared/time.js";
-import type {
-  HaltState,
-  LeaseAuthority,
-  LeaseState,
-  PersistenceScope,
-} from "./persistence.js";
+import type { HaltState, PersistenceScope } from "./persistence.js";
 
 export type OperatorMainnetTestAttemptOutcome =
   "accepted" | "rejected" | "ambiguous";
@@ -47,8 +42,6 @@ export interface OperatorMainnetTestIntentRecord {
   readonly sourceId: string;
   readonly operation: "CREATE";
   readonly runId: string;
-  readonly leaseOwnerRunId: string;
-  readonly leaseEpoch: number;
   readonly canonicalJson: string;
   readonly canonicalHash: PlanHash;
   readonly preparedAt: UtcTimestamp;
@@ -95,11 +88,9 @@ export interface OperatorMainnetTestSnapshot {
   readonly reconciliations: readonly OperatorMainnetTestReconciliationRecord[];
   readonly manualActions: readonly OperatorMainnetTestManualActionRecord[];
   readonly halt: HaltState;
-  readonly lease?: LeaseState;
 }
 
 export interface PrepareOperatorMainnetTestCreateRequest {
-  readonly authority: LeaseAuthority;
   readonly runId: string;
   readonly plan: OperatorMainnetTestPlan;
   readonly approval: OperatorMainnetTestApproval;
@@ -110,7 +101,7 @@ export interface PrepareOperatorMainnetTestCreateRequest {
 }
 
 export interface RecordOperatorMainnetTestAttemptRequest {
-  readonly authority: LeaseAuthority;
+  readonly runId: string;
   readonly sourceId: string;
   readonly attemptId: string;
   readonly outcome: OperatorMainnetTestAttemptOutcome;
@@ -120,7 +111,6 @@ export interface RecordOperatorMainnetTestAttemptRequest {
 }
 
 export interface AppendOperatorMainnetTestReconciliationRequest {
-  readonly authority: LeaseAuthority;
   readonly sourceId: string;
   readonly lifecycleOutcome: OperatorMainnetTestLifecycleOutcome;
   readonly cleanupStatus: OperatorMainnetTestCleanupStatus;
@@ -129,7 +119,6 @@ export interface AppendOperatorMainnetTestReconciliationRequest {
 }
 
 export interface AppendOperatorMainnetTestManualActionRequest {
-  readonly authority: LeaseAuthority;
   readonly sourceId: string;
   readonly action: OperatorMainnetTestManualAction;
   readonly provenance: unknown;
@@ -150,16 +139,20 @@ export interface OperatorMainnetTestPersistencePort {
   readOperatorMainnetTestSource(
     sourceId: string,
   ): Result<OperatorMainnetTestSnapshot | undefined>;
-  findPendingOperatorMainnetTestSource(
-    authority: LeaseAuthority,
-    now: UtcTimestamp,
-  ): Result<OperatorMainnetTestSourceRecord | undefined>;
+  findPendingOperatorMainnetTestSource(): Result<
+    OperatorMainnetTestSourceRecord | undefined
+  >;
   prepareCreateIntent(
     request: PrepareOperatorMainnetTestCreateRequest,
   ): Result<OperatorMainnetTestSnapshot>;
   recordAttemptAndHalt(
     request: RecordOperatorMainnetTestAttemptRequest,
   ): Result<OperatorMainnetTestSnapshot>;
+  raiseHalt(
+    sourceId: string,
+    reason: string,
+    at: UtcTimestamp,
+  ): Result<HaltState>;
   appendReconciliation(
     request: AppendOperatorMainnetTestReconciliationRequest,
   ): Result<OperatorMainnetTestReconciliationRecord>;

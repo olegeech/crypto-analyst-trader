@@ -107,15 +107,13 @@ function createPrivateCreateIssuer(): {
         requireIdentifier(binding.sourceId, "sourceId"),
         requireIdentifier(binding.symbol, "symbol"),
         requireIdentifier(binding.clientOrderId, "clientOrderId"),
-        requireIdentifier(binding.leaseOwnerRunId, "leaseOwnerRunId"),
+        requireIdentifier(binding.runId, "runId"),
       ];
       const expiry = parseUtcTimestamp(binding.expiresAt);
       if (
         hashes.some((item) => !item.ok) ||
         identifiers.some((item) => !item.ok) ||
-        !expiry.ok ||
-        !Number.isSafeInteger(binding.leaseEpoch) ||
-        binding.leaseEpoch < 1
+        !expiry.ok
       )
         return undefined;
       const encoded = canonicalSerialize(binding);
@@ -372,44 +370,25 @@ export async function runMainnetOperatorTestComposition(
     const privateTransportRef: { current?: BybitPrivateTransport } = {};
     const issuer = createPrivateCreateIssuer();
 
-    function localNow(): UtcTimestamp | undefined {
-      try {
-        const parsed = timestampFromEpochMs(wall());
-        return parsed.ok ? parsed.value : undefined;
-      } catch {
-        return undefined;
-      }
-    }
-
-    function sourceAndFenceAreCurrent(): boolean {
+    function sourceIsCurrent(): boolean {
       const binding = currentBinding;
       if (!binding) return false;
-      const snapshot = sqlite.readScopeSnapshot();
+      const halt = sqlite.readHalt();
       const source = operatorJournal.readOperatorMainnetTestSource(
         binding.sourceId,
       );
-      if (!snapshot.ok || !source.ok || !source.value) return false;
-      const lease = snapshot.value.lease;
-      const now = localNow();
+      if (!halt.ok || !source.ok || !source.value) return false;
       return Boolean(
-        lease &&
-        now &&
-        lease.ownerRunId === binding.leaseOwnerRunId &&
-        lease.epoch === binding.leaseEpoch &&
-        !lease.reconciliationRequired &&
-        timestampToEpochMs(now) < timestampToEpochMs(lease.expiresAt) &&
-        !snapshot.value.halt.active &&
-        !snapshot.value.halt.reconciliationRequired &&
+        !halt.value.active &&
+        !halt.value.reconciliationRequired &&
         source.value.intent.operation === "CREATE" &&
-        source.value.intent.runId === binding.leaseOwnerRunId &&
-        source.value.intent.leaseOwnerRunId === binding.leaseOwnerRunId &&
-        source.value.intent.leaseEpoch === binding.leaseEpoch &&
+        source.value.intent.runId === binding.runId &&
         source.value.source.payloadHash === binding.exactPayloadHash &&
         source.value.attempt === undefined,
       );
     }
 
-    async function finalTransportFence(
+    async function finalTransportCheck(
       body: string,
       path: string,
     ): Promise<boolean> {
@@ -448,7 +427,7 @@ export async function runMainnetOperatorTestComposition(
         fresh.ok &&
         approvalStillValid.ok &&
         issuer.hasClaimedTransportGrant(binding.exactPayloadHash, now) &&
-        sourceAndFenceAreCurrent()
+        sourceIsCurrent()
       );
     }
 
@@ -475,9 +454,9 @@ export async function runMainnetOperatorTestComposition(
       )
         throw new Error("Mainnet write lacks its one-use durable CREATE grant");
       postGrantArmed = false;
-      if (!(await finalTransportFence(body, parsedUrl.pathname)))
+      if (!(await finalTransportCheck(body, parsedUrl.pathname)))
         throw new Error(
-          "Mainnet CREATE failed its final source, lease or freshness fence",
+          "Mainnet CREATE failed its final source or freshness check",
         );
       issuer.markDispatched();
       return request(url, init);
@@ -539,7 +518,7 @@ export async function runMainnetOperatorTestComposition(
         if (
           !now ||
           !issuer.claimForTransport(payloadHash, now) ||
-          !sourceAndFenceAreCurrent()
+          !sourceIsCurrent()
         )
           throw new Error(
             "Mainnet CREATE lacks its consumed one-use source grant",

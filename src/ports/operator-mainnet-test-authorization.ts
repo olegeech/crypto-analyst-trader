@@ -11,8 +11,7 @@ export interface OperatorMainnetTestCreateAuthorizationBinding {
   readonly symbol: string;
   readonly clientOrderId: string;
   readonly exactPayloadHash: PlanHash;
-  readonly leaseOwnerRunId: string;
-  readonly leaseEpoch: number;
+  readonly runId: string;
   readonly expiresAt: UtcTimestamp;
 }
 

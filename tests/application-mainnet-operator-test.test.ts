@@ -895,19 +895,10 @@ test("same-account pending source blocks a different nonce even with fresh evide
   const secondPlan = plan({ nonce: "new-nonce" });
   const harness = setup({ valuePlan: secondPlan });
   const firstPlan = plan({ nonce: "unresolved-prior-source" });
-  const lease = unwrap(
-    harness.persistence.acquireLease({
-      scope: harness.persistence.scope,
-      ownerRunId: harness.input.runId,
-      now: NOW,
-      ttlMs: 60_000,
-    }),
-  );
   const firstApproval = approval(firstPlan);
   const firstCreate = unwrap(createOperatorMainnetCreateRequest(firstPlan));
   unwrap(
     harness.journal.prepareCreateIntent({
-      authority: { ownerRunId: lease.ownerRunId, epoch: lease.epoch },
       runId: harness.input.runId,
       plan: firstPlan,
       approval: firstApproval,
@@ -922,24 +913,7 @@ test("same-account pending source blocks a different nonce even with fresh evide
   harness.persistence.close();
 });
 
-test("lost lease and failed intent commit both leave the exchange untouched", async () => {
-  const lostLease = setup({
-    onCollect: (persistence) => {
-      const snapshot = unwrap(persistence.readScopeSnapshot());
-      assert.ok(snapshot.lease);
-      unwrap(
-        persistence.releaseLease({
-          ownerRunId: snapshot.lease.ownerRunId,
-          epoch: snapshot.lease.epoch,
-        }),
-      );
-    },
-  });
-  const leaseResult = await lostLease.run();
-  assert.equal(leaseResult.ok, false);
-  assert.equal(lostLease.createObservations.length, 0);
-  lostLease.persistence.close();
-
+test("failed intent commit leaves the exchange untouched", async () => {
   const failedCommit = setup({ failSourceInsert: true });
   const commitResult = await failedCommit.run();
   assert.equal(commitResult.ok, false);
@@ -960,6 +934,7 @@ test("consumed capability denial after durable intent is recovery-only and never
   const result = await harness.run();
   assert.equal(unwrap(result).kind, "recovery");
   assert.equal(harness.createObservations.length, 0);
+  assert.equal(unwrap(harness.persistence.readHalt()).active, false);
   harness.authorization.denyConsume = false;
   const restart = await harness.run();
   assert.equal(unwrap(restart).kind, "recovery");
@@ -1163,4 +1138,83 @@ test("real fee-rate response with RPI passes the complete production admission v
     state: async () => ({ ok: true, value: fresh.state }),
   });
   assert.deepEqual(result.fresh.feeRate, fresh.feeRate);
+});
+
+test("pre-intent evidence failure permits a clean second attended run despite an abandoned expired lease", async () => {
+  const harness = setup();
+  const abandoned = unwrap(
+    harness.persistence.acquireLease({
+      scope: harness.persistence.scope,
+      ownerRunId: "abandoned-pre-intent",
+      now: at(Date.parse(NOW) - 120_000),
+      ttlMs: 60_000,
+    }),
+  );
+  const initialHalt = unwrap(harness.persistence.readHalt());
+  const noLease = new Proxy(harness.persistence, {
+    get(target, key) {
+      if (["acquireLease", "renewLease", "releaseLease"].includes(String(key)))
+        return () => {
+          throw new Error("operator CREATE must not manage leases");
+        };
+      const value = Reflect.get(target, key, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+  let unavailable = true;
+  const dependencies: MainnetOperatorTestDependencies = {
+    ...harness.dependencies,
+    persistence: noLease,
+    evidence: {
+      collect: async () => {
+        if (unavailable) throw new Error("read failed before intent");
+        return freshEvidence(harness.valuePlan);
+      },
+    },
+  };
+  const first = await executeMainnetOperatorTest(harness.input, dependencies);
+  assert.equal(first.ok, false);
+  const sourceId = unwrap(
+    deriveOperatorMainnetTestSourceId(harness.valuePlan.contentHash),
+  );
+  assert.equal(
+    unwrap(harness.journal.readOperatorMainnetTestSource(sourceId)),
+    undefined,
+  );
+  assert.deepEqual(unwrap(harness.persistence.readHalt()), initialHalt);
+  assert.equal(
+    unwrap(harness.persistence.readScopeSnapshot()).lease?.epoch,
+    abandoned.epoch,
+  );
+  assert.equal(harness.createObservations.length, 0);
+  unavailable = false;
+  const secondApproval = unwrap(
+    createOperatorMainnetTestApproval({
+      plan: harness.valuePlan,
+      planHash: harness.valuePlan.contentHash,
+      actor: "second-attended-consent",
+      consent: true,
+      approvedAt: NOW,
+    }),
+  );
+  const second = await executeMainnetOperatorTest(
+    {
+      approval: secondApproval,
+      approvalHash: secondApproval.contentHash,
+      runId: "second-attended-run",
+    },
+    dependencies,
+  );
+  assert.equal(unwrap(second).kind, "attempted");
+  assert.equal(harness.createObservations.length, 1);
+  const stored = unwrap(
+    harness.journal.readOperatorMainnetTestSource(sourceId),
+  );
+  assert.equal(stored?.intent.runId, "second-attended-run");
+  assert.equal(stored?.intent.canonicalJson.includes("lease"), false);
+  assert.equal(
+    unwrap(harness.persistence.readScopeSnapshot()).lease?.epoch,
+    abandoned.epoch,
+  );
+  harness.persistence.close();
 });

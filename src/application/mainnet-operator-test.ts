@@ -32,7 +32,7 @@ import type {
   OperatorMainnetTestPersistencePort,
   OperatorMainnetTestAttemptOutcome,
 } from "../ports/operator-mainnet-test-persistence.js";
-import type { LeaseAuthority, PersistencePort } from "../ports/persistence.js";
+import type { PersistencePort } from "../ports/persistence.js";
 import {
   createOperatorMainnetCreateRequest,
   revalidateMainnetOperatorEvidenceAge,
@@ -41,8 +41,6 @@ import {
 } from "./mainnet-entry-evidence.js";
 
 import { OperatorEvidenceReadError } from "./mainnet-operator-test-evidence.js";
-
-const LEASE_TTL_MS = 60_000;
 
 export interface MainnetOperatorTestDependencies {
   readonly persistence: PersistencePort;
@@ -103,53 +101,12 @@ function effectiveProviderTime(
   return timestampFromEpochMs(timestampToEpochMs(base) + Math.ceil(elapsedMs));
 }
 
-function authorityStillCurrent(
-  dependencies: MainnetOperatorTestDependencies,
-  authority: LeaseAuthority,
-): Result<void> {
-  const now = parseUtcTimestamp(dependencies.localClock.now());
-  if (!now.ok) return now;
-  const current = dependencies.persistence.readScopeSnapshot();
-  if (!current.ok) return current;
-  const lease = current.value.lease;
-  if (
-    current.value.halt.active ||
-    current.value.halt.reconciliationRequired ||
-    lease === undefined ||
-    lease.ownerRunId !== authority.ownerRunId ||
-    lease.epoch !== authority.epoch ||
-    lease.reconciliationRequired ||
-    timestampToEpochMs(now.value) >= timestampToEpochMs(lease.expiresAt)
-  )
-    return blocked("HALT_OR_FENCED_LEASE");
+function haltIsClear(persistence: PersistencePort): Result<void> {
+  const halt = persistence.readHalt();
+  if (!halt.ok) return halt;
+  if (halt.value.active || halt.value.reconciliationRequired)
+    return blocked("HALT_OR_RECONCILIATION_REQUIRED");
   return ok(undefined);
-}
-
-function acquireLease(
-  persistence: PersistencePort,
-  runId: string,
-  now: UtcTimestamp,
-): Result<{ readonly ownerRunId: string; readonly epoch: number }> {
-  const snapshot = persistence.readScopeSnapshot();
-  if (!snapshot.ok) return snapshot;
-  const existing = snapshot.value.lease;
-  if (
-    existing?.ownerRunId === runId &&
-    timestampToEpochMs(now) < timestampToEpochMs(existing.expiresAt)
-  )
-    return persistence.renewLease({
-      scope: persistence.scope,
-      ownerRunId: runId,
-      now,
-      ttlMs: LEASE_TTL_MS,
-      authority: { ownerRunId: runId, epoch: existing.epoch },
-    });
-  return persistence.acquireLease({
-    scope: persistence.scope,
-    ownerRunId: runId,
-    now,
-    ttlMs: LEASE_TTL_MS,
-  });
 }
 
 function payloadFor(
@@ -302,30 +259,9 @@ export async function executeMainnetOperatorTest(
       ),
     );
 
-  const initial = dependencies.persistence.readScopeSnapshot();
+  const initial = haltIsClear(dependencies.persistence);
   if (!initial.ok) return initial;
-  if (
-    initial.value.halt.active ||
-    initial.value.halt.reconciliationRequired ||
-    initial.value.lease?.reconciliationRequired
-  )
-    return blocked("HALT_OR_RECONCILIATION_REQUIRED");
-  const acquired = acquireLease(
-    dependencies.persistence,
-    runId.value,
-    localNow.value,
-  );
-  if (!acquired.ok) return acquired;
-  const authority: LeaseAuthority = Object.freeze({
-    ownerRunId: acquired.value.ownerRunId,
-    epoch: acquired.value.epoch,
-  });
-  const fenceBeforeReads = authorityStillCurrent(dependencies, authority);
-  if (!fenceBeforeReads.ok) return fenceBeforeReads;
-  const pending = dependencies.journal.findPendingOperatorMainnetTestSource(
-    authority,
-    localNow.value,
-  );
+  const pending = dependencies.journal.findPendingOperatorMainnetTestSource();
   if (!pending.ok) return pending;
   if (pending.value) return blocked("UNRESOLVED_SAME_ACCOUNT_SOURCE_EXISTS");
 
@@ -383,8 +319,7 @@ export async function executeMainnetOperatorTest(
     symbol: plan.value.symbol,
     clientOrderId: plan.value.clientOrderId,
     exactPayloadHash: approvedPayloadHash.value as PlanHash,
-    leaseOwnerRunId: authority.ownerRunId,
-    leaseEpoch: authority.epoch,
+    runId: runId.value,
     expiresAt: exactApproval.value.expiresAt,
   });
   let capability: object | undefined;
@@ -397,7 +332,6 @@ export async function executeMainnetOperatorTest(
     return blocked("CREATE_AUTHORIZATION_UNAVAILABLE");
 
   const prepared = dependencies.journal.prepareCreateIntent({
-    authority,
     runId: runId.value,
     plan: plan.value,
     approval: exactApproval.value,
@@ -425,13 +359,6 @@ export async function executeMainnetOperatorTest(
   const rejectAfterIntent = (
     reasonCode: string,
   ): Result<MainnetOperatorTestOutcome> => {
-    const at = parseUtcTimestamp(dependencies.localClock.now());
-    if (at.ok)
-      dependencies.persistence.raiseHalt(
-        authority,
-        `operator Mainnet source requires recovery: ${reasonCode}`,
-        at.value,
-      );
     return ok(recovery(sourceId.value, plan.value.clientOrderId, reasonCode));
   };
 
@@ -455,7 +382,7 @@ export async function executeMainnetOperatorTest(
     elapsed.value,
   );
   const payloadAgain = payloadFor(create.value.request);
-  const fence = authorityStillCurrent(dependencies, authority);
+  const halt = haltIsClear(dependencies.persistence);
   const persisted = dependencies.journal.readOperatorMainnetTestSource(
     sourceId.value,
   );
@@ -465,13 +392,11 @@ export async function executeMainnetOperatorTest(
     !payloadAgain.ok ||
     payloadAgain.value.json !== create.value.payloadJson ||
     payloadAgain.value.hash !== approvedPayloadHash.value ||
-    !fence.ok ||
+    !halt.ok ||
     !persisted.ok ||
     !persisted.value ||
     persisted.value.intent.operation !== "CREATE" ||
     persisted.value.intent.runId !== runId.value ||
-    persisted.value.intent.leaseOwnerRunId !== authority.ownerRunId ||
-    persisted.value.intent.leaseEpoch !== authority.epoch ||
     persisted.value.source.payloadHash !== approvedPayloadHash.value
   )
     return rejectAfterIntent("POST_INTENT_RECHECK_FAILED");
@@ -507,7 +432,7 @@ export async function executeMainnetOperatorTest(
   );
   const recordedAt = attemptAt.ok ? attemptAt.value : providerTime.value;
   const attempt = dependencies.journal.recordAttemptAndHalt({
-    authority,
+    runId: runId.value,
     sourceId: sourceId.value,
     attemptId: randomUUID(),
     outcome: classified.outcome,

@@ -1,5 +1,3 @@
-import { randomUUID } from "node:crypto";
-
 import type { OperatorMainnetTestPlan } from "../domain/execution/operator-mainnet-test-plan.js";
 import type { ExchangeFillObservation } from "../domain/execution/exchange-fill.js";
 import type { ExchangeOrderObservation } from "../domain/execution/exchange-order.js";
@@ -20,13 +18,8 @@ import type {
   OperatorMainnetTestPersistencePort,
   OperatorMainnetTestSnapshot,
 } from "../ports/operator-mainnet-test-persistence.js";
-import type {
-  HaltState,
-  LeaseAuthority,
-  PersistencePort,
-} from "../ports/persistence.js";
+import type { HaltState, PersistencePort } from "../ports/persistence.js";
 
-const LEASE_TTL_MS = 60_000;
 const MAX_OBSERVATION_AGE_MS = 60_000;
 
 export interface MainnetOperatorTestPosition {
@@ -561,61 +554,6 @@ function classify(
   };
 }
 
-function statusAuthority(
-  persistence: PersistencePort,
-  snapshot: OperatorMainnetTestSnapshot,
-  now: UtcTimestamp,
-): Result<LeaseAuthority> {
-  const current = persistence.readScopeSnapshot();
-  if (!current.ok) return current;
-  const lease = current.value.lease;
-  const activeLease =
-    lease !== undefined &&
-    timestampToEpochMs(now) < timestampToEpochMs(lease.expiresAt);
-  const evidenceOwner = (() => {
-    const latest = snapshot.reconciliations.at(-1);
-    if (!latest) return undefined;
-    try {
-      const row = JSON.parse(latest.canonicalJson) as Record<string, unknown>;
-      const evidence = row.evidence;
-      return typeof evidence === "object" && evidence !== null
-        ? (evidence as Record<string, unknown>).statusAuthorityOwnerRunId
-        : undefined;
-    } catch {
-      return undefined;
-    }
-  })();
-  const reusableOwners = [snapshot.intent.leaseOwnerRunId, evidenceOwner];
-  if (activeLease) {
-    if (!reusableOwners.includes(lease.ownerRunId))
-      return fail(
-        domainError(
-          "RUN_LEASE_HELD",
-          "another account operation holds the status lease",
-        ),
-      );
-    const renewed = persistence.renewLease({
-      scope: persistence.scope,
-      ownerRunId: lease.ownerRunId,
-      now,
-      ttlMs: LEASE_TTL_MS,
-      authority: { ownerRunId: lease.ownerRunId, epoch: lease.epoch },
-    });
-    return renewed.ok
-      ? ok({ ownerRunId: renewed.value.ownerRunId, epoch: renewed.value.epoch })
-      : renewed;
-  }
-  const acquired = persistence.acquireLease({
-    scope: persistence.scope,
-    ownerRunId: `operator-status-${randomUUID()}`,
-    now,
-    ttlMs: LEASE_TTL_MS,
-  });
-  return acquired.ok
-    ? ok({ ownerRunId: acquired.value.ownerRunId, epoch: acquired.value.epoch })
-    : acquired;
-}
-
 /** Read-only exchange recovery plus append-only local evidence; it never clears HALT. */
 export async function runMainnetOperatorTestStatus(
   input: MainnetOperatorTestStatusInput,
@@ -647,16 +585,9 @@ export async function runMainnetOperatorTestStatus(
   let snapshot = snapshotResult.value;
   const parsedNow = parseUtcTimestamp(dependencies.clock.now());
   if (!parsedNow.ok) return parsedNow;
-  const authority = statusAuthority(
-    dependencies.persistence,
-    snapshot,
-    parsedNow.value,
-  );
-  if (!authority.ok) return authority;
 
   if (input.manualAction !== undefined) {
     const recorded = dependencies.journal.appendManualAction({
-      authority: authority.value,
       sourceId: sourceId.value,
       action: input.manualAction,
       provenance: {
@@ -725,12 +656,9 @@ export async function runMainnetOperatorTestStatus(
       };
   const evidence = {
     ...result.evidence,
-    statusAuthorityOwnerRunId: authority.value.ownerRunId,
-    statusAuthorityEpoch: authority.value.epoch,
     statusJournalObservedAt: observedAt,
   };
   const persisted = dependencies.journal.appendReconciliation({
-    authority: authority.value,
     sourceId: sourceId.value,
     lifecycleOutcome: result.lifecycleOutcome,
     cleanupStatus: result.cleanupStatus,
@@ -743,8 +671,8 @@ export async function runMainnetOperatorTestStatus(
     const currentHalt = dependencies.persistence.readHalt();
     if (!currentHalt.ok) return currentHalt;
     if (!currentHalt.value.active) {
-      const raised = dependencies.persistence.raiseHalt(
-        authority.value,
+      const raised = dependencies.journal.raiseHalt(
+        sourceId.value,
         "operator Mainnet status is unknown",
         observedAt,
       );

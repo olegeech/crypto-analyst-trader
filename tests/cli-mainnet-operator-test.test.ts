@@ -359,6 +359,14 @@ test("durable intent routes execute to read-only status and never resends", asyn
   assert.equal(writes, 0);
   assert.equal(statusCalls, 1);
   assert.match(terminal.text(), /DURABLE_INTENT_ALREADY_EXISTS/u);
+  assert.match(
+    terminal.text(),
+    new RegExp(`CLIENT_ORDER_ID=${plan.clientOrderId}`, "u"),
+  );
+  assert.match(
+    terminal.text(),
+    /inspect Bybit UI orders, fills and position using CLIENT_ORDER_ID/u,
+  );
   assert.match(terminal.text(), /LIFECYCLE_OUTCOME=UNKNOWN/u);
   assert.match(terminal.text(), /EXCHANGE_READS=3/u);
   assert.match(terminal.text(), /EXCHANGE_WRITES=0/u);
@@ -633,4 +641,39 @@ test("failed execution retains recovery instructions when intent or dispatch evi
       /EXECUTION_NOT_STARTED|secret provider/u,
     );
   }
+});
+
+test("unknown post-intent execution gives concrete manual Bybit guidance without an automatic resend", async () => {
+  const terminal = streams(true);
+  let calls = 0;
+  const code = await runMainnetOperatorTestCli(
+    ["execute", "--plan-hash", plan.contentHash],
+    {
+      ...terminal,
+      resolvePlan: () => resolvedPlan(),
+      hasDurableIntent: () => ok(false),
+      prompt: async () => "yes",
+      clock: () => Date.parse(NOW),
+      actor: () => "operator-test",
+      execute: async () => {
+        calls += 1;
+        return ok({
+          kind: "recovery",
+          sourceId,
+          clientOrderId: plan.clientOrderId,
+          attemptOutcome: "ambiguous",
+          exchangeReads: 8,
+          exchangeWrites: 1,
+        });
+      },
+    },
+  );
+  assert.equal(code, 5);
+  assert.equal(calls, 1);
+  assert.match(terminal.text(), /EXECUTION_STATE=RECOVERY_ONLY/u);
+  assert.match(
+    terminal.text(),
+    /inspect Bybit UI orders, fills and position using CLIENT_ORDER_ID/u,
+  );
+  assert.match(terminal.text(), /do not resend this source/u);
 });
