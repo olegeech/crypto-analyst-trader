@@ -48,6 +48,14 @@ Bybit manually if a process crashes or an order outcome is uncertain.
   After an uncertain submission or crash, give the operator concrete Bybit UI
   inspection/recovery guidance; never infer that an order did not exist.
   Do not automatically clear an existing non-lease incident HALT.
+- **#31 pre-merge acceptance:** the first supervised happy-path CREATE is
+  permitted from the exact reviewed PR-branch commit with passing same-SHA
+  release tests/CI, fresh Mainnet evidence, all existing capital/position/HALT
+  checks and separately obtained human exact-plan approval. Do **not** insist
+  on merging into `main`, tagging or publishing before that one experiment:
+  its observed outcome informs the merge-vs-rework decision. No automatic
+  live authorization, no bypass of existing incident HALT, and no generalized
+  unattended execution.
 - This is an approved **design simplification**, not permission to bypass
   current code or manually edit SQLite. Update implementation, regression tests
   and #31 acceptance criteria together before any supervised live CREATE.
