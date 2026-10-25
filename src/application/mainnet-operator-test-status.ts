@@ -173,47 +173,64 @@ function orderMatchesPlan(
   );
 }
 
-function childMatchesPlan(
+function childProofFailures(
   child: ExchangeOrderObservation,
   plan: OperatorMainnetTestPlan,
-  observedAt: UtcTimestamp,
-): boolean {
-  const createdAt = child.providerCreatedAt
-    ? timestampToEpochMs(child.providerCreatedAt)
-    : Number.NaN;
-  const updatedAt = child.providerUpdatedAt
-    ? timestampToEpochMs(child.providerUpdatedAt)
-    : Number.NaN;
-  const observed = timestampToEpochMs(observedAt);
-  return (
-    child.clientOrderId === child.providerOrderLinkId &&
-    child.parentOrderLinkId === plan.clientOrderId &&
-    child.instrument === plan.symbol &&
-    child.category === "linear" &&
-    child.protectionType === "take-profit" &&
-    child.providerStopOrderType === "PartialTakeProfit" &&
-    child.providerTpslMode === "Partial" &&
-    child.side === "sell" &&
-    child.requestedQuantity.isPositive() &&
-    child.requestedQuantity.compare(plan.entry.quantity) <= 0 &&
-    child.orderType === "market" &&
-    child.price === undefined &&
-    sameDecimal(child.triggerPrice, plan.entry.takeProfit.triggerPrice) &&
-    child.takeProfitTriggerBy === "LastPrice" &&
+): readonly string[] {
+  // Native TP children may have no user-supplied orderLinkId. The mapper then
+  // uses the proven parent link as a local lookup alias, never as ownership.
+  const clientLinkMatches =
+    child.providerOrderLinkId === undefined
+      ? child.clientOrderId === plan.clientOrderId
+      : child.clientOrderId === child.providerOrderLinkId;
+  const triggerBasisMatches =
+    (child.triggerBy ?? child.takeProfitTriggerBy) === "LastPrice" &&
     (child.triggerBy === undefined || child.triggerBy === "LastPrice") &&
-    child.reduceOnly === true &&
-    child.positionIdx === 0 &&
-    child.stopLoss === null &&
-    Number.isFinite(createdAt) &&
-    Number.isFinite(updatedAt) &&
-    createdAt <= updatedAt &&
-    updatedAt <= observed &&
-    (child.status === "open" ||
-      child.status === "partially-filled" ||
-      child.status === "filled" ||
-      child.status === "cancelled" ||
-      child.status === "rejected")
-  );
+    (child.takeProfitTriggerBy === undefined ||
+      child.takeProfitTriggerBy === "LastPrice");
+  const checks: readonly (readonly [string, boolean])[] = [
+    ["TP_CHILD_CLIENT_LINK_INVALID", clientLinkMatches],
+    [
+      "TP_CHILD_PARENT_LINK_MISMATCH",
+      child.parentOrderLinkId === plan.clientOrderId,
+    ],
+    [
+      "TP_CHILD_SCOPE_MISMATCH",
+      child.instrument === plan.symbol && child.category === "linear",
+    ],
+    [
+      "TP_CHILD_TYPE_MISMATCH",
+      child.protectionType === "take-profit" &&
+        child.providerStopOrderType === "PartialTakeProfit" &&
+        child.providerTpslMode === "Partial",
+    ],
+    [
+      "TP_CHILD_SIDE_OR_QUANTITY_INVALID",
+      child.side === "sell" &&
+        child.requestedQuantity.isPositive() &&
+        child.requestedQuantity.compare(plan.entry.quantity) <= 0,
+    ],
+    // Bybit can retain a positive IOC matching price on a Market history row.
+    // Market identity, the approved trigger and attributed fills prove the exit.
+    ["TP_CHILD_ORDER_TYPE_MISMATCH", child.orderType === "market"],
+    [
+      "TP_CHILD_TRIGGER_PRICE_MISMATCH",
+      sameDecimal(child.triggerPrice, plan.entry.takeProfit.triggerPrice),
+    ],
+    ["TP_CHILD_TRIGGER_BASIS_MISMATCH", triggerBasisMatches],
+    [
+      "TP_CHILD_REDUCTION_MODE_INVALID",
+      child.reduceOnly === true && child.positionIdx === 0,
+    ],
+    ["TP_CHILD_STOP_LOSS_UNEXPECTED", child.stopLoss === null],
+    [
+      "TP_CHILD_STATUS_INVALID",
+      ["open", "partially-filled", "filled", "cancelled", "rejected"].includes(
+        child.status,
+      ),
+    ],
+  ];
+  return checks.filter(([, valid]) => !valid).map(([reason]) => reason);
 }
 
 function freshOrder(
@@ -361,12 +378,15 @@ function classify(
   if (observation.children.length > 1)
     reasons.add("DUPLICATE_OR_STRAY_TP_CHILD");
   for (const child of observation.children) {
-    if (
-      childIds.has(child.exchangeOrderId) ||
-      !childMatchesPlan(child, plan, observation.observedAt) ||
-      !freshOrder(child, observation.observedAt)
-    )
+    const failures = [...childProofFailures(child, plan)];
+    if (childIds.has(child.exchangeOrderId))
+      failures.push("TP_CHILD_DUPLICATE_ID");
+    if (!freshOrder(child, observation.observedAt))
+      failures.push("TP_CHILD_TIME_INVALID_OR_STALE");
+    if (failures.length > 0) {
       reasons.add("TP_CHILD_PROOF_INVALID_OR_DUPLICATE");
+      for (const reason of failures) reasons.add(reason);
+    }
     childIds.add(child.exchangeOrderId);
   }
 

@@ -1,5 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import {
+  mapOrderRecords,
+  mapOrderObservation,
+} from "../src/adapters/bybit-v5/read-mappers.js";
 
 import {
   createOperatorMainnetQuote,
@@ -109,6 +113,50 @@ const approved = unwrap(
     approvedAt: NOW,
   }),
 );
+
+function nativeFilledChild(overrides: Record<string, unknown> = {}) {
+  const records = mapOrderRecords(
+    {
+      result: {
+        category: "linear",
+        list: [
+          {
+            orderId: "exchange-tp-1",
+            orderLinkId: "",
+            parentOrderLinkId: plan.clientOrderId,
+            symbol: plan.symbol,
+            side: "Sell",
+            qty: "0.08",
+            cumExecQty: "0.08",
+            orderStatus: "Filled",
+            orderType: "Market",
+            timeInForce: "IOC",
+            price: "101.23",
+            triggerPrice: plan.entry.takeProfit.triggerPrice.toString(),
+            takeProfit: "0",
+            stopLoss: "0",
+            stopOrderType: "PartialTakeProfit",
+            tpslMode: "Partial",
+            triggerBy: "LastPrice",
+            tpTriggerBy: "",
+            reduceOnly: true,
+            positionIdx: 0,
+            createdTime: String(Date.parse("2026-10-23T11:59:59.700Z")),
+            updatedTime: String(Date.parse("2026-10-23T12:00:00.700Z")),
+            ...overrides,
+          },
+        ],
+      },
+    },
+    plan.symbol,
+    "order/history",
+  );
+  return mapOrderObservation(
+    records[0]!,
+    OBSERVED,
+    "bybit-mainnet/order/history",
+  );
+}
 
 function parent(options: {
   readonly filled: string;
@@ -407,6 +455,87 @@ function hash(value: string): PlanHash {
   if (!parsed.ok) throw new Error("test hash is invalid");
   return parsed.value as PlanHash;
 }
+
+test("native filled TP history with empty own link and attached-TP fields verifies through the Bybit mapper", async () => {
+  const tp = nativeFilledChild();
+  const entry = parent({ filled: "0.08", status: "filled" });
+  const h = harness(
+    ok(
+      observation({
+        parent: entry,
+        entry: [
+          fill({
+            id: "native-entry",
+            orderId: entry.exchangeOrderId,
+            side: "buy",
+            quantity: "0.08",
+          }),
+        ],
+        children: [tp],
+        exits: [
+          fill({
+            id: "native-exit",
+            orderId: tp.exchangeOrderId,
+            side: "sell",
+            quantity: "0.08",
+          }),
+        ],
+      }),
+    ),
+  );
+  const result = unwrap(await h.run());
+  assert.equal(result.lifecycleOutcome, "TP_LIFECYCLE_PASS");
+  assert.equal(result.cleanupStatus, "verified-clean");
+  assert.deepEqual(result.reasons, []);
+});
+
+test("native TP shape still requires parent ownership, market identity and unambiguous trigger basis", async () => {
+  const invalid: readonly [Record<string, unknown>, string][] = [
+    [
+      { parentOrderLinkId: "unrelated-parent" },
+      "TP_CHILD_PARENT_LINK_MISMATCH",
+    ],
+    [{ triggerBy: "MarkPrice" }, "TP_CHILD_TRIGGER_BASIS_MISMATCH"],
+    [{ tpTriggerBy: "MarkPrice" }, "TP_CHILD_TRIGGER_BASIS_MISMATCH"],
+    [{ triggerBy: "" }, "TP_CHILD_TRIGGER_BASIS_MISMATCH"],
+    [{ reduceOnly: false }, "TP_CHILD_REDUCTION_MODE_INVALID"],
+    [{ stopOrderType: "TakeProfit" }, "TP_CHILD_TYPE_MISMATCH"],
+    [{ orderType: "Limit" }, "TP_CHILD_ORDER_TYPE_MISMATCH"],
+    [{ triggerPrice: "101" }, "TP_CHILD_TRIGGER_PRICE_MISMATCH"],
+  ];
+  for (const [overrides, reason] of invalid) {
+    const tp = nativeFilledChild(overrides);
+    const entry = parent({ filled: "0.08", status: "filled" });
+    const h = harness(
+      ok(
+        observation({
+          parent: entry,
+          entry: [
+            fill({
+              id: "native-entry",
+              orderId: entry.exchangeOrderId,
+              side: "buy",
+              quantity: "0.08",
+            }),
+          ],
+          children: [tp],
+          exits: [
+            fill({
+              id: "native-exit",
+              orderId: tp.exchangeOrderId,
+              side: "sell",
+              quantity: "0.08",
+            }),
+          ],
+        }),
+      ),
+    );
+    const result = unwrap(await h.run());
+    assert.equal(result.lifecycleOutcome, "UNKNOWN", reason);
+    assert.ok(result.reasons.includes(reason), reason);
+    assert.equal(h.snapshot.halt.active, true);
+  }
+});
 
 test("zero entry fill with an open GTC parent is NOT_EXERCISED and cleanup pending", async () => {
   const entry = parent({ filled: "0", status: "open" });
