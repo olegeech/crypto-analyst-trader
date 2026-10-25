@@ -666,7 +666,7 @@ function validateCompactAccountEvidence(
 }
 
 export function validateCompactOperatorAccountForPlan(
-  plan: OperatorMainnetTestPlan,
+  plan: OperatorMainnetTestPlan | undefined,
   compactAccount: MainnetOperatorTestCompactAccountEvidence,
   providerTime: UtcTimestamp,
 ): Result<{

@@ -24,6 +24,7 @@ import { fail, ok, type Result } from "../domain/shared/result.js";
 import {
   parseUtcTimestamp,
   timestampFromEpochMs,
+  timestampToEpochMs,
 } from "../domain/shared/time.js";
 import { isPlanningSymbol } from "../domain/planning/decision-policy.js";
 import type {
@@ -37,8 +38,16 @@ import { deriveMainnetExecutionReadiness } from "./mainnet-execution-readiness.j
 import {
   collectCompactOperatorAccountEvidence,
   createCompactOperatorAccountReader,
+  extractOperatorFeeRate,
+  CompactAccountEvidenceUnavailable,
 } from "./mainnet-operator-test-evidence.js";
-import { validateCompactOperatorPreparationEvidence } from "./mainnet-entry-evidence.js";
+import {
+  calculateOperatorMainnetTestCapacity,
+  calculateOperatorMainnetTestCapacityFromAvailableBalance,
+  validateCompactOperatorAccountForPlan,
+  validateCompactOperatorPreparationEvidence,
+} from "./mainnet-entry-evidence.js";
+import { PROVISIONAL_M1_MAX_ACCOUNT_EVIDENCE_AGE_MS } from "./policies/provisional-m1.js";
 import {
   createMainnetGetCounts,
   snapshotExchangeCredentials,
@@ -57,6 +66,7 @@ export interface MainnetOperatorTestPreparation {
   readonly exchangeReads: number;
   readonly exchangeGetCounts?: string;
   readonly exchangeWrites: 0;
+  readonly compactFallbackReason?: string;
 }
 
 function scopeFor(accountId: string) {
@@ -81,13 +91,50 @@ function failed(
   );
 }
 
+async function readPreparationFee(
+  transport: BybitAccountReadTransport,
+  symbol: string,
+) {
+  let response;
+  try {
+    response = await transport.get("/v5/account/fee-rate", {
+      category: "linear",
+      symbol,
+    });
+  } catch {
+    return failed("FEE_RATE_READ_FAILED", { source: "fee" });
+  }
+  return extractOperatorFeeRate(response, symbol);
+}
+
+export interface MainnetOperatorTestPreparationDependencies {
+  readonly request?: typeof fetch;
+  readonly credentialProvider?: Pick<CredentialProvider, "load">;
+  readonly openPersistence?: typeof openSqlitePersistence;
+  readonly utcClock?: () => number;
+}
+
 /** GET-only preparation and canonical persistence; it has no private write transport. */
 export async function prepareMainnetOperatorTest(
   input: MainnetOperatorTestPrepareInput,
+  dependencies: MainnetOperatorTestPreparationDependencies = {},
 ): Promise<Result<MainnetOperatorTestPreparation>> {
   const getCounts = createMainnetGetCounts();
+  let compactFallbackReason: string | undefined;
   const withCounts = <T>(result: Result<T>, reads: number, writes: number) =>
-    withExchangeCounts(result, reads, writes, getCounts.summary());
+    withExchangeCounts(
+      !result.ok && compactFallbackReason
+        ? fail(
+            domainError(result.error.code, result.error.message, {
+              ...result.error.details,
+              compactFallbackReason,
+            }),
+          )
+        : result,
+      reads,
+      writes,
+      getCounts.summary(),
+    );
   let exchangeReads = 0;
   if (
     typeof input !== "object" ||
@@ -106,7 +153,7 @@ export async function prepareMainnetOperatorTest(
   )
     return withCounts(failed("INVALID_INPUT"), exchangeReads, 0);
 
-  const wall = Date.now;
+  const wall = dependencies.utcClock ?? Date.now;
   const monotonic = () => performance.now();
   const request: typeof fetch = async (url, init) => {
     const method = (
@@ -116,7 +163,7 @@ export async function prepareMainnetOperatorTest(
       throw new Error("operator preparation permits GET requests only");
     exchangeReads += 1;
     getCounts.record(url, init);
-    return fetch(url, init);
+    return (dependencies.request ?? fetch)(url, init);
   };
   const runId = `operator-prepare-${randomUUID()}`;
   let credentials: Readonly<ExchangeCredentials> | undefined;
@@ -138,7 +185,11 @@ export async function prepareMainnetOperatorTest(
     | undefined;
   let compactState: MainnetExchangeReadState | undefined;
   let accountResult: AccountEvidenceCollectionResult | undefined;
-  const provider = createMacOSKeychainProvider();
+  let preparationFee:
+    | Extract<ReturnType<typeof extractOperatorFeeRate>, { ok: true }>["value"]
+    | undefined;
+  const provider =
+    dependencies.credentialProvider ?? createMacOSKeychainProvider();
   const credentialLoader: Pick<CredentialProvider, "load"> = {
     load: async (environment: CredentialEnvironment) => {
       if (environment !== "mainnet") throw new Error("environment mismatch");
@@ -162,6 +213,46 @@ export async function prepareMainnetOperatorTest(
       compactReader.reader,
       loaded,
     );
+    const fee = await readPreparationFee(compactReader.transport, input.symbol);
+    if (!fee.ok) return withCounts(fee, exchangeReads, 0);
+    preparationFee = fee.value;
+    const accountCheck = validateCompactOperatorAccountForPlan(
+      undefined,
+      compactAccount,
+      fee.value.observedAt,
+    );
+    if (!accountCheck.ok) {
+      const reasonCode = accountCheck.error.details?.reasonCode;
+      if (
+        typeof reasonCode === "string" &&
+        [
+          "ACCOUNT_MODE_UNKNOWN",
+          "ACCOUNT_MODE_UNSUPPORTED",
+          "SPOT_HEDGING_ENABLED",
+          "CREDENTIAL_PERMISSION_BLOCKED",
+          "CRITICAL_STATE_CHANGED",
+        ].includes(reasonCode)
+      )
+        return withCounts(
+          failed(reasonCode, accountCheck.error.details ?? {}),
+          exchangeReads,
+          0,
+        );
+      throw new CompactAccountEvidenceUnavailable(
+        typeof reasonCode === "string"
+          ? reasonCode
+          : "ACCOUNT_EVIDENCE_INVALID",
+      );
+    }
+    if (accountCheck.value.availableBalance.isZero())
+      return withCounts(
+        failed("AVAILABLE_MARGIN_OR_FEE_RESERVE_INSUFFICIENT", {
+          availableBalance: "0",
+          source: "balance",
+        }),
+        exchangeReads,
+        0,
+      );
     const instrument = await new BybitMainnetReadCapabilityFacade(
       compactReader.transport,
     ).readInstrument(input.symbol);
@@ -169,6 +260,49 @@ export async function prepareMainnetOperatorTest(
       transport: new BybitPublicTransport({ request }),
     });
     const quote = await publicMarkets.readOperatorQuote(input.symbol);
+    // Exact venue rounding and both entry/exit fees own affordability. Do this
+    // before the comparatively expensive target-state reads or persistence.
+    const candidate = createOperatorMainnetTestPlan({
+      accountIdentityHash: accountCheck.value.accountIdentityHash,
+      symbol: input.symbol,
+      nonce: randomUUID(),
+      allocation: input.allocation,
+      grossNotionalCap: input.grossNotionalCap,
+      maxDeviationBps: input.maxDeviationBps,
+      quote,
+      warningCodes: accountCheck.value.credentialPosture.warnings,
+      constraints: instrument.constraints,
+      preparedAt: quote.observedAt,
+    });
+    if (!candidate.ok) return withCounts(candidate, exchangeReads, 0);
+    const earlyFeeAge =
+      timestampToEpochMs(quote.observedAt) -
+      timestampToEpochMs(fee.value.observedAt);
+    if (
+      earlyFeeAge < 0 ||
+      earlyFeeAge > PROVISIONAL_M1_MAX_ACCOUNT_EVIDENCE_AGE_MS
+    )
+      return withCounts(
+        failed("MAINNET_EVIDENCE_STALE", {
+          source: "fee",
+          ageMs: earlyFeeAge,
+          limitMs: PROVISIONAL_M1_MAX_ACCOUNT_EVIDENCE_AGE_MS,
+        }),
+        exchangeReads,
+        0,
+      );
+    const accountAtQuote = validateCompactOperatorAccountForPlan(
+      candidate.value,
+      compactAccount,
+      quote.observedAt,
+    );
+    if (!accountAtQuote.ok) return withCounts(accountAtQuote, exchangeReads, 0);
+    const capacity = calculateOperatorMainnetTestCapacityFromAvailableBalance(
+      candidate.value,
+      accountAtQuote.value.availableBalance,
+      fee.value,
+    );
+    if (!capacity.ok) return withCounts(capacity, exchangeReads, 0);
     const exchange = new BybitMainnetExecutionAdapter({
       transport: new BybitPrivateTransport({
         environment: "mainnet",
@@ -210,9 +344,19 @@ export async function prepareMainnetOperatorTest(
           exchangeReads,
           0,
         );
+      compactFallbackReason =
+        typeof reasonCode === "string" &&
+        /^[A-Z][A-Z0-9_]{0,79}$/u.test(reasonCode)
+          ? reasonCode
+          : "COMPACT_EVIDENCE_INVALID";
     }
-  } catch {
-    // Missing or ambiguous compact facts use the existing full-readiness path below.
+  } catch (error) {
+    // No raw provider error is exposed. The route and safe reason explain extra reads.
+    compactFallbackReason =
+      error instanceof CompactAccountEvidenceUnavailable &&
+      /^[A-Z][A-Z0-9_]{0,79}$/u.test(error.reasonCode)
+        ? error.reasonCode
+        : "COMPACT_READ_FAILED";
   }
   if (!credentials)
     return withCounts(failed("ACCOUNT_EVIDENCE_UNAVAILABLE"), exchangeReads, 0);
@@ -263,6 +407,12 @@ export async function prepareMainnetOperatorTest(
         transport: new BybitPublicTransport({ request }),
       });
       quote = await publicMarkets.readOperatorQuote(input.symbol);
+      const fallbackFee = await readPreparationFee(
+        accountTransport,
+        input.symbol,
+      );
+      if (!fallbackFee.ok) return withCounts(fallbackFee, exchangeReads, 0);
+      preparationFee = fallbackFee.value;
       providerTime = timestampFromEpochMs(
         await accountTransport.readExchangeTime(),
       );
@@ -329,11 +479,95 @@ export async function prepareMainnetOperatorTest(
       preparedAt: providerTime.value,
     });
     if (!plan.ok) return withCounts(plan, exchangeReads, 0);
-    const persistence = openSqlitePersistence({
-      environment: "mainnet",
-      scope: scopeFor(plan.value.accountIdentityHash),
-      clock: { now: () => providerTime.value },
-    });
+    // Recheck fresh fee/balance evidence at the shared persistence boundary,
+    // covering both compact preparation and full-readiness fallback.
+    if (!accountTransport)
+      return withCounts(
+        failed("ACCOUNT_EVIDENCE_UNAVAILABLE"),
+        exchangeReads,
+        0,
+      );
+    if (!preparationFee)
+      return withCounts(failed("FEE_RATE_EVIDENCE_INVALID"), exchangeReads, 0);
+    const fee = preparationFee;
+    const freshTime = timestampToEpochMs(providerTime.value);
+    const feeAge = freshTime - timestampToEpochMs(fee.observedAt);
+    if (feeAge < 0 || feeAge > PROVISIONAL_M1_MAX_ACCOUNT_EVIDENCE_AGE_MS)
+      return withCounts(
+        failed("MAINNET_EVIDENCE_STALE", {
+          source: "fee",
+          ageMs: feeAge,
+          limitMs: PROVISIONAL_M1_MAX_ACCOUNT_EVIDENCE_AGE_MS,
+        }),
+        exchangeReads,
+        0,
+      );
+    let capacity;
+    if (compactPreparation && compactAccount) {
+      const time = timestampFromEpochMs(freshTime);
+      if (!time.ok) return withCounts(time, exchangeReads, 0);
+      const account = validateCompactOperatorAccountForPlan(
+        plan.value,
+        compactAccount,
+        time.value,
+      );
+      if (!account.ok) return withCounts(account, exchangeReads, 0);
+      capacity = calculateOperatorMainnetTestCapacityFromAvailableBalance(
+        plan.value,
+        account.value.availableBalance,
+        fee,
+      );
+    } else if (accountResult?.kind === "account-evidence") {
+      const walletObservations = [
+        accountResult.bundle.criticalPasses.A,
+        accountResult.bundle.criticalPasses.B,
+      ].map(
+        (pass) =>
+          pass?.observations.find(
+            (item) => item.partition.endpoint === "wallet",
+          )?.exchangeResponseTime,
+      );
+      if (walletObservations.some((at) => !at))
+        return withCounts(
+          failed("ACCOUNT_CAPACITY_INCOMPLETE"),
+          exchangeReads,
+          0,
+        );
+      for (const observedAt of walletObservations) {
+        const accountAge = freshTime - timestampToEpochMs(observedAt!);
+        if (
+          accountAge < 0 ||
+          accountAge > PROVISIONAL_M1_MAX_ACCOUNT_EVIDENCE_AGE_MS
+        )
+          return withCounts(
+            failed("MAINNET_EVIDENCE_STALE", {
+              source: "balance",
+              ageMs: accountAge,
+              limitMs: PROVISIONAL_M1_MAX_ACCOUNT_EVIDENCE_AGE_MS,
+            }),
+            exchangeReads,
+            0,
+          );
+      }
+      capacity = calculateOperatorMainnetTestCapacity(
+        plan.value,
+        accountResult.bundle,
+        fee,
+      );
+    } else
+      return withCounts(
+        failed("ACCOUNT_CAPACITY_INCOMPLETE"),
+        exchangeReads,
+        0,
+      );
+    if (!capacity.ok) return withCounts(capacity, exchangeReads, 0);
+    const persistence = (dependencies.openPersistence ?? openSqlitePersistence)(
+      {
+        environment: "mainnet",
+        scope: scopeFor(plan.value.accountIdentityHash),
+        clock: { now: () => providerTime.value },
+      },
+    );
     if (!persistence.ok) return withCounts(persistence, exchangeReads, 0);
     try {
       const journal = persistence.value.operatorMainnetTest;
@@ -350,6 +584,7 @@ export async function prepareMainnetOperatorTest(
             exchangeReads,
             exchangeWrites: 0,
             exchangeGetCounts: getCounts.summary(),
+            ...(compactFallbackReason ? { compactFallbackReason } : {}),
           })
         : withCounts(stored, exchangeReads, 0);
     } finally {

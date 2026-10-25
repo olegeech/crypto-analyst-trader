@@ -445,6 +445,10 @@ function mainnetMarketSnapshot(
   };
   if (instrument.constraints.minNotional !== undefined)
     constraints.minNotional = instrument.constraints.minNotional.toString();
+  for (const bound of ["minPrice", "maxPrice", "maxLimitQuantity"] as const) {
+    const value = instrument.constraints[bound];
+    if (value !== undefined) constraints[bound] = value.toString();
+  }
   const snapshot = createMarketSnapshot({
     snapshotId: sourceId,
     instrument: instrument.symbol,

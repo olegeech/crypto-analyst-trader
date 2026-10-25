@@ -214,6 +214,13 @@ function printGetCounts(
     envelope?.ok === true
       ? evidenceRecord(envelope.value)
       : evidenceRecord(evidenceRecord(envelope?.error)?.details);
+  const fallback = payload?.compactFallbackReason;
+  if (
+    stage === "PREPARE" &&
+    typeof fallback === "string" &&
+    /^[A-Z][A-Z0-9_]{0,79}$/u.test(fallback)
+  )
+    line(output, `PREPARE_COMPACT_FALLBACK_REASON=${fallback}`);
   const counts = safeMainnetGetCounts(payload?.exchangeGetCounts);
   if (counts !== undefined) line(output, `GET_COUNTS_${stage}=${counts}`);
 }
@@ -480,8 +487,15 @@ function operatorFailureDiagnostic(
   )
     return {
       explanation:
-        "The approved order exceeds the account-wide available balance after reserving entry and exit fees.",
-      why: "The compact admission check compared Bybit totalAvailableBalance with the approved USDT notional and fee reserve.",
+        details?.availableBalance === "0" &&
+        details.requiredAvailableBalance === undefined
+          ? "The account has no available balance for a positive order."
+          : "The approved order exceeds the account-wide available balance after reserving entry and exit fees.",
+      why:
+        details?.availableBalance === "0" &&
+        details.requiredAvailableBalance === undefined
+          ? "Fresh Bybit totalAvailableBalance is zero; no positive order can fit. Exact order and fee amounts were not calculated."
+          : "Bybit totalAvailableBalance was compared with the exact USDT notional and entry/exit fee reserve.",
       nextAction:
         "add funds to the trading account or reduce the proposed order; prepare a new plan and obtain fresh exact-plan confirmation before another attempt",
     };
@@ -1110,6 +1124,15 @@ export async function runMainnetOperatorTestCli(
           `EXCHANGE_WRITES=${resultCount(prepared, "exchangeWrites")}`,
         );
         const error = evidenceRecord(evidenceRecord(prepared)?.error);
+        if (reasonCode === "AVAILABLE_MARGIN_OR_FEE_RESERVE_INSUFFICIENT") {
+          const capacity = operatorCapacityDiagnostic(prepared);
+          printOperatorCapacityDiagnostic(output, capacity);
+          if (
+            !capacity &&
+            evidenceRecord(error?.details)?.availableBalance === "0"
+          )
+            line(output, "AVAILABLE_BALANCE_USD_EQUIVALENT=0");
+        }
         printOperatorFailureDiagnostic(
           output,
           reasonCode,

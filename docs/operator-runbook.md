@@ -185,9 +185,19 @@ GET accounting reports `GET_COUNTS_PREFLIGHT`, `GET_COUNTS_PREPARE` and
 include pagination and retries already attempted, including failed HTTP reads;
 POSTs are excluded. No extra requests are made for measurement. Only fixed
 group names and counts are emitted, without query strings or account data.
-This instrumentation establishes a baseline; it does not yet reduce reads or
-change the account-evidence checks. A 10–25 GET compact operator admission is
-an engineering target, not measured performance.
+The operator path uses compact current evidence where it is sufficient; full
+readiness collection remains a fallback. `PREPARE_COMPACT_FALLBACK_REASON`
+identifies why preparation took that fallback, alongside `GET_COUNTS_PREPARE`.
+These per-run diagnostics cannot establish the cause of a prior run that did
+not record them. A 10–25 GET compact operator admission is an engineering
+target, not measured performance.
+
+Preparation checks the exact rounded order plus entry and exit fee reserves
+against fresh account-wide available balance before saving a prepared plan.
+Proven insufficiency stops early with available, required and shortfall amounts
+when calculated. A zero balance stops before order/fee calculations and reports
+only the known zero. Unknown, stale or ambiguous facts cannot establish affordability. Execution
+still performs its own final fresh admission checks.
 
 Admission diagnostics distinguish `QUOTE_OUTSIDE_APPROVED_RANGE`,
 `QUOTE_EVIDENCE_INVALID`, `QUOTE_STALE_OR_FUTURE`,

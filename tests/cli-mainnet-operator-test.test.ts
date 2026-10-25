@@ -459,7 +459,10 @@ test("insufficient-funds admission prints only safe capacity details and next st
     /REASON_CODE=AVAILABLE_MARGIN_OR_FEE_RESERVE_INSUFFICIENT/u,
   );
   assert.match(terminal.text(), /EXPLANATION=The approved order exceeds/u);
-  assert.match(terminal.text(), /WHY=The compact admission check compared/u);
+  assert.match(
+    terminal.text(),
+    /WHY=Bybit totalAvailableBalance was compared/u,
+  );
   assert.match(terminal.text(), /EXECUTION_STATE=EXECUTION_NOT_STARTED/u);
   assert.match(terminal.text(), /EXCHANGE_READS=7/u);
   assert.match(terminal.text(), /EXCHANGE_WRITES=0/u);
@@ -942,5 +945,73 @@ test("execute GET breakdown survives a pre-intent failure and suppresses unsafe 
         /GET_COUNTS_EXECUTE|private-account/u,
       );
     assert.match(terminal.text(), /EXECUTION_NOT_STARTED/u);
+  }
+});
+
+test("prepare prints fee-inclusive shortfall and safe fallback counts before any approval", async () => {
+  for (const zero of [false, true]) {
+    const terminal = streams(false);
+    const code = await runMainnetOperatorTestCli(
+      [
+        "prepare",
+        "--symbol",
+        "DOGEUSDT",
+        "--allocation",
+        "10",
+        "--gross-cap",
+        "10",
+        "--max-deviation-bps",
+        "10",
+      ],
+      {
+        ...terminal,
+        prepare: async () =>
+          fail(
+            domainError("INVALID_EVIDENCE", "PRIVATE_SECRET", {
+              reasonCode: "AVAILABLE_MARGIN_OR_FEE_RESERVE_INSUFFICIENT",
+              availableBalance: zero ? "0" : "10",
+              ...(zero
+                ? {}
+                : {
+                    orderNotional: "10",
+                    entryFeeReserve: "0.01",
+                    exitFeeReserve: "0.01002",
+                    totalReserve: "0.02002",
+                    requiredAvailableBalance: "10.02002",
+                    shortfall: "0.02002",
+                  }),
+              compactFallbackReason: "ACCOUNT_CAPACITY_INCOMPLETE",
+              exchangeGetCounts: '{"fees":1,"wallet":2}',
+              exchangeReads: 3,
+              exchangeWrites: 0,
+            }),
+          ),
+      },
+    );
+    assert.equal(code, 4);
+    assert.match(
+      terminal.text(),
+      new RegExp(`AVAILABLE_BALANCE_USD_EQUIVALENT=${zero ? "0" : "10"}`),
+    );
+    assert.match(
+      terminal.text(),
+      /PREPARE_COMPACT_FALLBACK_REASON=ACCOUNT_CAPACITY_INCOMPLETE/u,
+    );
+    assert.match(terminal.text(), /GET_COUNTS_PREPARE=.*"fees":1/u);
+    if (zero) {
+      assert.match(
+        terminal.text(),
+        /Exact order and fee amounts were not calculated/u,
+      );
+      assert.doesNotMatch(terminal.text(), /SHORTFALL_USD_EQUIVALENT=/u);
+    } else {
+      assert.match(
+        terminal.text(),
+        /REQUIRED_AVAILABLE_BALANCE_USD_EQUIVALENT=10.02002/u,
+      );
+      assert.match(terminal.text(), /SHORTFALL_USD_EQUIVALENT=0.02002/u);
+    }
+    assert.doesNotMatch(terminal.text(), /PRIVATE_SECRET/u);
+    assert.match(terminal.text(), /NEXT_ACTION=add funds/u);
   }
 });

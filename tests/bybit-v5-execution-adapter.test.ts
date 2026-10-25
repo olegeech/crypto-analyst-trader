@@ -467,6 +467,12 @@ test("Mainnet adapter exposes sanitized symbol state and all supported single op
   const state = await fixture.adapter.readState({ instrument: "DOGEUSDT" });
   assert.equal(state.ok, true);
   if (!state.ok) return;
+  assert.equal(state.value.market.constraints.minPrice?.toString(), "0.0001");
+  assert.equal(state.value.market.constraints.maxPrice?.toString(), "1000000");
+  assert.equal(
+    state.value.market.constraints.maxLimitQuantity?.toString(),
+    "100000",
+  );
   assert.deepEqual(
     fixture.calls.map((call) => new URL(call.url).pathname),
     [
