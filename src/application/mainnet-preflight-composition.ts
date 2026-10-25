@@ -1,3 +1,4 @@
+import { changedAccountCriticalGroups } from "../domain/account/account-evidence-consistency.js";
 import { randomUUID } from "node:crypto";
 import { createMacOSKeychainProvider } from "../adapters/macos-keychain.js";
 import {
@@ -37,6 +38,7 @@ export interface MainnetPreflightRequestCounts {
 
 export interface MainnetPreflightAssessment {
   readonly kind: "assessment";
+  readonly criticalChangedGroups?: readonly string[];
   readonly readiness: MainnetExecutionReadiness;
   readonly requestCounts: MainnetPreflightRequestCounts;
   readonly instrumentProviderReasonCode?: AccountEvidenceFailureCode;
@@ -238,6 +240,11 @@ export async function runMainnetPreflight(
   });
   return Object.freeze({
     kind: "assessment",
+    criticalChangedGroups:
+      accountResult.kind === "account-evidence" &&
+      readiness.reasonCodes.includes("CRITICAL_STATE_CHANGED")
+        ? changedAccountCriticalGroups(accountResult.bundle)
+        : [],
     readiness,
     requestCounts: counter.counts,
     ...(instrumentReasonCode === undefined

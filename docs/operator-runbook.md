@@ -177,6 +177,17 @@ operator command or authorize a Mainnet write.
 
 ### Supervised Mainnet lifecycle check (issue #31 U3)
 
+Admission diagnostics distinguish `QUOTE_OUTSIDE_APPROVED_RANGE`,
+`QUOTE_EVIDENCE_INVALID`, `QUOTE_STALE_OR_FUTURE`,
+`FEE_RATE_EVIDENCE_INVALID`, `ACCOUNT_EVIDENCE_INVALID` and
+`EVIDENCE_TIME_INVALID`. Quote drift requires a fresh plan and new exact-plan
+confirmation; never reprice an already approved order. A
+`CRITICAL_STATE_CHANGED` report includes `CRITICAL_CHANGED_GROUPS` with group
+names only, without account amounts or identifiers. These diagnostics do not
+relax the existing checks. `EXECUTION_NOT_STARTED` means no durable intent was
+created and no write was submitted; use GET-only diagnostics rather than
+repeating `execute` or requesting `status` for a nonexistent source.
+
 The attended CLI exposes three commands. **The first supervised #31 happy-path
 test is intentionally allowed on the reviewed, same-SHA CI-green PR branch,
 before any merge, to inform merge-versus-fix.** Preparation performs bounded

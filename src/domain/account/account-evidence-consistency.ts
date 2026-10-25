@@ -54,7 +54,7 @@ const equal = (left: unknown, right: unknown): boolean => {
     b = canonicalSerialize(right);
   return a.ok && b.ok && a.value === b.value;
 };
-function projection(pass: AccountCriticalPass): unknown {
+function projection(pass: AccountCriticalPass) {
   const project = (record: object, fields: readonly string[]) => {
     const result: Record<string, unknown> = {};
     for (const key of fields)
@@ -77,6 +77,48 @@ function projection(pass: AccountCriticalPass): unknown {
     ),
     modeProbes: pass.modeProbes,
   };
+}
+export const ACCOUNT_CRITICAL_GROUPS = [
+  "account",
+  "assets",
+  "collateral",
+  "positions",
+  "orders",
+  "modeProbes",
+  "discovery",
+] as const;
+type AccountCriticalGroup = (typeof ACCOUNT_CRITICAL_GROUPS)[number];
+function discoveryExpanded(
+  discovery: NonNullable<AccountEvidencePayload["discovery"]>,
+): boolean {
+  const settlements = new Set([
+    ...policy.initialSettlementCoins,
+    ...discovery.settlementCoins,
+  ]);
+  const bases = new Set([
+    ...discovery.optionBaseCoins,
+    ...discovery.exposureOptionBaseCoins,
+  ]);
+  return (
+    discovery.passBSettlementCoins.some((coin) => !settlements.has(coin)) ||
+    discovery.passBOptionBaseCoins.some((coin) => !bases.has(coin))
+  );
+}
+/** Diagnostic group names only; never returns account values or identifiers. */
+export function changedAccountCriticalGroups(
+  payload: Pick<AccountEvidencePayload, "criticalPasses" | "discovery">,
+): readonly AccountCriticalGroup[] {
+  const { A, B } = payload.criticalPasses;
+  const groups: AccountCriticalGroup[] = [];
+  if (A && B) {
+    const a = projection(A),
+      b = projection(B);
+    for (const key of Object.keys(a) as (keyof typeof a)[])
+      if (!equal(a[key], b[key])) groups.push(key);
+  }
+  if (payload.discovery && discoveryExpanded(payload.discovery))
+    groups.push("discovery");
+  return groups;
 }
 function known<T>(
   fact: AccountEvidenceFact<T>,
@@ -467,19 +509,7 @@ export function evaluateAccountEvidenceConsistency(
       !equal(expectedKeys, keys(payload.coverage))
     )
       add("COVERAGE_INCOMPLETE");
-    const settlements = new Set([
-      ...policy.initialSettlementCoins,
-      ...discovery.settlementCoins,
-    ]);
-    const bases = new Set([
-      ...discovery.optionBaseCoins,
-      ...discovery.exposureOptionBaseCoins,
-    ]);
-    if (
-      discovery.passBSettlementCoins.some((coin) => !settlements.has(coin)) ||
-      discovery.passBOptionBaseCoins.some((coin) => !bases.has(coin))
-    )
-      add("CRITICAL_STATE_CHANGED");
+    if (discoveryExpanded(discovery)) add("CRITICAL_STATE_CHANGED");
     if (
       discovery.uncoveredScopes ||
       discovery.upgradeOverlap ||

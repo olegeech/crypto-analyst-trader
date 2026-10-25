@@ -1,3 +1,4 @@
+import { changedAccountCriticalGroups } from "../domain/account/account-evidence-consistency.js";
 import { createHash } from "node:crypto";
 
 import type { AccountEvidenceBundle } from "../domain/account/account-evidence-bundle.js";
@@ -391,20 +392,27 @@ export function validateMainnetOperatorTestEvidence(
   const quote = validateOperatorMainnetQuoteForPlan(
     plan,
     evidenceInput.quote,
-    evidenceInput.quote.collectionCompletedAt,
+    plainDataRecord(evidenceInput.quote)
+      ? evidenceInput.quote.collectionCompletedAt
+      : undefined,
   );
   const feeRate = createOperatorMainnetFeeRateEvidence(evidenceInput.feeRate);
   const serverTime = parseUtcTimestamp(state.serverTime);
   const evaluatedAt = parseUtcTimestamp(readiness.evaluatedAt);
-  if (
-    !account.ok ||
-    !quote.ok ||
-    !feeRate.ok ||
-    !plainDataRecord(instrument) ||
-    !serverTime.ok ||
-    !evaluatedAt.ok
-  )
-    return blocked("FRESH_MAINNET_EVIDENCE_INVALID");
+  if (!account.ok) return blocked("ACCOUNT_EVIDENCE_INVALID");
+  if (!quote.ok)
+    return blocked(
+      quote.error.code === "CONSTRAINT_VIOLATION"
+        ? "QUOTE_OUTSIDE_APPROVED_RANGE"
+        : quote.error.code === "STALE_EVIDENCE"
+          ? "QUOTE_STALE_OR_FUTURE"
+          : "QUOTE_EVIDENCE_INVALID",
+      "fresh quote validation failed",
+      { causeCode: quote.error.code },
+    );
+  if (!feeRate.ok) return blocked("FEE_RATE_EVIDENCE_INVALID");
+  if (!serverTime.ok || !evaluatedAt.ok)
+    return blocked("EVIDENCE_TIME_INVALID");
   const accountHash = accountEvidenceContentHash(account.value);
   const binding = account.value.accountBinding;
   const readinessWarnings = readiness.warningCodes;
@@ -417,6 +425,16 @@ export function validateMainnetOperatorTestEvidence(
     !Array.isArray(state.openOrders)
   )
     return blocked("FRESH_MAINNET_EVIDENCE_INVALID");
+  if (readiness.reasonCodes.includes("CRITICAL_STATE_CHANGED"))
+    return blocked(
+      "CRITICAL_STATE_CHANGED",
+      "account critical state changed between observations",
+      {
+        criticalChangedGroups:
+          changedAccountCriticalGroups(account.value).join(",") ||
+          "UNESTABLISHED",
+      },
+    );
   const hasIpWarning = readinessWarnings.includes("API_KEY_IP_UNBOUND");
   const plannedIpWarning = plan.warningCodes.includes("API_KEY_IP_UNBOUND");
   if (

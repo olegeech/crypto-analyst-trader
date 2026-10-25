@@ -1,3 +1,4 @@
+import { ACCOUNT_CRITICAL_GROUPS } from "../domain/account/account-evidence-consistency.js";
 import { randomUUID } from "node:crypto";
 import { userInfo } from "node:os";
 import process from "node:process";
@@ -894,6 +895,28 @@ export async function runMainnetOperatorTestCli(
         `EXECUTION_STATE=${notStarted ? "EXECUTION_NOT_STARTED" : "RECOVERY_ONLY"}`,
       );
       line(output, `REASON_CODE=${reasonCode}`);
+      if (reasonCode === "QUOTE_OUTSIDE_APPROVED_RANGE")
+        line(
+          output,
+          "EXPLANATION=fresh best bid is outside the approved range; prepare a fresh plan and obtain new exact-plan confirmation",
+        );
+      const failure = evidenceRecord(result);
+      const error = evidenceRecord(failure?.error);
+      const details = evidenceRecord(error?.details);
+      const changedGroups = details?.criticalChangedGroups;
+      if (
+        reasonCode === "CRITICAL_STATE_CHANGED" &&
+        typeof changedGroups === "string" &&
+        changedGroups
+          .split(",")
+          .every((group) =>
+            [...ACCOUNT_CRITICAL_GROUPS, "UNESTABLISHED"].some(
+              (value) => value === group,
+            ),
+          )
+      )
+        line(output, `CRITICAL_CHANGED_GROUPS=${changedGroups}`);
+
       line(output, `SOURCE_ID=${sourceIdResult.value}`);
       line(output, `EXCHANGE_READS=${resultCount(result, "exchangeReads")}`);
       line(output, `EXCHANGE_WRITES=${resultCount(result, "exchangeWrites")}`);

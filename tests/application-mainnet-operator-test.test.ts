@@ -33,6 +33,7 @@ import {
   type UtcTimestamp,
 } from "../src/domain/shared/time.js";
 import {
+  validateMainnetOperatorTestEvidence,
   createOperatorMainnetCreateRequest,
   createOperatorMainnetFeeRateEvidence,
   type MainnetOperatorTestFreshEvidence,
@@ -1270,6 +1271,110 @@ test("pre-intent evidence failure permits a clean second attended run despite an
   assert.equal(
     unwrap(harness.persistence.readScopeSnapshot()).lease?.epoch,
     abandoned.epoch,
+  );
+  harness.persistence.close();
+});
+
+test("admission preserves quote deviation and malformed fee diagnostics", async () => {
+  const valuePlan = plan();
+  const fresh = freshEvidence(valuePlan);
+  const quote = unwrap(
+    createOperatorMainnetQuote({
+      symbol: valuePlan.symbol,
+      exchange: "bybit",
+      environment: "mainnet",
+      category: "linear",
+      origin: "https://api.bybit.com",
+      observedAt: fresh.quote.observedAt,
+      collectionStartedAt: fresh.quote.collectionStartedAt,
+      collectionCompletedAt: fresh.quote.collectionCompletedAt,
+      bid: "101",
+      ask: "101.1",
+      last: "101",
+    }),
+  );
+  const drift = validateMainnetOperatorTestEvidence(valuePlan, {
+    ...fresh,
+    quote,
+  });
+  assert.equal(drift.ok, false);
+  if (!drift.ok)
+    assert.equal(
+      drift.error.details?.reasonCode,
+      "QUOTE_OUTSIDE_APPROVED_RANGE",
+    );
+  const harness = setup({ valuePlan, evidence: { ...fresh, quote } });
+  const execution = await harness.run();
+  assert.equal(execution.ok, false);
+  if (!execution.ok)
+    assert.equal(
+      execution.error.details?.reasonCode,
+      "QUOTE_OUTSIDE_APPROVED_RANGE",
+    );
+  assert.equal(harness.createObservations.length, 0);
+  assert.equal(
+    unwrap(harness.journal.findPendingOperatorMainnetTestSource()),
+    undefined,
+  );
+  harness.persistence.close();
+  const fee = validateMainnetOperatorTestEvidence(valuePlan, {
+    ...fresh,
+    feeRate: {},
+  } as unknown as MainnetOperatorTestFreshEvidence);
+  assert.equal(fee.ok, false);
+  if (!fee.ok)
+    assert.equal(fee.error.details?.reasonCode, "FEE_RATE_EVIDENCE_INVALID");
+});
+
+test("actual changed account bundle preserves groups through execution without intent", async () => {
+  const valuePlan = plan();
+  const fresh = freshEvidence(valuePlan);
+  const { consistency, ...payload } = fresh.account;
+  assert.equal(consistency.structuralComparison, "unchanged");
+  assert.ok(payload.criticalPasses.B);
+  const account = unwrap(
+    createAccountEvidenceBundle({
+      ...payload,
+      collectionStatus: "incomplete",
+      criticalPasses: {
+        ...payload.criticalPasses,
+        B: {
+          ...payload.criticalPasses.B,
+          account: {
+            ...payload.criticalPasses.B.account,
+            marginMode: { state: "known", value: "PORTFOLIO_MARGIN" },
+          },
+        },
+      },
+    }),
+  );
+  const accountResult = unwrap(
+    createAccountEvidenceCollectionResult({
+      kind: "account-evidence",
+      bundle: account,
+    }),
+  );
+  const readiness = deriveMainnetExecutionReadiness({
+    accountResult,
+    symbol: valuePlan.symbol,
+    instrument: fresh.instrument,
+    evaluatedAt: NOW,
+  });
+  assert.ok(readiness.reasonCodes.includes("CRITICAL_STATE_CHANGED"));
+  const harness = setup({
+    valuePlan,
+    evidence: { ...fresh, account, readiness },
+  });
+  const result = await harness.run();
+  assert.equal(result.ok, false);
+  if (!result.ok) {
+    assert.equal(result.error.details?.reasonCode, "CRITICAL_STATE_CHANGED");
+    assert.equal(result.error.details?.criticalChangedGroups, "account");
+  }
+  assert.equal(harness.createObservations.length, 0);
+  assert.equal(
+    unwrap(harness.journal.findPendingOperatorMainnetTestSource()),
+    undefined,
   );
   harness.persistence.close();
 });

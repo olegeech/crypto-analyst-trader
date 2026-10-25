@@ -737,3 +737,54 @@ test("unknown post-intent execution gives concrete manual Bybit guidance without
   );
   assert.match(terminal.text(), /do not resend this source/u);
 });
+
+test("pre-intent critical state errors expose only safe groups and quote drift explains next action", async () => {
+  for (const [reasonCode, groups, expected] of [
+    [
+      "QUOTE_OUTSIDE_APPROVED_RANGE",
+      undefined,
+      /fresh best bid is outside the approved range/u,
+    ],
+    [
+      "CRITICAL_STATE_CHANGED",
+      "assets,orders",
+      /CRITICAL_CHANGED_GROUPS=assets,orders/u,
+    ],
+    [
+      "CRITICAL_STATE_CHANGED",
+      "secret-provider-value\nLEAK=1",
+      /REASON_CODE=CRITICAL_STATE_CHANGED/u,
+    ],
+  ] as const) {
+    const terminal = streams(true);
+    const code = await runMainnetOperatorTestCli(
+      ["execute", "--plan-hash", plan.contentHash],
+      {
+        ...terminal,
+        resolvePlan: () => resolvedPlan(),
+        hasDurableIntent: () => ok(false),
+        prompt: async () => "yes",
+        clock: () => Date.parse(NOW),
+        actor: () => "operator-test",
+        execute: async () =>
+          fail(
+            domainError("INVALID_EVIDENCE", "private provider message", {
+              reasonCode,
+              exchangeReads: 77,
+              exchangeWrites: 0,
+              ...(groups === undefined
+                ? {}
+                : { criticalChangedGroups: groups }),
+            }),
+          ),
+      },
+    );
+    assert.equal(code, 5);
+    assert.match(terminal.text(), expected);
+    assert.match(terminal.text(), /EXECUTION_NOT_STARTED/u);
+    assert.doesNotMatch(
+      terminal.text(),
+      /secret-provider-value|LEAK|private provider message/u,
+    );
+  }
+});
