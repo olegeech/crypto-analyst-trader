@@ -100,7 +100,10 @@ Requirements:
 npm ci && npm run test:release
 ```
 
-This is the single pre-PR and release verification command. The optional
+The command above installs a fresh checkout and runs full release verification.
+For PRs, choose [risk-based validation](docs/workflow.md#risk-based-validation):
+documentation-only changes need lightweight checks, and equivalent green CI on
+the exact SHA avoids a duplicate local release run. The optional
 `npm run test:testnet` command performs a read-only Bybit Testnet smoke check;
 `npm run audit:dependencies` runs the advisory dependency audit separately.
 

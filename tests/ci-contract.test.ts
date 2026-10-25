@@ -95,9 +95,22 @@ test("release composition propagates each blocking stage failure", async () => {
   }
 });
 
-test("default CI delegates to the same release command without secrets or optional checks", () => {
+test("CI selects documentation checks or the full release command without secrets or optional checks", () => {
   assert.match(ciWorkflow, /run: npm ci/);
   assert.match(ciWorkflow, /run: npm run test:release/);
+  assert.match(ciWorkflow, /fetch-depth: 0/u);
+  assert.match(ciWorkflow, /CI_DIFF_BASE:.*pull_request\.base\.sha/u);
+  assert.match(ciWorkflow, /CI_DIFF_HEAD:.*pull_request\.head\.sha/u);
+  assert.match(ciWorkflow, /ci-validation\.ts scope/u);
+  assert.match(
+    ciWorkflow,
+    /if: steps\.scope\.outputs\.docs_only == 'true'[\s\S]*ci-validation\.ts docs/u,
+  );
+  assert.equal(
+    (ciWorkflow.match(/if: steps\.scope\.outputs\.docs_only != 'true'/gu) ?? [])
+      .length,
+    2,
+  );
   assert.doesNotMatch(
     ciWorkflow,
     /secrets\.|BYBIT_API_|credentials:(?:setup|remove|connect)|test:testnet|audit:dependencies|api-testnet\.bybit\.com|placeOrder|create-order/i,

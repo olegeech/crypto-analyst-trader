@@ -15,9 +15,27 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22.22.3
           cache: npm
-      - run: npm ci
-      - run: npm run test:release
+      - name: Select validation scope
+        id: scope
+        env:
+          CI_DIFF_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          CI_DIFF_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+          CI_DIFF_EVENT: ${{ github.event_name }}
+        run: node --experimental-strip-types scripts/ci-validation.ts scope
+      - name: Check documentation
+        if: steps.scope.outputs.docs_only == 'true'
+        env:
+          CI_DIFF_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          CI_DIFF_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+          CI_DIFF_EVENT: ${{ github.event_name }}
+        run: node --experimental-strip-types scripts/ci-validation.ts docs
+      - if: steps.scope.outputs.docs_only != 'true'
+        run: npm ci
+      - if: steps.scope.outputs.docs_only != 'true'
+        run: npm run test:release

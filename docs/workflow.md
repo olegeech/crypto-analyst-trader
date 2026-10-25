@@ -123,7 +123,13 @@ Run `npm ci` only for missing dependencies, manifest/lockfile changes or an
 incompatible installed environment. State the validation performed and any
 material limits in the PR. Do not add checks for procedural formality.
 Required release, CI and merge gates remain in force; this policy removes
-unnecessary local duplication, not those gates.
+unnecessary duplication, not those gates. CI keeps the required `release-checks`
+name: an entirely known diff of root/documentation Markdown or PR-template
+Markdown runs formatting, local file/anchor links and `git diff --check` only.
+External URLs are not fetched by this check. Code, dependencies, CI/configuration,
+skill files, mixed changes or an unavailable diff select the full release suite.
+PR scope uses the complete base-to-head diff; pushes use the previous-to-current
+commit range, including deleted and renamed paths.
 
 ## Integration contract check
 
