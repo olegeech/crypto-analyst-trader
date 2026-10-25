@@ -597,6 +597,13 @@ export function mapInstrumentInfo(
     quantityStep: lotSizeFilter.qtyStep,
     minQuantity: lotSizeFilter.minOrderQty,
     minNotional: parseMinNotional(lotSizeFilter, "instruments-info").toString(),
+    minPrice: positiveDecimal(priceFilter, "minPrice", "instruments-info"),
+    maxPrice: positiveDecimal(priceFilter, "maxPrice", "instruments-info"),
+    maxLimitQuantity: positiveDecimal(
+      lotSizeFilter,
+      "maxOrderQty",
+      "instruments-info",
+    ),
   });
   if (!constraintsResult.ok) {
     invalid("Bybit instrument constraints are invalid.");
@@ -642,7 +649,7 @@ export function mapWalletBalance(response: BybitResponse): BybitWalletState {
 }
 
 export function mapPosition(
-  response: BybitResponse,
+  response: Pick<BybitResponse, "result">,
   symbol: string,
 ): BybitPositionState {
   const records = responseRecords(response, "position/list");
@@ -729,7 +736,7 @@ function orderStatus(value: string, label: string): ExchangeOrderStatus {
 }
 
 export function mapOrderRecords(
-  response: BybitResponse,
+  response: Pick<BybitResponse, "result">,
   symbol: string,
   label = "order/realtime",
 ): readonly BybitOrderRecord[] {

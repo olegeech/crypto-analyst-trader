@@ -13,6 +13,7 @@ import {
   type SqliteExecutionStore,
 } from "./execution-store.js";
 import { createSqlitePreparedLegStore } from "./prepared-leg-store.js";
+import { createSqliteOperatorMainnetTestStore } from "./operator-mainnet-test-store.js";
 import { ok, type Result } from "../../domain/shared/result.js";
 import type { Approval } from "../../domain/execution/approval.js";
 import type { UtcTimestamp } from "../../domain/shared/time.js";
@@ -46,6 +47,7 @@ import type {
   ReconciliationRecord,
 } from "../../ports/persistence.js";
 import type { PreparedLegPersistencePort } from "../../ports/persistence.js";
+import type { OperatorMainnetTestPersistencePort } from "../../ports/operator-mainnet-test-persistence.js";
 
 export interface SqlitePersistenceOptions extends Omit<
   SqliteConnectionOptions,
@@ -61,17 +63,22 @@ export class SqlitePersistence implements PersistencePort {
   private readonly accounting: SqliteAccountingStore;
   /** Available only for a sanitized Mainnet account scope. */
   public readonly preparedLegExecution: PreparedLegPersistencePort | undefined;
+  /** Additive source-native journal available only in a scoped Mainnet database. */
+  public readonly operatorMainnetTest:
+    OperatorMainnetTestPersistencePort | undefined;
 
   public constructor(
     private readonly connection: SqliteConnection,
     execution: SqliteExecutionStore,
     accounting: SqliteAccountingStore,
     preparedLegExecution?: PreparedLegPersistencePort,
+    operatorMainnetTest?: OperatorMainnetTestPersistencePort,
   ) {
     this.scope = execution.scope;
     this.execution = execution;
     this.accounting = accounting;
     this.preparedLegExecution = preparedLegExecution;
+    this.operatorMainnetTest = operatorMainnetTest;
   }
 
   public diagnostics(): PersistenceDiagnostics {
@@ -260,12 +267,24 @@ export function openSqlitePersistence(
     connection.value.close();
     return preparedLegExecution;
   }
+  const operatorMainnetTest =
+    options.environment === "mainnet"
+      ? createSqliteOperatorMainnetTestStore(
+          connection.value,
+          execution.value.scope,
+        )
+      : undefined;
+  if (operatorMainnetTest && !operatorMainnetTest.ok) {
+    connection.value.close();
+    return operatorMainnetTest;
+  }
   return ok(
     new SqlitePersistence(
       connection.value,
       execution.value,
       accounting.value,
       preparedLegExecution?.value,
+      operatorMainnetTest?.value,
     ),
   );
 }

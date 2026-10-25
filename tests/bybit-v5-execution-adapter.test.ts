@@ -39,10 +39,15 @@ function baseResponse(path: string): BybitResponse {
             contractType: "LinearPerpetual",
             quoteCoin: "USDT",
             settleCoin: "USDT",
-            priceFilter: { tickSize: "0.0001" },
+            priceFilter: {
+              tickSize: "0.0001",
+              minPrice: "0.0001",
+              maxPrice: "1000000",
+            },
             lotSizeFilter: {
               qtyStep: "1",
               minOrderQty: "1",
+              maxOrderQty: "100000",
               minNotionalValue: "5",
             },
           },
@@ -327,10 +332,15 @@ function mainnetFixture(
               contractType: "LinearPerpetual",
               quoteCoin: "USDT",
               settleCoin: "USDT",
-              priceFilter: { tickSize: "0.0001" },
+              priceFilter: {
+                tickSize: "0.0001",
+                minPrice: "0.0001",
+                maxPrice: "1000000",
+              },
               lotSizeFilter: {
                 qtyStep: "1",
                 minOrderQty: "1",
+                maxOrderQty: "100000",
                 minNotionalValue: "5",
               },
             },
@@ -457,6 +467,12 @@ test("Mainnet adapter exposes sanitized symbol state and all supported single op
   const state = await fixture.adapter.readState({ instrument: "DOGEUSDT" });
   assert.equal(state.ok, true);
   if (!state.ok) return;
+  assert.equal(state.value.market.constraints.minPrice?.toString(), "0.0001");
+  assert.equal(state.value.market.constraints.maxPrice?.toString(), "1000000");
+  assert.equal(
+    state.value.market.constraints.maxLimitQuantity?.toString(),
+    "100000",
+  );
   assert.deepEqual(
     fixture.calls.map((call) => new URL(call.url).pathname),
     [

@@ -22,6 +22,7 @@ const PRIVATE_PATHS = new Set([
   "/v5/user/query-api",
   "/v5/account/info",
   "/v5/account/wallet-balance",
+  "/v5/account/fee-rate",
   "/v5/account/collateral-info",
   "/v5/position/list",
   "/v5/order/realtime",

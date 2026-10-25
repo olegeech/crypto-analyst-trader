@@ -105,21 +105,53 @@ Prefer the shortest safe path to a useful end-to-end product:
 
 ### First mainnet canary
 
+**Product-owner scope refinement — 2026-10-24.** The first operator
+Mainnet experiment is a single attended local process. The owner does not
+run concurrent executors and accepts responsibility for inspecting Bybit
+orders/positions manually after a crash. Do not impose persisted run-lease
+ownership, expired-lease takeover reconciliation or lease-only automatic
+HALT on this supervised path. These are deferred capabilities for a real
+multi-process/autonomous requirement. Preserve order authorization, capital
+limits, fresh account/venue proof, durable unique CREATE identity and no blind
+re-POST when dispatch might have occurred. A genuine ambiguous submission
+still requires human inspection before further exposure; an existing incident
+HALT must not be deleted or silently ignored. This newer direction supersedes
+the legacy lease admission clause in #31 and the #9 generic persistence plan
+**only for this bounded operator flow**. This operator experiment may exercise
+its happy path on the exact reviewed PR-branch commit with green same-SHA
+release tests and CI **before merge or publication**. Keep explicit attended
+approval, mandatory exchange/account gates and genuine incident HALT handling.
+The observed result should inform whether the PR is merged or revised.
+
+**Guardrail design rule.** Reject speculative operational complexity:
+new preflight conditions, confirmations, persistent locks, recovery rituals,
+state machines or tests must justify a current demonstrated risk and show why
+the simpler existing control is insufficient. Start with the smallest
+end-to-end working path, instrument genuine failures, then add the narrowest
+necessary safeguard. This principle does not waive the minimum integrity and
+write-identity contracts already required for real orders.
+
 [Issue #31](https://github.com/olegeech/crypto-analyst-trader/issues/31) owns the
-canonical production-canary scope and acceptance criteria. The first canary uses
-a dedicated subaccount, one symbol and side, and a strict capital cap. Expanding
-to multiple symbols is a later product step and requires the separate issue and
-approval required by #31.
+canonical production-canary scope and acceptance criteria. Its first supervised
+experiment is an execution-contract check on a dedicated subaccount: one
+quote-based Limit entry, one attached take-profit and an operator-defined gross
+notional cap. It is not a daily-strategy recommendation, a daily-data quality
+approval, a guaranteed-profit system or evidence that the strategy is ready.
+This one experiment does not depend on completion of #30's integrated daily-data
+gate. It still requires the fresh #31 Mainnet preflight and every mandatory
+runtime account, permission, capacity, ownership, position and approval check,
+plus incident HALT handling when there is an actual unresolved exchange operation. Any broader strategy canary or expansion to multiple symbols needs
+its own issue and approval.
 
 Before approval, the operator should see at least:
 
-- instrument;
-- proposed entry price and quantity;
-- capital allocated;
-- grid and take-profit parameters;
-- confidence and evidence-quality assessment;
-- rationale for the recommendation; and
-- when modifying existing state, a clear comparison with the current state.
+- the symbol and fresh quote timestamp;
+- the frozen entry price, quantity, quote-deviation bound and exact plan hash;
+- the operator allocation and gross entry notional cap;
+- the attached TP trigger, order mode and target price;
+- the policy identity and any warnings; and
+- the fact that fees, funding, slippage and total loss are not bounded by the
+  gross entry cap.
 
 A strategy recommendation that later proves unprofitable is an acceptable
 learning outcome when evidence, risk and execution contracts behaved as

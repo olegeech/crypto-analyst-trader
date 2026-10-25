@@ -10,7 +10,7 @@ import {
 function terminalStreams() {
   return {
     input: Object.assign(new PassThrough(), { isTTY: true }),
-    output: new PassThrough(),
+    output: Object.assign(new PassThrough(), { isTTY: true }),
   };
 }
 
@@ -30,6 +30,17 @@ test("visible prompt requires terminal input", () => {
         output: new PassThrough(),
       }),
     /Needs a terminal/,
+  );
+});
+
+test("visible prompt requires terminal output when input is a TTY", () => {
+  assert.throws(
+    () =>
+      promptVisible("Choose an option", "Needs a visible terminal.", {
+        input: Object.assign(new PassThrough(), { isTTY: true }),
+        output: new PassThrough(),
+      }),
+    /Needs a visible terminal/u,
   );
 });
 

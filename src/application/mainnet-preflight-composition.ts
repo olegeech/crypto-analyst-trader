@@ -1,3 +1,4 @@
+import { changedAccountCriticalGroups } from "../domain/account/account-evidence-consistency.js";
 import { randomUUID } from "node:crypto";
 import { createMacOSKeychainProvider } from "../adapters/macos-keychain.js";
 import {
@@ -27,15 +28,21 @@ import {
   deriveMainnetExecutionReadiness,
   type MainnetExecutionReadiness,
 } from "./mainnet-execution-readiness.js";
+import {
+  createMainnetGetCounts,
+  snapshotExchangeCredentials,
+} from "./mainnet-composition-helpers.js";
 
 export interface MainnetPreflightRequestCounts {
   readonly exchangeReads: number;
+  readonly exchangeGetCounts?: string;
   /** Non-GET attempts are rejected before reaching fetch and must remain zero. */
   readonly exchangeWrites: number;
 }
 
 export interface MainnetPreflightAssessment {
   readonly kind: "assessment";
+  readonly criticalChangedGroups?: readonly string[];
   readonly readiness: MainnetExecutionReadiness;
   readonly requestCounts: MainnetPreflightRequestCounts;
   readonly instrumentProviderReasonCode?: AccountEvidenceFailureCode;
@@ -72,11 +79,16 @@ export interface MainnetPreflightDependencies {
 }
 
 function requestCounter() {
+  const getCounts = createMainnetGetCounts();
   let exchangeReads = 0;
   let exchangeWrites = 0;
   return {
     get counts(): MainnetPreflightRequestCounts {
-      return Object.freeze({ exchangeReads, exchangeWrites });
+      return Object.freeze({
+        exchangeReads,
+        exchangeWrites,
+        exchangeGetCounts: getCounts.summary(),
+      });
     },
     wrap(request: typeof fetch): typeof fetch {
       return async (input, init) => {
@@ -85,6 +97,7 @@ function requestCounter() {
             ? input.method
             : "GET";
         const method = (init?.method ?? requestMethod).toUpperCase();
+        getCounts.record(input, init);
         if (method === "GET") exchangeReads++;
         else {
           exchangeWrites++;
@@ -112,16 +125,6 @@ function instrumentProviderFailureCode(
     }
   }
   return "TRANSPORT_FAILED";
-}
-
-function snapshotCredentials(
-  credentials: ExchangeCredentials,
-): Readonly<ExchangeCredentials> {
-  return Object.freeze({
-    apiKey: credentials.apiKey,
-    apiSecret: credentials.apiSecret,
-    accountId: credentials.accountId,
-  });
 }
 
 function failed(
@@ -154,7 +157,9 @@ export async function runMainnetPreflight(
     load: async (environment: CredentialEnvironment) => {
       if (environment !== "mainnet") throw new Error("Environment mismatch.");
       if (credentialSnapshot) return credentialSnapshot;
-      credentialSnapshot = snapshotCredentials(await provider.load("mainnet"));
+      credentialSnapshot = snapshotExchangeCredentials(
+        await provider.load("mainnet"),
+      );
       return credentialSnapshot;
     },
   };
@@ -245,6 +250,11 @@ export async function runMainnetPreflight(
   });
   return Object.freeze({
     kind: "assessment",
+    criticalChangedGroups:
+      accountResult.kind === "account-evidence" &&
+      readiness.reasonCodes.includes("CRITICAL_STATE_CHANGED")
+        ? changedAccountCriticalGroups(accountResult.bundle)
+        : [],
     readiness,
     requestCounts: counter.counts,
     ...(instrumentReasonCode === undefined

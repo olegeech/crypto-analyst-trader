@@ -21,6 +21,46 @@ For normal work, read:
 Do not load every issue, closed history or every ADR. GitHub Issues own active
 scope and acceptance criteria; code and tests own actual behavior.
 
+## Product-owner complexity budget — 2026-10-24
+
+For the current supervised Mainnet canary (#31), design for **one attending human,
+one local application process and one deliberately approved order**, not a
+future autonomous or multi-process trading service. The owner will inspect
+Bybit manually if a process crashes or an order outcome is uncertain.
+
+- **Earn every additional guard.** Before adding a new blocker, HALT trigger,
+  lease/fencing mechanism, retry/recovery state, extra prompt or validation
+  layer, show the concrete failure seen in the current workflow (or a
+  demonstrably unavoidable immediate failure), its actual consequence, why
+  an existing simpler control does not address it, and the smallest fix.
+  Hypothetical future concurrency or autonomy is not sufficient justification.
+- **#31 owner decision:** Remove the account-scoped run lease as an admission
+  prerequisite for this _attended, single-process operator experiment_; do not
+  turn an expired/abandoned pre-intent lease into automatic HALT or require
+  incident reconciliation when no CREATE could have been submitted. This
+  explicitly supersedes older #9/#31 lease-by-default planning **for this
+  bounded operator path only**. Defer multi-process fencing to a demonstrated
+  need or a separately approved autonomous-execution design.
+- **Keep the minimum real-write boundary:** explicit exact-plan consent, the
+  operator's capital cap, current account/position/open-order and venue checks,
+  unique durable CREATE intent/client order identity, no blind duplicate
+  submission after an ambiguous write, attached TP and truthful status.
+  After an uncertain submission or crash, give the operator concrete Bybit UI
+  inspection/recovery guidance; never infer that an order did not exist.
+  Do not automatically clear an existing non-lease incident HALT.
+- **#31 pre-merge acceptance:** the first supervised happy-path CREATE is
+  permitted from the exact reviewed PR-branch commit with passing same-SHA
+  release tests/CI, fresh Mainnet evidence, all existing capital/position/HALT
+  checks and separately obtained human exact-plan approval. Do **not** insist
+  on merging into `main`, tagging or publishing before that one experiment:
+  its observed outcome informs the merge-vs-rework decision. No automatic
+  live authorization, no bypass of existing incident HALT, and no generalized
+  unattended execution.
+- This is an approved **design simplification**, not permission to bypass
+  current code or manually edit SQLite. Update implementation, regression tests
+  and #31 acceptance criteria together before any supervised live CREATE.
+  Do not broaden this decision to unattended execution.
+
 ## Canonical safety context
 
 An issue or pull request cannot restate, weaken or override

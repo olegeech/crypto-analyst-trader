@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createAccountEvidenceBundle } from "../src/domain/account/account-evidence-bundle.js";
-import { proveAccountPositionMode } from "../src/domain/account/account-evidence-consistency.js";
+import {
+  changedAccountCriticalGroups,
+  proveAccountPositionMode,
+} from "../src/domain/account/account-evidence-consistency.js";
 import {
   accountEvidencePartitionKey,
   deriveExpectedAccountEvidencePartitions,
@@ -628,4 +631,19 @@ test("collateral switch N/A requires proven ineligibility; known restriction cha
       "CRITICAL_STATE_CHANGED",
     ),
   );
+});
+
+test("critical change diagnostics name groups without private values", () => {
+  const input = fixture();
+  const groups = () => {
+    const parsed = createAccountEvidenceBundle(input);
+    assert.ok(parsed.ok);
+    return changedAccountCriticalGroups(parsed.value);
+  };
+  assert.deepEqual(groups(), []);
+  input.collectionStatus = "incomplete";
+  input.criticalPasses.B.account.marginMode = known("PORTFOLIO_MARGIN");
+  assert.deepEqual(groups(), ["account"]);
+  input.discovery.passBSettlementCoins.push("DAI");
+  assert.deepEqual(groups(), ["account", "discovery"]);
 });

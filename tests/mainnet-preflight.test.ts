@@ -232,10 +232,15 @@ function productionMainnetFetchFixture(delayAfterInstrumentMs = 0) {
                 contractType: "LinearPerpetual",
                 quoteCoin: "USDT",
                 settleCoin: "USDT",
-                priceFilter: { tickSize: "0.1" },
+                priceFilter: {
+                  tickSize: "0.1",
+                  minPrice: "0.1",
+                  maxPrice: "1000000",
+                },
                 lotSizeFilter: {
                   qtyStep: "0.001",
                   minOrderQty: "0.001",
+                  maxOrderQty: "100000",
                   minNotionalValue: "5",
                 },
               },
@@ -444,10 +449,15 @@ test("preflight freshness uses provider time after instrument lookup", async () 
                   contractType: "LinearPerpetual",
                   quoteCoin: "USDT",
                   settleCoin: "USDT",
-                  priceFilter: { tickSize: "0.1" },
+                  priceFilter: {
+                    tickSize: "0.1",
+                    minPrice: "0.1",
+                    maxPrice: "1000000",
+                  },
                   lotSizeFilter: {
                     qtyStep: "0.001",
                     minOrderQty: "0.001",
+                    maxOrderQty: "100000",
                     minNotionalValue: "5",
                   },
                 },
@@ -509,6 +519,19 @@ test("production collector reaches sanitized READY and checks delayed verdict fr
   );
   assert.ok(ready.fixture.calls.length > 2);
   assert.ok(ready.fixture.calls.every((call) => call.method === "GET"));
+  const countsLine = ready.output
+    .split("\n")
+    .find((line) => line.startsWith("GET_COUNTS_PREFLIGHT="));
+  assert.ok(countsLine);
+  const counts = JSON.parse(
+    countsLine.slice("GET_COUNTS_PREFLIGHT=".length),
+  ) as Record<string, number>;
+  assert.equal(
+    Object.values(counts).reduce((sum, value) => sum + value, 0),
+    ready.fixture.calls.length,
+  );
+  assert.ok((counts["order-history"] ?? 0) > 0);
+  assert.ok((counts.executions ?? 0) > 0);
   assert.doesNotMatch(
     ready.output,
     /synthetic-mainnet|userID|accountIdentityHash|123|balances|ips/u,
@@ -602,4 +625,65 @@ test("unexpected CLI failure does not invent zero exchange counts", async () => 
   assert.equal(exitCode, 1);
   assert.match(output.join(""), /EXCHANGE_READS=UNKNOWN/u);
   assert.match(output.join(""), /EXCHANGE_WRITES=UNKNOWN/u);
+});
+
+test("critical state renderer emits only allowlisted changed group names", async () => {
+  const output: string[] = [];
+  const readiness = fixtureReadiness();
+  const code = await runMainnetPreflightCli(["--symbol", symbol], {
+    output: { write: (text) => output.push(text) },
+    run: async () => ({
+      kind: "assessment",
+      readiness: {
+        ...readiness,
+        verdict: "BLOCKED",
+        reasonCodes: ["CRITICAL_STATE_CHANGED"],
+      },
+      criticalChangedGroups: [
+        "assets",
+        "positions",
+        "private-account-value\nLEAK=1",
+      ],
+      requestCounts: { exchangeReads: 73, exchangeWrites: 0 },
+    }),
+  });
+  assert.equal(code, 4);
+  assert.match(output.join(""), /CRITICAL_CHANGED_GROUPS=assets,positions\n/u);
+  assert.doesNotMatch(output.join(""), /private-account-value|LEAK/u);
+});
+
+test("production preflight reports the actual changed wallet group across A/B", async () => {
+  const provider = productionMainnetFetchFixture(0);
+  let walletReads = 0;
+  const request: typeof fetch = async (input, init) => {
+    const response = await provider.request(input, init);
+    const url = new URL(String(input));
+    if (url.pathname === "/v5/account/wallet-balance") {
+      const body = await response.json();
+      walletReads++;
+      assert.ok(Array.isArray(walletResponse.result.list));
+      body.result.list[0].coin = structuredClone(
+        walletResponse.result.list[0]!.coin,
+      );
+      if (walletReads === 2) body.result.list[0].coin[0].walletBalance = "99";
+      return new Response(JSON.stringify(body), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }
+    return response;
+  };
+  const result = await runMainnetPreflight(symbol, {
+    credentialProvider: { load: async () => credentials },
+    utcClock: () => Date.parse(evaluatedAt) - 30000,
+    monotonicClock: () => 0,
+    runId: "critical-changed-preflight",
+    request,
+  });
+  assert.equal(result.kind, "assessment");
+  if (result.kind !== "assessment") return;
+  assert.equal(result.readiness.verdict, "BLOCKED");
+  assert.ok(result.readiness.reasonCodes.includes("CRITICAL_STATE_CHANGED"));
+  assert.deepEqual(result.criticalChangedGroups, ["assets"]);
+  assert.equal(result.requestCounts.exchangeWrites, 0);
 });

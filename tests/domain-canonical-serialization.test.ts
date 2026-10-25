@@ -6,6 +6,7 @@ import {
   hashCanonical,
 } from "../src/domain/identity/canonical-serialization.js";
 import { DecimalValue } from "../src/domain/shared/decimal.js";
+import { createOperatorMainnetQuote } from "../src/domain/execution/operator-mainnet-test-plan.js";
 
 test("canonical serialization sorts keys, normalizes Unicode and decimals", () => {
   const first = DecimalValue.fromString("001.2300");
@@ -51,4 +52,35 @@ test("hashes are version-independent values with a stable SHA-256 prefix", () =>
   if (!first.ok || !second.ok) return;
   assert.equal(first.value, second.value);
   assert.match(first.value, /^sha256:[0-9a-f]{64}$/u);
+});
+
+test("operator quote canonical identity binds attribution, provider time and price facts", () => {
+  const source = {
+    symbol: "DOGEUSDT",
+    exchange: "bybit",
+    environment: "mainnet",
+    category: "linear",
+    origin: "https://api.bybit.com",
+    observedAt: "2026-10-22T10:00:00.000Z",
+    collectionStartedAt: "2026-10-22T09:59:59.990Z",
+    collectionCompletedAt: "2026-10-22T10:00:00.010Z",
+    bid: "0.0886",
+    ask: "0.0887",
+    last: "0.08865",
+  };
+  const first = createOperatorMainnetQuote(source);
+  const repeated = createOperatorMainnetQuote({ ...source });
+  const changedOrigin = createOperatorMainnetQuote({
+    ...source,
+    origin: "https://api-testnet.bybit.com",
+  });
+  assert.equal(first.ok, true);
+  assert.equal(repeated.ok, true);
+  assert.equal(changedOrigin.ok, false);
+  if (first.ok && repeated.ok) {
+    assert.equal(first.value.contentHash, repeated.value.contentHash);
+    const canonical = canonicalSerialize(first.value);
+    assert.equal(canonical.ok, true);
+    assert.match(first.value.contentHash, /^sha256:[0-9a-f]{64}$/u);
+  }
 });

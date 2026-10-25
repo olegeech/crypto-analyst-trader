@@ -53,10 +53,15 @@ function defaultResponse(path: string): BybitResponse {
             contractType: "LinearPerpetual",
             quoteCoin: "USDT",
             settleCoin: "USDT",
-            priceFilter: { tickSize: "0.0001" },
+            priceFilter: {
+              tickSize: "0.0001",
+              minPrice: "0.0001",
+              maxPrice: "1000000",
+            },
             lotSizeFilter: {
               qtyStep: "1",
               minOrderQty: "1",
+              maxOrderQty: "100000",
               minNotionalValue: "5",
             },
           },

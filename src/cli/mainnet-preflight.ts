@@ -1,3 +1,5 @@
+import { safeMainnetGetCounts } from "../application/mainnet-composition-helpers.js";
+import { ACCOUNT_CRITICAL_GROUPS } from "../domain/account/account-evidence-consistency.js";
 import { pathToFileURL } from "node:url";
 import { MARKET_EVIDENCE_SYMBOLS } from "../domain/market/market-evidence-bundle.js";
 import { isPlanningSymbol } from "../domain/planning/decision-policy.js";
@@ -27,6 +29,8 @@ function writeResult(
   output.write(`SYMBOL=${symbol}\n`);
   output.write(`EXCHANGE_READS=${result.requestCounts.exchangeReads}\n`);
   output.write(`EXCHANGE_WRITES=${result.requestCounts.exchangeWrites}\n`);
+  const counts = safeMainnetGetCounts(result.requestCounts.exchangeGetCounts);
+  if (counts !== undefined) output.write(`GET_COUNTS_PREFLIGHT=${counts}\n`);
   if (result.kind === "failure") {
     output.write("VERDICT=BLOCKED\n");
     output.write("CAPABILITY_STATUS=NOT_ESTABLISHED\n");
@@ -38,6 +42,13 @@ function writeResult(
   }
 
   const readiness = result.readiness;
+  const groups = (result.criticalChangedGroups ?? []).filter((group) =>
+    ACCOUNT_CRITICAL_GROUPS.some((value) => value === group),
+  );
+  if (readiness.reasonCodes.includes("CRITICAL_STATE_CHANGED"))
+    output.write(
+      `CRITICAL_CHANGED_GROUPS=${groups.join(",") || "UNESTABLISHED"}\n`,
+    );
   output.write(`VERDICT=${readiness.verdict}\n`);
   output.write(`CAPABILITY_STATUS=${readiness.capabilityProfile.status}\n`);
   output.write("LIVE_PROOF=NOT_ESTABLISHED\n");
