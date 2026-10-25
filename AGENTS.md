@@ -72,6 +72,10 @@ An issue or pull request cannot restate, weaken or override
 - Do not add a second backlog source or duplicate issue bodies in docs.
 - Follow `docs/workflow.md` and `CONTRIBUTING.md` for branch, test and pull
   request rules.
+- For external API or money-affecting changes, follow the
+  [integration contract check](docs/workflow.md#integration-contract-check):
+  verify provider assumptions, test the production path and settle product
+  boundaries before a large implementation.
 - The repository skills `$develop-next-roadmap-story`, `$issue-delivery`,
   `$test-current-feature-pr`, and `$daily-rebalance` are temporarily deprecated
   and must not be invoked until their owners refresh the workflows and remove

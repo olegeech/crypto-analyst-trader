@@ -92,6 +92,39 @@ diagnostic usefulness against the concrete risk addressed.
 - size small enough for one focused pull request;
 - required live, capital, data-integrity or security labels applied.
 
+## Integration contract check
+
+For external API or money-affecting changes, include these checks in the
+existing planning, implementation and acceptance work. Internal refactoring
+that preserves those contracts does not need this step.
+
+1. **Check assumptions early.** Before a large implementation, identify
+   unverified provider facts, distinguish product decisions from mandatory
+   technical protections, and choose a concrete test that proves success.
+   Settle the execution mode and release boundary with the owner in the
+   existing issue or plan; no separate document or agent is required.
+2. **Test the provider contract.** Inspect existing production mappers and
+   current official API documentation. Use a representative sanitized provider
+   response fixture, preserving meaningful empty, optional and extra fields,
+   plus negative cases for critical fields. Record fixture provenance without
+   secrets or private account data. Test through the production mapper rather
+   than constructing only the domain object the validator expects. Use the
+   existing Node test runner; no new mocking or record/replay platform.
+3. **Prove the operator path incrementally.** For execution work, cover
+   `prepare → execute admission → status`, from provider responses through
+   application results to CLI diagnostics, including the happy path and known
+   blockers. Complete relevant production-path tests and available read-only
+   checks before a separately approved live canary. A failed stage calls for a
+   focused contract-boundary fix, not more guards across the whole flow.
+   Existing safety gates and exact-plan authorization still apply.
+
+For the next two or three integration PRs, add a few lines to the existing PR
+retrospective: provider contract defects first found in manual operation,
+defect fixes after the first full green CI, and operator retries caused by
+program defects. Separate product-scope changes and expected safety blocks
+from defects. This trial needs no metrics system, additional agents, blanket
+cross-model review or Mainnet smoke on every commit.
+
 ## Named issue delivery
 
 The repository-local `issue-delivery` skill is temporarily paused; see its
