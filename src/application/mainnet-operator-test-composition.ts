@@ -1,15 +1,27 @@
 import { createHash } from "node:crypto";
 
 import { createMacOSKeychainProvider } from "../adapters/macos-keychain.js";
-import { BybitAccountReadTransport } from "../adapters/bybit-v5/account-read-transport.js";
+import {
+  BybitAccountReadError,
+  BybitAccountReadTransport,
+} from "../adapters/bybit-v5/account-read-transport.js";
 import { BybitAccountReadClient } from "../adapters/bybit-v5/account-read-client.js";
 import { BybitMainnetExecutionAdapter } from "../adapters/bybit-v5/execution-adapter.js";
 import { mapCreateOrderRequest } from "../adapters/bybit-v5/order-mappers.js";
-import { BybitPrivateTransport } from "../adapters/bybit-v5/transport.js";
+import {
+  BybitPrivateTransport,
+  BybitPrivateTransportError,
+} from "../adapters/bybit-v5/transport.js";
 import { BybitPublicMarketClient } from "../adapters/bybit-v5/public-market-client.js";
-import { BybitPublicTransport } from "../adapters/bybit-v5/public-transport.js";
-import { BybitMainnetReadCapabilityFacade } from "../adapters/bybit-v5/read-capability-facade.js";
-import type { BybitInstrumentInfo } from "../adapters/bybit-v5/read-mappers.js";
+import {
+  BybitPublicTransport,
+  BybitPublicTransportError,
+} from "../adapters/bybit-v5/public-transport.js";
+import {
+  BybitMainnetReadCapabilityError,
+  BybitMainnetReadCapabilityFacade,
+} from "../adapters/bybit-v5/read-capability-facade.js";
+import { BybitPublicMarketMappingError } from "../adapters/bybit-v5/public-market-mappers.js";
 import { openSqlitePersistence } from "../adapters/sqlite/sqlite-persistence.js";
 import type { AccountEvidenceCollectionResult } from "../domain/account/account-evidence-bundle.js";
 import {
@@ -48,10 +60,12 @@ import type {
 import { executeMainnetOperatorTest } from "./mainnet-operator-test.js";
 import { collectAccountEvidence } from "./account-evidence-collection.js";
 import {
+  calculateOperatorMainnetTestCapacityFromAvailableBalance,
   revalidateMainnetOperatorEvidenceAge,
   validateMainnetOperatorTestEvidence,
+  validateCompactOperatorAccountForPlan,
   type MainnetOperatorTestEvidencePort,
-  type MainnetOperatorTestFreshEvidence,
+  type MainnetOperatorTestAdmissionEvidence,
 } from "./mainnet-entry-evidence.js";
 import { deriveMainnetExecutionReadiness } from "./mainnet-execution-readiness.js";
 import {
@@ -61,7 +75,11 @@ import {
 } from "./mainnet-composition-helpers.js";
 
 import {
+  collectCompactOperatorAccountEvidence,
+  createCompactOperatorAccountReader,
   collectOperatorAdmissionEvidence,
+  extractOperatorFeeRate,
+  CompactAccountEvidenceUnavailable,
   OperatorEvidenceReadError,
 } from "./mainnet-operator-test-evidence.js";
 
@@ -307,63 +325,21 @@ export async function runMainnetOperatorTestComposition(
       else throw new Error("operator composition permits GET and CREATE only");
       return fetch(url, init);
     };
-    let accountTransport: BybitAccountReadTransport | undefined;
-    const accountResult: AccountEvidenceCollectionResult =
-      await collectAccountEvidence({
-        environment: "mainnet",
-        runId: admitted.runId,
-        configuredM1Symbols: [admitted.plan.symbol],
-        credentialLoader,
-        utcClock: wall,
-        monotonicClock: monotonic,
-        createReadPort: (configuration) => {
-          accountTransport = new BybitAccountReadTransport({
-            environment: "mainnet",
-            credentials: configuration.credentials,
-            budget: configuration.budget,
-            request,
-            clock: configuration.utcClock,
-            monotonicClock: configuration.monotonicClock,
-          });
-          return new BybitAccountReadClient({
-            transport: accountTransport,
-            utcClock: configuration.utcClock,
-          });
-        },
-      });
-    if (
-      accountResult.kind !== "account-evidence" ||
-      !credentialSnapshot ||
-      !accountTransport
-    )
-      return withCounts(
-        failed("ACCOUNT_EVIDENCE_INCOMPLETE"),
-        exchangeReads,
-        exchangeWrites,
-      );
-
-    const instrument: BybitInstrumentInfo =
-      await new BybitMainnetReadCapabilityFacade(
-        accountTransport,
-      ).readInstrument(admitted.plan.symbol);
-    const evaluatedAtMs = await accountTransport.readExchangeTime();
-    const evaluatedAt = timestampFromEpochMs(evaluatedAtMs);
-    if (!evaluatedAt.ok)
-      return withCounts(
-        failed("PROVIDER_TIME_UNAVAILABLE"),
-        exchangeReads,
-        exchangeWrites,
-      );
-    const readiness = deriveMainnetExecutionReadiness({
-      accountResult,
-      symbol: admitted.plan.symbol,
-      instrument,
-      evaluatedAt: evaluatedAt.value,
+    const loadedCredentials = await credentialLoader.load("mainnet");
+    const accountReader = createCompactOperatorAccountReader({
+      credentials: loadedCredentials,
+      request,
+      utcClock: wall,
+      monotonicClock: monotonic,
     });
+    let compactAccount:
+      | Awaited<ReturnType<typeof collectCompactOperatorAccountEvidence>>
+      | undefined;
+    let accountResult: AccountEvidenceCollectionResult | undefined;
 
     let latestAdmission:
       | {
-          readonly evidence: MainnetOperatorTestFreshEvidence;
+          readonly evidence: MainnetOperatorTestAdmissionEvidence;
           readonly evidenceAtMonotonic: number;
           readonly ages: ValidatedAdmission;
         }
@@ -469,7 +445,7 @@ export async function runMainnetOperatorTestComposition(
 
     const privateTransport = new BybitPrivateTransport({
       environment: "mainnet",
-      credentials: credentialSnapshot,
+      credentials: loadedCredentials,
       request: guardedRequest,
       clock: wall,
     });
@@ -485,6 +461,179 @@ export async function runMainnetOperatorTestComposition(
       collect: async (symbol) => {
         if (symbol !== admitted.plan.symbol)
           throw new Error("operator source symbol mismatch");
+        try {
+          compactAccount = await collectCompactOperatorAccountEvidence(
+            accountReader.reader,
+            loadedCredentials,
+          );
+          const feeResponse = await accountReader.transport.get(
+            ACCOUNT_FEE_RATE_PATH,
+            {
+              category: "linear",
+              symbol,
+            },
+          );
+          const feeRate = extractOperatorFeeRate(feeResponse, symbol);
+          if (!feeRate.ok)
+            throw new CompactAccountEvidenceUnavailable(
+              "FEE_RATE_RESPONSE_INVALID",
+            );
+          const accountAdmission = validateCompactOperatorAccountForPlan(
+            admitted.plan,
+            compactAccount,
+            feeRate.value.observedAt,
+          );
+          if (!accountAdmission.ok) {
+            const reasonCode = accountAdmission.error.details?.reasonCode;
+            const code =
+              typeof reasonCode === "string"
+                ? reasonCode
+                : "ACCOUNT_EVIDENCE_INVALID";
+            if (
+              [
+                "CRITICAL_STATE_CHANGED",
+                "ACCOUNT_MODE_UNSUPPORTED",
+                "SPOT_HEDGING_ENABLED",
+                "CREDENTIAL_PERMISSION_BLOCKED",
+                "ACCOUNT_READINESS_OR_IDENTITY_BLOCKED",
+              ].includes(code)
+            )
+              throw new OperatorEvidenceReadError(
+                code,
+                accountAdmission.error.details ?? {},
+              );
+            throw new CompactAccountEvidenceUnavailable(code);
+          }
+          const capacity =
+            calculateOperatorMainnetTestCapacityFromAvailableBalance(
+              admitted.plan,
+              accountAdmission.value.availableBalance,
+              feeRate.value,
+            );
+          if (!capacity.ok) {
+            const reasonCode = capacity.error.details?.reasonCode;
+            if (reasonCode === "AVAILABLE_MARGIN_OR_FEE_RESERVE_INSUFFICIENT")
+              throw new OperatorEvidenceReadError(
+                reasonCode,
+                capacity.error.details ?? {},
+              );
+            throw new CompactAccountEvidenceUnavailable(
+              typeof reasonCode === "string"
+                ? reasonCode
+                : "ACCOUNT_CAPACITY_INCOMPLETE",
+            );
+          }
+
+          const instrument = await new BybitMainnetReadCapabilityFacade(
+            accountReader.transport,
+          ).readInstrument(symbol);
+          const quote = await publicMarkets.readOperatorQuote(symbol);
+          const state = await exchangeAdapter.readState({ instrument: symbol });
+          if (!state.ok)
+            throw new CompactAccountEvidenceUnavailable(
+              "TARGET_STATE_READ_FAILED",
+            );
+          const fresh: MainnetOperatorTestAdmissionEvidence = {
+            compactAccount,
+            state: state.value,
+            instrument,
+            quote,
+            feeRate: feeRate.value,
+          };
+          const validated = validateMainnetOperatorTestEvidence(
+            admitted.plan,
+            fresh,
+          );
+          if (!validated.ok) {
+            const reasonCode = validated.error.details?.reasonCode;
+            const code =
+              typeof reasonCode === "string"
+                ? reasonCode
+                : "FRESH_MAINNET_EVIDENCE_INVALID";
+            if (
+              [
+                "CRITICAL_STATE_CHANGED",
+                "TARGET_STATE_OR_CAPABILITY_BLOCKED",
+                "TARGET_INSTRUMENT_UNSUPPORTED",
+                "APPROVED_INSTRUMENT_CONSTRAINTS_CHANGED",
+                "QUOTE_OUTSIDE_APPROVED_RANGE",
+                "QUOTE_STALE_OR_FUTURE",
+                "AVAILABLE_MARGIN_OR_FEE_RESERVE_INSUFFICIENT",
+              ].includes(code)
+            )
+              throw new OperatorEvidenceReadError(
+                code,
+                validated.error.details ?? {},
+              );
+            throw new CompactAccountEvidenceUnavailable(code);
+          }
+          const evidenceAtMonotonic = monotonic();
+          if (!Number.isFinite(evidenceAtMonotonic))
+            throw new OperatorEvidenceReadError("MONOTONIC_CLOCK_INVALID");
+          latestAdmission = {
+            evidence: fresh,
+            evidenceAtMonotonic,
+            ages: validated.value,
+          };
+          return fresh;
+        } catch (error) {
+          if (error instanceof OperatorEvidenceReadError) throw error;
+          if (!(
+            error instanceof CompactAccountEvidenceUnavailable ||
+            error instanceof BybitAccountReadError ||
+            error instanceof BybitMainnetReadCapabilityError ||
+            error instanceof BybitPublicMarketMappingError ||
+            error instanceof BybitPublicTransportError ||
+            error instanceof BybitPrivateTransportError
+          ))
+            throw new OperatorEvidenceReadError(
+              "FRESH_MAINNET_EVIDENCE_UNAVAILABLE",
+            );
+        }
+
+        let fullAccountTransport: BybitAccountReadTransport | undefined;
+        accountResult = await collectAccountEvidence({
+          environment: "mainnet",
+          runId: admitted.runId,
+          configuredM1Symbols: [admitted.plan.symbol],
+          credentialLoader,
+          utcClock: wall,
+          monotonicClock: monotonic,
+          createReadPort: (configuration) => {
+            fullAccountTransport = new BybitAccountReadTransport({
+              environment: "mainnet",
+              credentials: configuration.credentials,
+              budget: configuration.budget,
+              request,
+              clock: configuration.utcClock,
+              monotonicClock: configuration.monotonicClock,
+            });
+            return new BybitAccountReadClient({
+              transport: fullAccountTransport,
+              utcClock: configuration.utcClock,
+            });
+          },
+        });
+        if (
+          !accountResult ||
+          accountResult.kind !== "account-evidence" ||
+          !fullAccountTransport
+        )
+          throw new OperatorEvidenceReadError("ACCOUNT_EVIDENCE_INCOMPLETE");
+        const instrument = await new BybitMainnetReadCapabilityFacade(
+          fullAccountTransport,
+        ).readInstrument(symbol);
+        const evaluatedAt = timestampFromEpochMs(
+          await fullAccountTransport.readExchangeTime(),
+        );
+        if (!evaluatedAt.ok)
+          throw new OperatorEvidenceReadError("PROVIDER_TIME_UNAVAILABLE");
+        const readiness = deriveMainnetExecutionReadiness({
+          accountResult,
+          symbol,
+          instrument,
+          evaluatedAt: evaluatedAt.value,
+        });
         const { fresh, ages } = await collectOperatorAdmissionEvidence(
           admitted.plan,
           { account: accountResult.bundle, readiness, instrument },

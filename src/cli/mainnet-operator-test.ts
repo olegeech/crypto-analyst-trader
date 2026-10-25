@@ -15,7 +15,10 @@ import {
   type OperatorMainnetTestPlan,
 } from "../domain/execution/operator-mainnet-test-plan.js";
 import { hashCanonical } from "../domain/identity/canonical-serialization.js";
-import { timestampFromEpochMs } from "../domain/shared/time.js";
+import {
+  parseUtcTimestamp,
+  timestampFromEpochMs,
+} from "../domain/shared/time.js";
 import { requireHash } from "../domain/shared/validation.js";
 import { resolveOperatorMainnetPlan } from "../adapters/sqlite/operator-mainnet-test-lookup.js";
 import { openSqlitePersistence } from "../adapters/sqlite/sqlite-persistence.js";
@@ -359,23 +362,448 @@ function printOperatorCapacityDiagnostic(
   output: OutputStream,
   diagnostic: OperatorCapacityDiagnostic | undefined,
 ): void {
-  line(output, "DIAGNOSTIC=Insufficient funds — недостаточно доступных USDT");
+  line(
+    output,
+    "DIAGNOSTIC=Insufficient funds — account-wide USD-equivalent available balance is too low",
+  );
   if (diagnostic) {
     line(output, `ORDER_NOTIONAL_USDT=${diagnostic.orderNotional}`);
-    line(output, `AVAILABLE_BALANCE_USDT=${diagnostic.availableBalance}`);
+    line(
+      output,
+      `AVAILABLE_BALANCE_USD_EQUIVALENT=${diagnostic.availableBalance}`,
+    );
     line(output, `ENTRY_FEE_RESERVE_USDT=${diagnostic.entryFeeReserve}`);
     line(output, `EXIT_FEE_RESERVE_USDT=${diagnostic.exitFeeReserve}`);
     line(output, `TOTAL_FEE_RESERVE_USDT=${diagnostic.totalReserve}`);
     line(
       output,
-      `REQUIRED_AVAILABLE_BALANCE_USDT=${diagnostic.requiredAvailableBalance}`,
+      `REQUIRED_AVAILABLE_BALANCE_USD_EQUIVALENT=${diagnostic.requiredAvailableBalance}`,
     );
-    line(output, `SHORTFALL_USDT=${diagnostic.shortfall}`);
+    line(output, `SHORTFALL_USD_EQUIVALENT=${diagnostic.shortfall}`);
   }
   line(
     output,
-    "CAPACITY_EXPLANATION=available USDT must cover order notional plus entry and exit fee reserve",
+    "CAPACITY_EXPLANATION=Bybit totalAvailableBalance is account-wide USD-equivalent capacity; it must cover the approved USDT notional plus entry and exit fee reserve",
   );
+}
+
+interface OperatorFailureDiagnostic {
+  readonly explanation: string;
+  readonly why: string;
+  readonly nextAction: string;
+}
+
+function safeChangedGroups(details: Record<string, unknown> | undefined) {
+  const value = details?.criticalChangedGroups;
+  if (typeof value !== "string") return undefined;
+  const groups = value.split(",");
+  return groups.length > 0 &&
+    groups.every((group) =>
+      [...ACCOUNT_CRITICAL_GROUPS, "UNESTABLISHED"].some(
+        (allowed) => allowed === group,
+      ),
+    )
+    ? value
+    : undefined;
+}
+
+function safeDecimalDetail(
+  details: Record<string, unknown> | undefined,
+  key: string,
+): string | undefined {
+  const value = details?.[key];
+  if (
+    typeof value === "string" &&
+    /^(?:0|[1-9]\d{0,19})(?:\.\d{1,18})?$/u.test(value)
+  )
+    return value;
+  return undefined;
+}
+
+function safeCountDetail(
+  details: Record<string, unknown> | undefined,
+  key: string,
+): number | undefined {
+  const value = details?.[key];
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0
+    ? value
+    : undefined;
+}
+
+function safeTimestampDetail(
+  details: Record<string, unknown> | undefined,
+  key: string,
+): string | undefined {
+  const timestamp = parseUtcTimestamp(details?.[key]);
+  return timestamp.ok ? timestamp.value : undefined;
+}
+
+function safeCodeDetail(
+  details: Record<string, unknown> | undefined,
+  key: string,
+): string | undefined {
+  const value = details?.[key];
+  return typeof value === "string" && /^[A-Z][A-Z0-9_]{0,99}$/u.test(value)
+    ? value
+    : undefined;
+}
+
+function safeChangedConstraint(
+  details: Record<string, unknown> | undefined,
+): string | undefined {
+  const value = details?.changedConstraint;
+  return typeof value === "string" &&
+    [
+      "instrument",
+      "version",
+      "priceTickSize",
+      "quantityStep",
+      "minQuantity",
+      "minNotional",
+      "minPrice",
+      "maxPrice",
+      "maxLimitQuantity",
+      "constraintSet",
+    ].includes(value)
+    ? value
+    : undefined;
+}
+
+function operatorFailureDiagnostic(
+  reasonCode: string,
+  details: Record<string, unknown> | undefined,
+  notStarted: boolean,
+): OperatorFailureDiagnostic {
+  if (
+    notStarted &&
+    reasonCode === "AVAILABLE_MARGIN_OR_FEE_RESERVE_INSUFFICIENT"
+  )
+    return {
+      explanation:
+        "The approved order exceeds the account-wide available balance after reserving entry and exit fees.",
+      why: "The compact admission check compared Bybit totalAvailableBalance with the approved USDT notional and fee reserve.",
+      nextAction:
+        "add funds to the trading account or reduce the proposed order; prepare a new plan and obtain fresh exact-plan confirmation before another attempt",
+    };
+  if (
+    reasonCode === "CRITICAL_STATE_CHANGED" ||
+    reasonCode.endsWith("_CRITICAL_STATE_CHANGED")
+  ) {
+    const groups = safeChangedGroups(details);
+    return {
+      explanation:
+        "Two fresh account or target-state observations did not agree.",
+      why: groups
+        ? `The changed evidence group is ${groups}.`
+        : "The exact changed field was not localized by the collected evidence.",
+      nextAction: notStarted
+        ? "inspect the account, target position and open orders in Bybit; use fresh GET-only preparation after the state is understood; no source exists for status and execute should not be repeated for diagnosis"
+        : "run mainnet:test status with the source ID; inspect Bybit orders, fills and position using CLIENT_ORDER_ID; do not retry execute",
+    };
+  }
+  if (reasonCode === "QUOTE_OUTSIDE_APPROVED_RANGE")
+    return {
+      explanation:
+        "The fresh best bid is outside the exact price range approved in this plan.",
+      why: (() => {
+        const bid = safeDecimalDetail(details, "quoteBid");
+        const lower = safeDecimalDetail(details, "approvedBidLower");
+        const upper = safeDecimalDetail(details, "approvedBidUpper");
+        return bid && lower && upper
+          ? `Fresh bid ${bid} is outside the approved range ${lower}–${upper}.`
+          : "The current quote no longer satisfies the stored plan's price bounds; exact prices were not available in the collected evidence.";
+      })(),
+      nextAction:
+        "prepare a fresh plan and obtain new exact-plan confirmation before another attempt",
+    };
+  if (
+    reasonCode === "QUOTE_STALE_OR_FUTURE" ||
+    reasonCode === "MAINNET_EVIDENCE_STALE"
+  )
+    return {
+      explanation: "Fresh market or account evidence failed its time check.",
+      why: (() => {
+        const source = details?.source;
+        const ageMs = safeCountDetail(details, "ageMs");
+        const futureByMs = safeCountDetail(details, "futureByMs");
+        const limitMs = safeCountDetail(details, "limitMs");
+        if (typeof source !== "string" || limitMs === undefined)
+          return "The evidence timestamp was stale, in the future, or outside the allowed freshness window; the exact age was not localized.";
+        if (futureByMs !== undefined)
+          return `${source} evidence is ${futureByMs} ms in the future; the allowed freshness limit is ${limitMs} ms.`;
+        if (ageMs !== undefined)
+          return `${source} evidence is ${ageMs} ms old; the allowed freshness limit is ${limitMs} ms.`;
+        return `${source} evidence is outside the allowed freshness window of ${limitMs} ms.`;
+      })(),
+      nextAction: notStarted
+        ? "check the local clock and Bybit read health, then use GET-only preparation; no source exists for status"
+        : "run mainnet:test status with the source ID; inspect Bybit orders, fills and position using CLIENT_ORDER_ID; do not retry execute",
+    };
+  if (
+    reasonCode === "PROVIDER_TIME_PRECISION_INSUFFICIENT" ||
+    reasonCode === "PROVIDER_TIME_INVALID_OR_INCONSISTENT" ||
+    reasonCode === "PROVIDER_TIME_UNAVAILABLE" ||
+    reasonCode === "EVIDENCE_TIME_INVALID"
+  )
+    return {
+      explanation:
+        "Bybit time evidence did not meet the timestamp contract required for this read.",
+      why:
+        reasonCode === "PROVIDER_TIME_PRECISION_INSUFFICIENT"
+          ? "The response did not provide the millisecond precision needed to order the quote collection window."
+          : "The provider time was missing, malformed, or contradictory.",
+      nextAction:
+        "check the local sanitized time diagnostics and use GET-only preparation after the Bybit time response is understood",
+    };
+  if (
+    reasonCode === "PUBLIC_MARKET_PRECONDITION" ||
+    reasonCode.startsWith("PUBLIC_MARKET_")
+  )
+    return {
+      explanation:
+        "Bybit public market evidence did not satisfy the source or price contract.",
+      why:
+        typeof details?.causeCode === "string" &&
+        /^[A-Z][A-Z0-9_]{0,99}$/u.test(details.causeCode)
+          ? `The public market validator reported ${details.causeCode}.`
+          : "The quote source, price values, or collection times could not be validated.",
+      nextAction:
+        "check the local sanitized quote diagnostics and use GET-only preparation after the response is understood",
+    };
+  if (reasonCode === "ACCOUNT_CAPACITY_INCOMPLETE")
+    return {
+      explanation:
+        "Bybit did not provide a complete account-wide available-balance value.",
+      why: "The value could not be proved from the account and wallet responses already collected.",
+      nextAction: notStarted
+        ? "check the account or wallet response in the local sanitized diagnostics; no source exists for status and do not retry execute for diagnosis"
+        : "run mainnet:test status with the source ID; inspect Bybit orders, fills and position using CLIENT_ORDER_ID; do not retry execute",
+    };
+  if (reasonCode === "CREDENTIAL_PERMISSION_BLOCKED")
+    return {
+      explanation:
+        "The connected API key does not meet the permissions required for this operator test.",
+      why: (() => {
+        const flags = [
+          ["read-only", details?.readOnly],
+          ["contract order", details?.contractOrder],
+          ["contract position", details?.contractPosition],
+          ["wallet transfer", details?.walletTransfer],
+          ["withdrawal", details?.withdraw],
+        ]
+          .filter(([, value]) => typeof value === "boolean")
+          .map(([name, value]) => `${name}=${String(value)}`);
+        if (flags.length > 0)
+          return `Collected permission flags: ${flags.join(", ")}.`;
+        const causeCode = safeCodeDetail(details, "causeCode");
+        return causeCode
+          ? `The credential check reported ${causeCode}.`
+          : "The already-collected credential posture failed a required permission check; exact flags were not available.";
+      })(),
+      nextAction:
+        "review the API key permissions and account identity; prepare a new plan and obtain fresh exact-plan confirmation",
+    };
+  if (reasonCode === "TARGET_STATE_OR_CAPABILITY_BLOCKED")
+    return {
+      explanation:
+        "The target symbol is not in the required flat, one-way 1x state or its required capability is unavailable.",
+      why: (() => {
+        const causeCode = safeCodeDetail(details, "causeCode");
+        const side = details?.positionSide;
+        const quantity = safeDecimalDetail(details, "positionQuantity");
+        const activeOrderCount = safeCountDetail(details, "activeOrderCount");
+        const leverage = safeDecimalDetail(details, "leverage");
+        if (causeCode) return `The target-state check reported ${causeCode}.`;
+        if (side === "long" || side === "short")
+          return `A ${side} target position of ${quantity ?? "unknown quantity"} was already present.`;
+        if (activeOrderCount !== undefined)
+          return `${activeOrderCount} active order(s) already exist for the target symbol.`;
+        if (leverage)
+          return `The collected target leverage is ${leverage}x; the plan requires 1x.`;
+        return "The collected position, open-order, leverage or capability evidence did not prove the required state; the exact cause was not localized.";
+      })(),
+      nextAction: notStarted
+        ? "inspect the target position and open orders in Bybit; resolve the state manually and use GET-only preparation"
+        : "run mainnet:test status with the source ID; inspect Bybit orders, fills and position using CLIENT_ORDER_ID; do not retry execute",
+    };
+  if (
+    reasonCode === "APPROVED_INSTRUMENT_CONSTRAINTS_CHANGED" ||
+    reasonCode === "TARGET_INSTRUMENT_UNSUPPORTED" ||
+    reasonCode === "INSTRUMENT_CONSTRAINTS_INCOMPLETE_OR_MISMATCHED"
+  )
+    return {
+      explanation:
+        "The current Bybit instrument details do not match the prepared plan.",
+      why: (() => {
+        const changedConstraint = safeChangedConstraint(details);
+        return changedConstraint
+          ? `The public ${changedConstraint} constraint differs from the exact approved plan.`
+          : "The symbol status, contract properties, or exchange order limits failed the stored plan checks; the specific field was not localized.";
+      })(),
+      nextAction:
+        reasonCode === "INSTRUMENT_CONSTRAINTS_INCOMPLETE_OR_MISMATCHED"
+          ? "verify complete same-symbol instruments-info mapping; do not execute until preparation succeeds"
+          : "verify the instrument details with GET-only preparation and prepare a new plan before approval",
+    };
+  if (
+    reasonCode === "FEE_RATE_RESPONSE_INVALID" ||
+    reasonCode === "FEE_RATE_READ_FAILED" ||
+    reasonCode === "FEE_RATE_EVIDENCE_INVALID" ||
+    reasonCode === "FEE_RATE_SYMBOL_MISMATCH"
+  )
+    return {
+      explanation: "The current Bybit fee-rate evidence could not be used.",
+      why: "The fee response was incomplete, malformed, or unavailable in the existing read.",
+      nextAction: notStarted
+        ? "check the local sanitized fee-rate diagnostics; no source exists for status and do not retry execute for diagnosis"
+        : "run mainnet:test status with the source ID; inspect Bybit orders, fills and position using CLIENT_ORDER_ID; do not retry execute",
+    };
+  if (
+    reasonCode === "QUOTE_READ_FAILED" ||
+    reasonCode === "QUOTE_EVIDENCE_INVALID" ||
+    reasonCode === "TARGET_STATE_READ_FAILED" ||
+    reasonCode === "ACCOUNT_EVIDENCE_INVALID" ||
+    reasonCode === "FRESH_MAINNET_EVIDENCE_INVALID" ||
+    reasonCode === "FRESH_MAINNET_EVIDENCE_UNAVAILABLE"
+  )
+    return {
+      explanation:
+        "Fresh Bybit evidence could not be collected or validated; this operator attempt did not reach CREATE.",
+      why:
+        typeof details?.source === "string"
+          ? `The failing evidence group was ${details.source}.`
+          : typeof details?.causeCode === "string" &&
+              /^[A-Z][A-Z0-9_]{0,99}$/u.test(details.causeCode)
+            ? `The validator reported ${details.causeCode}; no more specific field was localized.`
+            : "The exact field or endpoint was not localized by the evidence available to this run.",
+      nextAction:
+        "inspect the local sanitized diagnostics and use GET-only preparation to identify the failing read; no source exists for status and do not retry execute for diagnosis",
+    };
+  if (
+    reasonCode === "ACCOUNT_MODE_UNKNOWN" ||
+    reasonCode === "ACCOUNT_MODE_UNSUPPORTED" ||
+    reasonCode === "SPOT_HEDGING_ENABLED" ||
+    reasonCode === "ACCOUNT_READINESS_OR_IDENTITY_BLOCKED"
+  )
+    return {
+      explanation:
+        "Fresh account mode or identity evidence does not meet the operator test requirements.",
+      why: (() => {
+        const causeCode = safeCodeDetail(details, "causeCode");
+        const utaStatus = safeCountDetail(details, "utaStatus");
+        const marginMode = details?.marginMode;
+        if (reasonCode === "SPOT_HEDGING_ENABLED")
+          return "The collected account-mode evidence reports that spot hedging is enabled.";
+        if (causeCode) return `The account check reported ${causeCode}.`;
+        if (utaStatus !== undefined || typeof marginMode === "string")
+          return `Collected account mode: utaStatus=${utaStatus ?? "unknown"}, marginMode=${typeof marginMode === "string" ? marginMode : "unknown"}.`;
+        return "The required account mode or verified identity was unknown or unsupported in the evidence already collected.";
+      })(),
+      nextAction:
+        "inspect the account mode and API-key identity in Bybit; use GET-only preparation after correcting or understanding the state",
+    };
+  if (notStarted && reasonCode === "HALT_OR_RECONCILIATION_REQUIRED")
+    return {
+      explanation:
+        "An existing HALT or reconciliation requirement blocks this operation.",
+      why: "The application checked the persisted incident state before collecting admission evidence.",
+      nextAction:
+        "preserve the existing HALT and follow its recorded recovery guidance before another operation",
+    };
+  return {
+    explanation: notStarted
+      ? "The operator attempt was blocked before CREATE."
+      : "A durable CREATE intent exists, so the exchange outcome must be checked before any further action.",
+    why: "The technical reason code is available, but this run did not collect a more specific safe explanation.",
+    nextAction: notStarted
+      ? "diagnose the blocked pre-intent stage from REASON_CODE using existing local evidence; no source exists for status and do not retry execute for diagnosis"
+      : "run mainnet:test status with the source ID; inspect Bybit orders, fills and position using CLIENT_ORDER_ID; do not retry execute",
+  };
+}
+
+function printOperatorFailureDiagnostic(
+  output: OutputStream,
+  reasonCode: string,
+  details: Record<string, unknown> | undefined,
+  notStarted: boolean,
+): void {
+  const diagnostic = operatorFailureDiagnostic(reasonCode, details, notStarted);
+  line(output, `EXPLANATION=${diagnostic.explanation}`);
+  line(output, `WHY=${diagnostic.why}`);
+  if (details) {
+    const numericFields = [
+      ["QUOTE_BID", "quoteBid"],
+      ["APPROVED_BID_LOWER", "approvedBidLower"],
+      ["APPROVED_BID_UPPER", "approvedBidUpper"],
+      ["ALLOWED_DEVIATION_BPS", "allowedDeviationBps"],
+      ["POSITION_QUANTITY", "positionQuantity"],
+      ["LEVERAGE", "leverage"],
+      ["LEVERAGE_BUY", "leverageBuy"],
+      ["LEVERAGE_SELL", "leverageSell"],
+      ["LEVERAGE_EFFECTIVE", "leverageEffective"],
+    ] as const;
+    for (const [label, key] of numericFields) {
+      const value = safeDecimalDetail(details, key);
+      if (value !== undefined) line(output, `${label}=${value}`);
+    }
+    const counts = [
+      ["EVIDENCE_AGE_MS", "ageMs"],
+      ["EVIDENCE_FUTURE_MS", "futureByMs"],
+      ["FRESHNESS_LIMIT_MS", "limitMs"],
+      ["COLLECTION_FUTURE_MS", "collectionFutureByMs"],
+      ["ACTIVE_ORDER_COUNT", "activeOrderCount"],
+      ["UTA_STATUS", "utaStatus"],
+    ] as const;
+    for (const [label, key] of counts) {
+      const value = safeCountDetail(details, key);
+      if (value !== undefined) line(output, `${label}=${value}`);
+    }
+    const observedAt = safeTimestampDetail(details, "quoteObservedAt");
+    if (observedAt) line(output, `QUOTE_OBSERVED_AT=${observedAt}`);
+    const source = details.source;
+    if (
+      typeof source === "string" &&
+      /^(?:account|balance|quote|fee|instrument|position|orders|target-state|provider-time)$/u.test(
+        source,
+      )
+    )
+      line(output, `EVIDENCE_SOURCE=${source}`);
+    const causeCode = safeCodeDetail(details, "causeCode");
+    if (causeCode) line(output, `DETAIL_CAUSE_CODE=${causeCode}`);
+    const changedConstraint = safeChangedConstraint(details);
+    if (changedConstraint)
+      line(output, `CHANGED_INSTRUMENT_CONSTRAINT=${changedConstraint}`);
+    for (const [label, key] of [
+      ["READ_ONLY", "readOnly"],
+      ["CONTRACT_ORDER_PERMISSION", "contractOrder"],
+      ["CONTRACT_POSITION_PERMISSION", "contractPosition"],
+      ["WALLET_TRANSFER_PERMISSION", "walletTransfer"],
+      ["WITHDRAW_PERMISSION", "withdraw"],
+      ["SPOT_HEDGING", "spotHedging"],
+    ] as const) {
+      if (typeof details[key] === "boolean")
+        line(output, `${label}=${String(details[key])}`);
+    }
+    if (
+      details.positionSide === "flat" ||
+      details.positionSide === "long" ||
+      details.positionSide === "short"
+    )
+      line(output, `POSITION_SIDE=${details.positionSide}`);
+    if (
+      details.marginMode === "REGULAR_MARGIN" ||
+      details.marginMode === "PORTFOLIO_MARGIN"
+    )
+      line(output, `MARGIN_MODE=${details.marginMode}`);
+  }
+  const groups = safeChangedGroups(details);
+  if (
+    (reasonCode === "CRITICAL_STATE_CHANGED" ||
+      reasonCode.endsWith("_CRITICAL_STATE_CHANGED")) &&
+    groups
+  )
+    line(output, `CRITICAL_CHANGED_GROUPS=${groups}`);
+  line(output, `NEXT_ACTION=${diagnostic.nextAction}`);
 }
 
 function printStatusResult(output: OutputStream, result: unknown): number {
@@ -386,6 +814,18 @@ function printStatusResult(output: OutputStream, result: unknown): number {
     line(output, "EXCHANGE_READS=UNKNOWN");
     line(output, "UNCERTAINTY=STATUS_RESULT_INVALID");
     line(output, "REASON_CODE=STATUS_RESULT_INVALID");
+    line(
+      output,
+      "EXPLANATION=The saved order lifecycle could not be verified from the status result.",
+    );
+    line(
+      output,
+      "WHY=The status result did not have the expected shape, so no cleanup conclusion is supported.",
+    );
+    line(
+      output,
+      "NEXT_ACTION=inspect the order, fills and position in Bybit; preserve any HALT and rerun status after the local issue is understood",
+    );
     return 5;
   }
   const typed = result as {
@@ -428,7 +868,15 @@ function printStatusResult(output: OutputStream, result: unknown): number {
     line(output, `REASON_CODE=${mapErrorCode(result)}`);
     line(
       output,
-      "NEXT_ACTION=inspect the saved source and retry status after the read issue is understood",
+      "EXPLANATION=The saved order lifecycle could not be verified by this status read.",
+    );
+    line(
+      output,
+      "WHY=The exchange read or its evidence validation failed; the exact endpoint or field was not localized by this result.",
+    );
+    line(
+      output,
+      "NEXT_ACTION=inspect the order, fills and position in Bybit; preserve any HALT and rerun status after the read issue is understood",
     );
     return 5;
   }
@@ -661,11 +1109,12 @@ export async function runMainnetOperatorTestCli(
           output,
           `EXCHANGE_WRITES=${resultCount(prepared, "exchangeWrites")}`,
         );
-        line(
+        const error = evidenceRecord(evidenceRecord(prepared)?.error);
+        printOperatorFailureDiagnostic(
           output,
-          reasonCode === "INSTRUMENT_CONSTRAINTS_INCOMPLETE_OR_MISMATCHED"
-            ? "NEXT_ACTION=verify complete same-symbol instruments-info mapping; do not execute until preparation succeeds"
-            : "NEXT_ACTION=correct the explicit preparation input or readiness issue",
+          reasonCode,
+          evidenceRecord(error?.details),
+          true,
         );
         return 4;
       }
@@ -920,19 +1369,6 @@ export async function runMainnetOperatorTestCli(
       const failure = evidenceRecord(result);
       const error = evidenceRecord(failure?.error);
       const details = evidenceRecord(error?.details);
-      const changedGroups = details?.criticalChangedGroups;
-      if (
-        reasonCode === "CRITICAL_STATE_CHANGED" &&
-        typeof changedGroups === "string" &&
-        changedGroups
-          .split(",")
-          .every((group) =>
-            [...ACCOUNT_CRITICAL_GROUPS, "UNESTABLISHED"].some(
-              (value) => value === group,
-            ),
-          )
-      )
-        line(output, `CRITICAL_CHANGED_GROUPS=${changedGroups}`);
 
       line(output, `SOURCE_ID=${sourceIdResult.value}`);
       line(output, `EXCHANGE_READS=${resultCount(result, "exchangeReads")}`);
@@ -945,14 +1381,7 @@ export async function runMainnetOperatorTestCli(
           output,
           operatorCapacityDiagnostic(result),
         );
-      line(
-        output,
-        insufficientCapacity
-          ? "NEXT_ACTION=top up the isolated subaccount or reduce the order size; verify the current account state; prepare a fresh plan and obtain fresh exact-plan confirmation before another attempt"
-          : notStarted
-            ? "NEXT_ACTION=diagnose the blocked pre-intent stage from REASON_CODE; preserve any HALT; use GET-only reads for data failures; no source exists for status; do not retry execute for diagnosis"
-            : "NEXT_ACTION=run mainnet:test status with the source ID; inspect Bybit UI orders, fills and position using CLIENT_ORDER_ID before another submission; do not retry execute",
-      );
+      printOperatorFailureDiagnostic(output, reasonCode, details, notStarted);
       return 5;
     } catch {
       line(output, "VERDICT=RECOVERY_ONLY");

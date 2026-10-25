@@ -74,8 +74,14 @@ export interface MainnetOperatorTestOutcome {
 function blocked(
   code: string,
   message = "operator Mainnet admission is blocked",
+  details: Readonly<Record<string, unknown>> = {},
 ) {
-  return fail(domainError("INVALID_CAPABILITY", message, { reasonCode: code }));
+  return fail(
+    domainError("INVALID_CAPABILITY", message, {
+      reasonCode: code,
+      ...details,
+    }),
+  );
 }
 
 function sameScope(
@@ -270,11 +276,13 @@ export async function executeMainnetOperatorTest(
   try {
     fresh = await dependencies.evidence.collect(plan.value.symbol);
   } catch (error) {
-    return blocked(
-      error instanceof OperatorEvidenceReadError
-        ? error.reasonCode
-        : "FRESH_MAINNET_EVIDENCE_UNAVAILABLE",
-    );
+    if (error instanceof OperatorEvidenceReadError)
+      return blocked(
+        error.reasonCode,
+        "operator Mainnet admission evidence was not accepted",
+        error.details,
+      );
+    return blocked("FRESH_MAINNET_EVIDENCE_UNAVAILABLE");
   }
   const evidence = validateMainnetOperatorTestEvidence(plan.value, fresh);
   if (!evidence.ok) return evidence;

@@ -649,7 +649,7 @@ export function mapWalletBalance(response: BybitResponse): BybitWalletState {
 }
 
 export function mapPosition(
-  response: BybitResponse,
+  response: Pick<BybitResponse, "result">,
   symbol: string,
 ): BybitPositionState {
   const records = responseRecords(response, "position/list");
@@ -736,7 +736,7 @@ function orderStatus(value: string, label: string): ExchangeOrderStatus {
 }
 
 export function mapOrderRecords(
-  response: BybitResponse,
+  response: Pick<BybitResponse, "result">,
   symbol: string,
   label = "order/realtime",
 ): readonly BybitOrderRecord[] {

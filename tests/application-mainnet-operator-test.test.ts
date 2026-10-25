@@ -36,7 +36,10 @@ import {
   validateMainnetOperatorTestEvidence,
   createOperatorMainnetCreateRequest,
   createOperatorMainnetFeeRateEvidence,
+  OPERATOR_MAINNET_COMPACT_ACCOUNT_SCHEMA_VERSION,
+  type MainnetOperatorTestAdmissionEvidence,
   type MainnetOperatorTestFreshEvidence,
+  type MainnetOperatorTestCompactFreshEvidence,
 } from "../src/application/mainnet-entry-evidence.js";
 import {
   extractOperatorFeeRate,
@@ -361,6 +364,36 @@ function freshEvidence(
   } satisfies MainnetOperatorTestFreshEvidence;
 }
 
+function compactEvidence(
+  valuePlan: OperatorMainnetTestPlan,
+  availableBalance = "1000",
+): MainnetOperatorTestCompactFreshEvidence {
+  const fresh = freshEvidence(valuePlan);
+  const passA = fresh.account.criticalPasses.A;
+  const passB = fresh.account.criticalPasses.B;
+  assert.ok(passA);
+  assert.ok(passB);
+  const observation = (mode: typeof passA.account) =>
+    Object.freeze({
+      mode,
+      availableBalance: decimal(availableBalance),
+      modeObservedAt: NOW,
+      balanceObservedAt: NOW,
+    });
+  return {
+    compactAccount: {
+      schemaVersion: OPERATOR_MAINNET_COMPACT_ACCOUNT_SCHEMA_VERSION,
+      accountBinding: fresh.account.accountBinding,
+      credentialPosture: fresh.account.credentialPosture,
+      observations: [observation(passA.account), observation(passB.account)],
+    },
+    state: fresh.state,
+    instrument: fresh.instrument,
+    quote: fresh.quote,
+    feeRate: fresh.feeRate,
+  };
+}
+
 class TestAuthorization implements OperatorMainnetTestAuthorizationPort {
   readonly issued = new WeakMap<object, string>();
   readonly consumed = new WeakSet<object>();
@@ -401,7 +434,7 @@ class TestAuthorization implements OperatorMainnetTestAuthorizationPort {
 function setup(
   options: {
     readonly valuePlan?: OperatorMainnetTestPlan;
-    readonly evidence?: MainnetOperatorTestFreshEvidence;
+    readonly evidence?: MainnetOperatorTestAdmissionEvidence;
     readonly persistenceAccount?: string;
     readonly runId?: string;
     readonly failSourceInsert?: boolean;
@@ -489,7 +522,7 @@ function setupWithPersistence(
   persistence: ReturnType<typeof openSqlitePersistence> extends Result<infer T>
     ? T
     : never,
-  suppliedEvidence?: MainnetOperatorTestFreshEvidence,
+  suppliedEvidence?: MainnetOperatorTestAdmissionEvidence,
   onCollect?: (
     persistence: MainnetOperatorTestDependencies["persistence"],
   ) => void,
@@ -606,6 +639,112 @@ test("one durable exact CREATE intent exists before the only exchange dispatch",
   assert.equal(unwrap(restart).kind, "recovery");
   assert.equal(harness.createObservations.length, 1);
   reopened.close();
+});
+
+test("compact admission accepts the same exact-plan CREATE proof without full account history", async () => {
+  const valuePlan = plan({ nonce: "compact-admission-success" });
+  const harness = setup({
+    valuePlan,
+    evidence: compactEvidence(valuePlan),
+  });
+
+  const result = await harness.run();
+
+  assert.equal(result.ok, true);
+  assert.equal(result.ok && result.value.kind, "attempted");
+  assert.equal(harness.authorization.consumeCalls, 1);
+  assert.deepEqual(harness.createObservations, [
+    { durableIntent: true, payloadMatches: true },
+  ]);
+  harness.persistence.close();
+});
+
+test("compact capacity check blocks before durable intent and retains exact shortfall", async () => {
+  const valuePlan = plan({ nonce: "compact-insufficient-capacity" });
+  const harness = setup({
+    valuePlan,
+    evidence: compactEvidence(valuePlan, "1.25"),
+  });
+
+  const result = await harness.run();
+
+  assert.equal(result.ok, false);
+  if (result.ok) return;
+  assert.equal(
+    result.error.details?.reasonCode,
+    "AVAILABLE_MARGIN_OR_FEE_RESERVE_INSUFFICIENT",
+  );
+  assert.equal(result.error.details?.availableBalance, "1.25");
+  assert.equal(typeof result.error.details?.shortfall, "string");
+  assert.equal(harness.authorization.consumeCalls, 0);
+  assert.equal(harness.createObservations.length, 0);
+  const sourceId = unwrap(
+    deriveOperatorMainnetTestSourceId(valuePlan.contentHash),
+  );
+  assert.equal(
+    unwrap(harness.journal.readOperatorMainnetTestSource(sourceId)),
+    undefined,
+  );
+  harness.persistence.close();
+});
+
+test("compact admission blocks a non-flat target position without durable intent", async () => {
+  const valuePlan = plan({ nonce: "compact-target-state-changed" });
+  const evidence = compactEvidence(valuePlan);
+  const changedEvidence: MainnetOperatorTestCompactFreshEvidence = {
+    ...evidence,
+    state: {
+      ...evidence.state,
+      position: {
+        ...evidence.state.position,
+        side: "long",
+        quantity: decimal("0.01"),
+      },
+    },
+  };
+  const harness = setup({ valuePlan, evidence: changedEvidence });
+
+  const result = await harness.run();
+
+  assert.equal(result.ok, false);
+  if (result.ok) return;
+  assert.equal(
+    result.error.details?.reasonCode,
+    "TARGET_STATE_OR_CAPABILITY_BLOCKED",
+  );
+  assert.equal(result.error.details?.source, "position");
+  assert.equal(result.error.details?.positionSide, "long");
+  assert.equal(result.error.details?.positionQuantity, "0.01");
+  assert.equal(harness.createObservations.length, 0);
+  harness.persistence.close();
+});
+
+test("compact account consistency identifies the changing balance group", async () => {
+  const valuePlan = plan({ nonce: "compact-account-balance-changed" });
+  const evidence = compactEvidence(valuePlan);
+  const changedEvidence: MainnetOperatorTestCompactFreshEvidence = {
+    ...evidence,
+    compactAccount: {
+      ...evidence.compactAccount,
+      observations: [
+        evidence.compactAccount.observations[0],
+        {
+          ...evidence.compactAccount.observations[1],
+          availableBalance: decimal("999"),
+        },
+      ],
+    },
+  };
+  const harness = setup({ valuePlan, evidence: changedEvidence });
+
+  const result = await harness.run();
+
+  assert.equal(result.ok, false);
+  if (result.ok) return;
+  assert.equal(result.error.details?.reasonCode, "CRITICAL_STATE_CHANGED");
+  assert.equal(result.error.details?.criticalChangedGroups, "assets");
+  assert.equal(harness.createObservations.length, 0);
+  harness.persistence.close();
 });
 
 // Production preparation binds OS Keychain and Bybit reads; persist the same
@@ -1090,6 +1229,7 @@ test("admission collection preserves a safe stage reason and never creates an in
     "quote",
     "state",
     "validation",
+    "quote-validation",
     "unexpected",
   ] as const) {
     const harness = setup();
@@ -1126,7 +1266,26 @@ test("admission collection preserves a safe stage reason and never creates an in
                     },
                     time: Date.parse(NOW),
                   },
-            quote: async () => (stage === "quote" ? failure() : fresh.quote),
+            quote: async () => {
+              if (stage === "quote") return failure();
+              if (stage === "quote-validation")
+                return unwrap(
+                  createOperatorMainnetQuote({
+                    symbol: fresh.quote.symbol,
+                    exchange: "bybit",
+                    environment: "mainnet",
+                    category: "linear",
+                    origin: "https://api.bybit.com",
+                    observedAt: fresh.quote.observedAt,
+                    collectionStartedAt: fresh.quote.collectionStartedAt,
+                    collectionCompletedAt: fresh.quote.collectionCompletedAt,
+                    bid: "101",
+                    ask: "101.1",
+                    last: "101",
+                  }),
+                );
+              return fresh.quote;
+            },
             state: async () =>
               stage === "state"
                 ? failure()
@@ -1148,9 +1307,35 @@ test("admission collection preserves a safe stage reason and never creates an in
     assert.equal(result.ok, false);
     if (!result.ok) {
       const code = result.error.details?.reasonCode;
-      if (stage === "fee") assert.equal(code, "FEE_RATE_READ_FAILED");
-      if (stage === "quote") assert.equal(code, "QUOTE_READ_FAILED");
-      if (stage === "state") assert.equal(code, "TARGET_STATE_READ_FAILED");
+      if (stage === "fee") {
+        assert.equal(code, "FEE_RATE_READ_FAILED");
+        assert.equal(result.error.details?.source, "fee");
+      }
+      if (stage === "quote") {
+        assert.equal(code, "QUOTE_READ_FAILED");
+        assert.equal(result.error.details?.source, "quote");
+      }
+      if (stage === "state") {
+        assert.equal(code, "TARGET_STATE_READ_FAILED");
+        assert.equal(result.error.details?.source, "target-state");
+      }
+      if (stage === "quote-validation") {
+        assert.equal(code, "QUOTE_OUTSIDE_APPROVED_RANGE");
+        assert.equal(result.error.details?.source, "quote");
+        assert.equal(result.error.details?.quoteBid, "101");
+        assert.equal(
+          result.error.details?.approvedBidLower,
+          harness.valuePlan.quoteBidRange.lower.toString(),
+        );
+        assert.equal(
+          result.error.details?.approvedBidUpper,
+          harness.valuePlan.quoteBidRange.upper.toString(),
+        );
+        assert.equal(
+          result.error.details?.allowedDeviationBps,
+          harness.valuePlan.maxDeviationBps.toString(),
+        );
+      }
       if (stage === "unexpected")
         assert.equal(code, "FRESH_MAINNET_EVIDENCE_UNAVAILABLE");
       assert.doesNotMatch(JSON.stringify(result), /secret|private provider/u);
@@ -1311,6 +1496,24 @@ test("admission preserves quote deviation and malformed fee diagnostics", async 
       execution.error.details?.reasonCode,
       "QUOTE_OUTSIDE_APPROVED_RANGE",
     );
+  if (!execution.ok)
+    assert.equal(execution.error.details?.causeCode, "CONSTRAINT_VIOLATION");
+  if (!execution.ok) {
+    assert.equal(execution.error.details?.source, "quote");
+    assert.equal(execution.error.details?.quoteBid, "101");
+    assert.equal(
+      execution.error.details?.approvedBidLower,
+      valuePlan.quoteBidRange.lower.toString(),
+    );
+    assert.equal(
+      execution.error.details?.approvedBidUpper,
+      valuePlan.quoteBidRange.upper.toString(),
+    );
+    assert.equal(
+      execution.error.details?.allowedDeviationBps,
+      valuePlan.maxDeviationBps.toString(),
+    );
+  }
   assert.equal(harness.createObservations.length, 0);
   assert.equal(
     unwrap(harness.journal.findPendingOperatorMainnetTestSource()),

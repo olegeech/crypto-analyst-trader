@@ -223,8 +223,11 @@ function invalidPlan(message = "operator Mainnet test plan is invalid") {
   return fail(domainError("INVALID_PLAN", message));
 }
 
-function invalidQuote(message = "operator Mainnet quote is invalid") {
-  return fail(domainError("INVALID_EVIDENCE", message));
+function invalidQuote(
+  message = "operator Mainnet quote is invalid",
+  details: Readonly<Record<string, string | number | boolean | null>> = {},
+) {
+  return fail(domainError("INVALID_EVIDENCE", message, details));
 }
 
 function invalidApproval(
@@ -769,17 +772,21 @@ export function validateOperatorMainnetQuoteForPlan(
   )
     return invalidQuote(
       "fresh quote does not match the approved Bybit linear scope",
+      { source: "quote", causeCode: "QUOTE_SCOPE_MISMATCH" },
     );
-  const age =
-    timestampToEpochMs(at.value) - timestampToEpochMs(quote.value.observedAt);
-  if (
-    age < 0 ||
-    age > plan.value.quoteFreshnessMs ||
-    timestampToEpochMs(quote.value.collectionCompletedAt) >
-      timestampToEpochMs(at.value)
-  )
+  const evaluatedAtMs = timestampToEpochMs(at.value);
+  const age = evaluatedAtMs - timestampToEpochMs(quote.value.observedAt);
+  const collectionFutureByMs =
+    timestampToEpochMs(quote.value.collectionCompletedAt) - evaluatedAtMs;
+  if (age < 0 || age > plan.value.quoteFreshnessMs || collectionFutureByMs > 0)
     return fail(
-      domainError("STALE_EVIDENCE", "fresh quote is stale or future dated"),
+      domainError("STALE_EVIDENCE", "fresh quote is stale or future dated", {
+        source: "quote",
+        ...(age < 0 ? { futureByMs: -age } : { ageMs: age }),
+        limitMs: plan.value.quoteFreshnessMs,
+        ...(collectionFutureByMs > 0 ? { collectionFutureByMs } : {}),
+        quoteObservedAt: quote.value.observedAt,
+      }),
     );
   if (
     quote.value.bid.compare(plan.value.quoteBidRange.lower) < 0 ||
@@ -789,6 +796,14 @@ export function validateOperatorMainnetQuoteForPlan(
       domainError(
         "CONSTRAINT_VIOLATION",
         "fresh Bybit best bid is outside the approved quote deviation range",
+        {
+          source: "quote",
+          quoteBid: quote.value.bid.toString(),
+          approvedBidLower: plan.value.quoteBidRange.lower.toString(),
+          approvedBidUpper: plan.value.quoteBidRange.upper.toString(),
+          quoteObservedAt: quote.value.observedAt,
+          allowedDeviationBps: plan.value.maxDeviationBps.toString(),
+        },
       ),
     );
   return quote;

@@ -363,17 +363,7 @@ class ReadOnlyOperatorStatusExchange {
         category: "linear",
         symbol: plan.symbol,
       });
-      const position = mapPosition(
-        {
-          retCode: 0,
-          retMsg: "",
-          result: positionResponse.result,
-          ...(positionResponse.time === undefined
-            ? {}
-            : { time: positionResponse.time }),
-        },
-        plan.symbol,
-      );
+      const position = mapPosition(positionResponse, plan.symbol);
       const childFills: MainnetOperatorTestChildFills[] = [];
       for (const child of childRecords) {
         const fills = await this.readFills({

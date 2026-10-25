@@ -420,7 +420,7 @@ test("insufficient-funds admission prints only safe capacity details and next st
         fail(
           domainError("INVALID_EVIDENCE", "blocked by available balance", {
             reasonCode: "AVAILABLE_MARGIN_OR_FEE_RESERVE_INSUFFICIENT",
-            exchangeReads: 77,
+            exchangeReads: 7,
             exchangeWrites: 0,
             availableBalance: "1.25",
             orderNotional: "8",
@@ -438,29 +438,34 @@ test("insufficient-funds admission prints only safe capacity details and next st
   assert.equal(code, 5);
   assert.match(
     terminal.text(),
-    /DIAGNOSTIC=Insufficient funds — недостаточно доступных USDT/u,
+    /DIAGNOSTIC=Insufficient funds — account-wide USD-equivalent available balance is too low/u,
   );
   assert.match(terminal.text(), /ORDER_NOTIONAL_USDT=8/u);
-  assert.match(terminal.text(), /AVAILABLE_BALANCE_USDT=1\.25/u);
+  assert.match(terminal.text(), /AVAILABLE_BALANCE_USD_EQUIVALENT=1\.25/u);
   assert.match(terminal.text(), /ENTRY_FEE_RESERVE_USDT=0\.0044/u);
   assert.match(terminal.text(), /EXIT_FEE_RESERVE_USDT=0\.0045/u);
   assert.match(terminal.text(), /TOTAL_FEE_RESERVE_USDT=0\.0089/u);
-  assert.match(terminal.text(), /REQUIRED_AVAILABLE_BALANCE_USDT=8\.0089/u);
-  assert.match(terminal.text(), /SHORTFALL_USDT=6\.7589/u);
   assert.match(
     terminal.text(),
-    /CAPACITY_EXPLANATION=.*order notional plus entry and exit fee reserve/u,
+    /REQUIRED_AVAILABLE_BALANCE_USD_EQUIVALENT=8\.0089/u,
+  );
+  assert.match(terminal.text(), /SHORTFALL_USD_EQUIVALENT=6\.7589/u);
+  assert.match(
+    terminal.text(),
+    /CAPACITY_EXPLANATION=.*account-wide USD-equivalent capacity.*USDT notional/u,
   );
   assert.match(
     terminal.text(),
     /REASON_CODE=AVAILABLE_MARGIN_OR_FEE_RESERVE_INSUFFICIENT/u,
   );
+  assert.match(terminal.text(), /EXPLANATION=The approved order exceeds/u);
+  assert.match(terminal.text(), /WHY=The compact admission check compared/u);
   assert.match(terminal.text(), /EXECUTION_STATE=EXECUTION_NOT_STARTED/u);
-  assert.match(terminal.text(), /EXCHANGE_READS=77/u);
+  assert.match(terminal.text(), /EXCHANGE_READS=7/u);
   assert.match(terminal.text(), /EXCHANGE_WRITES=0/u);
   assert.match(
     terminal.text(),
-    /NEXT_ACTION=top up the isolated subaccount or reduce the order size; verify the current account state; prepare a fresh plan and obtain fresh exact-plan confirmation before another attempt/u,
+    /NEXT_ACTION=add funds to the trading account or reduce the proposed order; prepare a new plan and obtain fresh exact-plan confirmation before another attempt/u,
   );
   assert.doesNotMatch(terminal.text(), /must-not-be-printed/u);
 });
@@ -782,9 +787,123 @@ test("pre-intent critical state errors expose only safe groups and quote drift e
     assert.equal(code, 5);
     assert.match(terminal.text(), expected);
     assert.match(terminal.text(), /EXECUTION_NOT_STARTED/u);
+    assert.match(terminal.text(), /EXPLANATION=/u);
+    assert.match(terminal.text(), /WHY=/u);
+    assert.match(terminal.text(), /NEXT_ACTION=/u);
+    if (reasonCode === "CRITICAL_STATE_CHANGED") {
+      assert.match(
+        terminal.text(),
+        groups === "assets,orders"
+          ? /WHY=The changed evidence group is assets,orders\./u
+          : /WHY=The exact changed field was not localized/u,
+      );
+    }
     assert.doesNotMatch(
       terminal.text(),
       /secret-provider-value|LEAK|private provider message/u,
+    );
+  }
+});
+
+test("operator failure output shows allowlisted quote, freshness, permission and target-state details", async () => {
+  const cases = [
+    {
+      reasonCode: "QUOTE_OUTSIDE_APPROVED_RANGE",
+      details: {
+        source: "quote",
+        quoteBid: "101",
+        approvedBidLower: "99",
+        approvedBidUpper: "100",
+        quoteObservedAt: NOW,
+        allowedDeviationBps: "10",
+        privatePayload: "must-not-be-printed",
+      },
+      expected: [
+        /WHY=Fresh bid 101 is outside the approved range 99–100\./u,
+        /QUOTE_BID=101/u,
+        /ALLOWED_DEVIATION_BPS=10/u,
+        new RegExp(`QUOTE_OBSERVED_AT=${NOW}`),
+      ],
+    },
+    {
+      reasonCode: "MAINNET_EVIDENCE_STALE",
+      details: {
+        source: "quote",
+        ageMs: 5_200,
+        limitMs: 5_000,
+        quoteObservedAt: NOW,
+        providerMessage: "must-not-be-printed",
+      },
+      expected: [
+        /WHY=quote evidence is 5200 ms old; the allowed freshness limit is 5000 ms\./u,
+        /EVIDENCE_AGE_MS=5200/u,
+        /FRESHNESS_LIMIT_MS=5000/u,
+      ],
+    },
+    {
+      reasonCode: "CREDENTIAL_PERMISSION_BLOCKED",
+      details: {
+        source: "account",
+        readOnly: false,
+        contractOrder: true,
+        contractPosition: false,
+        walletTransfer: false,
+        withdraw: false,
+        apiKey: "must-not-be-printed",
+      },
+      expected: [
+        /Collected permission flags: read-only=false, contract order=true, contract position=false/u,
+        /CONTRACT_POSITION_PERMISSION=false/u,
+      ],
+    },
+    {
+      reasonCode: "TARGET_STATE_OR_CAPABILITY_BLOCKED",
+      details: {
+        source: "position",
+        positionSide: "long",
+        positionQuantity: "0.01",
+        accountId: "must-not-be-printed",
+      },
+      expected: [
+        /A long target position of 0\.01 was already present\./u,
+        /POSITION_SIDE=long/u,
+        /POSITION_QUANTITY=0\.01/u,
+      ],
+    },
+  ] as const;
+
+  for (const item of cases) {
+    const terminal = streams(true);
+    const code = await runMainnetOperatorTestCli(
+      ["execute", "--plan-hash", plan.contentHash],
+      {
+        ...terminal,
+        resolvePlan: () => resolvedPlan(),
+        hasDurableIntent: () => ok(false),
+        prompt: async () => "yes",
+        clock: () => Date.parse(NOW),
+        actor: () => "operator-test",
+        execute: async () =>
+          fail(
+            domainError("INVALID_EVIDENCE", "private provider text", {
+              reasonCode: item.reasonCode,
+              exchangeReads: 7,
+              exchangeWrites: 0,
+              ...item.details,
+            }),
+          ),
+      },
+    );
+
+    assert.equal(code, 5);
+    for (const expected of item.expected)
+      assert.match(terminal.text(), expected);
+    assert.match(terminal.text(), /REASON_CODE=/u);
+    assert.match(terminal.text(), /EXPLANATION=/u);
+    assert.match(terminal.text(), /NEXT_ACTION=/u);
+    assert.doesNotMatch(
+      terminal.text(),
+      /must-not-be-printed|private provider text/u,
     );
   }
 });
