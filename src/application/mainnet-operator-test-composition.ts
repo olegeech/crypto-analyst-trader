@@ -55,6 +55,7 @@ import {
 } from "./mainnet-entry-evidence.js";
 import { deriveMainnetExecutionReadiness } from "./mainnet-execution-readiness.js";
 import {
+  createMainnetGetCounts,
   snapshotExchangeCredentials,
   withExchangeCounts,
 } from "./mainnet-composition-helpers.js";
@@ -243,11 +244,14 @@ type ValidatedAdmission = Extract<
 export async function runMainnetOperatorTestComposition(
   input: MainnetOperatorTestInput,
 ): Promise<Result<MainnetOperatorTestOutcome>> {
+  const getCounts = createMainnetGetCounts();
+  const withCounts = <T>(result: Result<T>, reads: number, writes: number) =>
+    withExchangeCounts(result, reads, writes, getCounts.summary());
   let exchangeReads = 0;
   let exchangeWrites = 0;
   const normalized = inputIdentity(input);
   if (!normalized)
-    return withExchangeCounts(
+    return withCounts(
       failed("APPROVAL_OR_PLAN_INVALID"),
       exchangeReads,
       exchangeWrites,
@@ -268,12 +272,12 @@ export async function runMainnetOperatorTestComposition(
     clock: localClock,
   });
   if (!persistence.ok)
-    return withExchangeCounts(persistence, exchangeReads, exchangeWrites);
+    return withCounts(persistence, exchangeReads, exchangeWrites);
   try {
     const sqlite = persistence.value;
     const journal = sqlite.operatorMainnetTest;
     if (!journal)
-      return withExchangeCounts(
+      return withCounts(
         failed("MAINNET_OPERATOR_JOURNAL_UNAVAILABLE"),
         exchangeReads,
         exchangeWrites,
@@ -297,6 +301,7 @@ export async function runMainnetOperatorTestComposition(
       const method = (
         init?.method ?? (url instanceof Request ? url.method : "GET")
       ).toUpperCase();
+      getCounts.record(url, init);
       if (method === "GET") exchangeReads += 1;
       else if (method === "POST") exchangeWrites += 1;
       else throw new Error("operator composition permits GET and CREATE only");
@@ -331,7 +336,7 @@ export async function runMainnetOperatorTestComposition(
       !credentialSnapshot ||
       !accountTransport
     )
-      return withExchangeCounts(
+      return withCounts(
         failed("ACCOUNT_EVIDENCE_INCOMPLETE"),
         exchangeReads,
         exchangeWrites,
@@ -344,7 +349,7 @@ export async function runMainnetOperatorTestComposition(
     const evaluatedAtMs = await accountTransport.readExchangeTime();
     const evaluatedAt = timestampFromEpochMs(evaluatedAtMs);
     if (!evaluatedAt.ok)
-      return withExchangeCounts(
+      return withCounts(
         failed("PROVIDER_TIME_UNAVAILABLE"),
         exchangeReads,
         exchangeWrites,
@@ -548,11 +553,16 @@ export async function runMainnetOperatorTestComposition(
     return result.ok
       ? {
           ok: true,
-          value: { ...result.value, exchangeReads, exchangeWrites },
+          value: {
+            ...result.value,
+            exchangeReads,
+            exchangeWrites,
+            exchangeGetCounts: getCounts.summary(),
+          },
         }
-      : withExchangeCounts(result, exchangeReads, exchangeWrites);
+      : withCounts(result, exchangeReads, exchangeWrites);
   } catch {
-    return withExchangeCounts(
+    return withCounts(
       failed("MAINNET_OPERATOR_TEST_FAILED_CLOSED"),
       exchangeReads,
       exchangeWrites,

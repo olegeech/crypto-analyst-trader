@@ -28,6 +28,7 @@ import type {
 import { collectAccountEvidence } from "./account-evidence-collection.js";
 import { deriveMainnetExecutionReadiness } from "./mainnet-execution-readiness.js";
 import {
+  createMainnetGetCounts,
   snapshotExchangeCredentials,
   withExchangeCounts,
 } from "./mainnet-composition-helpers.js";
@@ -42,6 +43,7 @@ export interface MainnetOperatorTestPrepareInput {
 export interface MainnetOperatorTestPreparation {
   readonly plan: OperatorMainnetTestPlan;
   readonly exchangeReads: number;
+  readonly exchangeGetCounts?: string;
   readonly exchangeWrites: 0;
 }
 
@@ -67,6 +69,9 @@ function failed(code: string): Result<never> {
 export async function prepareMainnetOperatorTest(
   input: MainnetOperatorTestPrepareInput,
 ): Promise<Result<MainnetOperatorTestPreparation>> {
+  const getCounts = createMainnetGetCounts();
+  const withCounts = <T>(result: Result<T>, reads: number, writes: number) =>
+    withExchangeCounts(result, reads, writes, getCounts.summary());
   let exchangeReads = 0;
   if (
     typeof input !== "object" ||
@@ -83,7 +88,7 @@ export async function prepareMainnetOperatorTest(
       (value) => typeof value !== "string" || value.length > 128,
     )
   )
-    return withExchangeCounts(failed("INVALID_INPUT"), exchangeReads, 0);
+    return withCounts(failed("INVALID_INPUT"), exchangeReads, 0);
 
   const wall = Date.now;
   const monotonic = () => performance.now();
@@ -94,6 +99,7 @@ export async function prepareMainnetOperatorTest(
     if (method !== "GET")
       throw new Error("operator preparation permits GET requests only");
     exchangeReads += 1;
+    getCounts.record(url, init);
     return fetch(url, init);
   };
   const runId = `operator-prepare-${randomUUID()}`;
@@ -135,22 +141,14 @@ export async function prepareMainnetOperatorTest(
       },
     });
   } catch {
-    return withExchangeCounts(
-      failed("ACCOUNT_EVIDENCE_UNAVAILABLE"),
-      exchangeReads,
-      0,
-    );
+    return withCounts(failed("ACCOUNT_EVIDENCE_UNAVAILABLE"), exchangeReads, 0);
   }
   if (
     accountResult.kind !== "account-evidence" ||
     !credentials ||
     !accountTransport
   )
-    return withExchangeCounts(
-      failed("ACCOUNT_EVIDENCE_INCOMPLETE"),
-      exchangeReads,
-      0,
-    );
+    return withCounts(failed("ACCOUNT_EVIDENCE_INCOMPLETE"), exchangeReads, 0);
 
   try {
     const instrument = await new BybitMainnetReadCapabilityFacade(
@@ -163,11 +161,7 @@ export async function prepareMainnetOperatorTest(
     const providerTimeMs = await accountTransport.readExchangeTime();
     const providerTime = timestampFromEpochMs(providerTimeMs);
     if (!providerTime.ok)
-      return withExchangeCounts(
-        failed("PROVIDER_TIME_UNAVAILABLE"),
-        exchangeReads,
-        0,
-      );
+      return withCounts(failed("PROVIDER_TIME_UNAVAILABLE"), exchangeReads, 0);
     const readiness = deriveMainnetExecutionReadiness({
       accountResult,
       symbol: input.symbol,
@@ -179,7 +173,7 @@ export async function prepareMainnetOperatorTest(
       readiness.internalBinding?.accountIdentityHash !==
         accountResult.bundle.accountBinding.accountIdentityHash
     )
-      return withExchangeCounts(
+      return withCounts(
         failed(`READINESS_${readiness.reasonCodes.join("_") || "BLOCKED"}`),
         exchangeReads,
         0,
@@ -200,31 +194,35 @@ export async function prepareMainnetOperatorTest(
       constraints: instrument.constraints,
       preparedAt: providerTime.value,
     });
-    if (!plan.ok) return withExchangeCounts(plan, exchangeReads, 0);
+    if (!plan.ok) return withCounts(plan, exchangeReads, 0);
     const persistence = openSqlitePersistence({
       environment: "mainnet",
       scope: scopeFor(plan.value.accountIdentityHash),
       clock: { now: () => providerTime.value },
     });
-    if (!persistence.ok)
-      return withExchangeCounts(persistence, exchangeReads, 0);
+    if (!persistence.ok) return withCounts(persistence, exchangeReads, 0);
     try {
       const journal = persistence.value.operatorMainnetTest;
       if (!journal)
-        return withExchangeCounts(
+        return withCounts(
           failed("OPERATOR_PLAN_STORE_UNAVAILABLE"),
           exchangeReads,
           0,
         );
       const stored = journal.persistPreparedPlan(plan.value);
       return stored.ok
-        ? ok({ plan: plan.value, exchangeReads, exchangeWrites: 0 })
-        : withExchangeCounts(stored, exchangeReads, 0);
+        ? ok({
+            plan: plan.value,
+            exchangeReads,
+            exchangeWrites: 0,
+            exchangeGetCounts: getCounts.summary(),
+          })
+        : withCounts(stored, exchangeReads, 0);
     } finally {
       persistence.value.close();
     }
   } catch (error) {
-    return withExchangeCounts(
+    return withCounts(
       failed(
         error instanceof BybitPublicTransportError
           ? (error.reasonCode ??

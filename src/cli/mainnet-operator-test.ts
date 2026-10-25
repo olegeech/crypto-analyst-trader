@@ -1,3 +1,4 @@
+import { safeMainnetGetCounts } from "../application/mainnet-composition-helpers.js";
 import { ACCOUNT_CRITICAL_GROUPS } from "../domain/account/account-evidence-consistency.js";
 import { randomUUID } from "node:crypto";
 import { userInfo } from "node:os";
@@ -198,6 +199,20 @@ function resultCount(
   return countText(
     result.ok ? result.value?.[key] : result.error?.details?.[key],
   );
+}
+
+function printGetCounts(
+  output: OutputStream,
+  result: unknown,
+  stage: "PREPARE" | "EXECUTE",
+): void {
+  const envelope = evidenceRecord(result);
+  const payload =
+    envelope?.ok === true
+      ? evidenceRecord(envelope.value)
+      : evidenceRecord(evidenceRecord(envelope?.error)?.details);
+  const counts = safeMainnetGetCounts(payload?.exchangeGetCounts);
+  if (counts !== undefined) line(output, `GET_COUNTS_${stage}=${counts}`);
 }
 
 function evidenceText(value: unknown): string {
@@ -613,6 +628,7 @@ export async function runMainnetOperatorTestCli(
         grossNotionalCap: parsed.grossNotionalCap,
         maxDeviationBps: parsed.maxDeviationBps,
       });
+      printGetCounts(output, prepared, "PREPARE");
       if (!prepared.ok) {
         const reasonCode = mapErrorCode(prepared);
         line(output, "VERDICT=BLOCKED");
@@ -839,6 +855,7 @@ export async function runMainnetOperatorTestCli(
         approvalHash: approval.value.contentHash,
         runId: `operator-execute-${randomUUID()}`,
       });
+      printGetCounts(output, result, "EXECUTE");
       if (
         typeof result === "object" &&
         result !== null &&

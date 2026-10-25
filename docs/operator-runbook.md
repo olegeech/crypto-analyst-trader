@@ -78,8 +78,11 @@ the isolated AI Subaccount. The first deliberately authorized Mainnet write is t
 **For this one attended happy-path acceptance experiment, merge to `main`,
 tagging, publication and deployment are NOT prerequisites.** An exact reviewed
 PR-branch commit with passing same-SHA release checks and CI is eligible for
-the test while the PR remains open. A fresh read-only preflight must be READY,
-every mandatory runtime safety gate must pass, and the operator must separately
+the test while the PR remains open. For this bounded #31 flow, successful
+`mainnet:test prepare` performs the required read-only readiness assessment;
+a separate `mainnet:preflight` invocation is optional diagnostics, not an
+additional prerequisite. Every mandatory fresh runtime safety gate in
+`execute` must still pass, and the operator must separately
 approve the exact attended order. Record the actual exchange result and
 reconciliation evidence to decide whether to merge or fix the PR. A green
 build is not live trading authorization. Completion of #30's integrated
@@ -176,6 +179,15 @@ any explicit `HALT` clearance. These internal boundaries do not expose an
 operator command or authorize a Mainnet write.
 
 ### Supervised Mainnet lifecycle check (issue #31 U3)
+
+GET accounting reports `GET_COUNTS_PREFLIGHT`, `GET_COUNTS_PREPARE` and
+`GET_COUNTS_EXECUTE` as endpoint-group counts per command invocation. Counts
+include pagination and retries already attempted, including failed HTTP reads;
+POSTs are excluded. No extra requests are made for measurement. Only fixed
+group names and counts are emitted, without query strings or account data.
+This instrumentation establishes a baseline; it does not yet reduce reads or
+change the account-evidence checks. A 10–25 GET compact operator admission is
+an engineering target, not measured performance.
 
 Admission diagnostics distinguish `QUOTE_OUTSIDE_APPROVED_RANGE`,
 `QUOTE_EVIDENCE_INVALID`, `QUOTE_STALE_OR_FUTURE`,

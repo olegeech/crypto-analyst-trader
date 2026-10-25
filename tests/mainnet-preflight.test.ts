@@ -519,6 +519,19 @@ test("production collector reaches sanitized READY and checks delayed verdict fr
   );
   assert.ok(ready.fixture.calls.length > 2);
   assert.ok(ready.fixture.calls.every((call) => call.method === "GET"));
+  const countsLine = ready.output
+    .split("\n")
+    .find((line) => line.startsWith("GET_COUNTS_PREFLIGHT="));
+  assert.ok(countsLine);
+  const counts = JSON.parse(
+    countsLine.slice("GET_COUNTS_PREFLIGHT=".length),
+  ) as Record<string, number>;
+  assert.equal(
+    Object.values(counts).reduce((sum, value) => sum + value, 0),
+    ready.fixture.calls.length,
+  );
+  assert.ok((counts["order-history"] ?? 0) > 0);
+  assert.ok((counts.executions ?? 0) > 0);
   assert.doesNotMatch(
     ready.output,
     /synthetic-mainnet|userID|accountIdentityHash|123|balances|ips/u,

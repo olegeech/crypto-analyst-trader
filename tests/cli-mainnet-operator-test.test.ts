@@ -788,3 +788,40 @@ test("pre-intent critical state errors expose only safe groups and quote drift e
     );
   }
 });
+
+test("execute GET breakdown survives a pre-intent failure and suppresses unsafe metric groups", async () => {
+  for (const [metrics, expected] of [
+    ['{"fees":1,"wallet":2}', /GET_COUNTS_EXECUTE=\{"fees":1,"wallet":2\}/u],
+    ['{"private-account":1}', undefined],
+  ] as const) {
+    const terminal = streams(true);
+    const code = await runMainnetOperatorTestCli(
+      ["execute", "--plan-hash", plan.contentHash],
+      {
+        ...terminal,
+        resolvePlan: () => resolvedPlan(),
+        hasDurableIntent: () => ok(false),
+        prompt: async () => "yes",
+        clock: () => Date.parse(NOW),
+        actor: () => "operator-test",
+        execute: async () =>
+          fail(
+            domainError("INVALID_EVIDENCE", "blocked", {
+              reasonCode: "FEE_RATE_EVIDENCE_INVALID",
+              exchangeReads: 3,
+              exchangeWrites: 0,
+              exchangeGetCounts: metrics,
+            }),
+          ),
+      },
+    );
+    assert.equal(code, 5);
+    if (expected) assert.match(terminal.text(), expected);
+    else
+      assert.doesNotMatch(
+        terminal.text(),
+        /GET_COUNTS_EXECUTE|private-account/u,
+      );
+    assert.match(terminal.text(), /EXECUTION_NOT_STARTED/u);
+  }
+});

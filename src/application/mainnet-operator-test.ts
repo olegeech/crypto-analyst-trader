@@ -67,6 +67,7 @@ export interface MainnetOperatorTestOutcome {
   readonly reasonCode?: string;
   /** Production composition counts actual Mainnet HTTP requests per invocation. */
   readonly exchangeReads?: number;
+  readonly exchangeGetCounts?: string;
   readonly exchangeWrites?: number;
 }
 

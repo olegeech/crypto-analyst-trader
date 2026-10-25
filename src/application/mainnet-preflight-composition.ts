@@ -28,10 +28,14 @@ import {
   deriveMainnetExecutionReadiness,
   type MainnetExecutionReadiness,
 } from "./mainnet-execution-readiness.js";
-import { snapshotExchangeCredentials } from "./mainnet-composition-helpers.js";
+import {
+  createMainnetGetCounts,
+  snapshotExchangeCredentials,
+} from "./mainnet-composition-helpers.js";
 
 export interface MainnetPreflightRequestCounts {
   readonly exchangeReads: number;
+  readonly exchangeGetCounts?: string;
   /** Non-GET attempts are rejected before reaching fetch and must remain zero. */
   readonly exchangeWrites: number;
 }
@@ -75,11 +79,16 @@ export interface MainnetPreflightDependencies {
 }
 
 function requestCounter() {
+  const getCounts = createMainnetGetCounts();
   let exchangeReads = 0;
   let exchangeWrites = 0;
   return {
     get counts(): MainnetPreflightRequestCounts {
-      return Object.freeze({ exchangeReads, exchangeWrites });
+      return Object.freeze({
+        exchangeReads,
+        exchangeWrites,
+        exchangeGetCounts: getCounts.summary(),
+      });
     },
     wrap(request: typeof fetch): typeof fetch {
       return async (input, init) => {
@@ -88,6 +97,7 @@ function requestCounter() {
             ? input.method
             : "GET";
         const method = (init?.method ?? requestMethod).toUpperCase();
+        getCounts.record(input, init);
         if (method === "GET") exchangeReads++;
         else {
           exchangeWrites++;
