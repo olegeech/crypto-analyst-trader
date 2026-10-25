@@ -94,22 +94,25 @@ diagnostic usefulness against the concrete risk addressed.
 
 ## Integration contract check
 
-For external API or money-affecting changes, include these checks in the
-existing planning, implementation and acceptance work. Internal refactoring
-that preserves those contracts does not need this step.
+For external API or money-affecting changes, apply only checks relevant to
+the changed boundary within existing planning, implementation and acceptance
+work. Internal refactoring that preserves those contracts does not need this
+step.
 
 1. **Check assumptions early.** Before a large implementation, identify
    unverified provider facts, distinguish product decisions from mandatory
    technical protections, and choose a concrete test that proves success.
    Settle the execution mode and release boundary with the owner in the
    existing issue or plan; no separate document or agent is required.
-2. **Test the provider contract.** Inspect existing production mappers and
-   current official API documentation. Use a representative sanitized provider
-   response fixture, preserving meaningful empty, optional and extra fields,
-   plus negative cases for critical fields. Record fixture provenance without
-   secrets or private account data. Test through the production mapper rather
-   than constructing only the domain object the validator expects. Use the
-   existing Node test runner; no new mocking or record/replay platform.
+2. **Test the changed boundary.** For external provider contract changes,
+   inspect production mappers and current official API documentation. Verify
+   actual response shapes through those mappers using representative sanitized
+   fixtures, preserving meaningful empty, optional and extra fields, plus
+   negative cases for critical fields. Record fixture provenance without
+   secrets or private account data. For money-affecting internal logic without
+   provider contract changes, focus on production-path tests, financial
+   boundary cases and existing safety invariants; new provider fixtures are
+   not required. Use the existing Node test runner.
 3. **Prove the operator path incrementally.** For execution work, cover
    `prepare → execute admission → status`, from provider responses through
    application results to CLI diagnostics, including the happy path and known
