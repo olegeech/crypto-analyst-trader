@@ -20,14 +20,19 @@ Use a short-lived branch and a focused pull request. Link the issue with
 
 ## Verification
 
-Run:
+Choose checks using [risk-based validation](docs/workflow.md#risk-based-validation).
+Documentation-only changes do not require a full local release suite.
+For changes that require full release evidence, use:
 
 ```bash
-npm ci && npm run test:release
+npm run test:release
 ```
 
-This is the single pre-PR verification command. Testnet smoke and dependency
-audit are separate opt-in checks and are not part of the blocking release path.
+Run `npm ci` only when dependencies are missing, manifest/lockfile changes or
+the installed environment is incompatible. Equivalent successful CI on the
+exact commit SHA satisfies those release checks without a duplicate local run.
+Required CI and merge gates remain mandatory. Testnet smoke and dependency
+audit remain separate opt-in checks.
 
 ## Operator safeguards and diagnostics
 

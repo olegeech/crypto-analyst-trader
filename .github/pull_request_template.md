@@ -8,8 +8,9 @@
 
 ## Evidence
 
-- [ ] `npm ci && npm run test:release`
-- Targeted tests or artifacts:
+- Validation selected under [risk-based validation](../docs/workflow.md#risk-based-validation):
+- Commands/results or equivalent successful CI (exact commit SHA and run link):
+- Material validation limits, if any:
 
 ## Safety impact
 
