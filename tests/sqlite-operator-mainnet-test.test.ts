@@ -14,6 +14,7 @@ import {
   createOperatorMainnetTestPlan,
   deriveOperatorMainnetTestSourceId,
 } from "../src/domain/execution/operator-mainnet-test-plan.js";
+import { createOperatorMainnetRecoveryAttestation } from "../src/domain/execution/operator-mainnet-recovery.js";
 import { createInstrumentConstraints } from "../src/domain/market/instrument-constraints.js";
 import {
   canonicalSerialize,
@@ -25,6 +26,7 @@ import {
 } from "../src/domain/shared/time.js";
 import type { Result } from "../src/domain/shared/result.js";
 import type { PersistenceScope } from "../src/ports/persistence.js";
+import type { OperatorMainnetTestSnapshot } from "../src/ports/operator-mainnet-test-persistence.js";
 import { CURRENT_SCHEMA_VERSION } from "../src/adapters/sqlite/migrations.js";
 
 const runtime = { nodeVersion: "22.22.3", sqliteVersion: "3.51.3" } as const;
@@ -156,6 +158,7 @@ function prepare(
   fixture: ReturnType<typeof setup>,
   valuePlan = plan(),
   valueApproval = approval(valuePlan),
+  recoveryGrantId?: string,
 ) {
   const payload = exactPayload(valuePlan);
   return fixture.store.prepareCreateIntent({
@@ -165,7 +168,134 @@ function prepare(
     payloadJson: payload,
     payloadHash: payloadHash(payload),
     preparedAt: fixture.clock.value,
+    ...(recoveryGrantId === undefined ? {} : { recoveryGrantId }),
   });
+}
+
+function manualRecoveryAttestation(
+  source: OperatorMainnetTestSnapshot,
+  takeProfitStatus = "Filled",
+) {
+  const sourceRevision =
+    (source.attempt === undefined ? 0 : 1) +
+    source.reconciliations.length +
+    source.manualActions.length +
+    (source.sourceDisposition === undefined ? 0 : 1);
+  return value(
+    createOperatorMainnetRecoveryAttestation({
+      provenance: "MANUAL_ATTESTED_NOT_API_VERIFIED",
+      exchange: "bybit",
+      environment: "mainnet",
+      accountIdentityHash: source.source.scope.accountId,
+      sourceId: source.source.sourceId,
+      sourcePlanHash: source.source.planHash,
+      sourceIntentId: source.intent.writeIntentId,
+      sourceRevision,
+      actor: "operator-01",
+      observedAt: NOW,
+      inspection: {
+        accountOpenOrdersInspected: true,
+        accountOpenOrders: [],
+        accountPositionsInspected: true,
+        accountPositions: [],
+        sourceOrderHistoryInspected: true,
+        sourceOrders: [
+          {
+            orderId: "exchange-parent-01",
+            clientOrderId: source.source.clientOrderId,
+            symbol: source.plan.symbol,
+            side: "Buy",
+            orderType: "Limit",
+            quantity: source.plan.entry.quantity.toString(),
+            price: source.plan.entry.limitPrice.toString(),
+            status: "Filled",
+          },
+          {
+            orderId: "exchange-tp-01",
+            symbol: source.plan.symbol,
+            side: "Sell",
+            orderType: "Market",
+            quantity: source.plan.entry.quantity.toString(),
+            status: takeProfitStatus,
+          },
+        ],
+        sourceFillsInspected: true,
+        sourceFills: [
+          {
+            executionId: "execution-entry-01",
+            orderId: "exchange-parent-01",
+            clientOrderId: source.source.clientOrderId,
+            symbol: source.plan.symbol,
+            side: "Buy",
+            quantity: source.plan.entry.quantity.toString(),
+            price: source.plan.entry.limitPrice.toString(),
+            executedAt: NOW,
+          },
+          {
+            executionId: "execution-exit-01",
+            orderId: "exchange-tp-01",
+            symbol: source.plan.symbol,
+            side: "Sell",
+            quantity: source.plan.entry.quantity.toString(),
+            price: source.plan.entry.takeProfit.triggerPrice.toString(),
+            executedAt: NOW,
+          },
+        ],
+        sourcePositionInspected: true,
+        sourcePosition: null,
+        sourceTakeProfitInspected: true,
+        sourceTakeProfitOrders: [
+          {
+            orderId: "exchange-tp-01",
+            symbol: source.plan.symbol,
+            side: "Sell",
+            orderType: "Market",
+            quantity: source.plan.entry.quantity.toString(),
+            status: takeProfitStatus,
+          },
+        ],
+      },
+      manualActions: ["position-closed"],
+      acceptedUncertainty: ["manual-ui-may-be-stale"],
+    }),
+  );
+}
+
+function saveRecoveryPlan(
+  fixture: ReturnType<typeof setup>,
+  valuePlan: ReturnType<typeof plan>,
+) {
+  value(fixture.store.persistPreparedPlan(valuePlan));
+  return valuePlan;
+}
+
+function createManualRecoveryGrant(
+  fixture: ReturnType<typeof setup>,
+  source: OperatorMainnetTestSnapshot,
+  recoveryPlan = plan("recovery-plan-01"),
+) {
+  const attestation = manualRecoveryAttestation(source);
+  value(
+    fixture.store.persistOperatorMainnetRecoveryAttestation({
+      attestation,
+      recordedAt: fixture.clock.value,
+    }),
+  );
+  saveRecoveryPlan(fixture, recoveryPlan);
+  const grant = value(
+    fixture.store.createOperatorMainnetRecoveryGrant({
+      sourceId: source.source.sourceId,
+      planHash: recoveryPlan.contentHash,
+      resolution: {
+        kind: "manual-attested",
+        attestationHash: attestation.contentHash,
+      },
+      actor: "operator-01",
+      consent: true,
+      issuedAt: fixture.clock.value,
+    }),
+  );
+  return { attestation, recoveryPlan, grant };
 }
 
 test("operator create intent, canonical artifacts and exact payload commit atomically", () => {
@@ -213,7 +343,7 @@ test("operator create intent, canonical artifacts and exact payload commit atomi
       .get()?.count,
     2,
   );
-  assert.equal(CURRENT_SCHEMA_VERSION, 9);
+  assert.equal(CURRENT_SCHEMA_VERSION, 10);
 });
 
 test("prepared plan is durable and readable before any CREATE intent", () => {
@@ -717,7 +847,546 @@ test("legacy #31 attempt-shaped HALT evidence stays immutable and missing origin
   fixture.connection.close();
 });
 
-test("v9 migration preserves populated historical v1 intent bytes and recovery records", () => {
+test("manual recovery clears eligible HALT once and atomically consumes grant with source disposition and new intent", () => {
+  const fixture = setup();
+  const original = value(prepare(fixture));
+  value(
+    fixture.store.recordAttempt({
+      runId: "operator-run-01",
+      sourceId: original.source.sourceId,
+      attemptId: "recovery-ambiguous-attempt",
+      outcome: "ambiguous",
+      providerReasonCode: "ACK_UNKNOWN",
+      recordedAt: fixture.clock.value,
+    }),
+  );
+  const unresolved = value(
+    fixture.store.readOperatorMainnetTestSource(original.source.sourceId),
+  )!;
+  // Accept the historical #31 shape only because these exact immutable bytes
+  // are also present as the source's saved attempt.
+  fixture.connection.db
+    .prepare("UPDATE halt_events SET evidence_json = ? WHERE account_id = ?")
+    .run(unresolved.attempt!.canonicalJson, ACCOUNT);
+  const { attestation, recoveryPlan, grant } = createManualRecoveryGrant(
+    fixture,
+    unresolved,
+  );
+
+  assert.equal(grant.resolution.kind, "manual-attested");
+  assert.equal(
+    grant.resolution.kind === "manual-attested" &&
+      grant.resolution.attestationHash,
+    attestation.contentHash,
+  );
+  assert.equal(grant.haltRevision, 2);
+  const activeEvent = fixture.connection.db
+    .prepare(
+      "SELECT event_id FROM halt_events WHERE account_id = ? AND active = 1",
+    )
+    .get(ACCOUNT) as { readonly event_id: string } | undefined;
+  assert.equal(grant.haltOrigin?.eventId, activeEvent?.event_id);
+  assert.equal(grant.haltOrigin?.revision, 1);
+  assert.equal(value(fixture.execution.readHalt()).active, false);
+  assert.equal(
+    fixture.connection.db
+      .prepare("SELECT COUNT(*) AS count FROM halt_events WHERE account_id = ?")
+      .get(ACCOUNT)?.count,
+    2,
+  );
+  assert.equal(
+    value(fixture.store.findPendingOperatorMainnetTestSource())?.sourceId,
+    original.source.sourceId,
+    "an unconsumed grant leaves the original source blocking",
+  );
+  assert.equal(
+    value(
+      fixture.store.findOperatorMainnetRecoveryGrant(
+        recoveryPlan.contentHash,
+        fixture.clock.value,
+      ),
+    )?.grantId,
+    grant.grantId,
+  );
+
+  fixture.clock.value = timestamp("2026-10-22T10:01:01.000Z");
+  const duplicate = fixture.store.createOperatorMainnetRecoveryGrant({
+    sourceId: original.source.sourceId,
+    planHash: recoveryPlan.contentHash,
+    resolution: {
+      kind: "manual-attested",
+      attestationHash: attestation.contentHash,
+    },
+    actor: "operator-01",
+    consent: true,
+    issuedAt: fixture.clock.value,
+  });
+  assert.equal(
+    duplicate.ok,
+    false,
+    "the same attestation cannot mint a second grant",
+  );
+  fixture.clock.value = NOW;
+
+  const wrongPlan = plan("wrong-recovery-plan");
+  assert.equal(
+    prepare(fixture, wrongPlan, approval(wrongPlan), grant.grantId).ok,
+    false,
+  );
+  assert.equal(
+    fixture.connection.db
+      .prepare(
+        "SELECT COUNT(*) AS count FROM operator_mainnet_recovery_grant_consumptions",
+      )
+      .get()?.count,
+    0,
+  );
+
+  fixture.connection.db.exec(`
+    CREATE TRIGGER fail_operator_recovery_disposition
+    BEFORE INSERT ON operator_mainnet_test_source_dispositions
+    BEGIN SELECT RAISE(ABORT, 'recovery disposition fault'); END;
+  `);
+  assert.equal(
+    prepare(fixture, recoveryPlan, approval(recoveryPlan), grant.grantId).ok,
+    false,
+  );
+  assert.equal(
+    fixture.connection.db
+      .prepare("SELECT COUNT(*) AS count FROM operator_mainnet_test_sources")
+      .get()?.count,
+    1,
+  );
+  assert.equal(
+    fixture.connection.db
+      .prepare(
+        "SELECT COUNT(*) AS count FROM operator_mainnet_test_write_intents",
+      )
+      .get()?.count,
+    1,
+  );
+  assert.equal(
+    fixture.connection.db
+      .prepare(
+        "SELECT COUNT(*) AS count FROM operator_mainnet_recovery_grant_consumptions",
+      )
+      .get()?.count,
+    0,
+  );
+  assert.equal(
+    value(
+      fixture.store.findOperatorMainnetRecoveryGrant(
+        recoveryPlan.contentHash,
+        fixture.clock.value,
+      ),
+    )?.grantId,
+    grant.grantId,
+    "a rolled-back intent transaction does not spend the grant",
+  );
+
+  fixture.connection.db.exec(
+    "DROP TRIGGER fail_operator_recovery_disposition;",
+  );
+  const next = value(
+    prepare(fixture, recoveryPlan, approval(recoveryPlan), grant.grantId),
+  );
+  assert.equal(
+    JSON.parse(next.intent.canonicalJson).schemaVersion,
+    "operator-mainnet-test-create-intent/v3",
+  );
+  assert.equal(
+    JSON.parse(next.intent.canonicalJson).recoveryGrantId,
+    grant.grantId,
+  );
+  assert.equal(
+    value(fixture.store.readOperatorMainnetTestSource(original.source.sourceId))
+      ?.sourceDisposition?.disposition,
+    "human-attested",
+  );
+  assert.equal(
+    fixture.connection.db
+      .prepare(
+        "SELECT COUNT(*) AS count FROM operator_mainnet_recovery_grant_consumptions",
+      )
+      .get()?.count,
+    1,
+  );
+  assert.equal(
+    value(fixture.store.findPendingOperatorMainnetTestSource())?.sourceId,
+    next.source.sourceId,
+  );
+  assert.equal(
+    value(
+      fixture.store.findOperatorMainnetRecoveryGrant(
+        recoveryPlan.contentHash,
+        fixture.clock.value,
+      ),
+    ),
+    undefined,
+  );
+  assert.equal(
+    prepare(fixture, recoveryPlan, approval(recoveryPlan), grant.grantId).ok,
+    false,
+    "a committed recovery grant is single-use",
+  );
+  assert.deepEqual(
+    fixture.connection.db.prepare("PRAGMA foreign_key_check").all(),
+    [],
+  );
+  fixture.connection.close();
+});
+
+test("HALT-free pending-source recovery does not append fictional clearance and source revision invalidates grant", () => {
+  const fixture = setup();
+  const original = value(prepare(fixture));
+  value(
+    fixture.store.recordAttempt({
+      runId: "operator-run-01",
+      sourceId: original.source.sourceId,
+      attemptId: "accepted-but-pending",
+      outcome: "accepted",
+      exchangeOrderId: "exchange-parent-accepted",
+      recordedAt: fixture.clock.value,
+    }),
+  );
+  const pending = value(
+    fixture.store.readOperatorMainnetTestSource(original.source.sourceId),
+  )!;
+  const { recoveryPlan, grant } = createManualRecoveryGrant(fixture, pending);
+
+  assert.equal(grant.haltOrigin, null);
+  assert.equal(grant.haltRevision, 0);
+  assert.equal(value(fixture.execution.readHalt()).active, false);
+  assert.equal(
+    fixture.connection.db
+      .prepare("SELECT COUNT(*) AS count FROM halt_events WHERE account_id = ?")
+      .get(ACCOUNT)?.count,
+    0,
+  );
+  assert.equal(
+    value(fixture.store.findPendingOperatorMainnetTestSource())?.sourceId,
+    original.source.sourceId,
+  );
+
+  fixture.clock.value = timestamp("2026-10-22T10:01:01.000Z");
+  value(
+    fixture.store.appendReconciliation({
+      sourceId: original.source.sourceId,
+      lifecycleOutcome: "UNKNOWN",
+      cleanupStatus: "unknown",
+      evidence: { reason: "newer source evidence" },
+      observedAt: fixture.clock.value,
+    }),
+  );
+  assert.equal(
+    value(
+      fixture.store.findOperatorMainnetRecoveryGrant(
+        recoveryPlan.contentHash,
+        fixture.clock.value,
+      ),
+    ),
+    undefined,
+  );
+  assert.equal(
+    prepare(fixture, recoveryPlan, approval(recoveryPlan), grant.grantId).ok,
+    false,
+    "newer source evidence invalidates an unconsumed grant",
+  );
+  assert.equal(
+    fixture.connection.db
+      .prepare(
+        "SELECT COUNT(*) AS count FROM operator_mainnet_recovery_grant_consumptions",
+      )
+      .get()?.count,
+    0,
+  );
+  fixture.connection.close();
+});
+
+test("recording an attempt invalidates a manual attestation bound before the attempt existed", () => {
+  const fixture = setup();
+  const original = value(prepare(fixture));
+  const attestation = manualRecoveryAttestation(original);
+  assert.equal(attestation.sourceRevision, 0);
+  value(
+    fixture.store.persistOperatorMainnetRecoveryAttestation({
+      attestation,
+      recordedAt: fixture.clock.value,
+    }),
+  );
+  const recoveryPlan = saveRecoveryPlan(
+    fixture,
+    plan("attempt-invalidates-recovery-attestation"),
+  );
+  value(
+    fixture.store.recordAttempt({
+      runId: "operator-run-01",
+      sourceId: original.source.sourceId,
+      attemptId: "attempt-added-after-attestation",
+      outcome: "accepted",
+      exchangeOrderId: "exchange-parent-after-attestation",
+      recordedAt: fixture.clock.value,
+    }),
+  );
+
+  const grant = fixture.store.createOperatorMainnetRecoveryGrant({
+    sourceId: original.source.sourceId,
+    planHash: recoveryPlan.contentHash,
+    resolution: {
+      kind: "manual-attested",
+      attestationHash: attestation.contentHash,
+    },
+    actor: "operator-01",
+    consent: true,
+    issuedAt: fixture.clock.value,
+  });
+  assert.equal(grant.ok, false);
+  assert.equal(value(fixture.execution.readHalt()).active, false);
+  assert.equal(
+    fixture.connection.db
+      .prepare("SELECT COUNT(*) AS count FROM operator_mainnet_recovery_grants")
+      .get()?.count,
+    0,
+  );
+  assert.equal(
+    value(
+      fixture.store.readOperatorMainnetRecoveryAttestation(
+        attestation.contentHash,
+      ),
+    )?.sourceRevision,
+    0,
+  );
+  fixture.connection.close();
+});
+
+test("fresh verified API cleanup can clear a source-bound HALT without a manual disposition", () => {
+  const fixture = setup();
+  const original = value(prepare(fixture));
+  value(
+    fixture.store.recordAttempt({
+      runId: "operator-run-01",
+      sourceId: original.source.sourceId,
+      attemptId: "api-recovery-ambiguous",
+      outcome: "ambiguous",
+      recordedAt: fixture.clock.value,
+    }),
+  );
+  const reconciliation = value(
+    fixture.store.appendReconciliation({
+      sourceId: original.source.sourceId,
+      lifecycleOutcome: "TP_LIFECYCLE_PASS",
+      cleanupStatus: "verified-clean",
+      evidence: { entryAndExitFillsMatched: true, noOpenOrders: true },
+      observedAt: fixture.clock.value,
+    }),
+  );
+  const recoveryPlan = saveRecoveryPlan(fixture, plan("api-recovery-plan"));
+  const grant = value(
+    fixture.store.createOperatorMainnetRecoveryGrant({
+      sourceId: original.source.sourceId,
+      planHash: recoveryPlan.contentHash,
+      resolution: {
+        kind: "api-resolved",
+        reconciliationId: reconciliation.reconciliationId,
+        reconciliationHash: reconciliation.canonicalHash,
+      },
+      actor: "operator-01",
+      consent: true,
+      issuedAt: fixture.clock.value,
+    }),
+  );
+  assert.equal(grant.resolution.kind, "api-resolved");
+  assert.equal(value(fixture.execution.readHalt()).active, false);
+  assert.equal(
+    value(fixture.store.readOperatorMainnetTestSource(original.source.sourceId))
+      ?.sourceDisposition,
+    undefined,
+  );
+  const clearance = fixture.connection.db
+    .prepare(
+      "SELECT evidence_json FROM halt_events WHERE account_id = ? AND active = 0",
+    )
+    .get(ACCOUNT) as { readonly evidence_json: string | null } | undefined;
+  assert.ok(clearance?.evidence_json);
+  assert.equal(JSON.parse(clearance.evidence_json).grantId, grant.grantId);
+  fixture.connection.close();
+});
+
+test("status-unknown HALT remains attributable to its historical reconciliation after a newer clean result", () => {
+  const fixture = setup();
+  const original = value(prepare(fixture));
+  const unknown = value(
+    fixture.store.appendReconciliation({
+      sourceId: original.source.sourceId,
+      lifecycleOutcome: "UNKNOWN",
+      cleanupStatus: "unknown",
+      evidence: { reason: "first status read was incomplete" },
+      observedAt: fixture.clock.value,
+    }),
+  );
+  value(
+    fixture.store.raiseHalt(
+      original.source.sourceId,
+      "operator Mainnet status is unknown",
+      fixture.clock.value,
+    ),
+  );
+  fixture.clock.value = timestamp("2026-10-22T10:01:01.000Z");
+  const clean = value(
+    fixture.store.appendReconciliation({
+      sourceId: original.source.sourceId,
+      lifecycleOutcome: "TP_LIFECYCLE_PASS",
+      cleanupStatus: "verified-clean",
+      evidence: { retryResolvedLifecycle: true },
+      observedAt: fixture.clock.value,
+    }),
+  );
+  const recoveryPlan = saveRecoveryPlan(fixture, plan("status-halt-recovery"));
+  const grant = value(
+    fixture.store.createOperatorMainnetRecoveryGrant({
+      sourceId: original.source.sourceId,
+      planHash: recoveryPlan.contentHash,
+      resolution: {
+        kind: "api-resolved",
+        reconciliationId: clean.reconciliationId,
+        reconciliationHash: clean.canonicalHash,
+      },
+      actor: "operator-01",
+      consent: true,
+      issuedAt: fixture.clock.value,
+    }),
+  );
+  assert.equal(grant.haltOrigin?.revision, 1);
+  assert.equal(grant.sourceRevision, 2);
+  assert.equal(value(fixture.execution.readHalt()).active, false);
+  assert.equal(
+    value(fixture.store.readOperatorMainnetTestSource(original.source.sourceId))
+      ?.reconciliations[0]?.canonicalHash,
+    unknown.canonicalHash,
+  );
+  fixture.connection.close();
+});
+
+test("recovery rejects an unlinked legacy HALT origin and leaves account blocked", () => {
+  const fixture = setup();
+  const original = value(prepare(fixture));
+  const attempt = value(
+    fixture.store.recordAttempt({
+      runId: "operator-run-01",
+      sourceId: original.source.sourceId,
+      attemptId: "legacy-unlinked-attempt",
+      outcome: "ambiguous",
+      recordedAt: fixture.clock.value,
+    }),
+  ).attempt!;
+  fixture.connection.db
+    .prepare("UPDATE halt_events SET evidence_json = NULL WHERE account_id = ?")
+    .run(ACCOUNT);
+  const source = value(
+    fixture.store.readOperatorMainnetTestSource(original.source.sourceId),
+  )!;
+  const attestation = manualRecoveryAttestation(source);
+  value(
+    fixture.store.persistOperatorMainnetRecoveryAttestation({
+      attestation,
+      recordedAt: fixture.clock.value,
+    }),
+  );
+  const recoveryPlan = saveRecoveryPlan(fixture, plan("blocked-recovery-plan"));
+  const grant = fixture.store.createOperatorMainnetRecoveryGrant({
+    sourceId: original.source.sourceId,
+    planHash: recoveryPlan.contentHash,
+    resolution: {
+      kind: "manual-attested",
+      attestationHash: attestation.contentHash,
+    },
+    actor: "operator-01",
+    consent: true,
+    issuedAt: fixture.clock.value,
+  });
+  assert.equal(grant.ok, false);
+  if (!grant.ok) {
+    assert.equal(grant.error.code, "HALT_ACTIVE");
+    assert.match(
+      grant.error.message,
+      /HALT origin is missing or uncorrelated/u,
+    );
+  }
+  assert.equal(value(fixture.execution.readHalt()).active, true);
+  assert.equal(
+    fixture.connection.db
+      .prepare("SELECT COUNT(*) AS count FROM operator_mainnet_recovery_grants")
+      .get()?.count,
+    0,
+  );
+  assert.equal(attempt.writeIntentId, original.intent.writeIntentId);
+  fixture.connection.close();
+});
+
+test("manual recovery rejects nonterminal source TP status even when account-wide open orders are empty", () => {
+  const fixture = setup();
+  const original = value(prepare(fixture));
+  value(
+    fixture.store.recordAttempt({
+      runId: "operator-run-01",
+      sourceId: original.source.sourceId,
+      attemptId: "nonterminal-tp-source",
+      outcome: "ambiguous",
+      recordedAt: fixture.clock.value,
+    }),
+  );
+  const source = value(
+    fixture.store.readOperatorMainnetTestSource(original.source.sourceId),
+  )!;
+  const attestation = manualRecoveryAttestation(source, "New");
+  assert.equal(attestation.inspection.accountOpenOrders.length, 0);
+  assert.equal(attestation.inspection.sourceTakeProfitOrders[0]?.status, "New");
+  value(
+    fixture.store.persistOperatorMainnetRecoveryAttestation({
+      attestation,
+      recordedAt: fixture.clock.value,
+    }),
+  );
+  const recoveryPlan = saveRecoveryPlan(
+    fixture,
+    plan("recovery-open-tp-blocked"),
+  );
+
+  const grant = fixture.store.createOperatorMainnetRecoveryGrant({
+    sourceId: original.source.sourceId,
+    planHash: recoveryPlan.contentHash,
+    resolution: {
+      kind: "manual-attested",
+      attestationHash: attestation.contentHash,
+    },
+    actor: "operator-01",
+    consent: true,
+    issuedAt: fixture.clock.value,
+  });
+  assert.equal(grant.ok, false);
+  if (!grant.ok) {
+    assert.equal(grant.error.code, "UNRESOLVED_STATE");
+    assert.match(grant.error.message, /nonterminal or unknown order status/u);
+  }
+  assert.equal(value(fixture.execution.readHalt()).active, true);
+  assert.equal(
+    fixture.connection.db
+      .prepare("SELECT COUNT(*) AS count FROM operator_mainnet_recovery_grants")
+      .get()?.count,
+    0,
+  );
+  assert.equal(
+    fixture.connection.db
+      .prepare(
+        "SELECT COUNT(*) AS count FROM halt_events WHERE account_id = ? AND active = 0",
+      )
+      .get(ACCOUNT)?.count,
+    0,
+  );
+  fixture.connection.close();
+});
+
+test("v8 through v10 migrations preserve populated historical v1 intent bytes and recovery records", () => {
   const fixture = setup();
   const created = value(prepare(fixture));
   value(
@@ -730,10 +1399,14 @@ test("v9 migration preserves populated historical v1 intent bytes and recovery r
     }),
   );
   // Reconstitute the v8 projections and canonical v1 record before opening it
-  // with the v9 adapter. No migration rewrites canonical history.
+  // with the v10 adapter. The additive v10 tables are absent in a v8 database.
   fixture.connection.db.exec(`
     ALTER TABLE operator_mainnet_test_write_intents ADD COLUMN lease_owner_run_id TEXT NOT NULL DEFAULT 'historic-run';
     ALTER TABLE operator_mainnet_test_write_intents ADD COLUMN lease_epoch INTEGER NOT NULL DEFAULT 1 CHECK (lease_epoch > 0);
+    DROP TABLE operator_mainnet_test_source_dispositions;
+    DROP TABLE operator_mainnet_recovery_grant_consumptions;
+    DROP TABLE operator_mainnet_recovery_grants;
+    DROP TABLE operator_mainnet_recovery_attestations;
     UPDATE schema_meta SET schema_version = 8;
   `);
   const historical = value(

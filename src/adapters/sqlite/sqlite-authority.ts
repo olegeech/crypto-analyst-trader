@@ -208,3 +208,71 @@ export function raiseHaltWithinTransaction(
     );
   return haltRow(database, scope);
 }
+
+/**
+ * Clear an eligible operator incident from its caller-owned transaction.
+ * Generic execution clearance intentionally remains lease-bound elsewhere.
+ */
+export function clearOperatorHaltWithinTransaction(
+  database: DatabaseSync,
+  scope: PersistenceScope,
+  expectedRevision: number,
+  reason: string,
+  recordedAt: UtcTimestamp,
+  evidenceJson: string,
+): Result<HaltState> {
+  const expected = requireFiniteInteger(expectedRevision, "expectedRevision");
+  const safeReason = requireSafeText(reason, "reason");
+  const current = haltRow(database, scope);
+  if (!expected.ok || !safeReason.ok || !current.ok)
+    return persistenceFailure("operator HALT clearance input is invalid");
+  if (!current.value.active || current.value.revision !== expected.value)
+    return fail(
+      domainError(
+        "HALT_ACTIVE",
+        "operator HALT changed before explicit source-bound recovery",
+      ),
+    );
+  if (typeof evidenceJson !== "string" || evidenceJson.length === 0)
+    return persistenceFailure("operator HALT clearance evidence is absent");
+  const revision = current.value.revision + 1;
+  if (!Number.isSafeInteger(revision))
+    return persistenceFailure("HALT revision exceeded the safe integer range");
+  const eventId = deterministicId(
+    "halt",
+    `${authorityScopeValues(scope).join("\u0000")}:${revision}:${safeReason.value}`,
+  );
+  database
+    .prepare(
+      `UPDATE halt_state
+       SET active = 0, revision = ?, reason = NULL, raised_at = NULL,
+           reconciliation_required = 0
+       WHERE ${AUTHORITY_SCOPE_WHERE} AND revision = ? AND active = 1`,
+    )
+    .run(revision, ...authorityScopeValues(scope), expected.value);
+  const updated = haltRow(database, scope);
+  if (!updated.ok) return updated;
+  if (updated.value.active || updated.value.revision !== revision)
+    return fail(
+      domainError(
+        "HALT_ACTIVE",
+        "operator HALT changed before explicit source-bound recovery",
+      ),
+    );
+  database
+    .prepare(
+      `INSERT INTO halt_events
+       (event_id, exchange, environment, account_id, category, position_mode,
+        revision, active, reason, recorded_at, evidence_json)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)`,
+    )
+    .run(
+      eventId,
+      ...scopeValues(scope),
+      revision,
+      safeReason.value,
+      recordedAt,
+      evidenceJson,
+    );
+  return haltRow(database, scope);
+}
