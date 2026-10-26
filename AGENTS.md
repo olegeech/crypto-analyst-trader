@@ -72,6 +72,9 @@ An issue or pull request cannot restate, weaken or override
 - Do not add a second backlog source or duplicate issue bodies in docs.
 - Follow `docs/workflow.md` and `CONTRIBUTING.md` for branch, test and pull
   request rules.
+- Use [minimum sufficient validation](docs/workflow.md#risk-based-validation):
+  select checks by actual risk and reuse equivalent green CI on the exact SHA
+  instead of repeating a full local suite.
 - For external API or money-affecting changes, follow the
   [integration contract check](docs/workflow.md#integration-contract-check):
   verify provider assumptions, test the production path and settle product

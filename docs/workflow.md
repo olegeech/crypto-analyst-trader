@@ -92,6 +92,45 @@ diagnostic usefulness against the concrete risk addressed.
 - size small enough for one focused pull request;
 - required live, capital, data-integrity or security labels applied.
 
+## Risk-based validation
+
+Use minimum sufficient validation, not maximum possible validation. Choose
+checks by actual behavior and risk; use the highest applicable row below.
+
+| Change                                                        | Sufficient validation                                                                                                              |
+| ------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| Documentation only                                            | Markdown formatting, changed links and `git diff --check`.                                                                         |
+| Internal refactoring without behavior changes                 | Affected tests and typecheck.                                                                                                      |
+| Business logic                                                | Targeted unit/integration tests, lint and typecheck.                                                                               |
+| Bybit provider contracts                                      | Production-path tests through real mappers, representative sanitized fixtures and critical negative cases; relevant static checks. |
+| Mainnet execution, HALT, accounting or authorization behavior | Full release suite, safety regressions, CI and required read-only checks.                                                          |
+
+Classify by effect, not file extension: executable configuration and agent
+instructions need review of the behavior they change. Documentation describing
+a safety gate needs semantic review, not a full runtime suite solely because
+it mentions trading. Internal financial logic without provider contract changes
+does not require new provider fixtures; test financial boundary cases and
+existing invariants.
+
+Reuse equivalent successful CI checks on the exact commit SHA instead of
+repeating them locally. A different SHA or materially different environment
+needs an explicit relevance assessment; do not claim exact-SHA evidence from
+an older run. Fresh runtime admission and separately authorized read-only/live
+checks are not replaced by CI. Broaden or repeat validation only when changes,
+failures or unresolved risks justify it.
+
+Run `npm ci` only for missing dependencies, manifest/lockfile changes or an
+incompatible installed environment. State the validation performed and any
+material limits in the PR. Do not add checks for procedural formality.
+Required release, CI and merge gates remain in force; this policy removes
+unnecessary duplication, not those gates. CI keeps the required `release-checks`
+name: an entirely known diff of root/documentation Markdown or PR-template
+Markdown runs formatting, local file/anchor links and `git diff --check` only.
+External URLs are not fetched by this check. Code, dependencies, CI/configuration,
+skill files, mixed changes or an unavailable diff select the full release suite.
+PR scope uses the complete base-to-head diff; pushes use the previous-to-current
+commit range, including deleted and renamed paths.
+
 ## Integration contract check
 
 For external API or money-affecting changes, apply only checks relevant to
@@ -141,7 +180,8 @@ owner action needed to refresh the paused workflow.
 ## Definition of Done
 
 - acceptance criteria have test or artifact evidence;
-- release checks pass;
+- validation matches the changed risk under [risk-based validation](#risk-based-validation),
+  and required release/CI gates pass;
 - risk and execution changes cover negative, duplicate, partial-failure and
   restart paths;
 - live changes include deterministic fault-test evidence, explicit read-only
