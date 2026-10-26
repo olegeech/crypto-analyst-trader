@@ -267,6 +267,74 @@ perform any necessary action yourself, then rerun `status` to record fresh
 exchange proof. Do not treat the manual declaration itself as proof or use it
 to clear HALT.
 
+### Manual-attestation recovery for an unavailable read (#25)
+
+The bounded B path is a human-risk exception for the selected prior-source
+reconciliation facts or current-target position/open-order facts that the
+required read cannot establish. It is available only for one attended Mainnet
+operator and one upcoming exact plan. `status` remains GET-only. Its answer to
+whether you acted in Bybit since the prior check (`none`, `cancel`, `close` or
+`other`) records your statement as provenance only; it does not attest that the
+account is clean, authorize recovery or CREATE, or clear HALT.
+
+Start with the exact source and account/environment shown by the local
+operator record. In Bybit, select the dedicated Mainnet subaccount used by the
+plan and confirm the account/environment before inspecting anything. If it
+does not match, stop. Review
+the source's owned parent and take-profit identities, order history, fills or
+executions, current position and take-profit state. Also inspect the dedicated
+account's **all currently open orders and all positions**, across symbols, not
+only the old source or the proposed target. Check active filters and available
+pages so a hidden or truncated list is not mistaken for empty state. Record
+what you saw and when, any manual actions, and the remaining uncertainty. If a
+relevant list, position, order identity or time is uninspected or unclear,
+record it as `UNKNOWN`; do not attest a zero. A visible position or open order
+means flat/no-open-order state has not been established, so stop and follow the
+supported path for that exposure; this recovery does not authorize cancelling
+or closing it.
+
+Use the optional recovery-preparation flow to save the exact plan bound to the
+typed UI facts. Preparation alone neither clears HALT nor grants CREATE. Then
+review the saved account, source, owned identities, provenance, accepted
+uncertainty, exact plan and expiry, and use the explicit `mainnet:test recover`
+operation to authorize B. Recovery is a separate no-exchange-write action. It
+binds the account-scoped HALT origin/revision and source revision to API
+resolution or this attestation. It may clear an eligible active incident HALT
+only after explicit acceptance; when no HALT is active it records no fictitious
+clearance. A different, newer or uncorrelated incident, wrong account/source,
+stale observation, or known contradiction blocks recovery.
+
+The attestation is valid for no more than five minutes from UI observation,
+and its one-plan grant expires at the earlier of that limit or the saved plan's
+expiry. The grant is single-use, and the same attestation cannot mint another
+grant. A later source or HALT revision invalidates an unused grant. Until it is
+atomically consumed with the bound new durable intent, the old source remains
+pending and blocks every other plan. That transaction records the old source's
+disposition as `human-attested`, leaves its API reconciliation rows unchanged,
+and starts an independent status/cleanup obligation for the new source.
+Exact-plan `execute` consent and all normal machine gates still
+apply: account identity and permissions, available balance/margin and
+fee-inclusive capacity, instrument, quote and fees, capital cap, ownership,
+attached take-profit and fresh final revalidation. The manual facts cannot
+waive machine account/permission/capacity/instrument/quote/fee checks or replace
+exact-plan approval, ownership checks, attached take-profit and final
+revalidation of the new intent. Do not fabricate a successful API bundle. An
+earlier historical fill/order that predates a later attested cleanup is not by
+itself a contradiction; a reliable API fact observed at or after that cleanup
+that conflicts with the attestation blocks B. If source ownership or event
+ordering is unclear, stop.
+
+Persist only the typed, versioned, redacted provenance in the private journal.
+Do not save or export screenshots, credentials, account identifiers or raw
+account responses in the repository, issues, PRs or public logs. Do not edit
+SQLite or report the attestation as `verified-clean` or `TP_LIFECYCLE_PASS`.
+If recovery is declined, expires or becomes invalid, the old source stays
+unresolved and no CREATE is authorized; follow the printed safe next action.
+Once the new intent is durable, the grant is spent even if dispatch fails.
+Inspect the exact client order ID and exchange state in Bybit, then use
+GET-only `status`; never run `execute` again for that source. A subsequent
+trade needs normal fresh admission or a new explicit B recovery.
+
 The command output is a sanitized, machine-readable evidence record. Keep the
 reviewed build HEAD (`git rev-parse HEAD`) with the plan schema/hash, policy
 version and identity hash, approval and payload hashes, per-invocation GET and

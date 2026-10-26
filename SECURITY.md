@@ -74,6 +74,41 @@ reconciliation before any new write. The #80 operator surface owns wording,
 while the #9 port owns the stable category, allowed actions, retryability and
 redacted diagnostic field list.
 
+## Supervised Mainnet manual-attestation recovery (#25)
+
+The bounded B path is a named human-risk exception for one attended Mainnet
+operator and one upcoming exact plan. It may replace only specified unavailable
+or inconclusive prior-source reconciliation facts and current-target
+position/open-order facts. It does not replace machine account identity or
+credential-mode/permission checks, available balance or margin, fee-inclusive
+capacity, instrument, quote or fee checks, capital limits, exact-plan consent,
+ownership, attached take-profit or durable unique intent. See the
+[operator recovery procedure](docs/operator-runbook.md#manual-attestation-recovery-for-an-unavailable-read-25)
+for the UI inspection steps.
+
+The separate recovery attestation binds the selected account/environment
+identity and prior source/owned identities. It records inspected orders,
+fills, position and take-profit, observation time, actions and accepted
+uncertainty. Persist only
+versioned, validated, redacted provenance marked
+`MANUAL_ATTESTED_NOT_API_VERIFIED`. Do not persist or export raw account
+screenshots, credentials, signed data or unredacted provider responses. An
+uninspected or unclear relevant UI scope is `UNKNOWN`; never report it as zero
+or rewrite manual evidence as API `verified-clean` or `TP_LIFECYCLE_PASS`.
+
+The existing status prompt about actions taken in Bybit is append-only
+provenance; its answer grants no recovery or entry authority. Recovery is a
+separate explicit, no-exchange-write operation that binds the account-scoped
+HALT origin/revision and source revision to API resolution or the B attestation.
+For B it grants one saved exact upcoming plan, for no longer than five minutes
+after UI observation or the plan expiry, whichever comes first. An active HALT
+is cleared only when that eligible recovery is explicitly accepted; HALT-free
+pending cleanup records no clearance. An unconsumed grant does not resolve the
+old source. The grant is consumed atomically with the bound new durable intent
+and cannot authorize another plan or later unattended entry. A committed intent
+spends it even if dispatch fails; inspect the exact order identity and never
+resend. Do not edit SQLite to bypass recovery or an incident HALT.
+
 ## Bybit probe manual recovery
 
 When a Testnet or Demo capability probe records `UNRESOLVED`, do not delete its
