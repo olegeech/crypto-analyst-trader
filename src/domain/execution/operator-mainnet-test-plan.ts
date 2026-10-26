@@ -35,6 +35,8 @@ export const OPERATOR_MAINNET_QUOTE_SCHEMA_VERSION =
   "bybit-linear-operator-quote/v1" as const;
 export const OPERATOR_MAINNET_TEST_PLAN_SCHEMA_VERSION =
   "operator-mainnet-execution-test/v1" as const;
+export const OPERATOR_MAINNET_RECOVERY_TEST_PLAN_SCHEMA_VERSION =
+  "operator-mainnet-execution-test/v2" as const;
 export const OPERATOR_MAINNET_TEST_APPROVAL_SCHEMA_VERSION =
   "operator-mainnet-execution-approval/v1" as const;
 export const OPERATOR_MAINNET_TEST_POLICY_VERSION =
@@ -57,7 +59,7 @@ const QUOTE_FIELDS = [
   "last",
   "contentHash",
 ] as const;
-const PLAN_FIELDS = [
+const PLAN_V1_FIELDS = [
   "schemaVersion",
   "policyVersion",
   "environment",
@@ -78,6 +80,11 @@ const PLAN_FIELDS = [
   "preparedAt",
   "quoteFreshnessMs",
   "approvalTtlMs",
+  "contentHash",
+] as const;
+const PLAN_V2_FIELDS = [
+  ...PLAN_V1_FIELDS.slice(0, -1),
+  "recoveryAttestationHash",
   "contentHash",
 ] as const;
 const OPERATOR_WARNING_CODES = ["API_KEY_IP_UNBOUND"] as const;
@@ -149,7 +156,9 @@ export interface OperatorMainnetTestEntry {
 }
 
 export interface OperatorMainnetTestPlan {
-  readonly schemaVersion: typeof OPERATOR_MAINNET_TEST_PLAN_SCHEMA_VERSION;
+  readonly schemaVersion:
+    | typeof OPERATOR_MAINNET_TEST_PLAN_SCHEMA_VERSION
+    | typeof OPERATOR_MAINNET_RECOVERY_TEST_PLAN_SCHEMA_VERSION;
   readonly policyVersion: typeof OPERATOR_MAINNET_TEST_POLICY_VERSION;
   readonly environment: "mainnet";
   readonly accountIdentityHash: string;
@@ -169,6 +178,7 @@ export interface OperatorMainnetTestPlan {
   readonly preparedAt: UtcTimestamp;
   readonly quoteFreshnessMs: typeof OPERATOR_MAINNET_QUOTE_FRESHNESS_MS;
   readonly approvalTtlMs: typeof OPERATOR_MAINNET_APPROVAL_TTL_MS;
+  readonly recoveryAttestationHash?: PlanHash;
   readonly contentHash: PlanHash;
 }
 
@@ -429,7 +439,7 @@ export function deriveOperatorMainnetTestSourceId(
 function canonicalizePlanInput(
   input: unknown,
 ): Result<OperatorMainnetTestPlan> {
-  const inputFields = [
+  const baseFields = [
     "accountIdentityHash",
     "symbol",
     "nonce",
@@ -441,6 +451,13 @@ function canonicalizePlanInput(
     "constraints",
     "preparedAt",
   ] as const;
+  const hasRecoveryAttestation =
+    typeof input === "object" &&
+    input !== null &&
+    Object.hasOwn(input, "recoveryAttestationHash");
+  const inputFields = hasRecoveryAttestation
+    ? [...baseFields, "recoveryAttestationHash"]
+    : baseFields;
   if (!exactRecord(input, inputFields)) return invalidPlan();
   const accountIdentityHash = requireHash(
     input.accountIdentityHash,
@@ -448,6 +465,9 @@ function canonicalizePlanInput(
   );
   const nonce = requireIdentifier(input.nonce, "nonce");
   const preparedAt = parseUtcTimestamp(input.preparedAt);
+  const recoveryAttestationHash = hasRecoveryAttestation
+    ? requireHash(input.recoveryAttestationHash, "recoveryAttestationHash")
+    : undefined;
   const allocation = positiveDecimal(input.allocation, "allocation");
   const grossNotionalCap = positiveDecimal(
     input.grossNotionalCap,
@@ -470,6 +490,7 @@ function canonicalizePlanInput(
     !maxDeviationBps.ok ||
     !quote.ok ||
     !constraints.ok ||
+    (recoveryAttestationHash !== undefined && !recoveryAttestationHash.ok) ||
     typeof input.symbol !== "string" ||
     !MARKET_EVIDENCE_SYMBOLS.includes(input.symbol as MarketEvidenceSymbol)
   )
@@ -672,7 +693,10 @@ function canonicalizePlanInput(
   if (!clientOrderId.ok) return clientOrderId;
 
   const payload = {
-    schemaVersion: OPERATOR_MAINNET_TEST_PLAN_SCHEMA_VERSION,
+    schemaVersion:
+      recoveryAttestationHash === undefined
+        ? OPERATOR_MAINNET_TEST_PLAN_SCHEMA_VERSION
+        : OPERATOR_MAINNET_RECOVERY_TEST_PLAN_SCHEMA_VERSION,
     policyVersion: OPERATOR_MAINNET_TEST_POLICY_VERSION,
     environment: "mainnet" as const,
     accountIdentityHash: accountIdentityHash.value,
@@ -706,6 +730,11 @@ function canonicalizePlanInput(
     preparedAt: preparedAt.value,
     quoteFreshnessMs: OPERATOR_MAINNET_QUOTE_FRESHNESS_MS,
     approvalTtlMs: OPERATOR_MAINNET_APPROVAL_TTL_MS,
+    ...(recoveryAttestationHash === undefined
+      ? {}
+      : {
+          recoveryAttestationHash: recoveryAttestationHash.value as PlanHash,
+        }),
   };
   const contentHash = hashCanonical(payload);
   if (!contentHash.ok) return contentHash;
@@ -721,7 +750,15 @@ export function createOperatorMainnetTestPlan(
 export function rehydrateOperatorMainnetTestPlan(
   input: unknown,
 ): Result<OperatorMainnetTestPlan> {
-  if (!exactRecord(input, PLAN_FIELDS)) return invalidPlan();
+  if (!isRecord(input)) return invalidPlan();
+  const planFields =
+    input.schemaVersion === OPERATOR_MAINNET_TEST_PLAN_SCHEMA_VERSION
+      ? PLAN_V1_FIELDS
+      : input.schemaVersion ===
+          OPERATOR_MAINNET_RECOVERY_TEST_PLAN_SCHEMA_VERSION
+        ? PLAN_V2_FIELDS
+        : undefined;
+  if (!planFields || !exactRecord(input, planFields)) return invalidPlan();
   const replayed = canonicalizePlanInput({
     accountIdentityHash: input.accountIdentityHash,
     symbol: input.symbol,
@@ -733,6 +770,10 @@ export function rehydrateOperatorMainnetTestPlan(
     warningCodes: input.warningCodes,
     constraints: input.constraints,
     preparedAt: input.preparedAt,
+    ...(input.schemaVersion ===
+    OPERATOR_MAINNET_RECOVERY_TEST_PLAN_SCHEMA_VERSION
+      ? { recoveryAttestationHash: input.recoveryAttestationHash }
+      : {}),
   });
   const contentHash = requireHash(input.contentHash, "contentHash");
   if (

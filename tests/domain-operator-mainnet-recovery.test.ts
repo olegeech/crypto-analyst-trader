@@ -121,6 +121,7 @@ function attestationInput(sourceRevision = 2) {
       ],
       sourcePositionInspected: true,
       sourcePosition: null,
+      targetLeverage: "1",
       sourceTakeProfitInspected: true,
       sourceTakeProfitOrders: [],
     },

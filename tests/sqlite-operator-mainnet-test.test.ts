@@ -49,7 +49,7 @@ function timestamp(text: string): UtcTimestamp {
   return value(parseUtcTimestamp(text));
 }
 
-function plan(nonce = "operator-test-01") {
+function plan(nonce = "operator-test-01", recoveryAttestationHash?: PlanHash) {
   const quote = value(
     createOperatorMainnetQuote({
       symbol: "DOGEUSDT",
@@ -90,6 +90,9 @@ function plan(nonce = "operator-test-01") {
       warningCodes: [],
       constraints,
       preparedAt: NOW,
+      ...(recoveryAttestationHash === undefined
+        ? {}
+        : { recoveryAttestationHash }),
     }),
   );
 }
@@ -243,6 +246,7 @@ function manualRecoveryAttestation(
         ],
         sourcePositionInspected: true,
         sourcePosition: null,
+        targetLeverage: "1",
         sourceTakeProfitInspected: true,
         sourceTakeProfitOrders: [
           {
@@ -272,9 +276,10 @@ function saveRecoveryPlan(
 function createManualRecoveryGrant(
   fixture: ReturnType<typeof setup>,
   source: OperatorMainnetTestSnapshot,
-  recoveryPlan = plan("recovery-plan-01"),
+  recoveryPlanNonce = "recovery-plan-01",
 ) {
   const attestation = manualRecoveryAttestation(source);
+  const recoveryPlan = plan(recoveryPlanNonce, attestation.contentHash);
   value(
     fixture.store.persistOperatorMainnetRecoveryAttestation({
       attestation,
@@ -1349,7 +1354,7 @@ test("manual recovery rejects nonterminal source TP status even when account-wid
   );
   const recoveryPlan = saveRecoveryPlan(
     fixture,
-    plan("recovery-open-tp-blocked"),
+    plan("recovery-open-tp-blocked", attestation.contentHash),
   );
 
   const grant = fixture.store.createOperatorMainnetRecoveryGrant({

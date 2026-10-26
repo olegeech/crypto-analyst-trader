@@ -6,6 +6,7 @@ import {
   createOperatorMainnetTestApproval,
   createOperatorMainnetTestPlan,
   deriveOperatorMainnetTestSourceId,
+  rehydrateOperatorMainnetTestPlan,
   validateOperatorMainnetQuoteForPlan,
   validateOperatorMainnetTestApproval,
 } from "../src/domain/execution/operator-mainnet-test-plan.js";
@@ -13,7 +14,10 @@ import {
   encodeCanonicalArtifact,
   rehydrateArtifact,
 } from "../src/domain/identity/canonical-artifact.js";
-import { hashCanonical } from "../src/domain/identity/canonical-serialization.js";
+import {
+  hashCanonical,
+  type PlanHash,
+} from "../src/domain/identity/canonical-serialization.js";
 import { createInstrumentConstraints } from "../src/domain/market/instrument-constraints.js";
 import { DecimalValue } from "../src/domain/shared/decimal.js";
 import type { UtcTimestamp } from "../src/domain/shared/time.js";
@@ -113,6 +117,39 @@ test("operator quote plan rounds the bid, budget quantity and attached TP exactl
   assert.equal(Object.hasOwn(decoded, "sourceId"), false);
   assert.equal(decoded.clientOrderId, plan.clientOrderId);
   assert.equal(encoded.canonicalJson.includes('"sourceId"'), false);
+});
+
+test("manual recovery uses a versioned plan codec without changing legacy plan identity", () => {
+  const legacy = value(validPlan());
+  const legacyEncoded = value(
+    encodeCanonicalArtifact("operator-mainnet-execution-test", legacy),
+  );
+  const legacyReplay = value(
+    rehydrateArtifact("operator-mainnet-execution-test", legacyEncoded),
+  );
+  assert.equal(legacy.schemaVersion, "operator-mainnet-execution-test/v1");
+  assert.equal(legacyReplay.contentHash, legacy.contentHash);
+  assert.equal(Object.hasOwn(legacyReplay, "recoveryAttestationHash"), false);
+
+  const recoveryAttestationHash = `sha256:${"b".repeat(64)}` as PlanHash;
+  const manual = value(validPlan({ recoveryAttestationHash }));
+  const encoded = value(
+    encodeCanonicalArtifact("operator-mainnet-execution-test", manual),
+  );
+  const decoded = value(
+    rehydrateArtifact("operator-mainnet-execution-test", encoded),
+  );
+  assert.equal(manual.schemaVersion, "operator-mainnet-execution-test/v2");
+  assert.equal(manual.recoveryAttestationHash, recoveryAttestationHash);
+  assert.equal(decoded.contentHash, manual.contentHash);
+  assert.notEqual(manual.contentHash, legacy.contentHash);
+  assert.equal(
+    rehydrateOperatorMainnetTestPlan({
+      ...legacy,
+      schemaVersion: "operator-mainnet-execution-test/v2",
+    }).ok,
+    false,
+  );
 });
 
 test("IP-unbound remains a hashed warning and cannot become an implicit blocker", () => {

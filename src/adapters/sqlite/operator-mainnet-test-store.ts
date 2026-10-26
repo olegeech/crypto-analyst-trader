@@ -19,7 +19,11 @@ import {
   type OperatorMainnetTestPlan,
 } from "../../domain/execution/operator-mainnet-test-plan.js";
 import {
+  isTerminalOperatorRecoveryOrderStatus,
+  operatorMainnetRecoverySourceRevision,
+  OPERATOR_MAINNET_RECOVERY_MAX_AGE_MS,
   createOperatorMainnetRecoveryGrant,
+  recoveryGrantEvidenceExpiry,
   rehydrateOperatorMainnetRecoveryAttestation,
   rehydrateOperatorMainnetRecoveryGrant,
   recoveryGrantPlanExpiry,
@@ -31,7 +35,6 @@ import {
 import { domainError } from "../../domain/shared/errors.js";
 import { fail, ok, type Result } from "../../domain/shared/result.js";
 import {
-  addMilliseconds,
   parseUtcTimestamp,
   timestampToEpochMs,
   type UtcTimestamp,
@@ -87,14 +90,6 @@ const APPROVAL_KIND = "operator-mainnet-execution-approval" as const;
 const PLAN_ARTIFACT_ID = (hash: string) => `operator-mainnet-test:${hash}`;
 const APPROVAL_ARTIFACT_ID = (hash: string) =>
   `operator-mainnet-test-approval:${hash}`;
-const TERMINAL_RECOVERY_ORDER_STATUSES = new Set([
-  "Filled",
-  "Cancelled",
-  "Rejected",
-  "Deactivated",
-  "PartiallyFilledCanceled",
-]);
-
 const invalid = (
   message = "operator Mainnet test persistence input is invalid",
 ) => fail(domainError("PERSISTENCE_INTEGRITY", message));
@@ -126,7 +121,7 @@ function manualRecoveryOrdersAreTerminal(
   return [
     ...attestation.inspection.sourceOrders,
     ...attestation.inspection.sourceTakeProfitOrders,
-  ].every((order) => TERMINAL_RECOVERY_ORDER_STATUSES.has(order.status));
+  ].every((order) => isTerminalOperatorRecoveryOrderStatus(order.status));
 }
 
 function expectedPayload(
@@ -445,12 +440,7 @@ export class SqliteOperatorMainnetTestStore implements OperatorMainnetTestPersis
   }
 
   private sourceRevision(snapshot: OperatorMainnetTestSnapshot): number {
-    return (
-      (snapshot.attempt === undefined ? 0 : 1) +
-      snapshot.reconciliations.length +
-      snapshot.manualActions.length +
-      (snapshot.sourceDisposition === undefined ? 0 : 1)
-    );
+    return operatorMainnetRecoverySourceRevision(snapshot);
   }
 
   private recoveryAttestationFromRow(
@@ -932,7 +922,7 @@ export class SqliteOperatorMainnetTestStore implements OperatorMainnetTestPersis
       latest.lifecycleOutcome === "UNKNOWN" ||
       timestampToEpochMs(issuedAt) < timestampToEpochMs(latest.observedAt) ||
       timestampToEpochMs(issuedAt) - timestampToEpochMs(latest.observedAt) >
-        300_000
+        OPERATOR_MAINNET_RECOVERY_MAX_AGE_MS
     )
       return fail(
         domainError(
@@ -1058,6 +1048,13 @@ export class SqliteOperatorMainnetTestStore implements OperatorMainnetTestPersis
                 "saved manual recovery attestation is unavailable",
               ),
             );
+          if (plan.value.recoveryAttestationHash !== attestationHash.value)
+            return fail(
+              domainError(
+                "INVALID_APPROVAL",
+                "manual recovery plan is not bound to this exact attestation",
+              ),
+            );
           const binding = validateOperatorMainnetRecoveryAttestationBinding(
             attestation.value,
             {
@@ -1085,7 +1082,7 @@ export class SqliteOperatorMainnetTestStore implements OperatorMainnetTestPersis
               timestampToEpochMs(binding.value.observedAt) ||
             timestampToEpochMs(issuedAt.value) -
               timestampToEpochMs(binding.value.observedAt) >
-              300_000
+              OPERATOR_MAINNET_RECOVERY_MAX_AGE_MS
           )
             return fail(
               domainError(
@@ -1105,13 +1102,11 @@ export class SqliteOperatorMainnetTestStore implements OperatorMainnetTestPersis
 
         const planExpiry = recoveryGrantPlanExpiry(plan.value);
         if (!planExpiry.ok) return planExpiry;
-        const observedExpiry = addMilliseconds(resolution.observedAt, 300_000);
-        if (!observedExpiry.ok) return observedExpiry;
-        const expiresAt =
-          timestampToEpochMs(observedExpiry.value) <=
-          timestampToEpochMs(planExpiry.value)
-            ? observedExpiry.value
-            : planExpiry.value;
+        const expiresAt = recoveryGrantEvidenceExpiry(
+          resolution.observedAt,
+          planExpiry.value,
+        );
+        if (!expiresAt.ok) return expiresAt;
         const grant = createOperatorMainnetRecoveryGrant({
           plan: plan.value,
           resolution,
@@ -1129,7 +1124,7 @@ export class SqliteOperatorMainnetTestStore implements OperatorMainnetTestPersis
           actor: actor.value,
           consent: true,
           issuedAt: issuedAt.value,
-          expiresAt,
+          expiresAt: expiresAt.value,
         });
         if (!grant.ok) return grant;
         const encoded = encode(grant.value);

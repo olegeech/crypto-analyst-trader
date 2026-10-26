@@ -324,6 +324,77 @@ itself a contradiction; a reliable API fact observed at or after that cleanup
 that conflicts with the attestation blocks B. If source ownership or event
 ordering is unclear, stop.
 
+For manual preparation, create a private local JSON file with the fields below.
+The empty account arrays are valid only when the dedicated account UI actually
+shows no open orders and no positions; include every observed source order,
+fill, TP order and position. The source entry must include the exact owned
+client order ID. Replace every example value with what the UI shows; never put
+screenshots, credentials or API secrets in this file.
+
+```json
+{
+  "observedAt": "<UTC time when the operator finished inspecting the Bybit UI>",
+  "inspection": {
+    "accountOpenOrdersInspected": true,
+    "accountOpenOrders": [],
+    "accountPositionsInspected": true,
+    "accountPositions": [],
+    "sourceOrderHistoryInspected": true,
+    "sourceOrders": [
+      {
+        "orderId": "<Bybit parent order ID>",
+        "clientOrderId": "<exact owned client order ID>",
+        "symbol": "DOGEUSDT",
+        "side": "Buy",
+        "orderType": "Limit",
+        "quantity": "<observed quantity>",
+        "price": "<observed limit price>",
+        "status": "<observed terminal status>"
+      }
+    ],
+    "sourceFillsInspected": true,
+    "sourceFills": [],
+    "sourcePositionInspected": true,
+    "sourcePosition": null,
+    "targetLeverage": "1",
+    "sourceTakeProfitInspected": true,
+    "sourceTakeProfitOrders": []
+  },
+  "manualActions": ["none"],
+  "acceptedUncertainty": ["manual-ui-may-be-stale"]
+}
+```
+
+`observedAt` is required and must be the actual time the UI inspection was
+completed; do not use the time the JSON file is read or saved. The application
+records the separate local persistence time automatically. Preparation compares
+the UI observation with Bybit server time and rejects future or more than
+five-minute-old observations.
+
+`sourcePosition` is `null` only when the UI shows none; otherwise record the
+observed `{ "symbol", "side", "quantity" }`. Add every observed fill as
+`{ "executionId", "orderId", "clientOrderId" (when shown), "symbol",
+"side", "quantity", "price", "executedAt" }`. Add each source or TP order
+using its visible IDs, symbol, side, type (`Market`, `Limit` or `Other`),
+quantity, optional price and status. An active account order/position, a
+nonterminal source/TP order, a leverage other than `1`, or any uninspected
+section blocks this recovery.
+
+Run preparation and recovery from an attended terminal, using the exact source
+and plan hashes printed by the application:
+
+```sh
+npm run mainnet:test -- prepare --symbol DOGEUSDT --allocation 10 --gross-cap 10 --max-deviation-bps 10 --recovery-source-id <SOURCE_ID> --recovery-inspection-file /private/path/inspection.json
+npm run mainnet:test -- recover --source-id <SOURCE_ID> --plan-hash <PLAN_HASH> --resolution manual
+npm run mainnet:test -- execute --plan-hash <PLAN_HASH>
+```
+
+`recover` previews the source, HALT revision, provenance, exact next plan and
+expiry, then requires typing lowercase `yes`. It performs no exchange reads or
+writes. `execute` asks for a separate exact-plan approval and still performs
+the normal fresh machine admission. For API recovery, use `--resolution api`;
+it accepts only the latest `verified-clean` status result.
+
 Persist only the typed, versioned, redacted provenance in the private journal.
 Do not save or export screenshots, credentials, account identifiers or raw
 account responses in the repository, issues, PRs or public logs. Do not edit

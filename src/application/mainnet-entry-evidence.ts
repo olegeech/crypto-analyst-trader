@@ -13,7 +13,10 @@ import {
   accountEvidenceContentHash,
   createAccountEvidenceBundle,
 } from "../domain/account/account-evidence-bundle.js";
-import { requireTrustedCapability } from "../domain/capabilities/capability.js";
+import {
+  requireTrustedCapability,
+  type CapabilityObservation,
+} from "../domain/capabilities/capability.js";
 import {
   validateOperatorMainnetQuoteForPlan,
   rehydrateOperatorMainnetQuote,
@@ -21,6 +24,12 @@ import {
   type OperatorMainnetQuote,
   type OperatorMainnetTestPlan,
 } from "../domain/execution/operator-mainnet-test-plan.js";
+import {
+  OPERATOR_MAINNET_RECOVERY_MAX_AGE_MS,
+  isTerminalOperatorRecoveryOrderStatus,
+  rehydrateOperatorMainnetRecoveryAttestation,
+  type OperatorMainnetRecoveryAttestation,
+} from "../domain/execution/operator-mainnet-recovery.js";
 import { createOrderIntent } from "../domain/planning/order-intent.js";
 import { hashCanonical } from "../domain/identity/canonical-serialization.js";
 import { DecimalValue } from "../domain/shared/decimal.js";
@@ -40,6 +49,7 @@ import { createInstrumentConstraints } from "../domain/market/instrument-constra
 import type { InstrumentConstraints } from "../domain/market/instrument-constraints.js";
 import { isProducedMarketSnapshot } from "../domain/market/snapshot-proof.js";
 import type { BybitInstrumentInfo } from "../adapters/bybit-v5/read-mappers.js";
+import type { MainnetOperatorTargetStateParts } from "../adapters/bybit-v5/execution-adapter.js";
 import type {
   MainnetExchangeReadState,
   ExchangeOrderRequest,
@@ -88,13 +98,26 @@ export interface MainnetOperatorTestCompactAccountEvidence {
   ];
 }
 
-export interface MainnetOperatorTestCompactFreshEvidence {
+export type MainnetOperatorManualTargetStateEvidence =
+  MainnetOperatorTargetStateParts & {
+    readonly attestation: OperatorMainnetRecoveryAttestation;
+  };
+
+export type MainnetOperatorTestCompactFreshEvidence = {
   readonly compactAccount: MainnetOperatorTestCompactAccountEvidence;
-  readonly state: MainnetExchangeReadState;
   readonly instrument: BybitInstrumentInfo;
   readonly quote: OperatorMainnetQuote;
   readonly feeRate: OperatorMainnetFeeRateEvidence;
-}
+} & (
+  | {
+      readonly state: MainnetExchangeReadState;
+      readonly manualTargetState?: MainnetOperatorManualTargetStateEvidence;
+    }
+  | {
+      readonly state?: never;
+      readonly manualTargetState: MainnetOperatorManualTargetStateEvidence;
+    }
+);
 
 export type MainnetOperatorTestAdmissionEvidence =
   MainnetOperatorTestFreshEvidence | MainnetOperatorTestCompactFreshEvidence;
@@ -134,7 +157,7 @@ function blocked(
 }
 
 function timeFailureDetails(
-  source: "account" | "balance" | "quote" | "fee",
+  source: "account" | "balance" | "quote" | "fee" | "target-state",
   ageMs: number,
   limitMs: number,
 ) {
@@ -678,8 +701,11 @@ export function validateCompactOperatorAccountForPlan(
   return validateCompactAccountEvidence(plan, compactAccount, providerTime);
 }
 
-function verifyCapabilities(state: MainnetExchangeReadState): boolean {
-  if (!Array.isArray(state.capabilities)) return false;
+function verifyOperatorMainnetCapabilities(
+  capabilities: readonly CapabilityObservation[],
+  serverTime: UtcTimestamp,
+): boolean {
+  if (!Array.isArray(capabilities)) return false;
   const scope = {
     exchange: "bybit",
     environment: "mainnet",
@@ -689,7 +715,7 @@ function verifyCapabilities(state: MainnetExchangeReadState): boolean {
   return (
     ["order-create", "attached-protection", "reconciliation-reads"] as const
   ).every((capability) => {
-    const observation = state.capabilities.find(
+    const observation = capabilities.find(
       (item) =>
         item.capability === capability &&
         item.scope.exchange === scope.exchange &&
@@ -702,10 +728,17 @@ function verifyCapabilities(state: MainnetExchangeReadState): boolean {
       requireTrustedCapability(
         observation,
         { capability, scope },
-        { now: () => state.serverTime },
+        { now: () => serverTime },
       ).ok
     );
   });
+}
+
+function verifyCapabilities(state: MainnetExchangeReadState): boolean {
+  return verifyOperatorMainnetCapabilities(
+    state.capabilities,
+    state.serverTime,
+  );
 }
 
 function validateOperatorTargetState(
@@ -801,6 +834,123 @@ function validateOperatorTargetState(
   return ok(undefined);
 }
 
+/** Validate only the target facts that #25 permits the operator UI to replace.
+ * The attestation stays a distinct manual partition; it is never turned into
+ * an API state bundle or an API cleanup result. */
+function validateManualOperatorTargetState(
+  plan: OperatorMainnetTestPlan,
+  evidence: MainnetOperatorManualTargetStateEvidence,
+): Result<void> {
+  const attestation = rehydrateOperatorMainnetRecoveryAttestation(
+    evidence.attestation,
+  );
+  const serverTime = parseUtcTimestamp(evidence.serverTime);
+  const uiLeverage = DecimalValue.fromString(
+    attestation.ok ? attestation.value.inspection.targetLeverage : "0",
+  );
+  if (
+    !attestation.ok ||
+    !serverTime.ok ||
+    !one.ok ||
+    !uiLeverage.ok ||
+    !plan.recoveryAttestationHash ||
+    attestation.value.contentHash !== plan.recoveryAttestationHash ||
+    attestation.value.accountIdentityHash !== plan.accountIdentityHash ||
+    attestation.value.inspection.accountOpenOrders.length !== 0 ||
+    attestation.value.inspection.accountPositions.length !== 0 ||
+    attestation.value.inspection.sourcePosition !== null ||
+    !attestation.value.inspection.sourceOrders.every((order) =>
+      isTerminalOperatorRecoveryOrderStatus(order.status),
+    ) ||
+    !attestation.value.inspection.sourceTakeProfitOrders.every((order) =>
+      isTerminalOperatorRecoveryOrderStatus(order.status),
+    ) ||
+    uiLeverage.value.compare(one.value) !== 0
+  )
+    return blocked(
+      "MANUAL_TARGET_EVIDENCE_INVALID",
+      "manual recovery does not prove an inspected, flat account and 1x target leverage",
+      { source: "target-state", causeCode: "MANUAL_ATTESTATION_INVALID" },
+    );
+
+  const ageMs =
+    timestampToEpochMs(serverTime.value) -
+    timestampToEpochMs(attestation.value.observedAt);
+  if (ageMs < 0 || ageMs > OPERATOR_MAINNET_RECOVERY_MAX_AGE_MS)
+    return blocked(
+      "MANUAL_TARGET_EVIDENCE_STALE",
+      "manual recovery UI inspection is not current within the five-minute window",
+      timeFailureDetails(
+        "target-state",
+        ageMs,
+        OPERATOR_MAINNET_RECOVERY_MAX_AGE_MS,
+      ),
+    );
+  if (
+    !verifyOperatorMainnetCapabilities(
+      evidence.capabilities ?? [],
+      serverTime.value,
+    )
+  )
+    return blocked(
+      "TARGET_STATE_OR_CAPABILITY_BLOCKED",
+      "Mainnet adapter capability evidence is unavailable",
+      { source: "target-state", causeCode: "REQUIRED_CAPABILITY_UNPROVEN" },
+    );
+
+  const manualAt = timestampToEpochMs(attestation.value.observedAt);
+  if (evidence.position.status === "available") {
+    const positionAt = parseUtcTimestamp(evidence.position.observedAt);
+    if (!positionAt.ok)
+      return blocked(
+        "TARGET_STATE_OR_CAPABILITY_BLOCKED",
+        "position observation time is invalid",
+      );
+    if (timestampToEpochMs(positionAt.value) >= manualAt) {
+      const position = evidence.position.value;
+      if (
+        position.instrument !== plan.symbol ||
+        position.side !== "flat" ||
+        !position.quantity.isZero() ||
+        position.leverage.compare(one.value) !== 0
+      )
+        return blocked(
+          "TARGET_STATE_OR_CAPABILITY_BLOCKED",
+          "fresh Bybit position evidence contradicts the manual target-state inspection",
+          {
+            source: "position",
+            causeCode: "MANUAL_API_POSITION_CONTRADICTION",
+          },
+        );
+    }
+  } else if (!/^[A-Z][A-Z0-9_]{0,79}$/u.test(evidence.position.reasonCode))
+    return blocked("MANUAL_TARGET_EVIDENCE_INVALID");
+
+  if (evidence.openOrders.status === "available") {
+    const ordersAt = parseUtcTimestamp(evidence.openOrders.observedAt);
+    if (!ordersAt.ok)
+      return blocked(
+        "TARGET_STATE_OR_CAPABILITY_BLOCKED",
+        "order observation time is invalid",
+      );
+    if (
+      timestampToEpochMs(ordersAt.value) >= manualAt &&
+      evidence.openOrders.value.length > 0
+    )
+      return blocked(
+        "TARGET_STATE_OR_CAPABILITY_BLOCKED",
+        "fresh Bybit open-order evidence contradicts the manual account-wide inspection",
+        {
+          source: "orders",
+          activeOrderCount: evidence.openOrders.value.length,
+          causeCode: "MANUAL_API_ORDERS_CONTRADICTION",
+        },
+      );
+  } else if (!/^[A-Z][A-Z0-9_]{0,79}$/u.test(evidence.openOrders.reasonCode))
+    return blocked("MANUAL_TARGET_EVIDENCE_INVALID");
+  return ok(undefined);
+}
+
 function changedInstrumentConstraint(
   approved: InstrumentConstraints,
   instrument: InstrumentConstraints,
@@ -837,10 +987,16 @@ export function validateMainnetOperatorTestEvidence(
   readonly accountAgeAtReadMs: number;
   readonly quoteAgeAtReadMs: number;
   readonly feeRateAgeAtReadMs: number;
+  readonly manualTargetAgeAtReadMs?: number;
   readonly capacity: OperatorMainnetTestCapacity;
 }> {
   if (isCompactOperatorEvidence(evidenceInput))
     return validateCompactMainnetOperatorTestEvidence(plan, evidenceInput);
+  if (plan.recoveryAttestationHash)
+    return blocked(
+      "MANUAL_RECOVERY_REQUIRES_SCOPED_COMPACT_EVIDENCE",
+      "manual recovery requires the scoped operator evidence path and its separate provenance",
+    );
   if (
     !plainDataRecord(evidenceInput) ||
     Reflect.ownKeys(evidenceInput).length !== 6 ||
@@ -1110,17 +1266,33 @@ function isCompactOperatorEvidence(
   return plainDataRecord(input) && Object.hasOwn(input, "compactAccount");
 }
 
-export function validateCompactOperatorPreparationEvidence(input: {
+type CompactOperatorPreparationEvidenceInput = {
   readonly compactAccount: MainnetOperatorTestCompactAccountEvidence;
-  readonly state: MainnetExchangeReadState;
   readonly instrument: BybitInstrumentInfo;
   readonly quote: OperatorMainnetQuote;
-}): Result<{
+} & (
+  | {
+      readonly state: MainnetExchangeReadState;
+      readonly manualTargetState?: never;
+      readonly plan?: never;
+    }
+  | {
+      readonly state?: never;
+      readonly manualTargetState: MainnetOperatorManualTargetStateEvidence;
+      readonly plan: OperatorMainnetTestPlan;
+    }
+);
+
+export function validateCompactOperatorPreparationEvidence(
+  input: CompactOperatorPreparationEvidenceInput,
+): Result<{
   readonly accountIdentityHash: string;
   readonly warningCodes: readonly "API_KEY_IP_UNBOUND"[];
 }> {
   if (!plainDataRecord(input)) return blocked("FRESH_MAINNET_EVIDENCE_INVALID");
-  const serverTime = parseUtcTimestamp(input.state.serverTime);
+  const serverTime = parseUtcTimestamp(
+    input.state?.serverTime ?? input.manualTargetState?.serverTime,
+  );
   if (!serverTime.ok) return blocked("EVIDENCE_TIME_INVALID");
   const account = validateCompactAccountEvidence(
     undefined,
@@ -1128,19 +1300,22 @@ export function validateCompactOperatorPreparationEvidence(input: {
     serverTime.value,
   );
   if (!account.ok) return account;
-  const currentMarket = isProducedMarketSnapshot(input.state.market)
-    ? input.state.market
-    : undefined;
-  if (!currentMarket)
+  const currentMarket =
+    input.state && isProducedMarketSnapshot(input.state.market)
+      ? input.state.market
+      : undefined;
+  if (input.state && !currentMarket)
     return blocked(
       "TARGET_STATE_OR_CAPABILITY_BLOCKED",
       "target market snapshot is unavailable",
-      { source: "target-state", causeCode: "MARKET_SCOPE_INVALID" },
+      {
+        source: "target-state",
+        causeCode: "MARKET_SCOPE_INVALID",
+      },
     );
-  const targetState = validateOperatorTargetState(
-    input.state,
-    input.instrument.symbol,
-  );
+  const targetState = input.state
+    ? validateOperatorTargetState(input.state, input.instrument.symbol)
+    : validateManualOperatorTargetState(input.plan, input.manualTargetState);
   if (!targetState.ok) return targetState;
   const quote = rehydrateOperatorMainnetQuote(input.quote);
   if (!quote.ok) return blocked("QUOTE_EVIDENCE_INVALID");
@@ -1166,11 +1341,16 @@ export function validateCompactOperatorPreparationEvidence(input: {
   const marketHash = currentMarket
     ? hashCanonical(currentMarket.constraints)
     : undefined;
+  const planHash = input.plan
+    ? hashCanonical(input.plan.constraints)
+    : undefined;
   if (
     !constraints?.ok ||
     !instrumentHash?.ok ||
-    !marketHash?.ok ||
-    instrumentHash.value !== marketHash.value ||
+    (input.state &&
+      (!marketHash?.ok || instrumentHash.value !== marketHash.value)) ||
+    (!input.state &&
+      (!planHash?.ok || instrumentHash.value !== planHash.value)) ||
     input.instrument.status !== "Trading" ||
     input.instrument.contractType !== "LinearPerpetual" ||
     input.instrument.quoteCoin !== "USDT" ||
@@ -1196,23 +1376,37 @@ function validateCompactMainnetOperatorTestEvidence(
   readonly accountAgeAtReadMs: number;
   readonly quoteAgeAtReadMs: number;
   readonly feeRateAgeAtReadMs: number;
+  readonly manualTargetAgeAtReadMs?: number;
   readonly capacity: OperatorMainnetTestCapacity;
 }> {
+  const hasState =
+    typeof evidenceInput === "object" &&
+    evidenceInput !== null &&
+    Object.hasOwn(evidenceInput, "state");
+  const hasManualState =
+    typeof evidenceInput === "object" &&
+    evidenceInput !== null &&
+    Object.hasOwn(evidenceInput, "manualTargetState");
   if (
     !plainDataRecord(evidenceInput) ||
-    Reflect.ownKeys(evidenceInput).length !== 5 ||
+    Reflect.ownKeys(evidenceInput).length !==
+      4 + Number(hasState) + Number(hasManualState) ||
     !Object.hasOwn(evidenceInput, "compactAccount") ||
-    !Object.hasOwn(evidenceInput, "state") ||
     !Object.hasOwn(evidenceInput, "instrument") ||
     !Object.hasOwn(evidenceInput, "quote") ||
     !Object.hasOwn(evidenceInput, "feeRate") ||
-    !plainDataRecord(evidenceInput.state) ||
-    !plainDataRecord(evidenceInput.instrument)
+    !plainDataRecord(evidenceInput.instrument) ||
+    (!hasState && !hasManualState) ||
+    (hasState && !plainDataRecord(evidenceInput.state)) ||
+    (hasManualState && !plainDataRecord(evidenceInput.manualTargetState))
   )
     return blocked("FRESH_MAINNET_EVIDENCE_INVALID");
 
   const state = evidenceInput.state;
-  const serverTime = parseUtcTimestamp(state.serverTime);
+  const manualTargetState = evidenceInput.manualTargetState;
+  const serverTime = parseUtcTimestamp(
+    state?.serverTime ?? manualTargetState?.serverTime,
+  );
   if (!serverTime.ok) return blocked("EVIDENCE_TIME_INVALID");
   const account = validateCompactAccountEvidence(
     plan,
@@ -1261,14 +1455,16 @@ function validateCompactMainnetOperatorTestEvidence(
   const instrumentConstraints = createInstrumentConstraints(
     instrument.constraints,
   );
-  const market = isProducedMarketSnapshot(state.market)
-    ? ok(state.market)
-    : fail(
-        domainError("INVALID_EVIDENCE", "market snapshot lacks domain proof"),
-      );
+  const market = state
+    ? isProducedMarketSnapshot(state.market)
+      ? ok(state.market)
+      : fail(
+          domainError("INVALID_EVIDENCE", "market snapshot lacks domain proof"),
+        )
+    : undefined;
   if (
     !instrumentConstraints.ok ||
-    !market.ok ||
+    (state && !market?.ok) ||
     instrument.symbol !== plan.symbol ||
     instrument.status !== "Trading" ||
     instrument.contractType !== "LinearPerpetual" ||
@@ -1284,25 +1480,30 @@ function validateCompactMainnetOperatorTestEvidence(
     instrumentConstraints.value,
   );
   const planConstraintsHash = hashCanonical(plan.constraints);
-  const marketConstraints = market.value.constraints;
-  const notionalConstraintMatches =
-    (marketConstraints.minNotional === undefined &&
-      plan.constraints.minNotional === undefined) ||
-    (marketConstraints.minNotional !== undefined &&
-      plan.constraints.minNotional !== undefined &&
-      marketConstraints.minNotional.compare(plan.constraints.minNotional) ===
-        0);
+  const marketConstraints = market?.ok ? market.value.constraints : undefined;
+  const notionalConstraintMatches = !marketConstraints
+    ? true
+    : (marketConstraints.minNotional === undefined &&
+        plan.constraints.minNotional === undefined) ||
+      (marketConstraints.minNotional !== undefined &&
+        plan.constraints.minNotional !== undefined &&
+        marketConstraints.minNotional.compare(plan.constraints.minNotional) ===
+          0);
   if (
     !freshInstrumentConstraintsHash.ok ||
     !planConstraintsHash.ok ||
     freshInstrumentConstraintsHash.value !== planConstraintsHash.value ||
-    marketConstraints.instrument !== plan.constraints.instrument ||
-    marketConstraints.version !== plan.constraints.version ||
-    marketConstraints.priceTickSize.compare(plan.constraints.priceTickSize) !==
-      0 ||
-    marketConstraints.quantityStep.compare(plan.constraints.quantityStep) !==
-      0 ||
-    marketConstraints.minQuantity.compare(plan.constraints.minQuantity) !== 0 ||
+    (marketConstraints &&
+      (marketConstraints.instrument !== plan.constraints.instrument ||
+        marketConstraints.version !== plan.constraints.version ||
+        marketConstraints.priceTickSize.compare(
+          plan.constraints.priceTickSize,
+        ) !== 0 ||
+        marketConstraints.quantityStep.compare(
+          plan.constraints.quantityStep,
+        ) !== 0 ||
+        marketConstraints.minQuantity.compare(plan.constraints.minQuantity) !==
+          0)) ||
     !notionalConstraintMatches
   )
     return blocked(
@@ -1314,13 +1515,26 @@ function validateCompactMainnetOperatorTestEvidence(
         changedConstraint: changedInstrumentConstraint(
           plan.constraints,
           instrumentConstraints.value,
-          marketConstraints,
+          marketConstraints ?? instrumentConstraints.value,
         ),
       },
     );
 
-  const targetState = validateOperatorTargetState(state, plan.symbol);
+  const targetState = state
+    ? validateOperatorTargetState(state, plan.symbol)
+    : manualTargetState
+      ? validateManualOperatorTargetState(plan, manualTargetState)
+      : blocked("MANUAL_TARGET_EVIDENCE_INVALID");
   if (!targetState.ok) return targetState;
+  if (state && manualTargetState) {
+    const manualTarget = validateManualOperatorTargetState(
+      plan,
+      manualTargetState,
+    );
+    if (!manualTarget.ok) return manualTarget;
+  }
+  if (plan.recoveryAttestationHash && !manualTargetState)
+    return blocked("MANUAL_RECOVERY_ATTESTATION_NOT_APPLIED");
 
   if (feeRate.value.symbol !== plan.symbol)
     return blocked(
@@ -1366,6 +1580,13 @@ function validateCompactMainnetOperatorTestEvidence(
     accountAgeAtReadMs: account.value.accountAgeAtReadMs,
     quoteAgeAtReadMs,
     feeRateAgeAtReadMs,
+    ...(manualTargetState
+      ? {
+          manualTargetAgeAtReadMs:
+            timestampToEpochMs(serverTime.value) -
+            timestampToEpochMs(manualTargetState.attestation.observedAt),
+        }
+      : {}),
     capacity: capacity.value,
   });
 }
@@ -1376,6 +1597,7 @@ export function revalidateMainnetOperatorEvidenceAge(
     readonly accountAgeAtReadMs: number;
     readonly quoteAgeAtReadMs: number;
     readonly feeRateAgeAtReadMs: number;
+    readonly manualTargetAgeAtReadMs?: number;
   },
   monotonicElapsedMs: number,
 ): Result<void> {
@@ -1386,7 +1608,11 @@ export function revalidateMainnetOperatorEvidenceAge(
       PROVISIONAL_M1_MAX_ACCOUNT_EVIDENCE_AGE_MS ||
     evidence.quoteAgeAtReadMs + monotonicElapsedMs > plan.quoteFreshnessMs ||
     evidence.feeRateAgeAtReadMs + monotonicElapsedMs >
-      PROVISIONAL_M1_MAX_ACCOUNT_EVIDENCE_AGE_MS
+      PROVISIONAL_M1_MAX_ACCOUNT_EVIDENCE_AGE_MS ||
+    (plan.recoveryAttestationHash !== undefined &&
+      (evidence.manualTargetAgeAtReadMs === undefined ||
+        evidence.manualTargetAgeAtReadMs + monotonicElapsedMs >
+          OPERATOR_MAINNET_RECOVERY_MAX_AGE_MS))
   )
     return blocked("MAINNET_EVIDENCE_EXPIRED");
   return ok(undefined);

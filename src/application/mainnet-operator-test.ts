@@ -266,11 +266,33 @@ export async function executeMainnetOperatorTest(
       ),
     );
 
+  const recoveryGrant = dependencies.journal.findOperatorMainnetRecoveryGrant(
+    plan.value.contentHash,
+    localNow.value,
+  );
+  if (!recoveryGrant.ok) return recoveryGrant;
+  if (
+    plan.value.recoveryAttestationHash &&
+    (!recoveryGrant.value ||
+      recoveryGrant.value.resolution.kind !== "manual-attested" ||
+      recoveryGrant.value.resolution.attestationHash !==
+        plan.value.recoveryAttestationHash)
+  )
+    return blocked(
+      "RECOVERY_AUTHORIZATION_REQUIRED",
+      "manual recovery plans require an unexpired, exact-plan recovery grant",
+    );
+
   const initial = haltIsClear(dependencies.persistence);
   if (!initial.ok) return initial;
   const pending = dependencies.journal.findPendingOperatorMainnetTestSource();
   if (!pending.ok) return pending;
-  if (pending.value) return blocked("UNRESOLVED_SAME_ACCOUNT_SOURCE_EXISTS");
+  if (
+    pending.value &&
+    (recoveryGrant.value === undefined ||
+      pending.value.sourceId !== recoveryGrant.value.sourceId)
+  )
+    return blocked("UNRESOLVED_SAME_ACCOUNT_SOURCE_EXISTS");
 
   let fresh: Awaited<ReturnType<MainnetOperatorTestEvidencePort["collect"]>>;
   try {
@@ -286,7 +308,13 @@ export async function executeMainnetOperatorTest(
   }
   const evidence = validateMainnetOperatorTestEvidence(plan.value, fresh);
   if (!evidence.ok) return evidence;
-  const providerTime = parseUtcTimestamp(fresh.state.serverTime);
+  const evidenceTime =
+    "manualTargetState" in fresh && fresh.manualTargetState
+      ? fresh.manualTargetState.serverTime
+      : "state" in fresh && fresh.state
+        ? fresh.state.serverTime
+        : undefined;
+  const providerTime = parseUtcTimestamp(evidenceTime);
   if (!providerTime.ok) return blocked("PROVIDER_TIME_INVALID");
   const currentApproval = validateOperatorMainnetTestApproval(
     exactApproval.value,
@@ -347,6 +375,9 @@ export async function executeMainnetOperatorTest(
     payloadJson: create.value.payloadJson,
     payloadHash: approvedPayloadHash.value as PlanHash,
     preparedAt: providerTime.value,
+    ...(recoveryGrant.value === undefined
+      ? {}
+      : { recoveryGrantId: recoveryGrant.value.grantId }),
   });
   if (!prepared.ok) return prepared;
 

@@ -31,6 +31,18 @@ export const OPERATOR_MAINNET_RECOVERY_GRANT_SCHEMA_VERSION =
   "operator-mainnet-recovery-grant/v1" as const;
 export const OPERATOR_MAINNET_RECOVERY_MAX_AGE_MS = 300_000 as const;
 
+const TERMINAL_RECOVERY_ORDER_STATUSES = new Set([
+  "Filled",
+  "Cancelled",
+  "Rejected",
+  "Deactivated",
+  "PartiallyFilledCanceled",
+]);
+
+export function isTerminalOperatorRecoveryOrderStatus(status: string): boolean {
+  return TERMINAL_RECOVERY_ORDER_STATUSES.has(status);
+}
+
 export type OperatorRecoveryManualAction =
   "none" | "entry-remainder-cancelled" | "position-closed" | "other";
 
@@ -38,6 +50,20 @@ export type OperatorRecoveryAcceptedUncertainty =
   | "manual-ui-may-be-stale"
   | "provider-history-may-be-delayed"
   | "other-operator-accepted-risk";
+
+export function operatorMainnetRecoverySourceRevision(snapshot: {
+  readonly attempt?: unknown;
+  readonly reconciliations: readonly unknown[];
+  readonly manualActions: readonly unknown[];
+  readonly sourceDisposition?: unknown;
+}): number {
+  return (
+    Number(snapshot.attempt !== undefined) +
+    snapshot.reconciliations.length +
+    snapshot.manualActions.length +
+    Number(snapshot.sourceDisposition !== undefined)
+  );
+}
 
 export interface OperatorRecoveryUiOrder {
   readonly orderId: string;
@@ -93,6 +119,8 @@ export interface OperatorMainnetRecoveryAttestation {
     readonly sourceFills: readonly OperatorRecoveryUiFill[];
     readonly sourcePositionInspected: true;
     readonly sourcePosition: OperatorRecoveryUiPosition | null;
+    /** Target-symbol leverage as shown in the account UI, required when the position GET is unavailable. */
+    readonly targetLeverage: string;
     readonly sourceTakeProfitInspected: true;
     readonly sourceTakeProfitOrders: readonly OperatorRecoveryUiOrder[];
   };
@@ -409,6 +437,7 @@ function canonicalizeAttestation(
       "sourceFills",
       "sourcePositionInspected",
       "sourcePosition",
+      "targetLeverage",
       "sourceTakeProfitInspected",
       "sourceTakeProfitOrders",
     ]) ||
@@ -462,6 +491,10 @@ function canonicalizeAttestation(
     input.inspection.sourcePosition === null
       ? ok<OperatorRecoveryUiPosition | null>(null)
       : parseUiPosition(input.inspection.sourcePosition);
+  const targetLeverage = boundedDecimal(
+    input.inspection.targetLeverage,
+    "targetLeverage",
+  );
   const sourceTakeProfitOrders = arrayOf(
     input.inspection.sourceTakeProfitOrders,
     "sourceTakeProfitOrders",
@@ -503,6 +536,7 @@ function canonicalizeAttestation(
     !sourceOrders.ok ||
     !sourceFills.ok ||
     !sourcePosition.ok ||
+    !targetLeverage.ok ||
     !sourceTakeProfitOrders.ok ||
     !manualActions.ok ||
     !acceptedUncertainty.ok ||
@@ -539,6 +573,7 @@ function canonicalizeAttestation(
       sourceFills: sourceFills.value,
       sourcePositionInspected: true as const,
       sourcePosition: sourcePosition.value,
+      targetLeverage: targetLeverage.value,
       sourceTakeProfitInspected: true as const,
       sourceTakeProfitOrders: sourceTakeProfitOrders.value,
     },
@@ -914,6 +949,21 @@ export function recoveryGrantPlanExpiry(
   plan: OperatorMainnetTestPlan,
 ): Result<UtcTimestamp> {
   return addMilliseconds(plan.preparedAt, plan.approvalTtlMs);
+}
+
+export function recoveryGrantEvidenceExpiry(
+  observedAt: UtcTimestamp,
+  planExpiresAt: UtcTimestamp,
+): Result<UtcTimestamp> {
+  const evidenceExpiresAt = addMilliseconds(
+    observedAt,
+    OPERATOR_MAINNET_RECOVERY_MAX_AGE_MS,
+  );
+  if (!evidenceExpiresAt.ok) return evidenceExpiresAt;
+  return timestampToEpochMs(evidenceExpiresAt.value) <=
+    timestampToEpochMs(planExpiresAt)
+    ? evidenceExpiresAt
+    : ok(planExpiresAt);
 }
 
 export function recoveryAttestationContentHash(

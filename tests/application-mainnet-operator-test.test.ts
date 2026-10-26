@@ -19,6 +19,12 @@ import {
   createOperatorMainnetTestPlan,
   deriveOperatorMainnetTestSourceId,
 } from "../src/domain/execution/operator-mainnet-test-plan.js";
+import { createOperatorMainnetRecoveryAttestation } from "../src/domain/execution/operator-mainnet-recovery.js";
+import { recoverMainnetOperatorTest } from "../src/application/mainnet-operator-test-recovery.js";
+import {
+  resolveOperatorMainnetPlan,
+  resolveOperatorMainnetSource,
+} from "../src/adapters/sqlite/operator-mainnet-test-lookup.js";
 import { createExchangeOrder } from "../src/domain/execution/exchange-order.js";
 import { createEvidenceRef } from "../src/domain/evidence/evidence-ref.js";
 import {
@@ -100,6 +106,7 @@ function plan(
     readonly accountIdentityHash?: string;
     readonly warningCodes?: readonly "API_KEY_IP_UNBOUND"[];
     readonly preparedAt?: UtcTimestamp;
+    readonly recoveryAttestationHash?: PlanHash;
   } = {},
 ): OperatorMainnetTestPlan {
   const preparedAt = options.preparedAt ?? NOW;
@@ -144,6 +151,55 @@ function plan(
       warningCodes: options.warningCodes ?? [],
       constraints,
       preparedAt,
+      ...(options.recoveryAttestationHash === undefined
+        ? {}
+        : { recoveryAttestationHash: options.recoveryAttestationHash }),
+    }),
+  );
+}
+
+function manualTargetAttestation(
+  accountIdentityHash: string,
+  options: {
+    readonly observedAt?: UtcTimestamp;
+    readonly targetLeverage?: string;
+    readonly accountPositions?: readonly {
+      readonly symbol: string;
+      readonly side: "Buy" | "Sell";
+      readonly quantity: string;
+    }[];
+  } = {},
+) {
+  const priorPlan = plan({ nonce: "manual-recovery-prior-plan" });
+  return unwrap(
+    createOperatorMainnetRecoveryAttestation({
+      provenance: "MANUAL_ATTESTED_NOT_API_VERIFIED",
+      exchange: "bybit",
+      environment: "mainnet",
+      accountIdentityHash,
+      sourceId: "manual-recovery-prior-source",
+      sourcePlanHash: priorPlan.contentHash,
+      sourceIntentId: "manual-recovery-prior-intent",
+      sourceRevision: 1,
+      actor: "operator-test",
+      observedAt: options.observedAt ?? at(Date.parse(NOW) - 1_000),
+      inspection: {
+        accountOpenOrdersInspected: true,
+        accountOpenOrders: [],
+        accountPositionsInspected: true,
+        accountPositions: options.accountPositions ?? [],
+        sourceOrderHistoryInspected: true,
+        sourceOrders: [],
+        sourceFillsInspected: true,
+        sourceFills: [],
+        sourcePositionInspected: true,
+        sourcePosition: null,
+        targetLeverage: options.targetLeverage ?? "1",
+        sourceTakeProfitInspected: true,
+        sourceTakeProfitOrders: [],
+      },
+      manualActions: ["none"],
+      acceptedUncertainty: ["manual-ui-may-be-stale"],
     }),
   );
 }
@@ -805,12 +861,14 @@ test("compact capacity check blocks before durable intent and retains exact shor
 test("compact admission blocks a non-flat target position without durable intent", async () => {
   const valuePlan = plan({ nonce: "compact-target-state-changed" });
   const evidence = compactEvidence(valuePlan);
+  assert.ok(evidence.state);
+  const state = evidence.state;
   const changedEvidence: MainnetOperatorTestCompactFreshEvidence = {
     ...evidence,
     state: {
-      ...evidence.state,
+      ...state,
       position: {
-        ...evidence.state.position,
+        ...state.position,
         side: "long",
         quantity: decimal("0.01"),
       },
@@ -831,6 +889,144 @@ test("compact admission blocks a non-flat target position without durable intent
   assert.equal(result.error.details?.positionQuantity, "0.01");
   assert.equal(harness.createObservations.length, 0);
   harness.persistence.close();
+});
+
+test("scoped manual recovery replaces only unavailable target position and order facts", () => {
+  const attestation = manualTargetAttestation(ACCOUNT);
+  const valuePlan = plan({
+    nonce: "manual-target-fallback",
+    recoveryAttestationHash: attestation.contentHash,
+  });
+  const compact = compactEvidence(valuePlan);
+  const fresh = freshEvidence(valuePlan);
+  const evidence: MainnetOperatorTestCompactFreshEvidence = {
+    compactAccount: compact.compactAccount,
+    manualTargetState: {
+      serverTime: NOW,
+      capabilities: fresh.state.capabilities,
+      position: {
+        status: "unavailable",
+        reasonCode: "TARGET_POSITION_READ_FAILED",
+      },
+      openOrders: {
+        status: "unavailable",
+        reasonCode: "TARGET_ORDERS_READ_FAILED",
+      },
+      attestation,
+    },
+    instrument: fresh.instrument,
+    quote: fresh.quote,
+    feeRate: fresh.feeRate,
+  };
+
+  const result = validateMainnetOperatorTestEvidence(valuePlan, evidence);
+
+  assert.equal(
+    result.ok,
+    true,
+    result.ok ? undefined : JSON.stringify(result.error),
+  );
+  if (result.ok) assert.equal(result.value.manualTargetAgeAtReadMs, 1_000);
+});
+
+test("manual recovery blocks stale, exposed or non-1x UI target facts", () => {
+  const cases = [
+    {
+      name: "stale UI observation",
+      options: { observedAt: at(Date.parse(NOW) - 301_000) },
+      expected: "MANUAL_TARGET_EVIDENCE_STALE",
+    },
+    {
+      name: "unrelated account position",
+      options: {
+        accountPositions: [
+          { symbol: "ETHUSDT", side: "Buy" as const, quantity: "1" },
+        ],
+      },
+      expected: "MANUAL_TARGET_EVIDENCE_INVALID",
+    },
+    {
+      name: "target leverage differs from the required 1x",
+      options: { targetLeverage: "2" },
+      expected: "MANUAL_TARGET_EVIDENCE_INVALID",
+    },
+  ] as const;
+
+  for (const [index, item] of cases.entries()) {
+    const attestation = manualTargetAttestation(ACCOUNT, item.options);
+    const valuePlan = plan({
+      nonce: `manual-target-block-${index}`,
+      recoveryAttestationHash: attestation.contentHash,
+    });
+    const compact = compactEvidence(valuePlan);
+    const fresh = freshEvidence(valuePlan);
+    const result = validateMainnetOperatorTestEvidence(valuePlan, {
+      compactAccount: compact.compactAccount,
+      manualTargetState: {
+        serverTime: NOW,
+        capabilities: fresh.state.capabilities,
+        position: {
+          status: "unavailable",
+          reasonCode: "TARGET_POSITION_READ_FAILED",
+        },
+        openOrders: {
+          status: "unavailable",
+          reasonCode: "TARGET_ORDERS_READ_FAILED",
+        },
+        attestation,
+      },
+      instrument: fresh.instrument,
+      quote: fresh.quote,
+      feeRate: fresh.feeRate,
+    });
+    assert.equal(result.ok, false, item.name);
+    if (!result.ok)
+      assert.equal(result.error.details?.reasonCode, item.expected);
+  }
+});
+
+test("fresh API target facts at or after the UI observation override manual flat claims", () => {
+  const attestation = manualTargetAttestation(ACCOUNT);
+  const valuePlan = plan({
+    nonce: "manual-target-api-contradiction",
+    recoveryAttestationHash: attestation.contentHash,
+  });
+  const compact = compactEvidence(valuePlan);
+  const fresh = freshEvidence(valuePlan);
+  const evidence: MainnetOperatorTestCompactFreshEvidence = {
+    compactAccount: compact.compactAccount,
+    manualTargetState: {
+      serverTime: NOW,
+      capabilities: fresh.state.capabilities,
+      position: {
+        status: "available",
+        observedAt: NOW,
+        value: {
+          ...fresh.state.position,
+          side: "long",
+          quantity: decimal("0.01"),
+        },
+      },
+      openOrders: {
+        status: "available",
+        observedAt: NOW,
+        value: [],
+      },
+      attestation,
+    },
+    instrument: fresh.instrument,
+    quote: fresh.quote,
+    feeRate: fresh.feeRate,
+  };
+
+  const result = validateMainnetOperatorTestEvidence(valuePlan, evidence);
+
+  assert.equal(result.ok, false);
+  if (!result.ok)
+    assert.equal(
+      result.error.details?.causeCode,
+      "MANUAL_API_POSITION_CONTRADICTION",
+    );
 });
 
 test("compact account consistency identifies the changing balance group", async () => {
@@ -1023,6 +1219,189 @@ test("temporary SQLite prepared plan survives reopen between one fake CREATE and
     durableSource?.source.payloadHash,
   );
   reopenedPersistence.close();
+});
+
+test("one manual recovery grant is consumed with one separately approved CREATE through application and SQLite", async () => {
+  const priorPlan = plan({ nonce: "manual-recovery-prior" });
+  const base = setup({ valuePlan: priorPlan });
+  const journal = base.journal;
+  assert.equal(journal.persistPreparedPlan(priorPlan).ok, true);
+  const priorCreate = unwrap(createOperatorMainnetCreateRequest(priorPlan));
+  const priorSourceId = unwrap(
+    deriveOperatorMainnetTestSourceId(priorPlan.contentHash),
+  );
+  const priorApproval = approval(priorPlan);
+  unwrap(
+    journal.prepareCreateIntent({
+      runId: "prior-run",
+      plan: priorPlan,
+      approval: priorApproval,
+      payloadJson: priorCreate.payloadJson,
+      payloadHash: priorCreate.payloadHash as PlanHash,
+      preparedAt: NOW,
+    }),
+  );
+  unwrap(
+    journal.recordAttempt({
+      runId: "prior-run",
+      sourceId: priorSourceId,
+      attemptId: "prior-attempt",
+      outcome: "accepted",
+      exchangeOrderId: "prior-exchange-order",
+      recordedAt: NOW,
+    }),
+  );
+  unwrap(journal.raiseHalt(priorSourceId, "status evidence unresolved", NOW));
+  const prior = unwrap(journal.readOperatorMainnetTestSource(priorSourceId));
+  assert.ok(prior);
+
+  const attestation = unwrap(
+    createOperatorMainnetRecoveryAttestation({
+      provenance: "MANUAL_ATTESTED_NOT_API_VERIFIED",
+      exchange: "bybit",
+      environment: "mainnet",
+      accountIdentityHash: ACCOUNT,
+      sourceId: priorSourceId,
+      sourcePlanHash: priorPlan.contentHash,
+      sourceIntentId: prior.intent.writeIntentId,
+      sourceRevision: 1,
+      actor: "operator-test",
+      observedAt: at(Date.parse(NOW) - 1_000),
+      inspection: {
+        accountOpenOrdersInspected: true,
+        accountOpenOrders: [],
+        accountPositionsInspected: true,
+        accountPositions: [],
+        sourceOrderHistoryInspected: true,
+        sourceOrders: [
+          {
+            orderId: "prior-exchange-order",
+            clientOrderId: priorPlan.clientOrderId,
+            symbol: priorPlan.symbol,
+            side: "Buy",
+            orderType: "Limit",
+            quantity: priorPlan.entry.quantity.toString(),
+            price: priorPlan.entry.limitPrice.toString(),
+            status: "Cancelled",
+          },
+        ],
+        sourceFillsInspected: true,
+        sourceFills: [],
+        sourcePositionInspected: true,
+        sourcePosition: null,
+        targetLeverage: "1",
+        sourceTakeProfitInspected: true,
+        sourceTakeProfitOrders: [],
+      },
+      manualActions: ["none"],
+      acceptedUncertainty: ["manual-ui-may-be-stale"],
+    }),
+  );
+  assert.equal(
+    journal.persistOperatorMainnetRecoveryAttestation({
+      attestation,
+      recordedAt: NOW,
+    }).ok,
+    true,
+  );
+  const nextPlan = plan({
+    nonce: "manual-recovery-next",
+    recoveryAttestationHash: attestation.contentHash,
+  });
+  assert.equal(journal.persistPreparedPlan(nextPlan).ok, true);
+
+  const lookupOptions = {
+    databasePath: base.databasePath,
+    clock: { now: () => base.clock.now },
+  };
+  const recovery = unwrap(
+    recoverMainnetOperatorTest(
+      {
+        sourceId: priorSourceId,
+        planHash: nextPlan.contentHash,
+        resolution: "manual-attested",
+        actor: "operator-test",
+        consent: true,
+        issuedAt: NOW,
+      },
+      {
+        resolveSource: (id: unknown) =>
+          resolveOperatorMainnetSource(id, lookupOptions),
+        resolvePlan: (hash: unknown) =>
+          resolveOperatorMainnetPlan(hash, lookupOptions),
+        openPersistence: (settings) =>
+          openSqlitePersistence({
+            ...settings,
+            databasePath: base.databasePath,
+            runtime,
+            clock: { now: () => base.clock.now },
+          }),
+      },
+    ),
+  );
+  assert.equal(recovery.exchangeReads, 0);
+  assert.equal(recovery.exchangeWrites, 0);
+  assert.equal(unwrap(base.persistence.readHalt()).active, false);
+  assert.equal(
+    unwrap(journal.findPendingOperatorMainnetTestSource())?.sourceId,
+    priorSourceId,
+    "recovery alone leaves the old source pending",
+  );
+
+  const compact = compactEvidence(nextPlan);
+  const fresh = freshEvidence(nextPlan);
+  const evidence: MainnetOperatorTestCompactFreshEvidence = {
+    compactAccount: compact.compactAccount,
+    manualTargetState: {
+      serverTime: NOW,
+      capabilities: fresh.state.capabilities,
+      position: {
+        status: "unavailable",
+        reasonCode: "TARGET_POSITION_READ_FAILED",
+      },
+      openOrders: {
+        status: "unavailable",
+        reasonCode: "TARGET_ORDERS_READ_FAILED",
+      },
+      attestation,
+    },
+    instrument: fresh.instrument,
+    quote: fresh.quote,
+    feeRate: fresh.feeRate,
+  };
+  const next = setupWithPersistence(
+    base.root,
+    base.databasePath,
+    nextPlan,
+    approval(nextPlan),
+    base.clock,
+    base.persistence,
+    evidence,
+  );
+  const outcome = unwrap(await next.run());
+  assert.equal(outcome.kind, "attempted");
+  assert.equal(outcome.attemptOutcome, "accepted");
+  assert.equal(next.authorization.consumeCalls, 1);
+  assert.deepEqual(next.createObservations, [
+    { durableIntent: true, payloadMatches: true },
+  ]);
+  const nextSourceId = unwrap(
+    deriveOperatorMainnetTestSourceId(nextPlan.contentHash),
+  );
+  const resolvedPrior = unwrap(
+    journal.readOperatorMainnetTestSource(priorSourceId),
+  );
+  assert.equal(resolvedPrior?.sourceDisposition?.disposition, "human-attested");
+  assert.equal(resolvedPrior?.sourceDisposition?.nextSourceId, nextSourceId);
+  assert.equal(
+    unwrap(journal.findPendingOperatorMainnetTestSource())?.sourceId,
+    nextSourceId,
+  );
+  assert.equal(
+    unwrap(journal.findOperatorMainnetRecoveryGrant(nextPlan.contentHash, NOW)),
+    undefined,
+  );
+  base.persistence.close();
 });
 
 test("IP-unbound is admitted only as the same explicit plan warning", async () => {

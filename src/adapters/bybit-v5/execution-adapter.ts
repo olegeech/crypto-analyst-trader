@@ -66,6 +66,30 @@ import {
   type BybitInstrumentInfo,
 } from "./read-mappers.js";
 
+export type MainnetOperatorTargetPartition<T> =
+  | {
+      readonly status: "available";
+      readonly observedAt: UtcTimestamp;
+      readonly value: T;
+    }
+  | {
+      readonly status: "unavailable";
+      readonly reasonCode: string;
+    };
+
+/** Separate provider partitions used only when a scoped manual recovery must
+ * replace unavailable current position/order facts. */
+export interface MainnetOperatorTargetStateParts {
+  readonly serverTime: UtcTimestamp | undefined;
+  readonly capabilities?: readonly CapabilityObservation[];
+  readonly position: MainnetOperatorTargetPartition<
+    MainnetExchangeReadState["position"]
+  >;
+  readonly openOrders: MainnetOperatorTargetPartition<
+    MainnetExchangeReadState["openOrders"]
+  >;
+}
+
 const DEMO_SCOPE = {
   exchange: "bybit",
   environment: "demo",
@@ -572,6 +596,78 @@ export class BybitMainnetExecutionAdapter implements MainnetExchangeExecutionPor
         normalizeBybitFailure(error, context("read"), "mainnet"),
       );
     }
+  }
+
+  /** Preserve independently successful target partitions for the named #25
+   * manual exception. A failure in one partition never fabricates success in
+   * another, and provider-time failure prevents any ordering conclusion. */
+  async readOperatorTargetStateParts(
+    request: ExchangeReadStateRequest,
+  ): Promise<MainnetOperatorTargetStateParts> {
+    const [positionResult, orderResult] = await Promise.allSettled([
+      this.client.readPosition(request.instrument),
+      this.client.readOpenOrders(request.instrument),
+    ]);
+    let serverTime: UtcTimestamp | undefined;
+    try {
+      serverTime = await this.client.readServerTime();
+    } catch {
+      return {
+        serverTime: undefined,
+        position: {
+          status: "unavailable",
+          reasonCode: "PROVIDER_TIME_UNAVAILABLE",
+        },
+        openOrders: {
+          status: "unavailable",
+          reasonCode: "PROVIDER_TIME_UNAVAILABLE",
+        },
+      };
+    }
+    const position: MainnetOperatorTargetStateParts["position"] =
+      positionResult.status === "fulfilled"
+        ? {
+            status: "available",
+            observedAt: serverTime,
+            value: Object.freeze({
+              instrument: positionResult.value.instrument,
+              side: positionResult.value.side,
+              quantity: positionResult.value.quantity,
+              leverage: positionResult.value.leverage,
+              ...(positionResult.value.entryPrice === undefined
+                ? {}
+                : { entryPrice: positionResult.value.entryPrice }),
+            }),
+          }
+        : {
+            status: "unavailable",
+            reasonCode: "TARGET_POSITION_READ_FAILED",
+          };
+    const openOrders: MainnetOperatorTargetStateParts["openOrders"] =
+      orderResult.status === "fulfilled"
+        ? {
+            status: "available",
+            observedAt: serverTime,
+            value: Object.freeze(
+              orderResult.value.map((record) =>
+                mapOrderObservation(
+                  record,
+                  serverTime!,
+                  "bybit-mainnet/order-realtime",
+                ),
+              ),
+            ),
+          }
+        : {
+            status: "unavailable",
+            reasonCode: "TARGET_ORDERS_READ_FAILED",
+          };
+    return {
+      serverTime,
+      capabilities: mainnetCapabilities(request.instrument, serverTime),
+      position,
+      openOrders,
+    };
   }
 
   async createOrder(

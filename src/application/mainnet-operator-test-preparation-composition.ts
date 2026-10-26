@@ -19,6 +19,7 @@ import {
   createOperatorMainnetTestPlan,
   type OperatorMainnetTestPlan,
 } from "../domain/execution/operator-mainnet-test-plan.js";
+import { rehydrateOperatorMainnetRecoveryAttestation } from "../domain/execution/operator-mainnet-recovery.js";
 import { domainError } from "../domain/shared/errors.js";
 import { fail, ok, type Result } from "../domain/shared/result.js";
 import {
@@ -27,12 +28,13 @@ import {
   timestampToEpochMs,
 } from "../domain/shared/time.js";
 import { isPlanningSymbol } from "../domain/planning/decision-policy.js";
+import { requireHash } from "../domain/shared/validation.js";
 import type {
   CredentialEnvironment,
   CredentialProvider,
   ExchangeCredentials,
 } from "../ports/credential-provider.js";
-import type { MainnetExchangeReadState } from "../ports/exchange-execution.js";
+import type { UtcTimestamp } from "../domain/shared/time.js";
 import { collectAccountEvidence } from "./account-evidence-collection.js";
 import { deriveMainnetExecutionReadiness } from "./mainnet-execution-readiness.js";
 import {
@@ -59,6 +61,8 @@ export interface MainnetOperatorTestPrepareInput {
   readonly allocation: unknown;
   readonly grossNotionalCap: unknown;
   readonly maxDeviationBps: unknown;
+  readonly recoveryAttestationHash?: unknown;
+  readonly recoveryAttestation?: unknown;
 }
 
 export interface MainnetOperatorTestPreparation {
@@ -140,11 +144,14 @@ export async function prepareMainnetOperatorTest(
     typeof input !== "object" ||
     input === null ||
     Array.isArray(input) ||
-    Reflect.ownKeys(input).length !== 4 ||
+    (Reflect.ownKeys(input).length !== 4 &&
+      Reflect.ownKeys(input).length !== 6) ||
     !Object.hasOwn(input, "symbol") ||
     !Object.hasOwn(input, "allocation") ||
     !Object.hasOwn(input, "grossNotionalCap") ||
     !Object.hasOwn(input, "maxDeviationBps") ||
+    Object.hasOwn(input, "recoveryAttestationHash") !==
+      Object.hasOwn(input, "recoveryAttestation") ||
     typeof input.symbol !== "string" ||
     !isPlanningSymbol(input.symbol) ||
     [input.allocation, input.grossNotionalCap, input.maxDeviationBps].some(
@@ -152,6 +159,29 @@ export async function prepareMainnetOperatorTest(
     )
   )
     return withCounts(failed("INVALID_INPUT"), exchangeReads, 0);
+
+  const recoveryAttestation = Object.hasOwn(input, "recoveryAttestation")
+    ? rehydrateOperatorMainnetRecoveryAttestation(input.recoveryAttestation)
+    : undefined;
+  const recoveryAttestationHash = Object.hasOwn(
+    input,
+    "recoveryAttestationHash",
+  )
+    ? requireHash(input.recoveryAttestationHash, "recoveryAttestationHash")
+    : undefined;
+  if (
+    (recoveryAttestation !== undefined && !recoveryAttestation.ok) ||
+    (recoveryAttestationHash !== undefined && !recoveryAttestationHash.ok) ||
+    (recoveryAttestation !== undefined &&
+      recoveryAttestation.ok &&
+      recoveryAttestationHash?.ok &&
+      recoveryAttestation.value.contentHash !== recoveryAttestationHash.value)
+  )
+    return withCounts(
+      failed("MANUAL_RECOVERY_ATTESTATION_INVALID"),
+      exchangeReads,
+      0,
+    );
 
   const wall = dependencies.utcClock ?? Date.now;
   const monotonic = () => performance.now();
@@ -183,7 +213,7 @@ export async function prepareMainnetOperatorTest(
   let compactQuote:
     | Awaited<ReturnType<BybitPublicMarketClient["readOperatorQuote"]>>
     | undefined;
-  let compactState: MainnetExchangeReadState | undefined;
+  let compactServerTime: UtcTimestamp | undefined;
   let accountResult: AccountEvidenceCollectionResult | undefined;
   let preparationFee:
     | Extract<ReturnType<typeof extractOperatorFeeRate>, { ok: true }>["value"]
@@ -273,6 +303,9 @@ export async function prepareMainnetOperatorTest(
       warningCodes: accountCheck.value.credentialPosture.warnings,
       constraints: instrument.constraints,
       preparedAt: quote.observedAt,
+      ...(recoveryAttestationHash?.ok
+        ? { recoveryAttestationHash: recoveryAttestationHash.value }
+        : {}),
     });
     if (!candidate.ok) return withCounts(candidate, exchangeReads, 0);
     const earlyFeeAge =
@@ -311,17 +344,43 @@ export async function prepareMainnetOperatorTest(
         clock: wall,
       }),
     });
-    const current = await exchange.readState({ instrument: input.symbol });
-    if (!current.ok) throw new Error("compact state unavailable");
     compactInstrument = instrument;
     compactQuote = quote;
-    compactState = current.value;
-    const checked = validateCompactOperatorPreparationEvidence({
-      compactAccount,
-      state: current.value,
-      instrument,
-      quote,
-    });
+    let checked;
+    if (recoveryAttestation?.ok) {
+      const parts = await exchange.readOperatorTargetStateParts({
+        instrument: input.symbol,
+      });
+      if (!parts.serverTime)
+        return withCounts(
+          failed("PROVIDER_TIME_UNAVAILABLE", {
+            source: "target-state",
+          }),
+          exchangeReads,
+          0,
+        );
+      compactServerTime = parts.serverTime;
+      checked = validateCompactOperatorPreparationEvidence({
+        compactAccount,
+        manualTargetState: {
+          ...parts,
+          attestation: recoveryAttestation.value,
+        },
+        plan: candidate.value,
+        instrument,
+        quote,
+      });
+    } else {
+      const current = await exchange.readState({ instrument: input.symbol });
+      if (!current.ok) throw new Error("compact state unavailable");
+      compactServerTime = current.value.serverTime;
+      checked = validateCompactOperatorPreparationEvidence({
+        compactAccount,
+        state: current.value,
+        instrument,
+        quote,
+      });
+    }
     if (checked.ok) compactPreparation = checked.value;
     else {
       const reasonCode = checked.error.details?.reasonCode;
@@ -358,14 +417,26 @@ export async function prepareMainnetOperatorTest(
         ? error.reasonCode
         : "COMPACT_READ_FAILED";
   }
+  if (recoveryAttestation?.ok && !compactPreparation)
+    return withCounts(
+      failed(
+        compactFallbackReason ?? "MANUAL_RECOVERY_MACHINE_EVIDENCE_UNAVAILABLE",
+        {
+          source: "account",
+          causeCode: "MANDATORY_COMPACT_EVIDENCE_INCOMPLETE",
+        },
+      ),
+      exchangeReads,
+      0,
+    );
   if (!credentials)
     return withCounts(failed("ACCOUNT_EVIDENCE_UNAVAILABLE"), exchangeReads, 0);
 
   try {
     let instrument = compactInstrument;
     let quote = compactQuote;
-    let providerTime = compactState
-      ? parseUtcTimestamp(compactState.serverTime)
+    let providerTime = compactServerTime
+      ? parseUtcTimestamp(compactServerTime)
       : undefined;
     let accountIdentityHash = compactPreparation?.accountIdentityHash;
     let warningCodes: readonly "API_KEY_IP_UNBOUND"[] | undefined =
@@ -477,6 +548,9 @@ export async function prepareMainnetOperatorTest(
       warningCodes,
       constraints: instrument.constraints,
       preparedAt: providerTime.value,
+      ...(recoveryAttestationHash?.ok
+        ? { recoveryAttestationHash: recoveryAttestationHash.value }
+        : {}),
     });
     if (!plan.ok) return withCounts(plan, exchangeReads, 0);
     // Recheck fresh fee/balance evidence at the shared persistence boundary,
