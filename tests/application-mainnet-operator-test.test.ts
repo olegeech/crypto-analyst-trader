@@ -615,6 +615,11 @@ test("one durable exact CREATE intent exists before the only exchange dispatch",
     harness.journal.readOperatorMainnetTestSource(sourceId),
   );
   assert.equal(source?.attempt?.outcome, "accepted");
+  assert.equal(unwrap(harness.persistence.readHalt()).active, false);
+  assert.equal(
+    unwrap(harness.journal.findPendingOperatorMainnetTestSource())?.sourceId,
+    sourceId,
+  );
   assert.equal(
     source?.source.payloadHash,
     unwrap(createOperatorMainnetCreateRequest(harness.valuePlan)).payloadHash,
@@ -639,6 +644,115 @@ test("one durable exact CREATE intent exists before the only exchange dispatch",
   assert.equal(unwrap(restart).kind, "recovery");
   assert.equal(harness.createObservations.length, 1);
   reopened.close();
+});
+
+test("UNKNOWN status raises a source-linked incident HALT and clean status keeps it active", async () => {
+  const harness = setup();
+  const execute = unwrap(await harness.run());
+  assert.equal(execute.attemptOutcome, "accepted");
+  assert.equal(unwrap(harness.persistence.readHalt()).active, false);
+
+  const sourceId = unwrap(
+    deriveOperatorMainnetTestSourceId(harness.valuePlan.contentHash),
+  );
+  const unknown = await runMainnetOperatorTestStatus(
+    { sourceId },
+    {
+      persistence: harness.persistence,
+      journal: harness.journal,
+      exchange: {
+        async observe() {
+          throw new Error("temporary status read failure");
+        },
+      },
+      clock: { now: () => harness.clock.now },
+    },
+  );
+  const unknownStatus = unwrap(unknown);
+  assert.equal(unknownStatus.lifecycleOutcome, "UNKNOWN");
+  assert.equal(unknownStatus.halt.active, true);
+
+  const observedAt = at(Date.parse(NOW) + 1_000);
+  const cancelledParent = unwrap(
+    createExchangeOrder({
+      exchangeOrderId: "test-exchange-order-1",
+      clientOrderId: harness.valuePlan.clientOrderId,
+      instrument: harness.valuePlan.symbol,
+      side: "buy",
+      requestedQuantity: harness.valuePlan.entry.quantity.toString(),
+      filledQuantity: "0",
+      status: "cancelled",
+      observedAt,
+      source: "bybit-mainnet/order/realtime",
+      category: "linear",
+      orderType: "limit",
+      price: harness.valuePlan.entry.limitPrice.toString(),
+      timeInForce: "GTC",
+      takeProfit: harness.valuePlan.entry.takeProfit.triggerPrice.toString(),
+      stopLoss: null,
+      reduceOnly: false,
+      positionIdx: 0,
+      providerCreatedAt: at(Date.parse(NOW) + 100),
+      providerUpdatedAt: observedAt,
+    }),
+  );
+  const resolved = unwrap(
+    await runMainnetOperatorTestStatus(
+      { sourceId },
+      {
+        persistence: harness.persistence,
+        journal: harness.journal,
+        exchange: {
+          async observe() {
+            return {
+              ok: true as const,
+              value: {
+                observedAt,
+                parentLookupComplete: true,
+                parent: cancelledParent,
+                entryFills: [],
+                children: [],
+                childFills: [],
+                position: {
+                  instrument: harness.valuePlan.symbol,
+                  side: "flat",
+                  quantity: decimal("0"),
+                },
+                activeOrders: [],
+                exchangeReads: 3,
+              },
+            };
+          },
+        },
+        clock: { now: () => observedAt },
+      },
+    ),
+  );
+  assert.equal(resolved.lifecycleOutcome, "NOT_EXERCISED");
+  assert.equal(resolved.cleanupStatus, "verified-clean");
+  assert.equal(resolved.halt.active, true);
+
+  harness.persistence.close();
+  const connection = unwrap(
+    openSqliteConnection({
+      environment: "mainnet",
+      databasePath: harness.databasePath,
+      runtime,
+      clock: { now: () => observedAt },
+    }),
+  );
+  const event = connection.db
+    .prepare("SELECT evidence_json FROM halt_events WHERE account_id = ?")
+    .get(ACCOUNT) as { readonly evidence_json: string | null } | undefined;
+  assert.ok(event?.evidence_json);
+  const evidence = JSON.parse(event.evidence_json) as Record<string, unknown>;
+  assert.equal(evidence.schemaVersion, "operator-mainnet-halt-origin/v1");
+  assert.equal(evidence.sourceId, sourceId);
+  assert.equal(
+    evidence.writeIntentId,
+    resolved.latestSnapshot.intent.writeIntentId,
+  );
+  connection.close();
 });
 
 test("compact admission accepts the same exact-plan CREATE proof without full account history", async () => {
@@ -1153,6 +1267,7 @@ test("post-dispatch journal failure remains ambiguous and restart cannot resend"
   const outcome = unwrap(result);
   assert.equal(outcome.kind, "recovery");
   assert.equal(outcome.attemptOutcome, "ambiguous");
+  assert.equal(unwrap(harness.persistence.readHalt()).active, true);
   assert.equal(harness.createObservations.length, 1);
   const restart = await harness.run();
   assert.equal(unwrap(restart).kind, "recovery");

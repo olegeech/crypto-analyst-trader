@@ -145,7 +145,8 @@ export interface OperatorMainnetTestPersistencePort {
   prepareCreateIntent(
     request: PrepareOperatorMainnetTestCreateRequest,
   ): Result<OperatorMainnetTestSnapshot>;
-  recordAttemptAndHalt(
+  /** Persist an attempt; only ambiguous delivery raises a source-linked HALT. */
+  recordAttempt(
     request: RecordOperatorMainnetTestAttemptRequest,
   ): Result<OperatorMainnetTestSnapshot>;
   raiseHalt(

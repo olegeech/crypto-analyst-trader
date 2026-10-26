@@ -337,11 +337,51 @@ test("intent source is recovery-only across close and reopen", () => {
   reopened.close();
 });
 
-test("attempt and unknown-protection HALT are one run-owned atomic write", () => {
+test("CREATE attempt outcomes remain pending; only ambiguity raises incident HALT", () => {
+  for (const outcome of ["accepted", "rejected"] as const) {
+    const fixture = setup();
+    const created = value(prepare(fixture));
+    const recorded = value(
+      fixture.store.recordAttempt({
+        runId: "operator-run-01",
+        sourceId: created.source.sourceId,
+        attemptId: `operator-attempt-${outcome}`,
+        outcome,
+        recordedAt: fixture.clock.value,
+      }),
+    );
+    assert.equal(recorded.attempt?.outcome, outcome);
+    assert.equal(recorded.halt.active, false);
+    assert.equal(
+      value(fixture.store.findPendingOperatorMainnetTestSource())?.sourceId,
+      created.source.sourceId,
+    );
+    const nextPlan = plan(`blocked-after-${outcome}`);
+    const next = fixture.store.prepareCreateIntent({
+      runId: "operator-run-02",
+      plan: nextPlan,
+      approval: approval(nextPlan),
+      payloadJson: exactPayload(nextPlan),
+      payloadHash: payloadHash(exactPayload(nextPlan)),
+      preparedAt: fixture.clock.value,
+    });
+    assert.equal(next.ok, false);
+    if (!next.ok) assert.equal(next.error.code, "UNRESOLVED_STATE");
+    assert.equal(
+      fixture.connection.db
+        .prepare(
+          "SELECT COUNT(*) AS count FROM halt_events WHERE account_id = ?",
+        )
+        .get(ACCOUNT)?.count,
+      0,
+    );
+    fixture.connection.close();
+  }
+
   const fixture = setup();
   const created = value(prepare(fixture));
   const recorded = value(
-    fixture.store.recordAttemptAndHalt({
+    fixture.store.recordAttempt({
       runId: "operator-run-01",
       sourceId: created.source.sourceId,
       attemptId: "operator-attempt-01",
@@ -353,6 +393,18 @@ test("attempt and unknown-protection HALT are one run-owned atomic write", () =>
   assert.equal(recorded.attempt?.outcome, "ambiguous");
   assert.equal(recorded.halt.active, true);
   assert.equal(recorded.halt.reconciliationRequired, true);
+  const event = fixture.connection.db
+    .prepare("SELECT evidence_json FROM halt_events WHERE account_id = ?")
+    .get(ACCOUNT) as { readonly evidence_json: string | null } | undefined;
+  assert.ok(event?.evidence_json);
+  const evidence = JSON.parse(event.evidence_json) as Record<string, unknown>;
+  assert.equal(evidence.schemaVersion, "operator-mainnet-halt-origin/v1");
+  assert.equal(evidence.sourceId, created.source.sourceId);
+  assert.equal(evidence.writeIntentId, created.intent.writeIntentId);
+  assert.equal(
+    (evidence.trigger as Record<string, unknown>).attemptCanonicalHash,
+    recorded.attempt?.canonicalHash,
+  );
   assert.equal(
     fixture.connection.db
       .prepare("SELECT COUNT(*) AS count FROM halt_events WHERE account_id = ?")
@@ -448,7 +500,7 @@ test("status reconciliation appends without a lease and preserves real HALT", ()
   const fixture = setup();
   const created = value(prepare(fixture));
   value(
-    fixture.store.recordAttemptAndHalt({
+    fixture.store.recordAttempt({
       runId: "operator-run-01",
       sourceId: created.source.sourceId,
       attemptId: "operator-attempt-recovery",
@@ -457,10 +509,9 @@ test("status reconciliation appends without a lease and preserves real HALT", ()
       recordedAt: fixture.clock.value,
     }),
   );
+  assert.equal(value(fixture.execution.readHalt()).active, false);
 
   fixture.clock.value = timestamp("2026-10-22T10:02:01.000Z");
-  assert.equal(value(fixture.execution.readHalt()).active, true);
-
   const appended = value(
     fixture.store.appendReconciliation({
       sourceId: created.source.sourceId,
@@ -469,6 +520,13 @@ test("status reconciliation appends without a lease and preserves real HALT", ()
       evidence: { reason: "recovery read incomplete" },
       observedAt: fixture.clock.value,
     }),
+  );
+  value(
+    fixture.store.raiseHalt(
+      created.source.sourceId,
+      "operator Mainnet status is unknown",
+      fixture.clock.value,
+    ),
   );
   assert.equal(appended.revision, 1);
   assert.equal(
@@ -513,7 +571,7 @@ test("an abandoned pre-intent lease does not block operator journal or raise HAL
 test("attempt recording requires the persisted run identity without a lease", () => {
   const fixture = setup();
   const created = value(prepare(fixture));
-  const result = fixture.store.recordAttemptAndHalt({
+  const result = fixture.store.recordAttempt({
     runId: "another-process",
     sourceId: created.source.sourceId,
     attemptId: "wrong-run-attempt",
@@ -561,6 +619,14 @@ test("source-bound HALT rejects absent or foreign sources and preserves a real i
     ),
   );
   assert.equal(raised.active, true);
+  const event = fixture.connection.db
+    .prepare("SELECT evidence_json FROM halt_events WHERE account_id = ?")
+    .get(ACCOUNT) as { readonly evidence_json: string | null } | undefined;
+  assert.ok(event?.evidence_json);
+  const evidence = JSON.parse(event.evidence_json) as Record<string, unknown>;
+  assert.equal(evidence.schemaVersion, "operator-mainnet-halt-origin/v1");
+  assert.equal(evidence.sourceId, created.source.sourceId);
+  assert.equal(evidence.writeIntentId, created.intent.writeIntentId);
   value(
     fixture.store.appendReconciliation({
       sourceId: created.source.sourceId,
@@ -580,11 +646,82 @@ test("source-bound HALT rejects absent or foreign sources and preserves a real i
   fixture.connection.close();
 });
 
+test("legacy #31 attempt-shaped HALT evidence stays immutable and missing origin keeps HALT actionable", () => {
+  const fixture = setup();
+  const created = value(prepare(fixture));
+  const recorded = value(
+    fixture.store.recordAttempt({
+      runId: "operator-run-01",
+      sourceId: created.source.sourceId,
+      attemptId: "legacy-halt-attempt",
+      outcome: "ambiguous",
+      providerReasonCode: "ACK_UNKNOWN",
+      recordedAt: fixture.clock.value,
+    }),
+  );
+  const legacyEventEvidence = recorded.attempt!.canonicalJson;
+  const legacyEvent = JSON.parse(legacyEventEvidence) as Record<
+    string,
+    unknown
+  >;
+  assert.equal(
+    legacyEvent.schemaVersion,
+    "operator-mainnet-test-create-attempt/v1",
+  );
+  assert.equal(legacyEvent.sourceId, created.source.sourceId);
+  assert.equal(legacyEvent.writeIntentId, created.intent.writeIntentId);
+
+  // This was the #31 event shape: the event payload itself was the canonical
+  // saved attempt. Opening the source validates the same persisted evidence.
+  fixture.connection.db
+    .prepare("UPDATE halt_events SET evidence_json = ? WHERE account_id = ?")
+    .run(legacyEventEvidence, ACCOUNT);
+  const validated = value(
+    fixture.store.readOperatorMainnetTestSource(created.source.sourceId),
+  );
+  assert.equal(validated?.attempt?.canonicalJson, legacyEventEvidence);
+  assert.equal(validated?.source.sourceId, legacyEvent.sourceId);
+  assert.equal(validated?.intent.writeIntentId, legacyEvent.writeIntentId);
+  assert.equal(
+    (
+      fixture.connection.db
+        .prepare("SELECT evidence_json FROM halt_events WHERE account_id = ?")
+        .get(ACCOUNT) as { readonly evidence_json: string | null }
+    ).evidence_json,
+    legacyEventEvidence,
+  );
+
+  // Missing legacy origin evidence never clears HALT or permits another plan.
+  fixture.connection.db
+    .prepare("UPDATE halt_events SET evidence_json = NULL WHERE account_id = ?")
+    .run(ACCOUNT);
+  const nextPlan = plan("blocked-by-unlinked-legacy-halt");
+  const blocked = prepare(fixture, nextPlan);
+  assert.equal(blocked.ok, false);
+  if (!blocked.ok) {
+    assert.equal(blocked.error.code, "HALT_ACTIVE");
+    assert.match(
+      blocked.error.message,
+      /inspect saved event and source\/intent evidence/u,
+    );
+  }
+  assert.equal(value(fixture.execution.readHalt()).active, true);
+  assert.equal(
+    (
+      fixture.connection.db
+        .prepare("SELECT evidence_json FROM halt_events WHERE account_id = ?")
+        .get(ACCOUNT) as { readonly evidence_json: string | null }
+    ).evidence_json,
+    null,
+  );
+  fixture.connection.close();
+});
+
 test("v9 migration preserves populated historical v1 intent bytes and recovery records", () => {
   const fixture = setup();
   const created = value(prepare(fixture));
   value(
-    fixture.store.recordAttemptAndHalt({
+    fixture.store.recordAttempt({
       runId: "operator-run-01",
       sourceId: created.source.sourceId,
       attemptId: "historical-attempt",

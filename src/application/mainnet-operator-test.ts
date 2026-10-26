@@ -440,7 +440,7 @@ export async function executeMainnetOperatorTest(
     elapsedAfterDispatch.ok ? elapsedAfterDispatch.value : elapsed.value,
   );
   const recordedAt = attemptAt.ok ? attemptAt.value : providerTime.value;
-  const attempt = dependencies.journal.recordAttemptAndHalt({
+  const attempt = dependencies.journal.recordAttempt({
     runId: runId.value,
     sourceId: sourceId.value,
     attemptId: randomUUID(),
@@ -453,7 +453,15 @@ export async function executeMainnetOperatorTest(
       : { providerReasonCode: classified.providerReasonCode }),
     recordedAt,
   });
-  if (!attempt.ok)
+  if (!attempt.ok) {
+    // A durable CREATE may already have reached Bybit. If its result could not
+    // be journaled atomically with the attempt, preserve an explicit incident
+    // using the still-validated source and intent, and never resubmit it.
+    dependencies.journal.raiseHalt(
+      sourceId.value,
+      "operator Mainnet CREATE outcome could not be durably recorded",
+      recordedAt,
+    );
     return ok(
       recovery(
         sourceId.value,
@@ -462,6 +470,7 @@ export async function executeMainnetOperatorTest(
         "ambiguous",
       ),
     );
+  }
   return ok(
     Object.freeze({
       kind: "attempted",

@@ -787,6 +787,26 @@ export class SqliteOperatorMainnetTestStore implements OperatorMainnetTestPersis
     });
   }
 
+  private haltOriginEvidence(
+    source: OperatorMainnetTestSourceRecord,
+    intent: OperatorMainnetTestIntentRecord,
+    trigger: Readonly<Record<string, unknown>>,
+  ): Result<string> {
+    if (source.sourceId !== intent.sourceId)
+      return persistenceFailure(
+        "operator HALT source and CREATE intent origin do not match",
+      );
+    const encoded = encode({
+      schemaVersion: "operator-mainnet-halt-origin/v1",
+      sourceId: source.sourceId,
+      writeIntentId: intent.writeIntentId,
+      sourcePlanHash: source.planHash,
+      intentCanonicalHash: intent.canonicalHash,
+      trigger,
+    });
+    return encoded.ok ? ok(encoded.value.json) : encoded;
+  }
+
   private pendingSourceRow(
     database = this.db,
   ): Result<OperatorMainnetTestSourceRecord | undefined> {
@@ -898,7 +918,7 @@ export class SqliteOperatorMainnetTestStore implements OperatorMainnetTestPersis
           return fail(
             domainError(
               "HALT_ACTIVE",
-              "HALT blocks a new operator Mainnet CREATE",
+              "HALT blocks a new operator Mainnet CREATE; inspect saved event and source/intent evidence before explicit recovery",
             ),
           );
         const pending = this.pendingSourceRow(database);
@@ -980,7 +1000,7 @@ export class SqliteOperatorMainnetTestStore implements OperatorMainnetTestPersis
     );
   }
 
-  recordAttemptAndHalt(
+  recordAttempt(
     request: RecordOperatorMainnetTestAttemptRequest,
   ): Result<OperatorMainnetTestSnapshot> {
     const sourceId = requireIdentifier(request.sourceId, "sourceId");
@@ -1080,14 +1100,29 @@ export class SqliteOperatorMainnetTestStore implements OperatorMainnetTestPersis
             attempt.value.hash,
             at.value,
           );
-        const raised = raiseHaltWithinTransaction(
-          database,
-          this.scope,
-          "operator Mainnet CREATE awaits read-only reconciliation",
-          at.value,
-          attempt.value.json,
-        );
-        if (!raised.ok) return raised;
+        if (request.outcome === "ambiguous") {
+          const validated = this.snapshot(sourceRow, database);
+          if (!validated.ok) return validated;
+          const origin = this.haltOriginEvidence(
+            validated.value.source,
+            validated.value.intent,
+            {
+              kind: "ambiguous-create-attempt",
+              attemptId: attemptId.value,
+              attemptCanonicalJson: attempt.value.json,
+              attemptCanonicalHash: attempt.value.hash,
+            },
+          );
+          if (!origin.ok) return origin;
+          const raised = raiseHaltWithinTransaction(
+            database,
+            this.scope,
+            "operator Mainnet CREATE awaits read-only reconciliation",
+            at.value,
+            origin.value,
+          );
+          if (!raised.ok) return raised;
+        }
         return this.snapshot(sourceRow, database);
       },
       "PERSISTENCE_CONFLICT",
@@ -1117,11 +1152,36 @@ export class SqliteOperatorMainnetTestStore implements OperatorMainnetTestPersis
           );
         const snapshot = this.snapshot(source, database);
         if (!snapshot.ok) return snapshot;
+        const latestReconciliation = snapshot.value.reconciliations.at(-1);
+        const origin = this.haltOriginEvidence(
+          snapshot.value.source,
+          snapshot.value.intent,
+          {
+            kind:
+              latestReconciliation?.lifecycleOutcome === "UNKNOWN" &&
+              latestReconciliation.cleanupStatus === "unknown"
+                ? "status-unknown"
+                : "operator-source-halt",
+            reason: safeReason.value,
+            recordedAt: time.value,
+            ...(latestReconciliation === undefined
+              ? {}
+              : {
+                  reconciliationRevision: latestReconciliation.revision,
+                  reconciliationCanonicalJson:
+                    latestReconciliation.canonicalJson,
+                  reconciliationCanonicalHash:
+                    latestReconciliation.canonicalHash,
+                }),
+          },
+        );
+        if (!origin.ok) return origin;
         return raiseHaltWithinTransaction(
           database,
           this.scope,
           safeReason.value,
           time.value,
+          origin.value,
         );
       },
       "PERSISTENCE_CONFLICT",
