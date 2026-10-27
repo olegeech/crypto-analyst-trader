@@ -28,6 +28,8 @@ const PRIVATE_PATHS = new Set([
   "/v5/order/realtime",
   "/v5/order/history",
   "/v5/execution/list",
+  "/v5/position/closed-pnl",
+  "/v5/account/transaction-log",
 ]);
 
 export class BybitAccountReadError extends Error {

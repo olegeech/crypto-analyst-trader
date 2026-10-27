@@ -83,10 +83,20 @@ test("account transport uses pinned GET signing bytes and a private credential c
     category: "linear",
     cursor: "next+/=",
   });
+  await transport.get("/v5/position/closed-pnl", {
+    category: "linear",
+    limit: "100",
+  });
+  await transport.get("/v5/account/transaction-log", {
+    accountType: "UNIFIED",
+    limit: "50",
+  });
   const call = seen[0]!;
   const query = new URL(call.url).search.slice(1);
   const headers = new Headers(call.init.headers);
   assert.equal(call.init.method, "GET");
+  assert.equal(seen.length, 3);
+  assert.ok(seen.every((request) => request.init.method === "GET"));
   assert.equal(call.init.redirect, "error");
   assert.equal(headers.get("X-BAPI-API-KEY"), credentials.apiKey);
   assert.equal(
