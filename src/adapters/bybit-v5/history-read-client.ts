@@ -161,8 +161,8 @@ export class BybitHistoryReadClient implements HistoryReadPort {
     try {
       validateWindow(request.window);
       const cursor = validateCursor(request.cursor);
+      if (!Object.hasOwn(SOURCE_ROUTES, request.source)) invalid();
       const source = SOURCE_ROUTES[request.source];
-      if (!source) invalid();
       const query: Record<string, string> = {
         ...(source.category ? { category: "linear" } : { accountType: "UNIFIED" }),
         startTime: String(request.window.fromMs),
