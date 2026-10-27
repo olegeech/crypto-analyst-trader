@@ -261,6 +261,7 @@ export async function prepareMainnetOperatorTest(
           "SPOT_HEDGING_ENABLED",
           "CREDENTIAL_PERMISSION_BLOCKED",
           "CRITICAL_STATE_CHANGED",
+          "AVAILABLE_BALANCE_SNAPSHOTS_DIFFER",
         ].includes(reasonCode)
       )
         return withCounts(
@@ -601,12 +602,19 @@ export async function prepareMainnetOperatorTest(
             (item) => item.partition.endpoint === "wallet",
           )?.exchangeResponseTime,
       );
-      if (walletObservations.some((at) => !at))
+      const missingWalletPass = walletObservations.findIndex((at) => !at);
+      if (missingWalletPass >= 0) {
+        const pass = missingWalletPass === 0 ? "A" : "B";
         return withCounts(
-          failed("ACCOUNT_CAPACITY_INCOMPLETE"),
+          failed(`WALLET_${pass}_OBSERVATION_MISSING`, {
+            source: "balance",
+            pass,
+            predicate: "wallet-observation",
+          }),
           exchangeReads,
           0,
         );
+      }
       for (const observedAt of walletObservations) {
         const accountAge = freshTime - timestampToEpochMs(observedAt!);
         if (
@@ -630,7 +638,7 @@ export async function prepareMainnetOperatorTest(
       );
     } else
       return withCounts(
-        failed("ACCOUNT_CAPACITY_INCOMPLETE"),
+        failed("ACCOUNT_EVIDENCE_INCOMPLETE"),
         exchangeReads,
         0,
       );

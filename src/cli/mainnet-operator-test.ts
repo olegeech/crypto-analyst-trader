@@ -658,11 +658,71 @@ function operatorFailureDiagnostic(
       nextAction:
         "check the local sanitized quote diagnostics and use GET-only preparation after the response is understood",
     };
+  if (
+    reasonCode === "WALLET_A_OBSERVATION_MISSING" ||
+    reasonCode === "WALLET_B_OBSERVATION_MISSING" ||
+    reasonCode === "WALLET_OBSERVATION_MISSING" ||
+    reasonCode === "WALLET_A_BALANCE_UNPROVEN" ||
+    reasonCode === "WALLET_B_BALANCE_UNPROVEN" ||
+    reasonCode === "AVAILABLE_BALANCE_UNPROVEN"
+  ) {
+    const pass =
+      details?.pass === "A" || details?.pass === "B"
+        ? `wallet pass ${details.pass}`
+        : reasonCode.startsWith("WALLET_A_")
+          ? "wallet pass A"
+          : reasonCode.startsWith("WALLET_B_")
+            ? "wallet pass B"
+            : "the collected wallet evidence";
+    const predicate =
+      details?.predicate === "wallet-observation"
+        ? "a timestamped wallet observation"
+        : "a nonnegative USD-equivalent totalAvailableBalance";
+    return {
+      explanation: "The account-wide capacity evidence is incomplete.",
+      why: `${pass} did not prove ${predicate}.`,
+      nextAction: notStarted
+        ? "check the local sanitized account diagnostics and Bybit wallet read health, then run GET-only preparation; no source exists for status"
+        : "run mainnet:test status with the source ID; inspect Bybit state using CLIENT_ORDER_ID; do not retry execute",
+    };
+  }
+  if (reasonCode === "AVAILABLE_BALANCE_SNAPSHOTS_DIFFER")
+    return {
+      explanation:
+        "Two fresh account-wide available-balance snapshots did not agree.",
+      why: "The A/B totalAvailableBalance values differ; exact account amounts are not printed in this diagnostic.",
+      nextAction: notStarted
+        ? "inspect recent account activity and run GET-only preparation when the balance is stable; no source exists for status and do not retry execute for diagnosis"
+        : "run mainnet:test status with the source ID; inspect Bybit state using CLIENT_ORDER_ID; do not retry execute",
+    };
+  if (reasonCode === "CURRENT_COMMITMENTS_INCOMPLETE") {
+    const pass =
+      details?.pass === "A" || details?.pass === "B"
+        ? `pass ${details.pass}`
+        : "an account snapshot";
+    const group =
+      details?.group === "positions" || details?.group === "orders"
+        ? details.group
+        : "account commitments";
+    const predicate =
+      typeof details?.predicate === "string" &&
+      /^[a-z][a-z0-9-]{0,39}$/u.test(details.predicate)
+        ? details.predicate
+        : "a required current-state field";
+    return {
+      explanation:
+        "Current account positions or active orders were not fully proven.",
+      why: `${pass} did not prove ${predicate} in the ${group} evidence.`,
+      nextAction: notStarted
+        ? "inspect account positions and active orders in Bybit, then run GET-only preparation after the account read is understood"
+        : "run mainnet:test status with the source ID; inspect Bybit state using CLIENT_ORDER_ID; do not retry execute",
+    };
+  }
   if (reasonCode === "ACCOUNT_CAPACITY_INCOMPLETE")
     return {
       explanation:
-        "Bybit did not provide a complete account-wide available-balance value.",
-      why: "The value could not be proved from the account and wallet responses already collected.",
+        "The collected account evidence did not prove the capacity needed for this order.",
+      why: "No more specific safe capacity predicate was available from the evidence already collected.",
       nextAction: notStarted
         ? "check the account or wallet response in the local sanitized diagnostics; no source exists for status and do not retry execute for diagnosis"
         : "run mainnet:test status with the source ID; inspect Bybit orders, fills and position using CLIENT_ORDER_ID; do not retry execute",

@@ -63,10 +63,15 @@ rationale and decision history.
     single-use, cannot be reminted from the same attestation, and expires no
     later than five minutes after UI observation or the plan expiry. A newer
     source or HALT revision, known contradiction,
-    wrong identity or unrelated incident invalidates or blocks it. Until the
-    same grant is atomically consumed with the new durable intent, the old
-    source remains blocking. Recovery does not authorize unattended execution
-    or a later plan.
+    wrong identity or unrelated incident invalidates or blocks it. A latest,
+    source-attributed API status reconciliation with `verified-clean` releases
+    the pending-source gate independently of any unused or expired grant.
+    `UNKNOWN`, pending, missing or manual-attestation-only evidence remains
+    blocking. An expired grant never authorizes CREATE, and an active HALT
+    remains a separate gate. If API cleanup is not verified, the source remains
+    blocking until the same eligible grant is atomically consumed with its
+    bound durable intent. Recovery does not authorize unattended execution or
+    a later plan.
 19. Research and ML produce decision evidence only. Exchange-valid order intents
     remain the responsibility of the TypeScript planner and cannot bypass risk
     or immutable approval.

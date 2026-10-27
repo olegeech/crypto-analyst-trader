@@ -103,11 +103,16 @@ HALT origin/revision and source revision to API resolution or the B attestation.
 For B it grants one saved exact upcoming plan, for no longer than five minutes
 after UI observation or the plan expiry, whichever comes first. An active HALT
 is cleared only when that eligible recovery is explicitly accepted; HALT-free
-pending cleanup records no clearance. An unconsumed grant does not resolve the
-old source. The grant is consumed atomically with the bound new durable intent
-and cannot authorize another plan or later unattended entry. A committed intent
-spends it even if dispatch fails; inspect the exact order identity and never
-resend. Do not edit SQLite to bypass recovery or an incident HALT.
+pending cleanup records no clearance. A latest, source-attributed API status
+reconciliation with `verified-clean` independently releases the pending-source
+gate, even if a recovery grant is unused or expired. Manual-attestation-only,
+pending, unknown or missing cleanup evidence does not release it. An expired
+grant never authorizes CREATE; when API cleanup is not verified, the source
+remains pending until the same eligible grant is consumed atomically with its
+bound new durable intent. The grant cannot authorize another plan or later
+unattended entry. A committed intent spends it even if dispatch fails; inspect
+the exact order identity and never resend. Do not edit SQLite to bypass recovery
+or an incident HALT.
 
 ## Bybit probe manual recovery
 

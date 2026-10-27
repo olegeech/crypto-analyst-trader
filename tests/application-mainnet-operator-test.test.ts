@@ -11,6 +11,9 @@ import { openSqlitePersistence } from "../src/adapters/sqlite/sqlite-persistence
 import {
   createAccountEvidenceBundle,
   createAccountEvidenceCollectionResult,
+  createAccountOrderEvidence,
+  createAccountPositionEvidence,
+  type AccountEvidenceBundle,
 } from "../src/domain/account/account-evidence-bundle.js";
 import { createAdapterCapabilityObservation } from "../src/domain/capabilities/capability.js";
 import {
@@ -39,6 +42,7 @@ import {
   type UtcTimestamp,
 } from "../src/domain/shared/time.js";
 import {
+  calculateOperatorMainnetTestCapacity,
   validateMainnetOperatorTestEvidence,
   createOperatorMainnetCreateRequest,
   createOperatorMainnetFeeRateEvidence,
@@ -65,7 +69,11 @@ import type { OperatorMainnetTestAuthorizationPort } from "../src/ports/operator
 import type { PersistenceScope } from "../src/ports/persistence.js";
 import type { Result } from "../src/domain/shared/result.js";
 import type { OperatorMainnetTestPlan } from "../src/domain/execution/operator-mainnet-test-plan.js";
-import { fixture as accountFixture } from "./account-evidence-fixture.js";
+import {
+  fixture as accountFixture,
+  order as accountOrder,
+  position as accountPosition,
+} from "./account-evidence-fixture.js";
 
 const NOW = "2026-10-02T12:00:02.000Z" as UtcTimestamp;
 const ACCOUNT = `sha256:${"a".repeat(64)}`;
@@ -858,6 +866,149 @@ test("compact capacity check blocks before durable intent and retains exact shor
   harness.persistence.close();
 });
 
+test("compact A/B balance disagreement is reported as a safe capacity predicate", async () => {
+  const valuePlan = plan({ nonce: "compact-balance-disagreement" });
+  const evidence = compactEvidence(valuePlan);
+  const first = evidence.compactAccount.observations[0];
+  const second = evidence.compactAccount.observations[1];
+  const changed: MainnetOperatorTestCompactFreshEvidence = {
+    ...evidence,
+    compactAccount: {
+      ...evidence.compactAccount,
+      observations: [first, { ...second, availableBalance: decimal("999.99") }],
+    },
+  };
+  const harness = setup({ valuePlan, evidence: changed });
+
+  const result = await harness.run();
+
+  assert.equal(result.ok, false);
+  if (result.ok) return;
+  assert.equal(
+    result.error.details?.reasonCode,
+    "AVAILABLE_BALANCE_SNAPSHOTS_DIFFER",
+  );
+  assert.equal(result.error.details?.pass, "A/B");
+  assert.equal(result.error.details?.predicate, "totalAvailableBalance");
+  assert.equal(result.error.details?.availableBalance, undefined);
+  assert.equal(harness.authorization.consumeCalls, 0);
+  assert.equal(harness.createObservations.length, 0);
+  const sourceId = unwrap(
+    deriveOperatorMainnetTestSourceId(valuePlan.contentHash),
+  );
+  assert.equal(
+    unwrap(harness.journal.readOperatorMainnetTestSource(sourceId)),
+    undefined,
+  );
+  harness.persistence.close();
+});
+
+test("incomplete current positions and orders identify the account pass and predicate", () => {
+  const cases = [
+    { pass: "A", group: "positions", predicate: "position-margin" },
+    { pass: "B", group: "orders", predicate: "order-price" },
+  ] as const;
+
+  for (const [index, item] of cases.entries()) {
+    const valuePlan = plan({ nonce: `incomplete-commitment-${index}` });
+    const evidence = freshEvidence(valuePlan);
+    let account = evidence.account;
+    const sourcePass =
+      item.pass === "A" ? account.criticalPasses.A : account.criticalPasses.B;
+    assert.ok(sourcePass);
+    let changedPass: typeof sourcePass;
+    if (item.group === "positions") {
+      const positions = [
+        ...sourcePass.positions,
+        unwrap(
+          createAccountPositionEvidence({
+            ...accountPosition(),
+            side: "Buy",
+            size: { state: "known", value: "1", unit: "contracts" },
+            positionValue: { state: "known", value: "100", unit: "USD" },
+            positionIM: { state: "known", value: "10", unit: "USD" },
+            leverage: { state: "known", value: "1", unit: "rate" },
+          }),
+        ),
+      ];
+      const rowIndex = positions.findIndex(
+        (position) => position.category === "linear",
+      );
+      assert.notEqual(rowIndex, -1);
+      changedPass = {
+        ...sourcePass,
+        positions: positions.map((position, currentIndex) =>
+          currentIndex === rowIndex
+            ? ({
+                ...position,
+                size: {
+                  state: "known",
+                  value: decimal("1"),
+                  unit: "contracts",
+                },
+                positionValue: {
+                  state: "known",
+                  value: decimal("100"),
+                  unit: "USD",
+                },
+                positionIM: {
+                  state: "unavailable",
+                  reason: "not-returned",
+                  unit: "USD",
+                },
+              } as typeof position)
+            : position,
+        ),
+      };
+    } else {
+      const orders = [
+        ...sourcePass.orders,
+        unwrap(createAccountOrderEvidence(accountOrder())),
+      ];
+      const rowIndex = orders.findIndex((order) => order.category === "linear");
+      assert.notEqual(rowIndex, -1);
+      changedPass = {
+        ...sourcePass,
+        orders: orders.map((order, currentIndex) =>
+          currentIndex === rowIndex
+            ? ({
+                ...order,
+                price: {
+                  state: "unavailable",
+                  reason: "not-returned",
+                  unit: "price",
+                },
+              } as typeof order)
+            : order,
+        ),
+      };
+    }
+    account = {
+      ...account,
+      criticalPasses: {
+        ...account.criticalPasses,
+        [item.pass]: changedPass,
+      },
+    } as AccountEvidenceBundle;
+
+    const capacity = calculateOperatorMainnetTestCapacity(
+      valuePlan,
+      account,
+      evidence.feeRate,
+    );
+
+    assert.equal(capacity.ok, false);
+    if (capacity.ok) continue;
+    assert.equal(
+      capacity.error.details?.reasonCode,
+      "CURRENT_COMMITMENTS_INCOMPLETE",
+    );
+    assert.equal(capacity.error.details?.pass, item.pass);
+    assert.equal(capacity.error.details?.group, item.group);
+    assert.equal(capacity.error.details?.predicate, item.predicate);
+  }
+});
+
 test("compact admission blocks a non-flat target position without durable intent", async () => {
   const valuePlan = plan({ nonce: "compact-target-state-changed" });
   const evidence = compactEvidence(valuePlan);
@@ -1051,8 +1202,12 @@ test("compact account consistency identifies the changing balance group", async 
 
   assert.equal(result.ok, false);
   if (result.ok) return;
-  assert.equal(result.error.details?.reasonCode, "CRITICAL_STATE_CHANGED");
-  assert.equal(result.error.details?.criticalChangedGroups, "assets");
+  assert.equal(
+    result.error.details?.reasonCode,
+    "AVAILABLE_BALANCE_SNAPSHOTS_DIFFER",
+  );
+  assert.equal(result.error.details?.pass, "A/B");
+  assert.equal(result.error.details?.predicate, "totalAvailableBalance");
   assert.equal(harness.createObservations.length, 0);
   harness.persistence.close();
 });

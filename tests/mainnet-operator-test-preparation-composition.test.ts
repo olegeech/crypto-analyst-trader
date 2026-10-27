@@ -465,14 +465,14 @@ test("unknown or stale compact balance records fallback and cannot reuse it as p
   }
 });
 
-test("full fallback uses its own balance before persistence", async () => {
+test("full fallback uses its own balance and preserves fee-inclusive insufficiency", async () => {
   const run = await prepare({ balance: "0", unknownFirstBalance: true });
   assert.equal(run.opened, 0);
   assert.equal(run.result.ok, false);
   if (!run.result.ok) {
     assert.equal(
       run.result.error.details?.compactFallbackReason,
-      "ACCOUNT_CAPACITY_INCOMPLETE",
+      "WALLET_A_BALANCE_UNPROVEN",
     );
     assert.equal(
       run.result.error.details?.reasonCode,
@@ -490,7 +490,7 @@ test("successful full fallback preserves its reason and endpoint counts", async 
   assert.equal(run.opened, 1);
   assert.equal(
     run.result.value.compactFallbackReason,
-    "ACCOUNT_CAPACITY_INCOMPLETE",
+    "WALLET_A_BALANCE_UNPROVEN",
   );
   const counts = JSON.parse(run.result.value.exchangeGetCounts!) as Record<
     string,
@@ -513,8 +513,15 @@ test("proven compact permission and balance-change blockers do not trigger a ful
         run.result.error.details?.reasonCode,
         options.readOnly
           ? "CREDENTIAL_PERMISSION_BLOCKED"
-          : "CRITICAL_STATE_CHANGED",
+          : "AVAILABLE_BALANCE_SNAPSHOTS_DIFFER",
       );
+      if (options.changingBalance) {
+        assert.equal(run.result.error.details?.pass, "A/B");
+        assert.equal(
+          run.result.error.details?.predicate,
+          "totalAvailableBalance",
+        );
+      }
       assert.equal(run.result.error.details?.compactFallbackReason, undefined);
     }
     assert.equal(run.paths.includes("/v5/order/history"), false);

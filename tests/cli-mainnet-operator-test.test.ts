@@ -1181,6 +1181,34 @@ test("operator failure output shows allowlisted quote, freshness, permission and
         /POSITION_QUANTITY=0\.01/u,
       ],
     },
+    {
+      reasonCode: "AVAILABLE_BALANCE_SNAPSHOTS_DIFFER",
+      details: {
+        source: "balance",
+        pass: "A/B",
+        predicate: "totalAvailableBalance",
+        availableBalance: "999999",
+        privatePayload: "must-not-be-printed",
+      },
+      expected: [
+        /Two fresh account-wide available-balance snapshots did not agree/u,
+        /A\/B totalAvailableBalance values differ/u,
+      ],
+    },
+    {
+      reasonCode: "CURRENT_COMMITMENTS_INCOMPLETE",
+      details: {
+        source: "orders",
+        pass: "B",
+        group: "orders",
+        predicate: "order-price",
+        privatePayload: "must-not-be-printed",
+      },
+      expected: [
+        /Current account positions or active orders were not fully proven/u,
+        /pass B did not prove order-price in the orders evidence/u,
+      ],
+    },
   ] as const;
 
   for (const item of cases) {
@@ -1214,7 +1242,7 @@ test("operator failure output shows allowlisted quote, freshness, permission and
     assert.match(terminal.text(), /NEXT_ACTION=/u);
     assert.doesNotMatch(
       terminal.text(),
-      /must-not-be-printed|private provider text/u,
+      /must-not-be-printed|private provider text|999999/u,
     );
   }
 });

@@ -399,8 +399,13 @@ Persist only the typed, versioned, redacted provenance in the private journal.
 Do not save or export screenshots, credentials, account identifiers or raw
 account responses in the repository, issues, PRs or public logs. Do not edit
 SQLite or report the attestation as `verified-clean` or `TP_LIFECYCLE_PASS`.
-If recovery is declined, expires or becomes invalid, the old source stays
-unresolved and no CREATE is authorized; follow the printed safe next action.
+A latest, source-attributed API status reconciliation with `verified-clean`
+releases the pending-source gate independently of an unused or expired grant;
+manual-attestation-only, pending, unknown or missing cleanup evidence remains
+blocking. If recovery is declined, expires or becomes invalid and no such API
+cleanup proof exists, the old source remains unresolved. An expired grant never
+authorizes CREATE, and any active HALT remains a separate gate. Follow the
+printed safe next action.
 Once the new intent is durable, the grant is spent even if dispatch fails.
 Inspect the exact client order ID and exchange state in Bybit, then use
 GET-only `status`; never run `execute` again for that source. A subsequent

@@ -510,6 +510,7 @@ export async function runMainnetOperatorTestComposition(
             if (
               [
                 "CRITICAL_STATE_CHANGED",
+                "AVAILABLE_BALANCE_SNAPSHOTS_DIFFER",
                 "ACCOUNT_MODE_UNSUPPORTED",
                 "SPOT_HEDGING_ENABLED",
                 "CREDENTIAL_PERMISSION_BLOCKED",

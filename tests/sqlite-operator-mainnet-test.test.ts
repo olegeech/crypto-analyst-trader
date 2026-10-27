@@ -49,7 +49,12 @@ function timestamp(text: string): UtcTimestamp {
   return value(parseUtcTimestamp(text));
 }
 
-function plan(nonce = "operator-test-01", recoveryAttestationHash?: PlanHash) {
+function plan(
+  nonce = "operator-test-01",
+  recoveryAttestationHash?: PlanHash,
+  preparedAt: UtcTimestamp = NOW,
+) {
+  const preparedAtMs = Date.parse(preparedAt);
   const quote = value(
     createOperatorMainnetQuote({
       symbol: "DOGEUSDT",
@@ -57,9 +62,9 @@ function plan(nonce = "operator-test-01", recoveryAttestationHash?: PlanHash) {
       environment: "mainnet",
       category: "linear",
       origin: "https://api.bybit.com",
-      observedAt: "2026-10-22T10:00:59.990Z",
-      collectionStartedAt: "2026-10-22T10:00:59.980Z",
-      collectionCompletedAt: "2026-10-22T10:00:59.995Z",
+      observedAt: new Date(preparedAtMs - 10).toISOString(),
+      collectionStartedAt: new Date(preparedAtMs - 20).toISOString(),
+      collectionCompletedAt: new Date(preparedAtMs - 5).toISOString(),
       bid: "0.08869",
       ask: "0.08870",
       last: "0.08869",
@@ -89,7 +94,7 @@ function plan(nonce = "operator-test-01", recoveryAttestationHash?: PlanHash) {
       quote,
       warningCodes: [],
       constraints,
-      preparedAt: NOW,
+      preparedAt,
       ...(recoveryAttestationHash === undefined
         ? {}
         : { recoveryAttestationHash }),
@@ -97,16 +102,24 @@ function plan(nonce = "operator-test-01", recoveryAttestationHash?: PlanHash) {
   );
 }
 
-function approval(valuePlan = plan()) {
+function approval(valuePlan = plan(), approvedAt = valuePlan.preparedAt) {
   return value(
     createOperatorMainnetTestApproval({
       plan: valuePlan,
       planHash: valuePlan.contentHash,
       actor: "operator-01",
       consent: true,
-      approvedAt: NOW,
+      approvedAt,
     }),
   );
+}
+
+function apiStatusEvidence(observedAt: UtcTimestamp) {
+  return {
+    schemaVersion: "operator-mainnet-test-status-evidence/v1",
+    observedAt,
+    exchangeReads: 1,
+  };
 }
 
 function exactPayload(valuePlan: ReturnType<typeof plan>): string {
@@ -607,7 +620,7 @@ test("reconciliation and manual action provenance append without rewriting prior
       sourceId: created.source.sourceId,
       lifecycleOutcome: "NOT_EXERCISED",
       cleanupStatus: "verified-clean",
-      evidence: { entryFillQuantity: "0", openEntryRemainder: false },
+      evidence: apiStatusEvidence(fixture.clock.value),
       observedAt: fixture.clock.value,
     }),
   );
@@ -629,6 +642,86 @@ test("reconciliation and manual action provenance append without rewriting prior
     value(fixture.store.findPendingOperatorMainnetTestSource()),
     undefined,
   );
+});
+
+test("fresh API verified-clean releases pending source independently of an expired unused grant", () => {
+  const fixture = setup();
+  const original = value(prepare(fixture));
+  value(
+    fixture.store.recordAttempt({
+      runId: "operator-run-01",
+      sourceId: original.source.sourceId,
+      attemptId: "accepted-before-expired-grant",
+      outcome: "accepted",
+      exchangeOrderId: "exchange-parent-expired-grant",
+      recordedAt: fixture.clock.value,
+    }),
+  );
+  const source = value(
+    fixture.store.readOperatorMainnetTestSource(original.source.sourceId),
+  )!;
+  const { recoveryPlan, grant } = createManualRecoveryGrant(fixture, source);
+
+  assert.equal(
+    value(fixture.store.findPendingOperatorMainnetTestSource())?.sourceId,
+    original.source.sourceId,
+    "manual grant alone does not release the pending source",
+  );
+
+  fixture.clock.value = timestamp("2026-10-22T10:07:00.000Z");
+  value(
+    fixture.store.appendReconciliation({
+      sourceId: original.source.sourceId,
+      lifecycleOutcome: "NOT_EXERCISED",
+      cleanupStatus: "verified-clean",
+      evidence: apiStatusEvidence(fixture.clock.value),
+      observedAt: fixture.clock.value,
+    }),
+  );
+
+  assert.equal(
+    value(fixture.store.findPendingOperatorMainnetTestSource()),
+    undefined,
+  );
+  assert.equal(
+    value(
+      fixture.store.findOperatorMainnetRecoveryGrant(
+        recoveryPlan.contentHash,
+        fixture.clock.value,
+      ),
+    ),
+    undefined,
+    "the expired grant is not returned as CREATE authority",
+  );
+  assert.equal(
+    fixture.connection.db
+      .prepare(
+        "SELECT COUNT(*) AS count FROM operator_mainnet_recovery_grant_consumptions WHERE grant_id = ?",
+      )
+      .get(grant.grantId)?.count,
+    0,
+    "the old grant remains unused",
+  );
+
+  const nextPlan = plan(
+    "new-plan-after-independent-api-cleanup",
+    undefined,
+    fixture.clock.value,
+  );
+  const next = prepare(fixture, nextPlan, approval(nextPlan));
+  assert.equal(next.ok, true);
+  if (next.ok)
+    assert.notEqual(next.value.source.sourceId, original.source.sourceId);
+  assert.equal(
+    fixture.connection.db
+      .prepare(
+        "SELECT COUNT(*) AS count FROM operator_mainnet_recovery_grant_consumptions",
+      )
+      .get()?.count,
+    0,
+    "fresh API cleanup permits normal approval without consuming the expired grant",
+  );
+  fixture.connection.close();
 });
 
 test("status reconciliation appends without a lease and preserves real HALT", () => {

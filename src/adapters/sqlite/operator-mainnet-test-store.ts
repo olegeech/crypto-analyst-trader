@@ -111,6 +111,43 @@ function encode(value: unknown): Result<{ json: string; hash: PlanHash }> {
     : invalid("operator journal record is not canonical");
 }
 
+function hasLatestApiVerifiedCleanReconciliation(
+  snapshot: OperatorMainnetTestSnapshot,
+): boolean {
+  const latest = snapshot.reconciliations.at(-1);
+  if (
+    latest === undefined ||
+    latest.cleanupStatus !== "verified-clean" ||
+    !["TP_LIFECYCLE_PASS", "NOT_EXERCISED", "MANUAL_CLEANUP"].includes(
+      latest.lifecycleOutcome,
+    )
+  )
+    return false;
+  try {
+    const record: unknown = JSON.parse(latest.canonicalJson);
+    if (
+      !isRecord(record) ||
+      record.schemaVersion !== "operator-mainnet-test-reconciliation/v1" ||
+      record.sourceId !== snapshot.source.sourceId ||
+      record.revision !== latest.revision ||
+      record.lifecycleOutcome !== latest.lifecycleOutcome ||
+      record.cleanupStatus !== "verified-clean" ||
+      record.observedAt !== latest.observedAt ||
+      !isRecord(record.evidence)
+    )
+      return false;
+    return (
+      record.evidence.schemaVersion ===
+        "operator-mainnet-test-status-evidence/v1" &&
+      record.evidence.observedAt === latest.observedAt &&
+      Number.isSafeInteger(record.evidence.exchangeReads) &&
+      (record.evidence.exchangeReads as number) > 0
+    );
+  } catch {
+    return false;
+  }
+}
+
 function hashPayload(json: string): PlanHash {
   return `sha256:${createHash("sha256").update(json, "utf8").digest("hex")}` as PlanHash;
 }
@@ -2016,6 +2053,10 @@ export class SqliteOperatorMainnetTestStore implements OperatorMainnetTestPersis
       const snapshot = this.snapshot(row, database);
       if (!snapshot.ok) return snapshot;
       if (snapshot.value.sourceDisposition !== undefined) continue;
+      // A fresh, source-attributed API status result is independently enough
+      // to release the pending-source gate. Grants authorize only the bound
+      // recovery intent; an unused or expired grant must not hold clean state.
+      if (hasLatestApiVerifiedCleanReconciliation(snapshot.value)) continue;
       const latestGrant = this.latestRecoveryGrantForSource(
         snapshot.value.source.sourceId,
         database,
@@ -2032,9 +2073,7 @@ export class SqliteOperatorMainnetTestStore implements OperatorMainnetTestPersis
           continue;
         }
       }
-      const latest = snapshot.value.reconciliations.at(-1);
-      if (latest?.cleanupStatus !== "verified-clean")
-        pending.push(snapshot.value.source);
+      pending.push(snapshot.value.source);
     }
     return ok(pending);
   }

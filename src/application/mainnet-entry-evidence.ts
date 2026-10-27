@@ -287,10 +287,63 @@ function knownPositiveRate(fact: unknown): boolean {
   );
 }
 
-function completeCurrentCommitments(account: AccountEvidenceBundle): boolean {
-  const passes = [account.criticalPasses.A, account.criticalPasses.B];
-  for (const pass of passes) {
-    if (pass === null) return false;
+function unprovenWalletBalance(pass: "A" | "B"): Result<DecimalValue> {
+  return blocked(
+    `WALLET_${pass}_BALANCE_UNPROVEN`,
+    `wallet pass ${pass} did not prove a nonnegative USD-equivalent available balance`,
+    { source: "balance", pass, predicate: "totalAvailableBalance" },
+  );
+}
+
+function currentAvailableBalance(
+  account: AccountEvidenceBundle,
+): Result<DecimalValue> {
+  const passA = account.criticalPasses.A;
+  const passB = account.criticalPasses.B;
+  if (!passA) return unprovenWalletBalance("A");
+  if (!passB) return unprovenWalletBalance("B");
+  const availableA = knownUsd(passA.totals.totalAvailableBalance);
+  const availableB = knownUsd(passB.totals.totalAvailableBalance);
+  if (availableA === undefined) return unprovenWalletBalance("A");
+  if (availableB === undefined) return unprovenWalletBalance("B");
+  if (availableA.compare(availableB) !== 0)
+    return blocked(
+      "AVAILABLE_BALANCE_SNAPSHOTS_DIFFER",
+      "valid wallet A and B available-balance snapshots differ",
+      {
+        source: "balance",
+        pass: "A/B",
+        predicate: "totalAvailableBalance",
+      },
+    );
+  return ok(availableA);
+}
+
+function validateCurrentCommitments(
+  account: AccountEvidenceBundle,
+): Result<void> {
+  const incomplete = (
+    pass: "A" | "B",
+    group: "positions" | "orders",
+    predicate: string,
+  ): Result<void> =>
+    blocked(
+      "CURRENT_COMMITMENTS_INCOMPLETE",
+      `account pass ${pass} did not prove a required current ${group} fact`,
+      {
+        source: group === "positions" ? "position" : "orders",
+        pass,
+        group,
+        predicate,
+      },
+    );
+  const passes = [
+    ["A", account.criticalPasses.A],
+    ["B", account.criticalPasses.B],
+  ] as const;
+  for (const [passName, pass] of passes) {
+    if (pass === null)
+      return incomplete(passName, "positions", "critical-pass");
     for (const position of pass.positions) {
       if (position.category !== "linear") continue;
       if (
@@ -298,14 +351,15 @@ function completeCurrentCommitments(account: AccountEvidenceBundle): boolean {
         position.size.unit !== "contracts" ||
         position.size.value.isNegative()
       )
-        return false;
-      if (
-        position.size.value.isPositive() &&
-        (knownUsd(position.positionValue) === undefined ||
-          knownUsd(position.positionIM) === undefined ||
-          !knownPositiveRate(position.leverage))
-      )
-        return false;
+        return incomplete(passName, "positions", "position-size");
+      if (position.size.value.isPositive()) {
+        if (knownUsd(position.positionValue) === undefined)
+          return incomplete(passName, "positions", "position-value");
+        if (knownUsd(position.positionIM) === undefined)
+          return incomplete(passName, "positions", "position-margin");
+        if (!knownPositiveRate(position.leverage))
+          return incomplete(passName, "positions", "position-leverage");
+      }
     }
     for (const order of pass.orders) {
       if (order.category !== "linear") continue;
@@ -316,31 +370,14 @@ function completeCurrentCommitments(account: AccountEvidenceBundle): boolean {
       if (
         order.leavesQty.state !== "known" ||
         order.leavesQty.unit !== "contracts" ||
-        !order.leavesQty.value.isPositive() ||
-        order.price.state !== "known" ||
-        !order.price.value.isPositive()
+        !order.leavesQty.value.isPositive()
       )
-        return false;
+        return incomplete(passName, "orders", "order-leaves-quantity");
+      if (order.price.state !== "known" || !order.price.value.isPositive())
+        return incomplete(passName, "orders", "order-price");
     }
   }
-  return true;
-}
-
-function currentAvailableBalance(
-  account: AccountEvidenceBundle,
-): DecimalValue | undefined {
-  const passA = account.criticalPasses.A;
-  const passB = account.criticalPasses.B;
-  if (!passA || !passB) return undefined;
-  const availableA = knownUsd(passA.totals.totalAvailableBalance);
-  const availableB = knownUsd(passB.totals.totalAvailableBalance);
-  if (
-    availableA === undefined ||
-    availableB === undefined ||
-    availableA.compare(availableB) !== 0
-  )
-    return undefined;
-  return availableA;
+  return ok(undefined);
 }
 
 export function calculateOperatorMainnetTestCapacity(
@@ -349,11 +386,12 @@ export function calculateOperatorMainnetTestCapacity(
   feeRate: OperatorMainnetFeeRateEvidence,
 ): Result<OperatorMainnetTestCapacity> {
   const availableBalance = currentAvailableBalance(account);
-  if (availableBalance === undefined || !completeCurrentCommitments(account))
-    return blocked("ACCOUNT_CAPACITY_INCOMPLETE");
+  if (!availableBalance.ok) return availableBalance;
+  const commitments = validateCurrentCommitments(account);
+  if (!commitments.ok) return commitments;
   return calculateOperatorMainnetTestCapacityFromAvailableBalance(
     plan,
-    availableBalance,
+    availableBalance.value,
     feeRate,
   );
 }
@@ -370,7 +408,11 @@ export function calculateOperatorMainnetTestCapacityFromAvailableBalance(
     !(availableBalance instanceof DecimalValue) ||
     availableBalance.isNegative()
   )
-    return blocked("ACCOUNT_CAPACITY_INCOMPLETE");
+    return blocked(
+      "AVAILABLE_BALANCE_UNPROVEN",
+      "available balance is not a nonnegative validated USD-equivalent amount",
+      { source: "balance", predicate: "totalAvailableBalance" },
+    );
   if (feeRate.symbol !== plan.symbol)
     return blocked("FEE_RATE_SYMBOL_MISMATCH");
   const entryFeeReserve = plan.effectiveGrossNotional.multiply(
@@ -592,9 +634,13 @@ function validateCompactAccountEvidence(
     );
   if (first.availableBalance.compare(second.availableBalance) !== 0)
     return blocked(
-      "CRITICAL_STATE_CHANGED",
+      "AVAILABLE_BALANCE_SNAPSHOTS_DIFFER",
       "account-wide available balance changed between the two compact observations",
-      { criticalChangedGroups: "assets" },
+      {
+        source: "balance",
+        pass: "A/B",
+        predicate: "totalAvailableBalance",
+      },
     );
   const mode = second.mode;
   const utaStatus = compactKnownFact(mode.utaStatus, (value): value is number =>
