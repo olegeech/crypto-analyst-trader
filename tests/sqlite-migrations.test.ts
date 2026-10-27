@@ -82,8 +82,8 @@ test("fresh and reopened journals configure verified SQLite durability state", (
   assert.equal(statSync(root).isDirectory(), true);
 });
 
-test("operator Mainnet journal uses v9 lease-free schema with empty tables", () => {
-  assert.equal(CURRENT_SCHEMA_VERSION, 9);
+test("operator Mainnet journal uses v10 recovery schema with empty tables", () => {
+  assert.equal(CURRENT_SCHEMA_VERSION, 10);
   const { path } = temporaryDatabase();
   const opened = openSqliteConnection({
     environment: "mainnet",
@@ -99,6 +99,10 @@ test("operator Mainnet journal uses v9 lease-free schema with empty tables", () 
     "operator_mainnet_test_attempts",
     "operator_mainnet_test_reconciliations",
     "operator_mainnet_test_manual_actions",
+    "operator_mainnet_recovery_attestations",
+    "operator_mainnet_recovery_grants",
+    "operator_mainnet_recovery_grant_consumptions",
+    "operator_mainnet_test_source_dispositions",
   ]) {
     assert.equal(
       db

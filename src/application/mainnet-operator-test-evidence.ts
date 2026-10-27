@@ -52,6 +52,9 @@ export class OperatorEvidenceReadError extends Error {
       "requiredAvailableBalance",
       "shortfall",
       "criticalChangedGroups",
+      "pass",
+      "group",
+      "predicate",
       "causeCode",
       "source",
       "ageMs",
@@ -127,6 +130,32 @@ export class OperatorEvidenceReadError extends Error {
           )
         )
           safe[key] = value;
+      } else if (
+        key === "pass" &&
+        (value === "A" || value === "B" || value === "A/B")
+      ) {
+        safe[key] = value;
+      } else if (
+        key === "group" &&
+        (value === "account" || value === "positions" || value === "orders")
+      ) {
+        safe[key] = value;
+      } else if (
+        key === "predicate" &&
+        [
+          "totalAvailableBalance",
+          "wallet-observation",
+          "critical-pass",
+          "account-mode",
+          "position-size",
+          "position-value",
+          "position-margin",
+          "position-leverage",
+          "order-leaves-quantity",
+          "order-price",
+        ].includes(value as string)
+      ) {
+        safe[key] = value;
       } else if (
         [
           "ageMs",
@@ -249,7 +278,11 @@ async function compactPartitionSample(
     sample.observation?.timeProvenance !== "response-envelope" ||
     sample.observation.exchangeResponseTime === null
   )
-    throw new CompactAccountEvidenceUnavailable("ACCOUNT_EVIDENCE_INVALID");
+    throw new CompactAccountEvidenceUnavailable(
+      endpoint === "wallet"
+        ? `WALLET_${pass}_OBSERVATION_MISSING`
+        : "ACCOUNT_EVIDENCE_INVALID",
+    );
   return {
     response: sample.responses[0]!,
     observedAt: sample.observation.exchangeResponseTime,
@@ -286,15 +319,10 @@ export async function collectCompactOperatorAccountEvidence(
     const totalsB = mapAccountWallet(walletB.response).totals;
     const balanceA = totalsA.totalAvailableBalance;
     const balanceB = totalsB.totalAvailableBalance;
-    if (
-      balanceA.state !== "known" ||
-      balanceA.unit !== "USD" ||
-      balanceB.state !== "known" ||
-      balanceB.unit !== "USD"
-    )
-      throw new CompactAccountEvidenceUnavailable(
-        "ACCOUNT_CAPACITY_INCOMPLETE",
-      );
+    if (balanceA.state !== "known" || balanceA.unit !== "USD")
+      throw new CompactAccountEvidenceUnavailable("WALLET_A_BALANCE_UNPROVEN");
+    if (balanceB.state !== "known" || balanceB.unit !== "USD")
+      throw new CompactAccountEvidenceUnavailable("WALLET_B_BALANCE_UNPROVEN");
 
     return Object.freeze({
       schemaVersion: OPERATOR_MAINNET_COMPACT_ACCOUNT_SCHEMA_VERSION,

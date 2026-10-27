@@ -2,6 +2,10 @@ import type {
   OperatorMainnetTestApproval,
   OperatorMainnetTestPlan,
 } from "../domain/execution/operator-mainnet-test-plan.js";
+import type {
+  OperatorMainnetRecoveryAttestation,
+  OperatorMainnetRecoveryGrant,
+} from "../domain/execution/operator-mainnet-recovery.js";
 import type { PlanHash } from "../domain/identity/canonical-serialization.js";
 import type { Result } from "../domain/shared/result.js";
 import type { UtcTimestamp } from "../domain/shared/time.js";
@@ -79,6 +83,19 @@ export interface OperatorMainnetTestManualActionRecord {
   readonly declaredAt: UtcTimestamp;
 }
 
+export interface OperatorMainnetTestSourceDispositionRecord {
+  readonly dispositionId: string;
+  readonly sourceId: string;
+  readonly revision: number;
+  readonly disposition: "human-attested";
+  readonly grantId: string;
+  readonly nextSourceId: string;
+  readonly nextWriteIntentId: string;
+  readonly canonicalJson: string;
+  readonly canonicalHash: PlanHash;
+  readonly recordedAt: UtcTimestamp;
+}
+
 export interface OperatorMainnetTestSnapshot {
   readonly source: OperatorMainnetTestSourceRecord;
   readonly plan: OperatorMainnetTestPlan;
@@ -87,6 +104,7 @@ export interface OperatorMainnetTestSnapshot {
   readonly attempt?: OperatorMainnetTestAttemptRecord;
   readonly reconciliations: readonly OperatorMainnetTestReconciliationRecord[];
   readonly manualActions: readonly OperatorMainnetTestManualActionRecord[];
+  readonly sourceDisposition?: OperatorMainnetTestSourceDispositionRecord;
   readonly halt: HaltState;
 }
 
@@ -98,6 +116,33 @@ export interface PrepareOperatorMainnetTestCreateRequest {
   readonly payloadJson: string;
   readonly payloadHash: PlanHash;
   readonly preparedAt: UtcTimestamp;
+  /** Optional source-bound one-plan recovery grant, consumed atomically with intent. */
+  readonly recoveryGrantId?: string;
+}
+
+export type OperatorMainnetRecoveryResolutionRequest =
+  | {
+      readonly kind: "api-resolved";
+      readonly reconciliationId: string;
+      readonly reconciliationHash: PlanHash;
+    }
+  | {
+      readonly kind: "manual-attested";
+      readonly attestationHash: PlanHash;
+    };
+
+export interface PersistOperatorMainnetRecoveryAttestationRequest {
+  readonly attestation: OperatorMainnetRecoveryAttestation;
+  readonly recordedAt: UtcTimestamp;
+}
+
+export interface CreateOperatorMainnetRecoveryGrantRequest {
+  readonly sourceId: string;
+  readonly planHash: PlanHash;
+  readonly resolution: OperatorMainnetRecoveryResolutionRequest;
+  readonly actor: string;
+  readonly consent: true;
+  readonly issuedAt: UtcTimestamp;
 }
 
 export interface RecordOperatorMainnetTestAttemptRequest {
@@ -136,6 +181,28 @@ export interface OperatorMainnetTestPersistencePort {
   readPreparedPlan(
     planHash: PlanHash,
   ): Result<OperatorMainnetTestPlan | undefined>;
+  /** Persist immutable, redacted UI provenance before explicit recovery consent. */
+  persistOperatorMainnetRecoveryAttestation(
+    request: PersistOperatorMainnetRecoveryAttestationRequest,
+  ): Result<OperatorMainnetRecoveryAttestation>;
+  readOperatorMainnetRecoveryAttestation(
+    attestationHash: PlanHash,
+  ): Result<OperatorMainnetRecoveryAttestation | undefined>;
+  /**
+   * Create the explicit exact-plan grant and, only for a validated active
+   * operator HALT, append its clearance in the same SQLite transaction.
+   */
+  createOperatorMainnetRecoveryGrant(
+    request: CreateOperatorMainnetRecoveryGrantRequest,
+  ): Result<OperatorMainnetRecoveryGrant>;
+  readOperatorMainnetRecoveryGrant(
+    grantId: string,
+  ): Result<OperatorMainnetRecoveryGrant | undefined>;
+  /** Returns only an unconsumed, unexpired grant with current source/HALT revisions. */
+  findOperatorMainnetRecoveryGrant(
+    planHash: PlanHash,
+    now: UtcTimestamp,
+  ): Result<OperatorMainnetRecoveryGrant | undefined>;
   readOperatorMainnetTestSource(
     sourceId: string,
   ): Result<OperatorMainnetTestSnapshot | undefined>;
@@ -145,7 +212,8 @@ export interface OperatorMainnetTestPersistencePort {
   prepareCreateIntent(
     request: PrepareOperatorMainnetTestCreateRequest,
   ): Result<OperatorMainnetTestSnapshot>;
-  recordAttemptAndHalt(
+  /** Persist an attempt; only ambiguous delivery raises a source-linked HALT. */
+  recordAttempt(
     request: RecordOperatorMainnetTestAttemptRequest,
   ): Result<OperatorMainnetTestSnapshot>;
   raiseHalt(

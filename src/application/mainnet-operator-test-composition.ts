@@ -34,6 +34,7 @@ import {
   validateOperatorMainnetTestApproval,
   type OperatorMainnetTestPlan,
 } from "../domain/execution/operator-mainnet-test-plan.js";
+import type { OperatorMainnetRecoveryAttestation } from "../domain/execution/operator-mainnet-recovery.js";
 import { domainError } from "../domain/shared/errors.js";
 import { fail, type Result } from "../domain/shared/result.js";
 import {
@@ -301,6 +302,23 @@ export async function runMainnetOperatorTestComposition(
         exchangeWrites,
       );
     const operatorJournal = journal;
+    let manualRecoveryAttestation:
+      OperatorMainnetRecoveryAttestation | undefined;
+    if (admitted.plan.recoveryAttestationHash) {
+      const savedAttestation =
+        operatorJournal.readOperatorMainnetRecoveryAttestation(
+          admitted.plan.recoveryAttestationHash,
+        );
+      if (!savedAttestation.ok)
+        return withCounts(savedAttestation, exchangeReads, exchangeWrites);
+      if (!savedAttestation.value)
+        return withCounts(
+          failed("MANUAL_RECOVERY_ATTESTATION_NOT_FOUND"),
+          exchangeReads,
+          exchangeWrites,
+        );
+      manualRecoveryAttestation = savedAttestation.value;
+    }
     const credentialProvider = createMacOSKeychainProvider();
     let credentialSnapshot: Readonly<ExchangeCredentials> | undefined;
     const credentialLoader: Pick<CredentialProvider, "load"> = {
@@ -492,6 +510,7 @@ export async function runMainnetOperatorTestComposition(
             if (
               [
                 "CRITICAL_STATE_CHANGED",
+                "AVAILABLE_BALANCE_SNAPSHOTS_DIFFER",
                 "ACCOUNT_MODE_UNSUPPORTED",
                 "SPOT_HEDGING_ENABLED",
                 "CREDENTIAL_PERMISSION_BLOCKED",
@@ -524,22 +543,45 @@ export async function runMainnetOperatorTestComposition(
             );
           }
 
+          let fresh: MainnetOperatorTestAdmissionEvidence;
           const instrument = await new BybitMainnetReadCapabilityFacade(
             accountReader.transport,
           ).readInstrument(symbol);
           const quote = await publicMarkets.readOperatorQuote(symbol);
-          const state = await exchangeAdapter.readState({ instrument: symbol });
-          if (!state.ok)
-            throw new CompactAccountEvidenceUnavailable(
-              "TARGET_STATE_READ_FAILED",
-            );
-          const fresh: MainnetOperatorTestAdmissionEvidence = {
-            compactAccount,
-            state: state.value,
-            instrument,
-            quote,
-            feeRate: feeRate.value,
-          };
+          if (manualRecoveryAttestation) {
+            const parts = await exchangeAdapter.readOperatorTargetStateParts({
+              instrument: symbol,
+            });
+            if (!parts.serverTime)
+              throw new OperatorEvidenceReadError("PROVIDER_TIME_UNAVAILABLE", {
+                source: "target-state",
+              });
+            fresh = {
+              compactAccount,
+              manualTargetState: {
+                ...parts,
+                attestation: manualRecoveryAttestation,
+              },
+              instrument,
+              quote,
+              feeRate: feeRate.value,
+            };
+          } else {
+            const state = await exchangeAdapter.readState({
+              instrument: symbol,
+            });
+            if (!state.ok)
+              throw new CompactAccountEvidenceUnavailable(
+                "TARGET_STATE_READ_FAILED",
+              );
+            fresh = {
+              compactAccount,
+              state: state.value,
+              instrument,
+              quote,
+              feeRate: feeRate.value,
+            };
+          }
           const validated = validateMainnetOperatorTestEvidence(
             admitted.plan,
             fresh,
@@ -590,6 +632,12 @@ export async function runMainnetOperatorTestComposition(
               "FRESH_MAINNET_EVIDENCE_UNAVAILABLE",
             );
         }
+
+        if (manualRecoveryAttestation)
+          throw new OperatorEvidenceReadError(
+            "MANUAL_TARGET_STATE_UNRESOLVED",
+            { source: "target-state" },
+          );
 
         let fullAccountTransport: BybitAccountReadTransport | undefined;
         accountResult = await collectAccountEvidence({

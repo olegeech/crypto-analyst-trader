@@ -18,13 +18,29 @@ import {
   type OperatorMainnetTestApproval,
   type OperatorMainnetTestPlan,
 } from "../../domain/execution/operator-mainnet-test-plan.js";
+import {
+  isTerminalOperatorRecoveryOrderStatus,
+  operatorMainnetRecoverySourceRevision,
+  OPERATOR_MAINNET_RECOVERY_MAX_AGE_MS,
+  createOperatorMainnetRecoveryGrant,
+  recoveryGrantEvidenceExpiry,
+  rehydrateOperatorMainnetRecoveryAttestation,
+  rehydrateOperatorMainnetRecoveryGrant,
+  recoveryGrantPlanExpiry,
+  validateOperatorMainnetRecoveryAttestationBinding,
+  validateOperatorMainnetRecoveryGrantForPlan,
+  type OperatorMainnetRecoveryAttestation,
+  type OperatorMainnetRecoveryGrant,
+} from "../../domain/execution/operator-mainnet-recovery.js";
 import { domainError } from "../../domain/shared/errors.js";
 import { fail, ok, type Result } from "../../domain/shared/result.js";
 import {
   parseUtcTimestamp,
+  timestampToEpochMs,
   type UtcTimestamp,
 } from "../../domain/shared/time.js";
 import {
+  isRecord,
   requireFiniteInteger,
   requireHash,
   requireIdentifier,
@@ -33,6 +49,8 @@ import {
 import type {
   AppendOperatorMainnetTestManualActionRequest,
   AppendOperatorMainnetTestReconciliationRequest,
+  CreateOperatorMainnetRecoveryGrantRequest,
+  OperatorMainnetTestSourceDispositionRecord,
   OperatorMainnetTestAttemptRecord,
   OperatorMainnetTestCleanupStatus,
   OperatorMainnetTestIntentRecord,
@@ -41,12 +59,18 @@ import type {
   OperatorMainnetTestPersistencePort,
   OperatorMainnetTestSnapshot,
   OperatorMainnetTestSourceRecord,
+  OperatorMainnetRecoveryResolutionRequest,
   PrepareOperatorMainnetTestCreateRequest,
+  PersistOperatorMainnetRecoveryAttestationRequest,
   RecordOperatorMainnetTestAttemptRequest,
 } from "../../ports/operator-mainnet-test-persistence.js";
 import type { HaltState, PersistenceScope } from "../../ports/persistence.js";
 import type { SqliteConnection } from "./connection.js";
-import { haltRow, raiseHaltWithinTransaction } from "./sqlite-authority.js";
+import {
+  clearOperatorHaltWithinTransaction,
+  haltRow,
+  raiseHaltWithinTransaction,
+} from "./sqlite-authority.js";
 import {
   AUTHORITY_SCOPE_WHERE,
   deterministicId,
@@ -66,7 +90,6 @@ const APPROVAL_KIND = "operator-mainnet-execution-approval" as const;
 const PLAN_ARTIFACT_ID = (hash: string) => `operator-mainnet-test:${hash}`;
 const APPROVAL_ARTIFACT_ID = (hash: string) =>
   `operator-mainnet-test-approval:${hash}`;
-
 const invalid = (
   message = "operator Mainnet test persistence input is invalid",
 ) => fail(domainError("PERSISTENCE_INTEGRITY", message));
@@ -88,8 +111,54 @@ function encode(value: unknown): Result<{ json: string; hash: PlanHash }> {
     : invalid("operator journal record is not canonical");
 }
 
+function hasLatestApiVerifiedCleanReconciliation(
+  snapshot: OperatorMainnetTestSnapshot,
+): boolean {
+  const latest = snapshot.reconciliations.at(-1);
+  if (
+    latest === undefined ||
+    latest.cleanupStatus !== "verified-clean" ||
+    !["TP_LIFECYCLE_PASS", "NOT_EXERCISED", "MANUAL_CLEANUP"].includes(
+      latest.lifecycleOutcome,
+    )
+  )
+    return false;
+  try {
+    const record: unknown = JSON.parse(latest.canonicalJson);
+    if (
+      !isRecord(record) ||
+      record.schemaVersion !== "operator-mainnet-test-reconciliation/v1" ||
+      record.sourceId !== snapshot.source.sourceId ||
+      record.revision !== latest.revision ||
+      record.lifecycleOutcome !== latest.lifecycleOutcome ||
+      record.cleanupStatus !== "verified-clean" ||
+      record.observedAt !== latest.observedAt ||
+      !isRecord(record.evidence)
+    )
+      return false;
+    return (
+      record.evidence.schemaVersion ===
+        "operator-mainnet-test-status-evidence/v1" &&
+      record.evidence.observedAt === latest.observedAt &&
+      Number.isSafeInteger(record.evidence.exchangeReads) &&
+      (record.evidence.exchangeReads as number) > 0
+    );
+  } catch {
+    return false;
+  }
+}
+
 function hashPayload(json: string): PlanHash {
   return `sha256:${createHash("sha256").update(json, "utf8").digest("hex")}` as PlanHash;
+}
+
+function manualRecoveryOrdersAreTerminal(
+  attestation: OperatorMainnetRecoveryAttestation,
+): boolean {
+  return [
+    ...attestation.inspection.sourceOrders,
+    ...attestation.inspection.sourceTakeProfitOrders,
+  ].every((order) => isTerminalOperatorRecoveryOrderStatus(order.status));
 }
 
 function expectedPayload(
@@ -333,6 +402,1149 @@ export class SqliteOperatorMainnetTestStore implements OperatorMainnetTestPersis
     return ok(plan.value);
   }
 
+  private sourceDispositionFromRow(
+    row: SqliteRow,
+  ): Result<OperatorMainnetTestSourceDispositionRecord> {
+    const dispositionId = storedIdentifier(row, "disposition_id");
+    const sourceId = storedIdentifier(row, "source_id");
+    const grantId = storedIdentifier(row, "grant_id");
+    const nextSourceId = storedIdentifier(row, "next_source_id");
+    const nextWriteIntentId = storedIdentifier(row, "next_write_intent_id");
+    const canonicalJson = storedString(row, "canonical_json");
+    const canonicalHash = storedHash(row, "canonical_hash");
+    const recordedAt = storedTimestamp(row, "recorded_at");
+    const revision = requireFiniteInteger(row.revision, "revision", 1);
+    if (
+      row.disposition !== "human-attested" ||
+      !dispositionId.ok ||
+      !sourceId.ok ||
+      !grantId.ok ||
+      !nextSourceId.ok ||
+      !nextWriteIntentId.ok ||
+      !canonicalJson.ok ||
+      !canonicalHash.ok ||
+      !recordedAt.ok ||
+      !revision.ok
+    )
+      return persistenceFailure(
+        "persisted operator source disposition is invalid",
+      );
+    const parsed = parseJsonHash(canonicalJson.value, canonicalHash.value);
+    if (!parsed.ok) return parsed;
+    const serialized = canonicalSerialize(parsed.value);
+    if (
+      !serialized.ok ||
+      serialized.value !== canonicalJson.value ||
+      !isRecord(parsed.value) ||
+      parsed.value.schemaVersion !== "operator-mainnet-source-disposition/v1" ||
+      parsed.value.sourceId !== sourceId.value ||
+      parsed.value.revision !== revision.value ||
+      parsed.value.disposition !== "human-attested" ||
+      parsed.value.grantId !== grantId.value ||
+      parsed.value.nextSourceId !== nextSourceId.value ||
+      parsed.value.nextWriteIntentId !== nextWriteIntentId.value
+    )
+      return persistenceFailure(
+        "operator source disposition identity is invalid",
+      );
+    return ok({
+      dispositionId: dispositionId.value,
+      sourceId: sourceId.value,
+      revision: revision.value,
+      disposition: "human-attested",
+      grantId: grantId.value,
+      nextSourceId: nextSourceId.value,
+      nextWriteIntentId: nextWriteIntentId.value,
+      canonicalJson: canonicalJson.value,
+      canonicalHash: canonicalHash.value as PlanHash,
+      recordedAt: recordedAt.value,
+    });
+  }
+
+  private sourceDispositionRow(
+    sourceId: string,
+    database = this.db,
+  ): Result<OperatorMainnetTestSourceDispositionRecord | undefined> {
+    const row = database
+      .prepare(
+        `SELECT * FROM operator_mainnet_test_source_dispositions
+         WHERE source_id = ?`,
+      )
+      .get(sourceId) as SqliteRow | undefined;
+    return row === undefined
+      ? ok(undefined)
+      : this.sourceDispositionFromRow(row);
+  }
+
+  private sourceRevision(snapshot: OperatorMainnetTestSnapshot): number {
+    return operatorMainnetRecoverySourceRevision(snapshot);
+  }
+
+  private recoveryAttestationFromRow(
+    row: SqliteRow,
+  ): Result<OperatorMainnetRecoveryAttestation> {
+    const attestationHash = storedHash(row, "attestation_hash");
+    const attestationId = storedIdentifier(row, "attestation_id");
+    const sourceId = storedIdentifier(row, "source_id");
+    const canonicalJson = storedString(row, "canonical_json");
+    const canonicalHash = storedHash(row, "canonical_hash");
+    const revision = requireFiniteInteger(
+      row.source_revision,
+      "source_revision",
+    );
+    const observedAt = storedTimestamp(row, "observed_at");
+    if (
+      row.exchange !== this.scope.exchange ||
+      row.environment !== this.scope.environment ||
+      row.account_id !== this.scope.accountId ||
+      row.category !== this.scope.category ||
+      row.position_mode !== this.scope.positionMode ||
+      !attestationHash.ok ||
+      !attestationId.ok ||
+      !sourceId.ok ||
+      !canonicalJson.ok ||
+      !canonicalHash.ok ||
+      !revision.ok ||
+      !observedAt.ok
+    )
+      return persistenceFailure(
+        "persisted operator recovery attestation is invalid",
+      );
+    const parsed = parseJsonHash(canonicalJson.value, canonicalHash.value);
+    if (!parsed.ok) return parsed;
+    const canonical = canonicalSerialize(parsed.value);
+    if (!canonical.ok || canonical.value !== canonicalJson.value)
+      return persistenceFailure(
+        "operator recovery attestation is not canonical",
+      );
+    const attestation = rehydrateOperatorMainnetRecoveryAttestation(
+      parsed.value,
+    );
+    if (
+      !attestation.ok ||
+      attestation.value.contentHash !== attestationHash.value ||
+      attestation.value.attestationId !== attestationId.value ||
+      attestation.value.sourceId !== sourceId.value ||
+      attestation.value.sourceRevision !== revision.value ||
+      attestation.value.observedAt !== observedAt.value
+    )
+      return persistenceFailure(
+        "operator recovery attestation identity is invalid",
+      );
+    return attestation;
+  }
+
+  private recoveryAttestationRow(
+    attestationHash: string,
+    database = this.db,
+  ): Result<OperatorMainnetRecoveryAttestation | undefined> {
+    const row = database
+      .prepare(
+        `SELECT * FROM operator_mainnet_recovery_attestations
+         WHERE attestation_hash = ? AND exchange = ? AND environment = ? AND account_id = ?`,
+      )
+      .get(
+        attestationHash,
+        this.scope.exchange,
+        this.scope.environment,
+        this.scope.accountId,
+      ) as SqliteRow | undefined;
+    return row === undefined
+      ? ok(undefined)
+      : this.recoveryAttestationFromRow(row);
+  }
+
+  private recoveryGrantFromRow(
+    row: SqliteRow,
+  ): Result<OperatorMainnetRecoveryGrant> {
+    const grantId = storedIdentifier(row, "grant_id");
+    const sourceId = storedIdentifier(row, "source_id");
+    const planHash = storedHash(row, "plan_hash");
+    const canonicalJson = storedString(row, "canonical_json");
+    const canonicalHash = storedHash(row, "canonical_hash");
+    if (
+      row.exchange !== this.scope.exchange ||
+      row.environment !== this.scope.environment ||
+      row.account_id !== this.scope.accountId ||
+      row.category !== this.scope.category ||
+      row.position_mode !== this.scope.positionMode ||
+      !grantId.ok ||
+      !sourceId.ok ||
+      !planHash.ok ||
+      !canonicalJson.ok ||
+      !canonicalHash.ok
+    )
+      return persistenceFailure("persisted operator recovery grant is invalid");
+    const parsed = parseJsonHash(canonicalJson.value, canonicalHash.value);
+    if (!parsed.ok) return parsed;
+    const canonical = canonicalSerialize(parsed.value);
+    if (!canonical.ok || canonical.value !== canonicalJson.value)
+      return persistenceFailure("operator recovery grant is not canonical");
+    const grant = rehydrateOperatorMainnetRecoveryGrant(parsed.value);
+    if (
+      !grant.ok ||
+      grant.value.grantId !== grantId.value ||
+      grant.value.sourceId !== sourceId.value ||
+      grant.value.planHash !== planHash.value ||
+      grant.value.haltRevision !== row.halt_revision ||
+      grant.value.sourceRevision !== row.source_revision ||
+      grant.value.resolution.kind !== row.resolution_kind ||
+      (grant.value.resolution.kind === "api-resolved" &&
+        grant.value.resolution.evidenceHash !== row.evidence_hash) ||
+      (grant.value.resolution.kind === "manual-attested" &&
+        grant.value.resolution.attestationHash !== row.attestation_hash) ||
+      grant.value.haltOrigin?.eventId !==
+        (row.halt_origin_event_id ?? undefined) ||
+      grant.value.haltOrigin?.revision !==
+        (row.halt_origin_revision ?? undefined)
+    )
+      return persistenceFailure("operator recovery grant identity is invalid");
+    return grant;
+  }
+
+  private recoveryGrantRow(
+    grantId: string,
+    database = this.db,
+  ): Result<OperatorMainnetRecoveryGrant | undefined> {
+    const row = database
+      .prepare(
+        `SELECT * FROM operator_mainnet_recovery_grants
+         WHERE grant_id = ? AND exchange = ? AND environment = ? AND account_id = ?`,
+      )
+      .get(
+        grantId,
+        this.scope.exchange,
+        this.scope.environment,
+        this.scope.accountId,
+      ) as SqliteRow | undefined;
+    return row === undefined ? ok(undefined) : this.recoveryGrantFromRow(row);
+  }
+
+  persistOperatorMainnetRecoveryAttestation(
+    request: PersistOperatorMainnetRecoveryAttestationRequest,
+  ): Result<OperatorMainnetRecoveryAttestation> {
+    const at = parseUtcTimestamp(request.recordedAt);
+    const attestation = rehydrateOperatorMainnetRecoveryAttestation(
+      request.attestation,
+    );
+    if (!at.ok || !attestation.ok || !validScope(this.scope)) return invalid();
+    if (
+      timestampToEpochMs(attestation.value.observedAt) >
+      timestampToEpochMs(at.value)
+    )
+      return invalid("manual UI observation cannot be future dated");
+    return runInTransaction(
+      this.db,
+      (database) => {
+        const sourceRow = this.sourceRow(attestation.value.sourceId, database);
+        if (!sourceRow)
+          return fail(
+            domainError(
+              "PERSISTENCE_CONFLICT",
+              "manual recovery source does not exist",
+            ),
+          );
+        const snapshot = this.snapshot(sourceRow, database);
+        if (!snapshot.ok) return snapshot;
+        const currentRevision = this.sourceRevision(snapshot.value);
+        const binding = validateOperatorMainnetRecoveryAttestationBinding(
+          attestation.value,
+          {
+            accountIdentityHash: this.scope.accountId,
+            sourceId: snapshot.value.source.sourceId,
+            sourcePlanHash: snapshot.value.source.planHash,
+            sourceIntentId: snapshot.value.intent.writeIntentId,
+            sourceRevision: currentRevision,
+            entryClientOrderId: snapshot.value.source.clientOrderId,
+          },
+        );
+        if (!binding.ok) return binding;
+        const encoded = encode(binding.value);
+        if (!encoded.ok) return encoded;
+        const existing = this.recoveryAttestationRow(
+          binding.value.contentHash,
+          database,
+        );
+        if (!existing.ok) return existing;
+        if (existing.value) {
+          const same =
+            existing.value.attestationId === binding.value.attestationId &&
+            existing.value.contentHash === binding.value.contentHash;
+          return same
+            ? ok(existing.value)
+            : fail(
+                domainError(
+                  "PERSISTENCE_CONFLICT",
+                  "manual recovery attestation hash is already bound",
+                ),
+              );
+        }
+        database
+          .prepare(
+            `INSERT INTO operator_mainnet_recovery_attestations
+             (attestation_hash, attestation_id, exchange, environment, account_id,
+              category, position_mode, source_id, source_revision, observed_at,
+              canonical_json, canonical_hash, recorded_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          )
+          .run(
+            binding.value.contentHash,
+            binding.value.attestationId,
+            ...scopeValues(this.scope),
+            binding.value.sourceId,
+            binding.value.sourceRevision,
+            binding.value.observedAt,
+            encoded.value.json,
+            encoded.value.hash,
+            at.value,
+          );
+        return ok(binding.value);
+      },
+      "PERSISTENCE_CONFLICT",
+    );
+  }
+
+  readOperatorMainnetRecoveryAttestation(
+    attestationHashInput: PlanHash,
+  ): Result<OperatorMainnetRecoveryAttestation | undefined> {
+    const hash = requireHash(attestationHashInput, "attestationHash");
+    if (!hash.ok || !validScope(this.scope)) return invalid();
+    try {
+      return this.recoveryAttestationRow(hash.value);
+    } catch (error) {
+      return fail(sqliteError(error, "PERSISTENCE_INTEGRITY"));
+    }
+  }
+
+  private latestRecoveryGrantForSource(
+    sourceId: string,
+    database = this.db,
+  ): Result<OperatorMainnetRecoveryGrant | undefined> {
+    const row = database
+      .prepare(
+        `SELECT * FROM operator_mainnet_recovery_grants
+         WHERE source_id = ? AND exchange = ? AND environment = ? AND account_id = ?
+         ORDER BY rowid DESC LIMIT 1`,
+      )
+      .get(
+        sourceId,
+        this.scope.exchange,
+        this.scope.environment,
+        this.scope.accountId,
+      ) as SqliteRow | undefined;
+    return row === undefined ? ok(undefined) : this.recoveryGrantFromRow(row);
+  }
+
+  private validateHaltOriginForSource(
+    event: SqliteRow,
+    snapshot: OperatorMainnetTestSnapshot,
+  ): Result<{
+    readonly eventId: string;
+    readonly revision: number;
+    readonly originHash: PlanHash;
+  }> {
+    const eventId = storedIdentifier(event, "event_id");
+    const revision = requireFiniteInteger(event.revision, "revision", 1);
+    const evidenceJson = storedOptionalString(event, "evidence_json");
+    if (
+      !eventId.ok ||
+      !revision.ok ||
+      !evidenceJson.ok ||
+      evidenceJson.value === undefined
+    )
+      return fail(
+        domainError(
+          "HALT_ACTIVE",
+          "HALT origin is missing or uncorrelated; inspect the saved source and intent before recovery",
+        ),
+      );
+    const evidenceHash = hashPayload(evidenceJson.value);
+    const parsed = parseJsonHash(evidenceJson.value, evidenceHash);
+    if (!parsed.ok)
+      return fail(
+        domainError(
+          "HALT_ACTIVE",
+          "saved HALT origin failed integrity validation",
+        ),
+      );
+    const serialized = canonicalSerialize(parsed.value);
+    if (
+      !serialized.ok ||
+      serialized.value !== evidenceJson.value ||
+      !isRecord(parsed.value)
+    )
+      return fail(
+        domainError("HALT_ACTIVE", "saved HALT origin is not canonical"),
+      );
+    const evidence = parsed.value;
+    if (evidence.schemaVersion === "operator-mainnet-test-create-attempt/v1") {
+      const attempt = snapshot.attempt;
+      if (
+        attempt === undefined ||
+        attempt.canonicalJson !== evidenceJson.value ||
+        attempt.writeIntentId !== snapshot.intent.writeIntentId ||
+        evidence.sourceId !== snapshot.source.sourceId ||
+        evidence.writeIntentId !== snapshot.intent.writeIntentId
+      )
+        return fail(
+          domainError(
+            "HALT_ACTIVE",
+            "legacy HALT attempt cannot be matched to immutable source and intent evidence",
+          ),
+        );
+    } else if (evidence.schemaVersion === "operator-mainnet-halt-origin/v1") {
+      const trigger = evidence.trigger;
+      if (
+        evidence.sourceId !== snapshot.source.sourceId ||
+        evidence.writeIntentId !== snapshot.intent.writeIntentId ||
+        evidence.sourcePlanHash !== snapshot.source.planHash ||
+        evidence.intentCanonicalHash !== snapshot.intent.canonicalHash ||
+        !isRecord(trigger)
+      )
+        return fail(
+          domainError(
+            "HALT_ACTIVE",
+            "HALT origin does not match the immutable source and intent",
+          ),
+        );
+      if (trigger.kind === "ambiguous-create-attempt") {
+        const attempt = snapshot.attempt;
+        if (
+          attempt === undefined ||
+          attempt.outcome !== "ambiguous" ||
+          trigger.attemptId !== attempt.attemptId ||
+          trigger.attemptCanonicalJson !== attempt.canonicalJson ||
+          trigger.attemptCanonicalHash !== attempt.canonicalHash
+        )
+          return fail(
+            domainError(
+              "HALT_ACTIVE",
+              "HALT attempt origin cannot be matched to the saved attempt",
+            ),
+          );
+      } else if (trigger.kind === "status-unknown") {
+        const linked = snapshot.reconciliations.find(
+          (reconciliation) =>
+            reconciliation.revision === trigger.reconciliationRevision,
+        );
+        if (
+          linked === undefined ||
+          linked.lifecycleOutcome !== "UNKNOWN" ||
+          linked.cleanupStatus !== "unknown" ||
+          trigger.reconciliationCanonicalJson !== linked.canonicalJson ||
+          trigger.reconciliationCanonicalHash !== linked.canonicalHash
+        )
+          return fail(
+            domainError(
+              "HALT_ACTIVE",
+              "HALT status origin cannot be matched to the saved reconciliation",
+            ),
+          );
+      } else if (
+        trigger.kind !== "operator-source-halt" ||
+        typeof trigger.reason !== "string" ||
+        typeof trigger.recordedAt !== "string"
+      ) {
+        return fail(
+          domainError(
+            "HALT_ACTIVE",
+            "HALT origin type is unsupported; keep HALT active and inspect the account manually",
+          ),
+        );
+      }
+    } else {
+      return fail(
+        domainError(
+          "HALT_ACTIVE",
+          "HALT origin type is unsupported; keep HALT active and inspect the account manually",
+        ),
+      );
+    }
+    return ok({
+      eventId: eventId.value,
+      revision: revision.value,
+      originHash: evidenceHash,
+    });
+  }
+
+  private activeHaltOrigin(
+    snapshot: OperatorMainnetTestSnapshot,
+    database: DatabaseSync,
+  ): Result<{
+    readonly eventId: string;
+    readonly revision: number;
+    readonly originHash: PlanHash;
+  }> {
+    const state = haltRow(database, this.scope);
+    if (!state.ok) return state;
+    if (!state.value.active)
+      return fail(
+        domainError("HALT_ACTIVE", "no active HALT origin is available"),
+      );
+    const rows = database
+      .prepare(
+        `SELECT * FROM halt_events
+         WHERE exchange = ? AND environment = ? AND account_id = ? AND revision <= ?
+         ORDER BY revision`,
+      )
+      .all(
+        this.scope.exchange,
+        this.scope.environment,
+        this.scope.accountId,
+        state.value.revision,
+      ) as SqliteRow[];
+    let lastClearanceIndex = -1;
+    for (const [index, row] of rows.entries()) {
+      if (row.active === 0) lastClearanceIndex = index;
+    }
+    const activeRows = rows
+      .slice(lastClearanceIndex + 1)
+      .filter((row) => row.active === 1);
+    if (
+      activeRows.length === 0 ||
+      rows.at(-1)?.revision !== state.value.revision ||
+      rows.at(-1)?.active !== 1
+    )
+      return fail(
+        domainError(
+          "HALT_ACTIVE",
+          "active HALT event history is incomplete; keep the account blocked",
+        ),
+      );
+    let current:
+      | {
+          readonly eventId: string;
+          readonly revision: number;
+          readonly originHash: PlanHash;
+        }
+      | undefined;
+    for (const event of activeRows) {
+      const origin = this.validateHaltOriginForSource(event, snapshot);
+      if (!origin.ok) return origin;
+      current = origin.value;
+    }
+    return current
+      ? ok(current)
+      : fail(domainError("HALT_ACTIVE", "active HALT origin is unavailable"));
+  }
+
+  private latestApiResolution(
+    snapshot: OperatorMainnetTestSnapshot,
+    resolution: OperatorMainnetRecoveryResolutionRequest,
+    issuedAt: UtcTimestamp,
+  ): Result<{
+    readonly evidenceHash: PlanHash;
+    readonly observedAt: UtcTimestamp;
+  }> {
+    if (resolution.kind !== "api-resolved")
+      return fail(
+        domainError("INVALID_EVIDENCE", "API reconciliation proof is required"),
+      );
+    const reconciliationId = requireIdentifier(
+      resolution.reconciliationId,
+      "reconciliationId",
+    );
+    const reconciliationHash = requireHash(
+      resolution.reconciliationHash,
+      "reconciliationHash",
+    );
+    const latest = snapshot.reconciliations.at(-1);
+    if (
+      !reconciliationId.ok ||
+      !reconciliationHash.ok ||
+      latest === undefined ||
+      latest.reconciliationId !== reconciliationId.value ||
+      latest.canonicalHash !== reconciliationHash.value ||
+      latest.cleanupStatus !== "verified-clean" ||
+      latest.lifecycleOutcome === "UNKNOWN" ||
+      timestampToEpochMs(issuedAt) < timestampToEpochMs(latest.observedAt) ||
+      timestampToEpochMs(issuedAt) - timestampToEpochMs(latest.observedAt) >
+        OPERATOR_MAINNET_RECOVERY_MAX_AGE_MS
+    )
+      return fail(
+        domainError(
+          "UNRESOLVED_STATE",
+          "fresh API cleanup proof is unavailable; run GET-only status and use the exact verified-clean result",
+        ),
+      );
+    return ok({
+      evidenceHash: latest.canonicalHash,
+      observedAt: latest.observedAt,
+    });
+  }
+
+  createOperatorMainnetRecoveryGrant(
+    request: CreateOperatorMainnetRecoveryGrantRequest,
+  ): Result<OperatorMainnetRecoveryGrant> {
+    const sourceId = requireIdentifier(request.sourceId, "sourceId");
+    const planHash = requireHash(request.planHash, "planHash");
+    const actor = requireIdentifier(request.actor, "actor");
+    const issuedAt = parseUtcTimestamp(request.issuedAt);
+    const consent = request.consent === true;
+    if (
+      !sourceId.ok ||
+      !planHash.ok ||
+      !actor.ok ||
+      !issuedAt.ok ||
+      !consent ||
+      !validScope(this.scope)
+    )
+      return invalid(
+        "explicit valid consent and exact recovery inputs are required",
+      );
+    return runInTransaction(
+      this.db,
+      (database) => {
+        const sourceRow = this.sourceRow(sourceId.value, database);
+        if (!sourceRow)
+          return fail(
+            domainError(
+              "PERSISTENCE_CONFLICT",
+              "recovery source does not exist in this account",
+            ),
+          );
+        const snapshot = this.snapshot(sourceRow, database);
+        if (!snapshot.ok) return snapshot;
+        const currentSourceRevision = this.sourceRevision(snapshot.value);
+        const planArtifact = this.artifactRow(PLAN_ARTIFACT_ID(planHash.value));
+        if (!planArtifact.ok) return planArtifact;
+        if (
+          !planArtifact.value ||
+          planArtifact.value.artifactKind !== PLAN_KIND
+        )
+          return fail(
+            domainError(
+              "PERSISTENCE_CONFLICT",
+              "recovery requires a saved exact plan",
+            ),
+          );
+        const plan = rehydrateArtifact(PLAN_KIND, planArtifact.value.envelope);
+        if (
+          !plan.ok ||
+          plan.value.contentHash !== planHash.value ||
+          plan.value.accountIdentityHash !== this.scope.accountId ||
+          plan.value.contentHash === snapshot.value.source.planHash
+        )
+          return fail(
+            domainError(
+              "PERSISTENCE_CONFLICT",
+              "recovery plan must be a different saved plan for this exact account",
+            ),
+          );
+        const pending = this.pendingSourceRows(database);
+        if (!pending.ok) return pending;
+        if (pending.value.some((source) => source.sourceId !== sourceId.value))
+          return fail(
+            domainError(
+              "UNRESOLVED_STATE",
+              "another operator source remains unresolved; recover only one source at a time",
+            ),
+          );
+
+        const halt = haltRow(database, this.scope);
+        if (!halt.ok) return halt;
+        if (
+          !halt.value.active &&
+          !pending.value.some((source) => source.sourceId === sourceId.value)
+        )
+          return fail(
+            domainError(
+              "UNRESOLVED_STATE",
+              "there is no active eligible HALT or pending source to recover",
+            ),
+          );
+        const origin = halt.value.active
+          ? this.activeHaltOrigin(snapshot.value, database)
+          : ok<OperatorMainnetRecoveryGrant["haltOrigin"]>(null);
+        if (!origin.ok) return origin;
+
+        let resolution: OperatorMainnetRecoveryGrant["resolution"];
+        if (request.resolution.kind === "api-resolved") {
+          const api = this.latestApiResolution(
+            snapshot.value,
+            request.resolution,
+            issuedAt.value,
+          );
+          if (!api.ok) return api;
+          resolution = { kind: "api-resolved", ...api.value };
+        } else if (request.resolution.kind === "manual-attested") {
+          const attestationHash = requireHash(
+            request.resolution.attestationHash,
+            "attestationHash",
+          );
+          if (!attestationHash.ok) return attestationHash;
+          const attestation = this.recoveryAttestationRow(
+            attestationHash.value,
+            database,
+          );
+          if (!attestation.ok) return attestation;
+          if (!attestation.value)
+            return fail(
+              domainError(
+                "INVALID_EVIDENCE",
+                "saved manual recovery attestation is unavailable",
+              ),
+            );
+          if (plan.value.recoveryAttestationHash !== attestationHash.value)
+            return fail(
+              domainError(
+                "INVALID_APPROVAL",
+                "manual recovery plan is not bound to this exact attestation",
+              ),
+            );
+          const binding = validateOperatorMainnetRecoveryAttestationBinding(
+            attestation.value,
+            {
+              accountIdentityHash: this.scope.accountId,
+              sourceId: snapshot.value.source.sourceId,
+              sourcePlanHash: snapshot.value.source.planHash,
+              sourceIntentId: snapshot.value.intent.writeIntentId,
+              sourceRevision: currentSourceRevision,
+              entryClientOrderId: snapshot.value.source.clientOrderId,
+            },
+          );
+          if (!binding.ok) return binding;
+          if (!manualRecoveryOrdersAreTerminal(binding.value))
+            return fail(
+              domainError(
+                "UNRESOLVED_STATE",
+                "manual source order history includes a nonterminal or unknown order status; inspect the source and TP in Bybit and retry with current evidence",
+              ),
+            );
+          if (
+            binding.value.inspection.accountOpenOrders.length > 0 ||
+            binding.value.inspection.accountPositions.length > 0 ||
+            binding.value.inspection.sourcePosition !== null ||
+            timestampToEpochMs(issuedAt.value) <
+              timestampToEpochMs(binding.value.observedAt) ||
+            timestampToEpochMs(issuedAt.value) -
+              timestampToEpochMs(binding.value.observedAt) >
+              OPERATOR_MAINNET_RECOVERY_MAX_AGE_MS
+          )
+            return fail(
+              domainError(
+                "UNRESOLVED_STATE",
+                "manual inspection is stale or shows an open order or position; resolve the exposure before recovery",
+              ),
+            );
+          resolution = {
+            kind: "manual-attested",
+            attestationId: binding.value.attestationId,
+            attestationHash: binding.value.contentHash,
+            observedAt: binding.value.observedAt,
+          };
+        } else {
+          return invalid("recovery resolution kind is invalid");
+        }
+
+        const planExpiry = recoveryGrantPlanExpiry(plan.value);
+        if (!planExpiry.ok) return planExpiry;
+        const expiresAt = recoveryGrantEvidenceExpiry(
+          resolution.observedAt,
+          planExpiry.value,
+        );
+        if (!expiresAt.ok) return expiresAt;
+        const grant = createOperatorMainnetRecoveryGrant({
+          plan: plan.value,
+          resolution,
+          exchange: "bybit",
+          environment: "mainnet",
+          accountIdentityHash: this.scope.accountId,
+          sourceId: snapshot.value.source.sourceId,
+          sourcePlanHash: snapshot.value.source.planHash,
+          sourceIntentId: snapshot.value.intent.writeIntentId,
+          sourceRevision: currentSourceRevision,
+          haltRevision: halt.value.revision + (halt.value.active ? 1 : 0),
+          haltOrigin: origin.value,
+          planHash: plan.value.contentHash,
+          planExpiresAt: planExpiry.value,
+          actor: actor.value,
+          consent: true,
+          issuedAt: issuedAt.value,
+          expiresAt: expiresAt.value,
+        });
+        if (!grant.ok) return grant;
+        const encoded = encode(grant.value);
+        if (!encoded.ok) return encoded;
+        const duplicate = database
+          .prepare(
+            "SELECT 1 AS present FROM operator_mainnet_recovery_grants WHERE grant_id = ?",
+          )
+          .get(grant.value.grantId) as SqliteRow | undefined;
+        if (duplicate)
+          return fail(
+            domainError(
+              "PERSISTENCE_CONFLICT",
+              "this exact recovery authorization already exists",
+            ),
+          );
+        database
+          .prepare(
+            `INSERT INTO operator_mainnet_recovery_grants
+             (grant_id, exchange, environment, account_id, category, position_mode,
+              source_id, source_revision, plan_hash, plan_artifact_id, resolution_kind,
+              evidence_hash, attestation_hash, halt_revision, halt_origin_event_id,
+              halt_origin_revision, issued_at, expires_at, canonical_json, canonical_hash)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          )
+          .run(
+            grant.value.grantId,
+            ...scopeValues(this.scope),
+            grant.value.sourceId,
+            grant.value.sourceRevision,
+            grant.value.planHash,
+            PLAN_ARTIFACT_ID(grant.value.planHash),
+            grant.value.resolution.kind,
+            grant.value.resolution.kind === "api-resolved"
+              ? grant.value.resolution.evidenceHash
+              : null,
+            grant.value.resolution.kind === "manual-attested"
+              ? grant.value.resolution.attestationHash
+              : null,
+            grant.value.haltRevision,
+            grant.value.haltOrigin?.eventId ?? null,
+            grant.value.haltOrigin?.revision ?? null,
+            grant.value.issuedAt,
+            grant.value.expiresAt,
+            encoded.value.json,
+            encoded.value.hash,
+          );
+        if (halt.value.active) {
+          const clearanceEvidence = encode({
+            schemaVersion: "operator-mainnet-recovery-clearance/v1",
+            grantId: grant.value.grantId,
+            grantHash: grant.value.contentHash,
+            sourceId: grant.value.sourceId,
+            sourceRevision: grant.value.sourceRevision,
+            planHash: grant.value.planHash,
+            priorHaltEventId: grant.value.haltOrigin?.eventId,
+            priorHaltRevision: grant.value.haltOrigin?.revision,
+            resolutionKind: grant.value.resolution.kind,
+            ...(grant.value.resolution.kind === "manual-attested"
+              ? { attestationHash: grant.value.resolution.attestationHash }
+              : { evidenceHash: grant.value.resolution.evidenceHash }),
+          });
+          if (!clearanceEvidence.ok) return clearanceEvidence;
+          const cleared = clearOperatorHaltWithinTransaction(
+            database,
+            this.scope,
+            halt.value.revision,
+            "operator explicitly accepted source-bound recovery",
+            issuedAt.value,
+            clearanceEvidence.value.json,
+          );
+          if (!cleared.ok) return cleared;
+          if (
+            cleared.value.revision !== grant.value.haltRevision ||
+            cleared.value.active
+          )
+            return fail(
+              domainError(
+                "HALT_ACTIVE",
+                "HALT clearance did not match the persisted recovery grant",
+              ),
+            );
+        }
+        return ok(grant.value);
+      },
+      "PERSISTENCE_CONFLICT",
+    );
+  }
+
+  readOperatorMainnetRecoveryGrant(
+    grantIdInput: string,
+  ): Result<OperatorMainnetRecoveryGrant | undefined> {
+    const grantId = requireIdentifier(grantIdInput, "grantId");
+    if (!grantId.ok || !validScope(this.scope)) return invalid();
+    try {
+      return this.recoveryGrantRow(grantId.value);
+    } catch (error) {
+      return fail(sqliteError(error, "PERSISTENCE_INTEGRITY"));
+    }
+  }
+
+  findOperatorMainnetRecoveryGrant(
+    planHashInput: PlanHash,
+    nowInput: UtcTimestamp,
+  ): Result<OperatorMainnetRecoveryGrant | undefined> {
+    const planHash = requireHash(planHashInput, "planHash");
+    const now = parseUtcTimestamp(nowInput);
+    if (!planHash.ok || !now.ok || !validScope(this.scope)) return invalid();
+    return runInTransaction(
+      this.db,
+      (database) => {
+        const rows = database
+          .prepare(
+            `SELECT * FROM operator_mainnet_recovery_grants
+             WHERE plan_hash = ? AND exchange = ? AND environment = ? AND account_id = ?
+             ORDER BY rowid DESC`,
+          )
+          .all(
+            planHash.value,
+            this.scope.exchange,
+            this.scope.environment,
+            this.scope.accountId,
+          ) as SqliteRow[];
+        for (const row of rows) {
+          const grant = this.recoveryGrantFromRow(row);
+          if (!grant.ok) return grant;
+          const consumed = database
+            .prepare(
+              "SELECT 1 AS present FROM operator_mainnet_recovery_grant_consumptions WHERE grant_id = ?",
+            )
+            .get(grant.value.grantId) as SqliteRow | undefined;
+          if (consumed) continue;
+          const source = this.sourceRow(grant.value.sourceId, database);
+          if (!source) continue;
+          const snapshot = this.snapshot(source, database);
+          if (!snapshot.ok) return snapshot;
+          const currentRevision = this.sourceRevision(snapshot.value);
+          const halt = haltRow(database, this.scope);
+          if (!halt.ok) return halt;
+          if (
+            grant.value.sourceRevision !== currentRevision ||
+            grant.value.haltRevision !== halt.value.revision ||
+            halt.value.active
+          )
+            continue;
+          const planArtifact = this.artifactRow(
+            PLAN_ARTIFACT_ID(planHash.value),
+          );
+          if (!planArtifact.ok) return planArtifact;
+          if (!planArtifact.value)
+            return persistenceFailure("recovery plan artifact is missing");
+          const plan = rehydrateArtifact(
+            PLAN_KIND,
+            planArtifact.value.envelope,
+          );
+          if (!plan.ok) return plan;
+          const valid = validateOperatorMainnetRecoveryGrantForPlan(
+            grant.value,
+            plan.value,
+            now.value,
+          );
+          if (!valid.ok) continue;
+          const latest = this.latestRecoveryGrantForSource(
+            grant.value.sourceId,
+            database,
+          );
+          if (!latest.ok) return latest;
+          if (latest.value?.grantId !== grant.value.grantId) continue;
+          const pending = this.pendingSourceRows(database);
+          if (!pending.ok) return pending;
+          if (
+            pending.value.some((item) => item.sourceId !== grant.value.sourceId)
+          )
+            continue;
+          return ok(grant.value);
+        }
+        return ok(undefined);
+      },
+      "PERSISTENCE_INTEGRITY",
+    );
+  }
+
+  private recoveryGrantForIntent(
+    grantId: string,
+    plan: OperatorMainnetTestPlan,
+    now: UtcTimestamp,
+    database: DatabaseSync,
+  ): Result<{
+    readonly grant: OperatorMainnetRecoveryGrant;
+    readonly source: OperatorMainnetTestSnapshot;
+  }> {
+    const grant = this.recoveryGrantRow(grantId, database);
+    if (!grant.ok) return grant;
+    if (!grant.value)
+      return fail(
+        domainError(
+          "INVALID_APPROVAL",
+          "source-bound recovery grant was not found for this account",
+        ),
+      );
+    const storedGrant = grant.value;
+    const bound = validateOperatorMainnetRecoveryGrantForPlan(
+      storedGrant,
+      plan,
+      now,
+    );
+    if (!bound.ok) return bound;
+    const latest = this.latestRecoveryGrantForSource(
+      storedGrant.sourceId,
+      database,
+    );
+    if (!latest.ok) return latest;
+    if (latest.value?.grantId !== storedGrant.grantId)
+      return fail(
+        domainError(
+          "INVALID_APPROVAL",
+          "a newer recovery grant superseded this one",
+        ),
+      );
+    const consumed = database
+      .prepare(
+        "SELECT 1 AS present FROM operator_mainnet_recovery_grant_consumptions WHERE grant_id = ?",
+      )
+      .get(storedGrant.grantId) as SqliteRow | undefined;
+    if (consumed)
+      return fail(
+        domainError(
+          "INVALID_APPROVAL",
+          "source-bound recovery grant was already consumed",
+        ),
+      );
+    const sourceRow = this.sourceRow(storedGrant.sourceId, database);
+    if (!sourceRow)
+      return fail(
+        domainError(
+          "PERSISTENCE_CONFLICT",
+          "recovery source is no longer present",
+        ),
+      );
+    const snapshot = this.snapshot(sourceRow, database);
+    if (!snapshot.ok) return snapshot;
+    if (
+      this.sourceRevision(snapshot.value) !== storedGrant.sourceRevision ||
+      snapshot.value.source.planHash !== storedGrant.sourcePlanHash ||
+      snapshot.value.intent.writeIntentId !== storedGrant.sourceIntentId
+    )
+      return fail(
+        domainError(
+          "INVALID_APPROVAL",
+          "source changed after recovery was authorized",
+        ),
+      );
+    const halt = haltRow(database, this.scope);
+    if (!halt.ok) return halt;
+    if (halt.value.active || halt.value.revision !== storedGrant.haltRevision)
+      return fail(
+        domainError(
+          "HALT_ACTIVE",
+          "HALT changed after recovery was authorized",
+        ),
+      );
+    if (storedGrant.resolution.kind === "api-resolved") {
+      const latestReconciliation = snapshot.value.reconciliations.at(-1);
+      if (
+        latestReconciliation?.cleanupStatus !== "verified-clean" ||
+        latestReconciliation.canonicalHash !==
+          storedGrant.resolution.evidenceHash
+      )
+        return fail(
+          domainError(
+            "UNRESOLVED_STATE",
+            "API recovery evidence changed after authorization",
+          ),
+        );
+    } else {
+      const attestation = this.recoveryAttestationRow(
+        storedGrant.resolution.attestationHash,
+        database,
+      );
+      if (!attestation.ok) return attestation;
+      if (
+        attestation.value === undefined ||
+        attestation.value.attestationId !==
+          storedGrant.resolution.attestationId ||
+        attestation.value.sourceRevision !== storedGrant.sourceRevision
+      )
+        return fail(
+          domainError(
+            "INVALID_APPROVAL",
+            "manual recovery attestation is missing or no longer current",
+          ),
+        );
+    }
+    return ok({ grant: storedGrant, source: snapshot.value });
+  }
+
+  private consumeRecoveryGrantWithinTransaction(
+    database: DatabaseSync,
+    grant: OperatorMainnetRecoveryGrant,
+    oldSource: OperatorMainnetTestSnapshot,
+    nextSourceId: string,
+    nextWriteIntentId: string,
+    consumedAt: UtcTimestamp,
+  ): Result<void> {
+    const event = encode({
+      schemaVersion: "operator-mainnet-recovery-grant-consumption/v1",
+      grantId: grant.grantId,
+      grantHash: grant.contentHash,
+      oldSourceId: grant.sourceId,
+      oldSourceRevision: grant.sourceRevision,
+      nextSourceId,
+      nextWriteIntentId,
+      nextPlanHash: grant.planHash,
+      resolutionKind: grant.resolution.kind,
+      consumedAt,
+    });
+    if (!event.ok) return event;
+    database
+      .prepare(
+        `INSERT INTO operator_mainnet_recovery_grant_consumptions
+         (grant_id, exchange, environment, account_id, new_source_id,
+          new_write_intent_id, consumed_at, canonical_json, canonical_hash)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        grant.grantId,
+        this.scope.exchange,
+        this.scope.environment,
+        this.scope.accountId,
+        nextSourceId,
+        nextWriteIntentId,
+        consumedAt,
+        event.value.json,
+        event.value.hash,
+      );
+    if (grant.resolution.kind !== "manual-attested") return ok(undefined);
+    if (oldSource.sourceDisposition !== undefined)
+      return fail(
+        domainError(
+          "PERSISTENCE_CONFLICT",
+          "recovery source already has a terminal disposition",
+        ),
+      );
+    const revision = this.sourceRevision(oldSource) + 1;
+    const dispositionId = deterministicId(
+      "operator-mainnet-source-disposition",
+      `${grant.sourceId}:${grant.grantId}`,
+    );
+    const disposition = encode({
+      schemaVersion: "operator-mainnet-source-disposition/v1",
+      sourceId: grant.sourceId,
+      revision,
+      disposition: "human-attested",
+      grantId: grant.grantId,
+      grantHash: grant.contentHash,
+      attestationId: grant.resolution.attestationId,
+      attestationHash: grant.resolution.attestationHash,
+      nextSourceId,
+      nextWriteIntentId,
+      recordedAt: consumedAt,
+    });
+    if (!disposition.ok) return disposition;
+    database
+      .prepare(
+        `INSERT INTO operator_mainnet_test_source_dispositions
+         (disposition_id, source_id, revision, disposition, grant_id,
+          next_source_id, next_write_intent_id, canonical_json, canonical_hash, recorded_at)
+         VALUES (?, ?, ?, 'human-attested', ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        dispositionId,
+        grant.sourceId,
+        revision,
+        grant.grantId,
+        nextSourceId,
+        nextWriteIntentId,
+        disposition.value.json,
+        disposition.value.hash,
+        consumedAt,
+      );
+    return ok(undefined);
+  }
+
   private sourceRow(
     sourceId: string,
     database = this.db,
@@ -529,12 +1741,19 @@ export class SqliteOperatorMainnetTestStore implements OperatorMainnetTestPersis
     const value = parsed.value as Record<string, unknown>;
     if (
       (value.schemaVersion !== "operator-mainnet-test-create-intent/v1" &&
-        value.schemaVersion !== "operator-mainnet-test-create-intent/v2") ||
+        value.schemaVersion !== "operator-mainnet-test-create-intent/v2" &&
+        value.schemaVersion !== "operator-mainnet-test-create-intent/v3") ||
       (value.schemaVersion === "operator-mainnet-test-create-intent/v1" &&
         (!requireIdentifier(value.leaseOwnerRunId, "leaseOwnerRunId").ok ||
           !requireFiniteInteger(value.leaseEpoch, "leaseEpoch", 1).ok)) ||
       (value.schemaVersion === "operator-mainnet-test-create-intent/v2" &&
-        ("leaseOwnerRunId" in value || "leaseEpoch" in value))
+        ("leaseOwnerRunId" in value ||
+          "leaseEpoch" in value ||
+          "recoveryGrantId" in value)) ||
+      (value.schemaVersion === "operator-mainnet-test-create-intent/v3" &&
+        ("leaseOwnerRunId" in value ||
+          "leaseEpoch" in value ||
+          !requireIdentifier(value.recoveryGrantId, "recoveryGrantId").ok))
     )
       return persistenceFailure("operator CREATE intent version is invalid");
     return ok({
@@ -773,6 +1992,11 @@ export class SqliteOperatorMainnetTestStore implements OperatorMainnetTestPersis
       database,
     );
     if (!manualActions.ok) return manualActions;
+    const sourceDisposition = this.sourceDispositionRow(
+      source.value.sourceId,
+      database,
+    );
+    if (!sourceDisposition.ok) return sourceDisposition;
     const halt = haltRow(database, this.scope);
     if (!halt.ok) return halt;
     return ok({
@@ -783,13 +2007,36 @@ export class SqliteOperatorMainnetTestStore implements OperatorMainnetTestPersis
       ...(attempt.value === undefined ? {} : { attempt: attempt.value }),
       reconciliations: reconciliations.value,
       manualActions: manualActions.value,
+      ...(sourceDisposition.value === undefined
+        ? {}
+        : { sourceDisposition: sourceDisposition.value }),
       halt: halt.value,
     });
   }
 
-  private pendingSourceRow(
+  private haltOriginEvidence(
+    source: OperatorMainnetTestSourceRecord,
+    intent: OperatorMainnetTestIntentRecord,
+    trigger: Readonly<Record<string, unknown>>,
+  ): Result<string> {
+    if (source.sourceId !== intent.sourceId)
+      return persistenceFailure(
+        "operator HALT source and CREATE intent origin do not match",
+      );
+    const encoded = encode({
+      schemaVersion: "operator-mainnet-halt-origin/v1",
+      sourceId: source.sourceId,
+      writeIntentId: intent.writeIntentId,
+      sourcePlanHash: source.planHash,
+      intentCanonicalHash: intent.canonicalHash,
+      trigger,
+    });
+    return encoded.ok ? ok(encoded.value.json) : encoded;
+  }
+
+  private pendingSourceRows(
     database = this.db,
-  ): Result<OperatorMainnetTestSourceRecord | undefined> {
+  ): Result<readonly OperatorMainnetTestSourceRecord[]> {
     const rows = database
       .prepare(
         `SELECT s.* FROM operator_mainnet_test_sources s
@@ -799,16 +2046,43 @@ export class SqliteOperatorMainnetTestStore implements OperatorMainnetTestPersis
          ORDER BY s.created_at, s.source_id`,
       )
       .all(...scopeValues(this.scope)) as SqliteRow[];
+    const pending: OperatorMainnetTestSourceRecord[] = [];
     for (const row of rows) {
       // Validate the complete persisted source and its canonical reconciliation
       // rows before trusting cleanup status to release the account gate.
       const snapshot = this.snapshot(row, database);
       if (!snapshot.ok) return snapshot;
-      const latest = snapshot.value.reconciliations.at(-1);
-      if (latest?.cleanupStatus !== "verified-clean")
-        return ok(snapshot.value.source);
+      if (snapshot.value.sourceDisposition !== undefined) continue;
+      // A fresh, source-attributed API status result is independently enough
+      // to release the pending-source gate. Grants authorize only the bound
+      // recovery intent; an unused or expired grant must not hold clean state.
+      if (hasLatestApiVerifiedCleanReconciliation(snapshot.value)) continue;
+      const latestGrant = this.latestRecoveryGrantForSource(
+        snapshot.value.source.sourceId,
+        database,
+      );
+      if (!latestGrant.ok) return latestGrant;
+      if (latestGrant.value) {
+        const consumed = database
+          .prepare(
+            "SELECT 1 AS present FROM operator_mainnet_recovery_grant_consumptions WHERE grant_id = ?",
+          )
+          .get(latestGrant.value.grantId) as SqliteRow | undefined;
+        if (!consumed) {
+          pending.push(snapshot.value.source);
+          continue;
+        }
+      }
+      pending.push(snapshot.value.source);
     }
-    return ok(undefined);
+    return ok(pending);
+  }
+
+  private pendingSourceRow(
+    database = this.db,
+  ): Result<OperatorMainnetTestSourceRecord | undefined> {
+    const pending = this.pendingSourceRows(database);
+    return pending.ok ? ok(pending.value[0]) : pending;
   }
 
   readOperatorMainnetTestSource(
@@ -840,7 +2114,12 @@ export class SqliteOperatorMainnetTestStore implements OperatorMainnetTestPersis
   ): Result<OperatorMainnetTestSnapshot> {
     const runId = requireIdentifier(request.runId, "runId");
     const at = parseUtcTimestamp(request.preparedAt);
-    if (!runId.ok || !at.ok || !validScope(this.scope)) return invalid();
+    const recoveryGrantId =
+      request.recoveryGrantId === undefined
+        ? ok<string | undefined>(undefined)
+        : requireIdentifier(request.recoveryGrantId, "recoveryGrantId");
+    if (!runId.ok || !at.ok || !recoveryGrantId.ok || !validScope(this.scope))
+      return invalid();
     const artifacts = validateArtifacts(
       request.plan,
       request.approval,
@@ -874,7 +2153,10 @@ export class SqliteOperatorMainnetTestStore implements OperatorMainnetTestPersis
       `${sourceId}:CREATE`,
     );
     const intentValue = {
-      schemaVersion: "operator-mainnet-test-create-intent/v2",
+      schemaVersion:
+        recoveryGrantId.value === undefined
+          ? "operator-mainnet-test-create-intent/v2"
+          : "operator-mainnet-test-create-intent/v3",
       operation: "CREATE" as const,
       sourceId,
       runId: runId.value,
@@ -886,24 +2168,48 @@ export class SqliteOperatorMainnetTestStore implements OperatorMainnetTestPersis
       exactPayloadHash: payload.value.hash,
       expiresAt: artifacts.value.approval.expiresAt,
       preparedAt: at.value,
+      ...(recoveryGrantId.value === undefined
+        ? {}
+        : { recoveryGrantId: recoveryGrantId.value }),
     };
     const intent = encode(intentValue);
     if (!intent.ok) return intent;
     return runInTransaction(
       this.db,
       (database) => {
+        const recoveryGrant =
+          recoveryGrantId.value === undefined
+            ? ok<
+                | {
+                    readonly grant: OperatorMainnetRecoveryGrant;
+                    readonly source: OperatorMainnetTestSnapshot;
+                  }
+                | undefined
+              >(undefined)
+            : this.recoveryGrantForIntent(
+                recoveryGrantId.value,
+                artifacts.value.plan,
+                at.value,
+                database,
+              );
+        if (!recoveryGrant.ok) return recoveryGrant;
         const halt = haltRow(database, this.scope);
         if (!halt.ok) return halt;
         if (halt.value.active)
           return fail(
             domainError(
               "HALT_ACTIVE",
-              "HALT blocks a new operator Mainnet CREATE",
+              "HALT blocks a new operator Mainnet CREATE; inspect saved event and source/intent evidence before explicit recovery",
             ),
           );
         const pending = this.pendingSourceRow(database);
         if (!pending.ok) return pending;
-        if (pending.value)
+        if (
+          pending.value &&
+          (recoveryGrant.value === undefined ||
+            pending.value.sourceId !==
+              recoveryGrant.value.source.source.sourceId)
+        )
           return fail(
             domainError(
               "UNRESOLVED_STATE",
@@ -969,6 +2275,17 @@ export class SqliteOperatorMainnetTestStore implements OperatorMainnetTestPersis
             intent.value.hash,
             at.value,
           );
+        if (recoveryGrant.value !== undefined) {
+          const consumed = this.consumeRecoveryGrantWithinTransaction(
+            database,
+            recoveryGrant.value.grant,
+            recoveryGrant.value.source,
+            sourceId,
+            writeIntentId,
+            at.value,
+          );
+          if (!consumed.ok) return consumed;
+        }
         const source = this.sourceRow(sourceId, database);
         if (!source)
           return invalid(
@@ -980,7 +2297,7 @@ export class SqliteOperatorMainnetTestStore implements OperatorMainnetTestPersis
     );
   }
 
-  recordAttemptAndHalt(
+  recordAttempt(
     request: RecordOperatorMainnetTestAttemptRequest,
   ): Result<OperatorMainnetTestSnapshot> {
     const sourceId = requireIdentifier(request.sourceId, "sourceId");
@@ -1080,14 +2397,29 @@ export class SqliteOperatorMainnetTestStore implements OperatorMainnetTestPersis
             attempt.value.hash,
             at.value,
           );
-        const raised = raiseHaltWithinTransaction(
-          database,
-          this.scope,
-          "operator Mainnet CREATE awaits read-only reconciliation",
-          at.value,
-          attempt.value.json,
-        );
-        if (!raised.ok) return raised;
+        if (request.outcome === "ambiguous") {
+          const validated = this.snapshot(sourceRow, database);
+          if (!validated.ok) return validated;
+          const origin = this.haltOriginEvidence(
+            validated.value.source,
+            validated.value.intent,
+            {
+              kind: "ambiguous-create-attempt",
+              attemptId: attemptId.value,
+              attemptCanonicalJson: attempt.value.json,
+              attemptCanonicalHash: attempt.value.hash,
+            },
+          );
+          if (!origin.ok) return origin;
+          const raised = raiseHaltWithinTransaction(
+            database,
+            this.scope,
+            "operator Mainnet CREATE awaits read-only reconciliation",
+            at.value,
+            origin.value,
+          );
+          if (!raised.ok) return raised;
+        }
         return this.snapshot(sourceRow, database);
       },
       "PERSISTENCE_CONFLICT",
@@ -1117,11 +2449,36 @@ export class SqliteOperatorMainnetTestStore implements OperatorMainnetTestPersis
           );
         const snapshot = this.snapshot(source, database);
         if (!snapshot.ok) return snapshot;
+        const latestReconciliation = snapshot.value.reconciliations.at(-1);
+        const origin = this.haltOriginEvidence(
+          snapshot.value.source,
+          snapshot.value.intent,
+          {
+            kind:
+              latestReconciliation?.lifecycleOutcome === "UNKNOWN" &&
+              latestReconciliation.cleanupStatus === "unknown"
+                ? "status-unknown"
+                : "operator-source-halt",
+            reason: safeReason.value,
+            recordedAt: time.value,
+            ...(latestReconciliation === undefined
+              ? {}
+              : {
+                  reconciliationRevision: latestReconciliation.revision,
+                  reconciliationCanonicalJson:
+                    latestReconciliation.canonicalJson,
+                  reconciliationCanonicalHash:
+                    latestReconciliation.canonicalHash,
+                }),
+          },
+        );
+        if (!origin.ok) return origin;
         return raiseHaltWithinTransaction(
           database,
           this.scope,
           safeReason.value,
           time.value,
+          origin.value,
         );
       },
       "PERSISTENCE_CONFLICT",

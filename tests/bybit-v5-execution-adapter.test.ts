@@ -267,6 +267,10 @@ function mainnetFixture(
     readonly ambiguousCreate?: boolean;
     readonly mismatchedAcknowledgement?: boolean;
     readonly mismatchedOrderSymbol?: boolean;
+    readonly failPositionRead?: boolean;
+    readonly failOpenOrdersRead?: boolean;
+    readonly unsetClockOffset?: boolean;
+    readonly serverTimeSequenceMs?: readonly number[];
   } = {},
 ) {
   const calls: Array<{
@@ -276,6 +280,7 @@ function mainnetFixture(
   }> = [];
   let leverage = "1";
   let includeFill = false;
+  let serverTimeReadCount = 0;
   const request: typeof fetch = async (input, init) => {
     const url = new URL(String(input));
     const method = init?.method ?? "GET";
@@ -285,6 +290,12 @@ function mainnetFixture(
       method,
       ...(body === undefined ? {} : { body }),
     });
+
+    if (
+      (options.failPositionRead && url.pathname === "/v5/position/list") ||
+      (options.failOpenOrdersRead && url.pathname === "/v5/order/realtime")
+    )
+      throw new Error("synthetic target partition failure");
 
     if (method === "POST") {
       const requestBody =
@@ -321,7 +332,18 @@ function mainnetFixture(
     let result: Record<string, unknown>;
     switch (url.pathname) {
       case "/v5/market/time":
-        result = { timeSecond: String(Date.parse(mainnetObservedAt) / 1000) };
+        if (options.serverTimeSequenceMs) {
+          const serverTimeMs =
+            options.serverTimeSequenceMs?.[serverTimeReadCount] ??
+            Date.parse(mainnetObservedAt);
+          serverTimeReadCount += 1;
+          result = {
+            timeSecond: String(Math.floor(serverTimeMs / 1000)),
+            timeNano: String(BigInt(serverTimeMs) * 1_000_000n),
+          };
+        } else {
+          result = { timeSecond: String(Date.parse(mainnetObservedAt) / 1000) };
+        }
         break;
       case "/v5/market/instruments-info":
         result = {
@@ -443,7 +465,7 @@ function mainnetFixture(
     credentials: mainnetCredentials,
     request,
     clock: () => Date.parse(mainnetObservedAt),
-    clockOffsetMs: 0,
+    ...(options.unsetClockOffset ? {} : { clockOffsetMs: 0 }),
   });
   const clock = fixedClock(mainnetObservedAt);
   assert.equal(clock.ok, true);
@@ -616,6 +638,66 @@ test("Mainnet adapter exposes sanitized symbol state and all supported single op
       .map((call) => new URL(call.url).pathname),
     ["/v5/order/create", "/v5/position/set-leverage", "/v5/order/cancel"],
   );
+});
+
+test("Mainnet target recovery preserves one successful partition when the other GET fails", async () => {
+  const fixture = mainnetFixture({ failOpenOrdersRead: true });
+  const parts = await fixture.adapter.readOperatorTargetStateParts({
+    instrument: "DOGEUSDT",
+  });
+
+  assert.ok(parts.serverTime);
+  assert.equal(parts.position.status, "available");
+  if (parts.position.status === "available") {
+    assert.equal(parts.position.value.side, "flat");
+    assert.equal(parts.position.value.quantity.toString(), "0");
+  }
+  assert.deepEqual(parts.openOrders, {
+    status: "unavailable",
+    reasonCode: "TARGET_ORDERS_READ_FAILED",
+  });
+  assert.ok(
+    parts.capabilities?.some((item) => item.capability === "order-create"),
+  );
+  assert.ok(fixture.calls.every((call) => call.method === "GET"));
+  assert.deepEqual(
+    fixture.calls.map((call) => new URL(call.url).pathname),
+    ["/v5/position/list", "/v5/order/realtime", "/v5/market/time"],
+  );
+});
+
+test("Mainnet target recovery shares first clock initialization and keeps the final provider time", async () => {
+  const initialServerTime = Date.parse(mainnetObservedAt);
+  const finalServerTime = initialServerTime + 1_234;
+  const fixture = mainnetFixture({
+    unsetClockOffset: true,
+    serverTimeSequenceMs: [initialServerTime, finalServerTime],
+  });
+
+  const parts = await fixture.adapter.readOperatorTargetStateParts({
+    instrument: "DOGEUSDT",
+  });
+
+  const expectedFinalTime = timestampFromEpochMs(finalServerTime);
+  assert.equal(expectedFinalTime.ok, true);
+  if (!expectedFinalTime.ok) return;
+  assert.equal(parts.serverTime, expectedFinalTime.value);
+  assert.equal(parts.position.status, "available");
+  assert.equal(parts.openOrders.status, "available");
+  if (parts.position.status === "available")
+    assert.equal(parts.position.observedAt, parts.serverTime);
+  if (parts.openOrders.status === "available")
+    assert.equal(parts.openOrders.observedAt, parts.serverTime);
+
+  const paths = fixture.calls.map((call) => new URL(call.url).pathname);
+  assert.equal(
+    paths.filter((path) => path === "/v5/market/time").length,
+    2,
+    "one unsigned GET initializes the shared offset, then one GET supplies final observation time",
+  );
+  assert.equal(paths.filter((path) => path === "/v5/position/list").length, 1);
+  assert.equal(paths.filter((path) => path === "/v5/order/realtime").length, 1);
+  assert.ok(fixture.calls.every((call) => call.method === "GET"));
 });
 
 test("Mainnet child observations use post-read Bybit time despite a lagging local clock", async () => {

@@ -13,6 +13,7 @@ import { preparedLegProtectionV2Migration } from "./migrations/007-prepared-leg-
 import { operatorMainnetTestMigration } from "./migrations/008-operator-mainnet-test.js";
 
 import { operatorMainnetTestLeaseFreeMigration } from "./migrations/009-operator-mainnet-test-lease-free.js";
+import { operatorMainnetRecoveryMigration } from "./migrations/010-operator-mainnet-recovery.js";
 
 export interface SqliteMigration {
   readonly version: number;
@@ -30,6 +31,7 @@ export const MIGRATIONS: readonly SqliteMigration[] = [
   preparedLegProtectionV2Migration,
   operatorMainnetTestMigration,
   operatorMainnetTestLeaseFreeMigration,
+  operatorMainnetRecoveryMigration,
 ];
 
 export const CURRENT_SCHEMA_VERSION = MIGRATIONS.at(-1)?.version ?? 0;

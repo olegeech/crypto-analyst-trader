@@ -1,4 +1,5 @@
 import { safeMainnetGetCounts } from "../application/mainnet-composition-helpers.js";
+import { readFileSync } from "node:fs";
 import { ACCOUNT_CRITICAL_GROUPS } from "../domain/account/account-evidence-consistency.js";
 import { randomUUID } from "node:crypto";
 import { userInfo } from "node:os";
@@ -14,22 +15,37 @@ import {
   deriveOperatorMainnetTestSourceId,
   type OperatorMainnetTestPlan,
 } from "../domain/execution/operator-mainnet-test-plan.js";
+import {
+  recoveryGrantEvidenceExpiry,
+  recoveryGrantPlanExpiry,
+  type OperatorMainnetRecoveryAttestation,
+} from "../domain/execution/operator-mainnet-recovery.js";
 import { hashCanonical } from "../domain/identity/canonical-serialization.js";
 import {
   parseUtcTimestamp,
   timestampFromEpochMs,
+  timestampToEpochMs,
+  type UtcTimestamp,
 } from "../domain/shared/time.js";
 import { requireHash } from "../domain/shared/validation.js";
-import { resolveOperatorMainnetPlan } from "../adapters/sqlite/operator-mainnet-test-lookup.js";
+import {
+  resolveOperatorMainnetPlan,
+  resolveOperatorMainnetSource,
+} from "../adapters/sqlite/operator-mainnet-test-lookup.js";
 import { openSqlitePersistence } from "../adapters/sqlite/sqlite-persistence.js";
 import { runMainnetOperatorTestStatusComposition } from "../application/mainnet-operator-test-status-composition.js";
 import { prepareMainnetOperatorTest } from "../application/mainnet-operator-test-preparation-composition.js";
+import {
+  persistManualOperatorRecoveryAttestation,
+  recoverMainnetOperatorTest,
+} from "../application/mainnet-operator-test-recovery.js";
 import { createOperatorMainnetCreateRequest } from "../application/mainnet-entry-evidence.js";
 import { promptVisible, PromptInterruptedError } from "./interactive-prompt.js";
 
 export const MAINNET_OPERATOR_TEST_USAGE = `Usage:
-  npm run mainnet:test -- prepare --symbol <BTCUSDT|ETHUSDT|XRPUSDT|DOGEUSDT> --allocation <USDT> --gross-cap <USDT> --max-deviation-bps <bps>
+  npm run mainnet:test -- prepare --symbol <BTCUSDT|ETHUSDT|XRPUSDT|DOGEUSDT> --allocation <USDT> --gross-cap <USDT> --max-deviation-bps <bps> [--recovery-source-id <operator-mainnet-test:...> --recovery-inspection-file <path>]
   npm run mainnet:test -- execute --plan-hash <sha256:...>
+  npm run mainnet:test -- recover --source-id <operator-mainnet-test:...> --plan-hash <sha256:...> --resolution <api|manual>
   npm run mainnet:test -- status --source-id <operator-mainnet-test:...>`;
 
 type InputStream = NodeJS.ReadableStream & { readonly isTTY?: boolean };
@@ -40,6 +56,9 @@ export interface MainnetOperatorTestCliDependencies {
   readonly output?: OutputStream;
   readonly prepare?: typeof prepareMainnetOperatorTest;
   readonly resolvePlan?: typeof resolveOperatorMainnetPlan;
+  readonly resolveSource?: typeof resolveOperatorMainnetSource;
+  readonly prepareRecoveryAttestation?: typeof persistManualOperatorRecoveryAttestation;
+  readonly recover?: typeof recoverMainnetOperatorTest;
   readonly hasDurableIntent?: (
     scope: PersistenceScope,
     sourceId: string,
@@ -62,8 +81,16 @@ type ParsedCommand =
       readonly allocation: string;
       readonly grossNotionalCap: string;
       readonly maxDeviationBps: string;
+      readonly recoverySourceId?: string;
+      readonly recoveryInspectionFile?: string;
     }
   | { readonly command: "execute"; readonly planHash: string }
+  | {
+      readonly command: "recover";
+      readonly sourceId: string;
+      readonly planHash: string;
+      readonly resolution: "api-resolved" | "manual-attested";
+    }
   | { readonly command: "status"; readonly sourceId: string };
 
 function safe(value: string): string {
@@ -101,11 +128,24 @@ function parseArgs(argv: readonly string[]): ParsedCommand | undefined {
     const values = flags(rest);
     if (
       !values ||
-      values.size !== 4 ||
+      (values.size !== 4 && values.size !== 6) ||
       !values.has("--symbol") ||
       !values.has("--allocation") ||
       !values.has("--gross-cap") ||
-      !values.has("--max-deviation-bps")
+      !values.has("--max-deviation-bps") ||
+      values.has("--recovery-source-id") !==
+        values.has("--recovery-inspection-file") ||
+      [...values.keys()].some(
+        (key) =>
+          ![
+            "--symbol",
+            "--allocation",
+            "--gross-cap",
+            "--max-deviation-bps",
+            "--recovery-source-id",
+            "--recovery-inspection-file",
+          ].includes(key),
+      )
     )
       return undefined;
     return {
@@ -114,6 +154,12 @@ function parseArgs(argv: readonly string[]): ParsedCommand | undefined {
       allocation: values.get("--allocation")!,
       grossNotionalCap: values.get("--gross-cap")!,
       maxDeviationBps: values.get("--max-deviation-bps")!,
+      ...(values.has("--recovery-source-id")
+        ? {
+            recoverySourceId: values.get("--recovery-source-id")!,
+            recoveryInspectionFile: values.get("--recovery-inspection-file")!,
+          }
+        : {}),
     };
   }
   if (command === "execute") {
@@ -127,6 +173,30 @@ function parseArgs(argv: readonly string[]): ParsedCommand | undefined {
     if (!values || values.size !== 1 || !values.has("--source-id"))
       return undefined;
     return { command, sourceId: values.get("--source-id")! };
+  }
+  if (command === "recover") {
+    const values = flags(rest);
+    if (
+      !values ||
+      values.size !== 3 ||
+      !values.has("--source-id") ||
+      !values.has("--plan-hash") ||
+      !values.has("--resolution") ||
+      [...values.keys()].some(
+        (key) => !["--source-id", "--plan-hash", "--resolution"].includes(key),
+      ) ||
+      !["api", "manual"].includes(values.get("--resolution")!)
+    )
+      return undefined;
+    return {
+      command,
+      sourceId: values.get("--source-id")!,
+      planHash: values.get("--plan-hash")!,
+      resolution:
+        values.get("--resolution") === "api"
+          ? "api-resolved"
+          : "manual-attested",
+    };
   }
   return undefined;
 }
@@ -147,6 +217,10 @@ function planReview(output: OutputStream, plan: OperatorMainnetTestPlan): void {
   );
   line(output, "ACCOUNT_SCOPE=VERIFIED_BYBIT_MAINNET_LINEAR_ONE_WAY");
   line(output, `PLAN_HASH=${plan.contentHash}`);
+  if (plan.recoveryAttestationHash) {
+    line(output, "RECOVERY_PROVENANCE=MANUAL_ATTESTED_NOT_API_VERIFIED");
+    line(output, `RECOVERY_ATTESTATION_HASH=${plan.recoveryAttestationHash}`);
+  }
   line(
     output,
     `PAYLOAD_HASH=${createRequest.ok ? createRequest.value.payloadHash : "UNKNOWN"}`,
@@ -584,11 +658,71 @@ function operatorFailureDiagnostic(
       nextAction:
         "check the local sanitized quote diagnostics and use GET-only preparation after the response is understood",
     };
+  if (
+    reasonCode === "WALLET_A_OBSERVATION_MISSING" ||
+    reasonCode === "WALLET_B_OBSERVATION_MISSING" ||
+    reasonCode === "WALLET_OBSERVATION_MISSING" ||
+    reasonCode === "WALLET_A_BALANCE_UNPROVEN" ||
+    reasonCode === "WALLET_B_BALANCE_UNPROVEN" ||
+    reasonCode === "AVAILABLE_BALANCE_UNPROVEN"
+  ) {
+    const pass =
+      details?.pass === "A" || details?.pass === "B"
+        ? `wallet pass ${details.pass}`
+        : reasonCode.startsWith("WALLET_A_")
+          ? "wallet pass A"
+          : reasonCode.startsWith("WALLET_B_")
+            ? "wallet pass B"
+            : "the collected wallet evidence";
+    const predicate =
+      details?.predicate === "wallet-observation"
+        ? "a timestamped wallet observation"
+        : "a nonnegative USD-equivalent totalAvailableBalance";
+    return {
+      explanation: "The account-wide capacity evidence is incomplete.",
+      why: `${pass} did not prove ${predicate}.`,
+      nextAction: notStarted
+        ? "check the local sanitized account diagnostics and Bybit wallet read health, then run GET-only preparation; no source exists for status"
+        : "run mainnet:test status with the source ID; inspect Bybit state using CLIENT_ORDER_ID; do not retry execute",
+    };
+  }
+  if (reasonCode === "AVAILABLE_BALANCE_SNAPSHOTS_DIFFER")
+    return {
+      explanation:
+        "Two fresh account-wide available-balance snapshots did not agree.",
+      why: "The A/B totalAvailableBalance values differ; exact account amounts are not printed in this diagnostic.",
+      nextAction: notStarted
+        ? "inspect recent account activity and run GET-only preparation when the balance is stable; no source exists for status and do not retry execute for diagnosis"
+        : "run mainnet:test status with the source ID; inspect Bybit state using CLIENT_ORDER_ID; do not retry execute",
+    };
+  if (reasonCode === "CURRENT_COMMITMENTS_INCOMPLETE") {
+    const pass =
+      details?.pass === "A" || details?.pass === "B"
+        ? `pass ${details.pass}`
+        : "an account snapshot";
+    const group =
+      details?.group === "positions" || details?.group === "orders"
+        ? details.group
+        : "account commitments";
+    const predicate =
+      typeof details?.predicate === "string" &&
+      /^[a-z][a-z0-9-]{0,39}$/u.test(details.predicate)
+        ? details.predicate
+        : "a required current-state field";
+    return {
+      explanation:
+        "Current account positions or active orders were not fully proven.",
+      why: `${pass} did not prove ${predicate} in the ${group} evidence.`,
+      nextAction: notStarted
+        ? "inspect account positions and active orders in Bybit, then run GET-only preparation after the account read is understood"
+        : "run mainnet:test status with the source ID; inspect Bybit state using CLIENT_ORDER_ID; do not retry execute",
+    };
+  }
   if (reasonCode === "ACCOUNT_CAPACITY_INCOMPLETE")
     return {
       explanation:
-        "Bybit did not provide a complete account-wide available-balance value.",
-      why: "The value could not be proved from the account and wallet responses already collected.",
+        "The collected account evidence did not prove the capacity needed for this order.",
+      why: "No more specific safe capacity predicate was available from the evidence already collected.",
       nextAction: notStarted
         ? "check the account or wallet response in the local sanitized diagnostics; no source exists for status and do not retry execute for diagnosis"
         : "run mainnet:test status with the source ID; inspect Bybit orders, fills and position using CLIENT_ORDER_ID; do not retry execute",
@@ -1082,6 +1216,73 @@ export async function runMainnetOperatorTestCli(
   if (parsed.command === "prepare") {
     line(output, "STAGE=READ_ONLY_PREPARATION");
     try {
+      let recoveryAttestation: OperatorMainnetRecoveryAttestation | undefined;
+      if (parsed.recoverySourceId && parsed.recoveryInspectionFile) {
+        if (!input.isTTY || !output.isTTY) {
+          line(output, "VERDICT=BLOCKED");
+          line(
+            output,
+            "REASON_CODE=MANUAL_RECOVERY_REQUIRES_ATTENDED_TERMINAL",
+          );
+          line(output, "EXCHANGE_READS=0");
+          line(output, "EXCHANGE_WRITES=0");
+          return 3;
+        }
+        let rawInspection: unknown;
+        try {
+          rawInspection = JSON.parse(
+            readFileSync(parsed.recoveryInspectionFile, "utf8"),
+          );
+        } catch {
+          line(output, "VERDICT=BLOCKED");
+          line(output, "REASON_CODE=RECOVERY_INSPECTION_FILE_INVALID");
+          line(output, "EXCHANGE_READS=0");
+          line(output, "EXCHANGE_WRITES=0");
+          line(
+            output,
+            "NEXT_ACTION=provide a local JSON file containing the complete Bybit UI inspection fields; do not include screenshots, credentials or account secrets",
+          );
+          return 4;
+        }
+        const recordedAt = timestampFromEpochMs(
+          (dependencies.clock ?? Date.now)(),
+        );
+        if (!recordedAt.ok) {
+          line(output, "VERDICT=BLOCKED");
+          line(output, "REASON_CODE=LOCAL_TIME_INVALID");
+          line(output, "EXCHANGE_READS=0");
+          line(output, "EXCHANGE_WRITES=0");
+          return 4;
+        }
+        const attested = (
+          dependencies.prepareRecoveryAttestation ??
+          persistManualOperatorRecoveryAttestation
+        )({
+          sourceId: parsed.recoverySourceId,
+          inspection: rawInspection as Parameters<
+            typeof persistManualOperatorRecoveryAttestation
+          >[0]["inspection"],
+          actor: dependencies.actor?.() ?? userInfo().username,
+          recordedAt: recordedAt.value,
+        });
+        if (!attested.ok) {
+          line(output, "VERDICT=BLOCKED");
+          line(output, `REASON_CODE=${mapErrorCode(attested)}`);
+          line(output, "EXCHANGE_READS=0");
+          line(output, "EXCHANGE_WRITES=0");
+          line(
+            output,
+            "NEXT_ACTION=inspect the current source and account-wide Bybit UI fields, correct the local inspection file, and prepare again",
+          );
+          return 4;
+        }
+        recoveryAttestation = attested.value.attestation;
+        line(
+          output,
+          `RECOVERY_ATTESTATION_HASH=${recoveryAttestation.contentHash}`,
+        );
+        line(output, "RECOVERY_PROVENANCE=MANUAL_ATTESTED_NOT_API_VERIFIED");
+      }
       const prepared = await (
         dependencies.prepare ?? prepareMainnetOperatorTest
       )({
@@ -1089,6 +1290,12 @@ export async function runMainnetOperatorTestCli(
         allocation: parsed.allocation,
         grossNotionalCap: parsed.grossNotionalCap,
         maxDeviationBps: parsed.maxDeviationBps,
+        ...(recoveryAttestation
+          ? {
+              recoveryAttestationHash: recoveryAttestation.contentHash,
+              recoveryAttestation,
+            }
+          : {}),
       });
       printGetCounts(output, prepared, "PREPARE");
       if (!prepared.ok) {
@@ -1161,6 +1368,225 @@ export async function runMainnetOperatorTestCli(
       );
       return 4;
     }
+  }
+
+  if (parsed.command === "recover") {
+    if (!input.isTTY || !output.isTTY) {
+      line(output, "VERDICT=DECLINED");
+      line(output, "REASON_CODE=RECOVERY_REQUIRES_ATTENDED_TERMINAL");
+      line(output, "EXCHANGE_READS=0");
+      line(output, "EXCHANGE_WRITES=0");
+      return 3;
+    }
+    const sourceId = evidenceIdentifier(parsed.sourceId);
+    const planHash = requireHash(parsed.planHash, "planHash");
+    if (!sourceId || !planHash.ok) {
+      line(output, "VERDICT=BLOCKED");
+      line(output, "REASON_CODE=INVALID_RECOVERY_SOURCE_OR_PLAN");
+      line(output, "EXCHANGE_READS=0");
+      line(output, "EXCHANGE_WRITES=0");
+      return 2;
+    }
+    const source = (dependencies.resolveSource ?? resolveOperatorMainnetSource)(
+      sourceId,
+    );
+    const plan = (dependencies.resolvePlan ?? resolveOperatorMainnetPlan)(
+      planHash.value,
+    );
+    if (!source.ok || !plan.ok || !source.value || !plan.value) {
+      line(output, "VERDICT=BLOCKED");
+      line(
+        output,
+        `REASON_CODE=${!source.ok ? mapErrorCode(source) : !plan.ok ? mapErrorCode(plan) : "RECOVERY_ARTIFACT_NOT_FOUND"}`,
+      );
+      line(output, "EXCHANGE_READS=0");
+      line(output, "EXCHANGE_WRITES=0");
+      return 4;
+    }
+    const snapshot = source.value.snapshot;
+    const savedPlan = plan.value.plan;
+    if (
+      source.value.scope.accountId !== plan.value.scope.accountId ||
+      source.value.scope.exchange !== plan.value.scope.exchange ||
+      source.value.scope.environment !== plan.value.scope.environment ||
+      source.value.scope.category !== plan.value.scope.category ||
+      source.value.scope.positionMode !== plan.value.scope.positionMode ||
+      savedPlan.accountIdentityHash !== source.value.scope.accountId
+    ) {
+      line(output, "VERDICT=BLOCKED");
+      line(output, "REASON_CODE=RECOVERY_SCOPE_MISMATCH");
+      line(output, "EXCHANGE_READS=0");
+      line(output, "EXCHANGE_WRITES=0");
+      return 4;
+    }
+    if (
+      (parsed.resolution === "manual-attested" &&
+        !savedPlan.recoveryAttestationHash) ||
+      (parsed.resolution === "api-resolved" &&
+        savedPlan.recoveryAttestationHash !== undefined)
+    ) {
+      line(output, "VERDICT=BLOCKED");
+      line(output, "REASON_CODE=RECOVERY_RESOLUTION_PLAN_MISMATCH");
+      line(output, "EXCHANGE_READS=0");
+      line(output, "EXCHANGE_WRITES=0");
+      return 4;
+    }
+    let observedAt: UtcTimestamp | undefined;
+    if (parsed.resolution === "api-resolved") {
+      const latest = snapshot.reconciliations.at(-1);
+      if (!latest || latest.cleanupStatus !== "verified-clean") {
+        line(output, "VERDICT=BLOCKED");
+        line(output, "REASON_CODE=API_CLEANUP_NOT_VERIFIED");
+        line(output, "EXCHANGE_READS=0");
+        line(output, "EXCHANGE_WRITES=0");
+        line(
+          output,
+          "NEXT_ACTION=run GET-only status and recover only from its latest verified-clean reconciliation",
+        );
+        return 4;
+      }
+      observedAt = latest.observedAt;
+      line(output, `API_RECONCILIATION_ID=${latest.reconciliationId}`);
+      line(output, `API_RECONCILIATION_HASH=${latest.canonicalHash}`);
+    } else {
+      const persistence = openSqlitePersistence({
+        environment: "mainnet",
+        scope: source.value.scope,
+      });
+      if (!persistence.ok) {
+        line(output, "VERDICT=BLOCKED");
+        line(output, `REASON_CODE=${mapErrorCode(persistence)}`);
+        line(output, "EXCHANGE_READS=0");
+        line(output, "EXCHANGE_WRITES=0");
+        return 4;
+      }
+      try {
+        const journal = persistence.value.operatorMainnetTest;
+        const saved = journal?.readOperatorMainnetRecoveryAttestation(
+          savedPlan.recoveryAttestationHash!,
+        );
+        if (!saved?.ok || !saved.value) {
+          line(output, "VERDICT=BLOCKED");
+          line(output, "REASON_CODE=MANUAL_RECOVERY_ATTESTATION_NOT_FOUND");
+          line(output, "EXCHANGE_READS=0");
+          line(output, "EXCHANGE_WRITES=0");
+          return 4;
+        }
+        observedAt = saved.value.observedAt;
+        line(output, `RECOVERY_ATTESTATION_HASH=${saved.value.contentHash}`);
+        line(output, `RECOVERY_PROVENANCE=${saved.value.provenance}`);
+      } finally {
+        persistence.value.close();
+      }
+    }
+    const planExpiry = recoveryGrantPlanExpiry(savedPlan);
+    const observedExpiry =
+      observedAt && planExpiry.ok
+        ? recoveryGrantEvidenceExpiry(observedAt, planExpiry.value)
+        : undefined;
+    const now = timestampFromEpochMs((dependencies.clock ?? Date.now)());
+    if (!planExpiry.ok || !observedExpiry?.ok || !now.ok || !observedAt) {
+      line(output, "VERDICT=BLOCKED");
+      line(output, "REASON_CODE=RECOVERY_TIME_INVALID");
+      line(output, "EXCHANGE_READS=0");
+      line(output, "EXCHANGE_WRITES=0");
+      return 4;
+    }
+    const grantExpiresAt = observedExpiry.value;
+    if (timestampToEpochMs(now.value) >= timestampToEpochMs(grantExpiresAt)) {
+      line(output, "VERDICT=BLOCKED");
+      line(output, "REASON_CODE=RECOVERY_EVIDENCE_EXPIRED");
+      line(output, "EXCHANGE_READS=0");
+      line(output, "EXCHANGE_WRITES=0");
+      return 4;
+    }
+    line(output, "STAGE=EXPLICIT_LOCAL_RECOVERY_AUTHORIZATION");
+    line(output, `SOURCE_ID=${snapshot.source.sourceId}`);
+    line(output, `SOURCE_PLAN_HASH=${snapshot.source.planHash}`);
+    line(output, `SOURCE_INTENT_ID=${snapshot.intent.writeIntentId}`);
+    line(output, `HALT_ACTIVE=${snapshot.halt.active ? "true" : "false"}`);
+    line(output, `HALT_REVISION=${snapshot.halt.revision}`);
+    line(output, `NEXT_PLAN_HASH=${savedPlan.contentHash}`);
+    line(output, `NEXT_CLIENT_ORDER_ID=${savedPlan.clientOrderId}`);
+    line(output, `RECOVERY_RESOLUTION=${parsed.resolution}`);
+    line(output, `RECOVERY_OBSERVED_AT=${observedAt}`);
+    line(output, `GRANT_EXPIRES_AT=${grantExpiresAt}`);
+    line(output, "EXCHANGE_READS=0");
+    line(output, "EXCHANGE_WRITES=0");
+    line(
+      output,
+      "RECOVERY_EFFECT=clear only the eligible source-linked HALT; authorize one exact plan; CREATE still requires separate exact-plan consent",
+    );
+    line(
+      output,
+      "EXACT_RECOVERY_CONSENT=type lowercase yes to authorize this recovery",
+    );
+    let answer: string;
+    try {
+      answer = await prompt(
+        "Authorize this exact source-bound recovery",
+        "Attended terminal input is required.",
+        { timeoutMs: 15 * 60_000, input, output },
+      );
+    } catch (error) {
+      line(output, "VERDICT=DECLINED");
+      line(
+        output,
+        `REASON_CODE=${error instanceof PromptInterruptedError ? "RECOVERY_CONSENT_INTERRUPTED" : "RECOVERY_CONSENT_UNAVAILABLE"}`,
+      );
+      line(output, "EXCHANGE_READS=0");
+      line(output, "EXCHANGE_WRITES=0");
+      return 3;
+    }
+    if (answer !== "yes") {
+      line(output, "VERDICT=DECLINED");
+      line(output, "REASON_CODE=RECOVERY_CONSENT_NOT_EXACT_YES");
+      line(output, "EXCHANGE_READS=0");
+      line(output, "EXCHANGE_WRITES=0");
+      return 3;
+    }
+    const issuedAt = timestampFromEpochMs((dependencies.clock ?? Date.now)());
+    if (!issuedAt.ok) {
+      line(output, "VERDICT=BLOCKED");
+      line(output, "REASON_CODE=LOCAL_TIME_INVALID");
+      line(output, "EXCHANGE_READS=0");
+      line(output, "EXCHANGE_WRITES=0");
+      return 4;
+    }
+    const recovered = (dependencies.recover ?? recoverMainnetOperatorTest)({
+      sourceId: snapshot.source.sourceId,
+      planHash: savedPlan.contentHash,
+      resolution: parsed.resolution,
+      actor: dependencies.actor?.() ?? userInfo().username,
+      consent: true,
+      issuedAt: issuedAt.value,
+    });
+    if (!recovered.ok) {
+      line(output, "VERDICT=BLOCKED");
+      line(output, `REASON_CODE=${mapErrorCode(recovered)}`);
+      line(output, "EXCHANGE_READS=0");
+      line(output, "EXCHANGE_WRITES=0");
+      line(
+        output,
+        "NEXT_ACTION=preserve the source and HALT; resolve the specific local journal conflict or collect a newer eligible cleanup proof",
+      );
+      return 4;
+    }
+    line(output, "VERDICT=RECOVERY_AUTHORIZED");
+    line(output, `RECOVERY_GRANT_ID=${recovered.value.grant.grantId}`);
+    line(output, `RECOVERY_GRANT_HASH=${recovered.value.grant.contentHash}`);
+    line(output, `GRANT_EXPIRES_AT=${recovered.value.grant.expiresAt}`);
+    line(
+      output,
+      `HALT_CLEARANCE=${recovered.value.grant.haltOrigin ? "recorded" : "not-needed"}`,
+    );
+    line(output, "EXCHANGE_READS=0");
+    line(output, "EXCHANGE_WRITES=0");
+    line(
+      output,
+      "NEXT_ACTION=review and separately approve the exact plan with mainnet:test execute before any CREATE",
+    );
+    return 0;
   }
 
   if (parsed.command === "execute") {

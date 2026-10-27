@@ -230,6 +230,7 @@ export class BybitPrivateTransport {
   private readonly recvWindow: string;
   private readonly timeoutMs: number;
   private clockOffset: number | undefined;
+  private clockOffsetInitialization: Promise<number> | undefined;
 
   constructor(options: BybitPrivateTransportOptions) {
     if (
@@ -280,12 +281,25 @@ export class BybitPrivateTransport {
 
   private async ensureClockOffset(): Promise<number> {
     if (this.clockOffset !== undefined) return this.clockOffset;
-    const before = this.clock();
-    const response = await this.sendUnsigned(BYBIT_TIME_PATH);
-    const after = this.clock();
-    const serverTime = parseServerTime(response);
-    this.clockOffset = serverTime - Math.round((before + after) / 2);
-    return this.clockOffset;
+    if (this.clockOffsetInitialization !== undefined)
+      return this.clockOffsetInitialization;
+
+    const initialization = (async () => {
+      const before = this.clock();
+      const response = await this.sendUnsigned(BYBIT_TIME_PATH);
+      const after = this.clock();
+      const serverTime = parseServerTime(response);
+      const offset = serverTime - Math.round((before + after) / 2);
+      this.clockOffset = offset;
+      return offset;
+    })();
+    this.clockOffsetInitialization = initialization;
+    try {
+      return await initialization;
+    } finally {
+      if (this.clockOffsetInitialization === initialization)
+        this.clockOffsetInitialization = undefined;
+    }
   }
 
   private async send(

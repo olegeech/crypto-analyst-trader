@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 
 import {
@@ -11,10 +14,12 @@ import {
   deriveOperatorMainnetTestSourceId,
   type OperatorMainnetTestPlan,
 } from "../src/domain/execution/operator-mainnet-test-plan.js";
+import { createOperatorMainnetRecoveryAttestation } from "../src/domain/execution/operator-mainnet-recovery.js";
 import { createInstrumentConstraints } from "../src/domain/market/instrument-constraints.js";
 import { domainError } from "../src/domain/shared/errors.js";
 import { fail, ok, type Result } from "../src/domain/shared/result.js";
 import type { PersistenceScope } from "../src/ports/persistence.js";
+import type { PlanHash } from "../src/domain/identity/canonical-serialization.js";
 
 const NOW = "2026-10-23T12:00:00.000Z";
 const ACCOUNT = `sha256:${"a".repeat(64)}`;
@@ -32,7 +37,9 @@ function unwrap<T>(result: Result<T>): T {
   return result.value;
 }
 
-function planFixture(): OperatorMainnetTestPlan {
+function planFixture(
+  recoveryAttestationHash?: PlanHash,
+): OperatorMainnetTestPlan {
   const quote = unwrap(
     createOperatorMainnetQuote({
       exchange: "bybit",
@@ -73,6 +80,43 @@ function planFixture(): OperatorMainnetTestPlan {
       warningCodes: [],
       constraints,
       preparedAt: NOW,
+      ...(recoveryAttestationHash === undefined
+        ? {}
+        : { recoveryAttestationHash }),
+    }),
+  );
+}
+
+function manualAttestation(observedAt = NOW) {
+  return unwrap(
+    createOperatorMainnetRecoveryAttestation({
+      provenance: "MANUAL_ATTESTED_NOT_API_VERIFIED",
+      exchange: "bybit",
+      environment: "mainnet",
+      accountIdentityHash: ACCOUNT,
+      sourceId: "operator-mainnet-test:prior-source",
+      sourcePlanHash: `sha256:${"b".repeat(64)}` as PlanHash,
+      sourceIntentId: "prior-intent",
+      sourceRevision: 1,
+      actor: "operator-test",
+      observedAt,
+      inspection: {
+        accountOpenOrdersInspected: true,
+        accountOpenOrders: [],
+        accountPositionsInspected: true,
+        accountPositions: [],
+        sourceOrderHistoryInspected: true,
+        sourceOrders: [],
+        sourceFillsInspected: true,
+        sourceFills: [],
+        sourcePositionInspected: true,
+        sourcePosition: null,
+        targetLeverage: "1",
+        sourceTakeProfitInspected: true,
+        sourceTakeProfitOrders: [],
+      },
+      manualActions: ["none"],
+      acceptedUncertainty: ["manual-ui-may-be-stale"],
     }),
   );
 }
@@ -138,6 +182,270 @@ test("prepare persists and displays the frozen plan without exchange writes", as
   assert.doesNotMatch(terminal.text(), /APPROVAL_EXPIRES=/u);
   assert.match(terminal.text(), /EXCHANGE_READS=6/u);
   assert.match(terminal.text(), /EXCHANGE_WRITES=0/u);
+});
+
+test("manual preparation requires an attended terminal and forwards the saved UI attestation to planning", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "operator-cli-recovery-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const inspection = {
+    observedAt: "2026-10-23T11:59:58.000Z",
+    inspection: {
+      accountOpenOrdersInspected: true,
+      accountOpenOrders: [],
+      accountPositionsInspected: true,
+      accountPositions: [],
+      sourceOrderHistoryInspected: true,
+      sourceOrders: [],
+      sourceFillsInspected: true,
+      sourceFills: [],
+      sourcePositionInspected: true,
+      sourcePosition: null,
+      targetLeverage: "1",
+      sourceTakeProfitInspected: true,
+      sourceTakeProfitOrders: [],
+    },
+    manualActions: ["none"],
+    acceptedUncertainty: ["manual-ui-may-be-stale"],
+  };
+  const inspectionPath = join(root, "inspection.json");
+  writeFileSync(inspectionPath, JSON.stringify(inspection), "utf8");
+  const attestation = manualAttestation(inspection.observedAt);
+  const manualPlan = planFixture(attestation.contentHash);
+  const attended = streams(true);
+  let preparationInput: unknown;
+  let attestationInput: unknown;
+  let recordedAtInput: unknown;
+  const code = await runMainnetOperatorTestCli(
+    [
+      "prepare",
+      "--symbol",
+      "BTCUSDT",
+      "--allocation",
+      "10",
+      "--gross-cap",
+      "8",
+      "--max-deviation-bps",
+      "10",
+      "--recovery-source-id",
+      sourceId,
+      "--recovery-inspection-file",
+      inspectionPath,
+    ],
+    {
+      ...attended,
+      actor: () => "operator-test",
+      clock: () => Date.parse(NOW),
+      prepareRecoveryAttestation: (input) => {
+        attestationInput = input.inspection;
+        recordedAtInput = input.recordedAt;
+        return ok({ attestation, exchangeReads: 0, exchangeWrites: 0 });
+      },
+      prepare: async (input) => {
+        preparationInput = input;
+        return ok({ plan: manualPlan, exchangeReads: 4, exchangeWrites: 0 });
+      },
+    },
+  );
+  assert.equal(code, 0);
+  assert.deepEqual(attestationInput, inspection);
+  assert.equal(recordedAtInput, NOW);
+  assert.equal(attestation.observedAt, inspection.observedAt);
+  assert.equal(
+    (preparationInput as { recoveryAttestationHash?: string })
+      .recoveryAttestationHash,
+    attestation.contentHash,
+  );
+  assert.equal(
+    (preparationInput as { recoveryAttestation?: unknown }).recoveryAttestation,
+    attestation,
+  );
+  assert.match(
+    attended.text(),
+    /RECOVERY_PROVENANCE=MANUAL_ATTESTED_NOT_API_VERIFIED/u,
+  );
+  assert.match(
+    attended.text(),
+    /PLAN_SCHEMA=operator-mainnet-execution-test\/v2/u,
+  );
+  assert.match(attended.text(), /EXCHANGE_WRITES=0/u);
+
+  const unattended = streams(false);
+  let attestationCalls = 0;
+  const blocked = await runMainnetOperatorTestCli(
+    [
+      "prepare",
+      "--symbol",
+      "BTCUSDT",
+      "--allocation",
+      "10",
+      "--gross-cap",
+      "8",
+      "--max-deviation-bps",
+      "10",
+      "--recovery-source-id",
+      sourceId,
+      "--recovery-inspection-file",
+      inspectionPath,
+    ],
+    {
+      ...unattended,
+      prepareRecoveryAttestation: () => {
+        attestationCalls += 1;
+        return ok({ attestation, exchangeReads: 0, exchangeWrites: 0 });
+      },
+    },
+  );
+  assert.equal(blocked, 3);
+  assert.equal(attestationCalls, 0);
+  assert.match(
+    unattended.text(),
+    /MANUAL_RECOVERY_REQUIRES_ATTENDED_TERMINAL/u,
+  );
+});
+
+test("manual preparation forwards a stale declared UI observation instead of refreshing it at file-read time", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "operator-cli-recovery-stale-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const observationTime = "2026-10-23T11:54:59.999Z";
+  const inspection = {
+    observedAt: observationTime,
+    inspection: {
+      accountOpenOrdersInspected: true,
+      accountOpenOrders: [],
+      accountPositionsInspected: true,
+      accountPositions: [],
+      sourceOrderHistoryInspected: true,
+      sourceOrders: [],
+      sourceFillsInspected: true,
+      sourceFills: [],
+      sourcePositionInspected: true,
+      sourcePosition: null,
+      targetLeverage: "1",
+      sourceTakeProfitInspected: true,
+      sourceTakeProfitOrders: [],
+    },
+    manualActions: ["none"],
+    acceptedUncertainty: ["manual-ui-may-be-stale"],
+  };
+  const inspectionPath = join(root, "inspection.json");
+  writeFileSync(inspectionPath, JSON.stringify(inspection), "utf8");
+  const terminal = streams(true);
+  const attestation = manualAttestation(observationTime);
+  const code = await runMainnetOperatorTestCli(
+    [
+      "prepare",
+      "--symbol",
+      "BTCUSDT",
+      "--allocation",
+      "10",
+      "--gross-cap",
+      "8",
+      "--max-deviation-bps",
+      "10",
+      "--recovery-source-id",
+      sourceId,
+      "--recovery-inspection-file",
+      inspectionPath,
+    ],
+    {
+      ...terminal,
+      actor: () => "operator-test",
+      clock: () => Date.parse(NOW),
+      prepareRecoveryAttestation: (input) => {
+        assert.equal(input.inspection.observedAt, observationTime);
+        assert.equal(input.recordedAt, NOW);
+        return ok({ attestation, exchangeReads: 0, exchangeWrites: 0 });
+      },
+      prepare: async (input) => {
+        assert.equal(
+          (input.recoveryAttestation as { observedAt: string }).observedAt,
+          observationTime,
+        );
+        return fail(
+          domainError("INVALID_EVIDENCE", "stale UI inspection", {
+            reasonCode: "MANUAL_TARGET_EVIDENCE_STALE",
+          }),
+        );
+      },
+    },
+  );
+  assert.equal(code, 4);
+  assert.match(terminal.text(), /MANUAL_TARGET_EVIDENCE_STALE/u);
+});
+
+test("recover requires exact lowercase consent and creates no exchange IO", async () => {
+  const snapshot = {
+    source: {
+      sourceId,
+      planHash: plan.contentHash,
+      clientOrderId: plan.clientOrderId,
+    },
+    intent: { writeIntentId: "prior-intent" },
+    reconciliations: [
+      {
+        reconciliationId: "cleanup-proof-01",
+        canonicalHash: plan.contentHash,
+        cleanupStatus: "verified-clean",
+        observedAt: NOW,
+      },
+    ],
+    halt: { active: true, revision: 1 },
+  };
+  let recoverCalls = 0;
+  let seenResolution: unknown;
+  const run = async (answer: string) => {
+    const terminal = streams(true);
+    const code = await runMainnetOperatorTestCli(
+      [
+        "recover",
+        "--source-id",
+        sourceId,
+        "--plan-hash",
+        plan.contentHash,
+        "--resolution",
+        "api",
+      ],
+      {
+        ...terminal,
+        clock: () => Date.parse(NOW),
+        resolveSource: () => ok({ scope, snapshot: snapshot as never }),
+        resolvePlan: () => resolvedPlan(),
+        prompt: async () => answer,
+        recover: (input) => {
+          recoverCalls += 1;
+          seenResolution = input.resolution;
+          return ok({
+            grant: {
+              grantId: "recovery-grant-01",
+              contentHash: plan.contentHash,
+              haltOrigin: {
+                eventId: "halt-event-01",
+                revision: 1,
+                originHash: plan.contentHash,
+              },
+            },
+            exchangeReads: 0,
+            exchangeWrites: 0,
+          } as never);
+        },
+      },
+    );
+    return { code, terminal };
+  };
+
+  const declined = await run("YES");
+  assert.equal(declined.code, 3);
+  assert.match(declined.terminal.text(), /RECOVERY_CONSENT_NOT_EXACT_YES/u);
+  assert.equal(recoverCalls, 0);
+
+  const authorized = await run("yes");
+  assert.equal(authorized.code, 0);
+  assert.equal(recoverCalls, 1);
+  assert.equal(seenResolution, "api-resolved");
+  assert.match(authorized.terminal.text(), /VERDICT=RECOVERY_AUTHORIZED/u);
+  assert.match(authorized.terminal.text(), /HALT_CLEARANCE=recorded/u);
+  assert.match(authorized.terminal.text(), /EXCHANGE_READS=0/u);
+  assert.match(authorized.terminal.text(), /EXCHANGE_WRITES=0/u);
 });
 
 test("invalid input and blocked preparation use distinct documented exit codes", async (t) => {
@@ -873,6 +1181,34 @@ test("operator failure output shows allowlisted quote, freshness, permission and
         /POSITION_QUANTITY=0\.01/u,
       ],
     },
+    {
+      reasonCode: "AVAILABLE_BALANCE_SNAPSHOTS_DIFFER",
+      details: {
+        source: "balance",
+        pass: "A/B",
+        predicate: "totalAvailableBalance",
+        availableBalance: "999999",
+        privatePayload: "must-not-be-printed",
+      },
+      expected: [
+        /Two fresh account-wide available-balance snapshots did not agree/u,
+        /A\/B totalAvailableBalance values differ/u,
+      ],
+    },
+    {
+      reasonCode: "CURRENT_COMMITMENTS_INCOMPLETE",
+      details: {
+        source: "orders",
+        pass: "B",
+        group: "orders",
+        predicate: "order-price",
+        privatePayload: "must-not-be-printed",
+      },
+      expected: [
+        /Current account positions or active orders were not fully proven/u,
+        /pass B did not prove order-price in the orders evidence/u,
+      ],
+    },
   ] as const;
 
   for (const item of cases) {
@@ -906,7 +1242,7 @@ test("operator failure output shows allowlisted quote, freshness, permission and
     assert.match(terminal.text(), /NEXT_ACTION=/u);
     assert.doesNotMatch(
       terminal.text(),
-      /must-not-be-printed|private provider text/u,
+      /must-not-be-printed|private provider text|999999/u,
     );
   }
 });
