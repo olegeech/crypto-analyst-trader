@@ -14,6 +14,7 @@ import { operatorMainnetTestMigration } from "./migrations/008-operator-mainnet-
 
 import { operatorMainnetTestLeaseFreeMigration } from "./migrations/009-operator-mainnet-test-lease-free.js";
 import { operatorMainnetRecoveryMigration } from "./migrations/010-operator-mainnet-recovery.js";
+import { historyIngestionMigration } from "./migrations/011-history-ingestion.js";
 
 export interface SqliteMigration {
   readonly version: number;
@@ -32,6 +33,7 @@ export const MIGRATIONS: readonly SqliteMigration[] = [
   operatorMainnetTestMigration,
   operatorMainnetTestLeaseFreeMigration,
   operatorMainnetRecoveryMigration,
+  historyIngestionMigration,
 ];
 
 export const CURRENT_SCHEMA_VERSION = MIGRATIONS.at(-1)?.version ?? 0;
