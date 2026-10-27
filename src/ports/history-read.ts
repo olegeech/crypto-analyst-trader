@@ -25,6 +25,8 @@ export interface HistoryReadPage {
   readonly window: HistoryReadWindow;
   readonly cursor: string | null;
   readonly nextCursor: string | null;
+  /** Number of raw provider rows received, before identical-row collapse. */
+  readonly receivedRowCount: number;
   readonly facts: readonly HistorySourceFact[];
 }
 

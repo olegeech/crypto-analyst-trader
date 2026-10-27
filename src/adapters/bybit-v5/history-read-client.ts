@@ -180,12 +180,12 @@ export class BybitHistoryReadClient implements HistoryReadPort {
         response,
         collectedAt,
       );
-      if (facts.length !== rowCount) invalid();
       return Object.freeze({
         source: request.source,
         window: Object.freeze({ ...request.window }),
         cursor: cursor ?? null,
         nextCursor,
+        receivedRowCount: rowCount,
         facts,
       });
     } catch (error) {
@@ -210,7 +210,7 @@ export class BybitHistoryReadClient implements HistoryReadPort {
         ...(cursor === undefined ? {} : { cursor }),
       });
       pageCount++;
-      rowCount += page.facts.length;
+      rowCount += page.receivedRowCount;
       if (rowCount > this.maxRowsPerWindow)
         throw new BybitAccountReadError("ROW_BUDGET_EXCEEDED");
       if (page.nextCursor && seenNextCursors.has(page.nextCursor))

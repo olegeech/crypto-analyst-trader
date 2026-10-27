@@ -70,6 +70,8 @@ export interface ExecutionHistorySourceFact extends HistorySourceFactBase {
   readonly orderId: string;
   readonly orderLinkId: string | null;
   readonly execId: string;
+  readonly orderPrice: string | null;
+  readonly orderQty: string | null;
   readonly side: string;
   readonly execType: string;
   readonly execPrice: string;
@@ -88,6 +90,8 @@ export interface ExecutionHistorySourceFact extends HistorySourceFactBase {
   readonly indexPrice: string | null;
   readonly underlyingPrice: string | null;
   readonly createType: string | null;
+  readonly blockTradeId: string | null;
+  readonly extraFees: string | null;
 }
 
 export interface ClosedPnlHistorySourceFact extends HistorySourceFactBase {
@@ -398,6 +402,8 @@ export function createHistorySourceFact(
       return invalid();
     const nullable = {
       orderLinkId: safeProviderText(input.orderLinkId),
+      orderPrice: decimal(input.orderPrice),
+      orderQty: decimal(input.orderQty),
       execValue: decimal(input.execValue),
       execFee: decimal(input.execFee),
       execFeeV2: decimal(input.execFeeV2),
@@ -412,6 +418,8 @@ export function createHistorySourceFact(
       indexPrice: decimal(input.indexPrice),
       underlyingPrice: decimal(input.underlyingPrice),
       createType: safeProviderText(input.createType),
+      blockTradeId: safeProviderText(input.blockTradeId),
+      extraFees: safeProviderText(input.extraFees),
     };
     if (Object.values(nullable).some((value) => value === undefined))
       return invalid();

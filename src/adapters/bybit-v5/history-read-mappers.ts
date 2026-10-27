@@ -262,6 +262,8 @@ export function mapBybitExecutionResponse(
       orderId: identifier(row.orderId),
       orderLinkId: text(row.orderLinkId),
       execId: identifier(row.execId),
+      orderPrice: decimal(row.orderPrice),
+      orderQty: decimal(row.orderQty),
       side: text(row.side, true)!,
       execType: text(row.execType, true)!,
       execPrice: decimal(row.execPrice, true)!,
@@ -280,13 +282,17 @@ export function mapBybitExecutionResponse(
       indexPrice: decimal(row.indexPrice),
       underlyingPrice: decimal(row.underlyingPrice),
       createType: text(row.createType),
+      blockTradeId: text(row.blockTradeId),
+      extraFees: text(row.extraFees),
     }),
   );
   const unique = collapseIdenticalImmutable(mapped, (value) =>
     value.factKind === "execution" ? value.execId : "",
   );
   return sortFacts(unique, (value) =>
-    value.factKind === "execution" ? value.execId : "",
+    value.factKind === "execution"
+      ? value.execId + "\u0000" + value.orderId + "\u0000" + (value.leavesQty ?? "")
+      : "",
   );
 }
 

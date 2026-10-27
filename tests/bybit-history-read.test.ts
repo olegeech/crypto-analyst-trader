@@ -25,6 +25,8 @@ const envelope = (result: unknown) =>
       time: Date.parse("2026-10-27T00:00:00.000Z"),
     }),
   );
+// Provider-shaped fixtures are synthetic, based on documented Bybit examples,
+// and do not contain captured account data.
 const syntheticSourceResponses: Readonly<Record<HistoryReadSource, unknown>> = {
   "order-history": {
     category: "linear",
@@ -59,6 +61,8 @@ const syntheticSourceResponses: Readonly<Record<HistoryReadSource, unknown>> = {
         orderId: "order-2",
         orderLinkId: "",
         execId: "exec-2",
+        orderPrice: "0.07700",
+        orderQty: "1",
         side: "Buy",
         execType: "Trade",
         execPrice: "0.07699",
@@ -70,6 +74,7 @@ const syntheticSourceResponses: Readonly<Record<HistoryReadSource, unknown>> = {
         execPnl: "0",
         closedSize: "0",
         execTime: "1792497600000",
+        extraFees: "opaque-fee-metadata",
         seq: "999",
       },
       {
@@ -78,6 +83,8 @@ const syntheticSourceResponses: Readonly<Record<HistoryReadSource, unknown>> = {
         orderId: "order-2",
         orderLinkId: "",
         execId: "exec-1",
+        orderPrice: "0.07700",
+        orderQty: "1",
         side: "Buy",
         execType: "Trade",
         execPrice: "0.07699",
@@ -89,6 +96,7 @@ const syntheticSourceResponses: Readonly<Record<HistoryReadSource, unknown>> = {
         execPnl: "0",
         closedSize: "0",
         execTime: "1792497600000",
+        extraFees: "opaque-fee-metadata",
         seq: "1000",
       },
     ],
@@ -151,7 +159,7 @@ const syntheticSourceResponses: Readonly<Record<HistoryReadSource, unknown>> = {
         tradePrice: "0",
         orderLinkId: "",
         displayType: "Future display value",
-        extraFees: '{"feeType":"TRADE","subFeeType":"EXTRA"}',
+        extraFees: "opaque-fee-metadata",
         futureProviderField: true,
       },
     ],
@@ -235,7 +243,9 @@ test("historical source facts retain exact source semantics and unknown provider
         const source =
           path === "/v5/account/transaction-log"
             ? "transaction-log"
-            : "order-history";
+            : path === "/v5/execution/list"
+              ? "executions"
+              : "order-history";
         return {
           time: Date.parse("2026-10-27T00:00:00.000Z"),
           result: syntheticSourceResponses[source] as Record<string, unknown>,
@@ -267,10 +277,16 @@ test("historical source facts retain exact source semantics and unknown provider
   assert.equal(transactionFact.tradeId, null);
   assert.equal(transactionFact.cashBalance, "10");
   assert.equal(transactionFact.orderLinkId, null);
-  assert.equal(
-    transactionFact.extraFees,
-    '{"feeType":"TRADE","subFeeType":"EXTRA"}',
+  assert.equal(transactionFact.extraFees, "opaque-fee-metadata");
+  const executions = await client.readPage({ source: "executions", window });
+  const executionFact = executions.facts.find(
+    (candidate) => candidate.factKind === "execution",
   );
+  assert.ok(executionFact && executionFact.factKind === "execution");
+  if (!executionFact || executionFact.factKind !== "execution") return;
+  assert.equal(executionFact.orderPrice, "0.077");
+  assert.equal(executionFact.orderQty, "1");
+  assert.equal(executionFact.extraFees, "opaque-fee-metadata");
 });
 
 test("equal-time fills with the same order remain distinct and stable by execId", async () => {
@@ -289,6 +305,39 @@ test("equal-time fills with the same order remain distinct and stable by execId"
       fact.factKind === "execution" ? fact.execId : null,
     ),
     ["exec-1", "exec-2"],
+  );
+});
+
+test("the raw-row budget includes identical rows collapsed by the mapper", async () => {
+  const response = structuredClone(
+    syntheticSourceResponses.executions,
+  ) as { list: Record<string, unknown>[]; nextPageCursor: string };
+  response.list.push({ ...response.list[0] });
+  const client = new BybitHistoryReadClient({
+    transport: {
+      get: async () => ({
+        time: Date.parse("2026-10-27T00:00:00.000Z"),
+        result: response,
+      }),
+    },
+    maxRowsPerWindow: 2,
+    utcClock: () => Date.parse("2026-10-27T00:00:01.000Z"),
+  });
+  const page = await client.readPage({ source: "executions", window });
+  assert.equal(page.receivedRowCount, 3);
+  assert.equal(page.facts.length, 2);
+  await assert.rejects(
+    async () => {
+      for await (const _page of client.readPages({
+        source: "executions",
+        window,
+      })) {
+        /* exhaust the provider-shaped page stream */
+      }
+    },
+    (error: unknown) =>
+      error instanceof BybitAccountReadError &&
+      error.code === "ROW_BUDGET_EXCEEDED",
   );
 });
 
