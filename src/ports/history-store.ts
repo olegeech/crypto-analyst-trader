@@ -63,6 +63,11 @@ export interface HistoryConflictSummary {
   readonly reason:
     "IMMUTABLE_ID_CONTENT_CHANGED" | "ORDER_REVISION_CONTENT_CHANGED";
   readonly recordedAt: UtcTimestamp;
+  /** Exact ingestion windows that recorded this conflict, when available. */
+  readonly windows?: readonly {
+    readonly filterHash: string;
+    readonly window: HistoryWindow;
+  }[];
 }
 
 export interface HistoryStorePageResult {

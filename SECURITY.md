@@ -55,6 +55,16 @@ validated plans, approvals, ownership, attempts, reconciliation, accounting
 facts, checkpoints and redacted halt evidence; it must never contain API keys,
 secrets, signatures, signed headers or raw authentication responses.
 
+Period-accounting wallet anchors carry a local HMAC-SHA-256 capture
+authenticator. Its random 32-byte key is stored separately in the macOS
+Keychain, with a distinct item for each environment; SQLite stores only the
+MAC. The key is created only by an explicit anchor-capture command and is never
+printed or stored in the database. Reconciliation and proof validation only
+read it. An unavailable or malformed key blocks validation; do not delete or
+replace it while anchors exist, because doing so would make those anchors
+unverifiable. A SQLite content hash alone is not proof that a Bybit capture
+occurred.
+
 The persistence facade refuses unsupported Node/SQLite runtimes, newer or
 inconsistent schemas, wrong environment identity, ineffective WAL or unsafe
 transaction setup before exposing execution authority. The operational floor

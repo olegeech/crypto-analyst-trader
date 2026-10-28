@@ -1136,11 +1136,54 @@ class SqliteHistoryStore implements HistoryStorePort {
            ORDER BY source, recorded_at, event_identity`,
         )
         .all(...params) as SqliteRow[];
+      const windowRows = this.connection.db
+        .prepare(
+          `SELECT conflict_id, filter_hash, window_from_ms, window_to_ms
+           FROM history_window_conflicts
+           WHERE exchange = ? AND environment = ? AND account_id = ?${sourceFilter}
+           ORDER BY conflict_id, filter_hash, window_from_ms, window_to_ms`,
+        )
+        .all(...params) as SqliteRow[];
+      const windowsByConflict = new Map<
+        string,
+        { filterHash: string; window: { fromMs: number; toMs: number } }[]
+      >();
+      for (const windowRow of windowRows) {
+        const conflictId = storedString(windowRow, "conflict_id");
+        const filterHash = storedString(windowRow, "filter_hash");
+        const fromMs = rowInteger(windowRow, "window_from_ms");
+        const toMs = rowInteger(windowRow, "window_to_ms");
+        if (
+          !conflictId.ok ||
+          !filterHash.ok ||
+          fromMs === undefined ||
+          toMs === undefined ||
+          fromMs < 0 ||
+          toMs <= fromMs
+        )
+          return fail(
+            domainError(
+              "PERSISTENCE_INTEGRITY",
+              "stored history conflict window is invalid",
+            ),
+          );
+        const windows = windowsByConflict.get(conflictId.value) ?? [];
+        windows.push({
+          filterHash: filterHash.value,
+          window: { fromMs, toMs },
+        });
+        windowsByConflict.set(conflictId.value, windows);
+      }
       const output: HistoryConflictSummary[] = [];
       for (const row of rows) {
         const conflict = parseConflict(row);
         if (!conflict.ok) return conflict;
-        output.push(conflict.value);
+        output.push({
+          ...conflict.value,
+          windows: Object.freeze(
+            windowsByConflict.get(conflict.value.conflictId) ?? [],
+          ),
+        });
       }
       return ok(output);
     } catch (error) {

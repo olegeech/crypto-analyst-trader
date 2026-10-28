@@ -86,7 +86,7 @@ function localFailure(code: string, message: string) {
   );
 }
 
-function loadLineageSnapshots(
+export function loadHistoryAttributionLineageSnapshots(
   connection: SqliteConnection,
   accountId: string,
 ): Result<{
@@ -350,7 +350,10 @@ export async function runLiveHistorySync(
     const store = createSqliteHistoryStore(connection);
     stage = "local-lineage-read";
     attemptedAction = "read account-scoped operator and prepared-run lineage";
-    const lineage = loadLineageSnapshots(connection, scope.accountId);
+    const lineage = loadHistoryAttributionLineageSnapshots(
+      connection,
+      scope.accountId,
+    );
     if (!lineage.ok)
       return failure(
         lineage.error,
