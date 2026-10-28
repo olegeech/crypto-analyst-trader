@@ -82,8 +82,8 @@ test("fresh and reopened journals configure verified SQLite durability state", (
   assert.equal(statSync(root).isDirectory(), true);
 });
 
-test("operator Mainnet journal uses v10 recovery schema with empty tables", () => {
-  assert.equal(CURRENT_SCHEMA_VERSION, 10);
+test("operator Mainnet journal uses v11 history schema with empty source tables", () => {
+  assert.equal(CURRENT_SCHEMA_VERSION, 11);
   const { path } = temporaryDatabase();
   const opened = openSqliteConnection({
     environment: "mainnet",
@@ -103,6 +103,10 @@ test("operator Mainnet journal uses v10 recovery schema with empty tables", () =
     "operator_mainnet_recovery_grants",
     "operator_mainnet_recovery_grant_consumptions",
     "operator_mainnet_test_source_dispositions",
+    "history_source_observations",
+    "history_source_conflicts",
+    "history_window_conflicts",
+    "history_window_checkpoints",
   ]) {
     assert.equal(
       db
@@ -132,6 +136,86 @@ test("operator Mainnet journal uses v10 recovery schema with empty tables", () =
   assert.equal(intentColumns.includes("lease_epoch"), false);
   assert.deepEqual(db.prepare("PRAGMA foreign_key_check").all(), []);
   opened.value.close();
+});
+
+test("v11 history migration preserves a v10 HALT and recovery grant", () => {
+  const { path } = temporaryDatabase();
+  const db = openDatabase(path);
+  db.exec("PRAGMA foreign_keys = ON");
+  assert.equal(applyMigrations(db, MIGRATIONS.slice(0, 10)).ok, true);
+  const accountId = `sha256:${"a".repeat(64)}`;
+  const planHash = `sha256:${"b".repeat(64)}`;
+  const approvalHash = `sha256:${"c".repeat(64)}`;
+  const evidenceHash = `sha256:${"d".repeat(64)}`;
+  const contentHash = `sha256:${"e".repeat(64)}`;
+  const timestamp = "2026-10-27T12:00:00.000Z";
+  for (const [artifactId, artifactHash] of [
+    ["plan-artifact", planHash],
+    ["approval-artifact", approvalHash],
+  ] as const) {
+    db.prepare(
+      `INSERT INTO artifacts
+       (artifact_id, artifact_kind, schema_version, canonical_json, canonical_hash,
+        material_hash, created_at)
+       VALUES (?, 'operator-test-fixture', 'artifact/v1', '{}', ?, ?, ?)`,
+    ).run(artifactId, artifactHash, artifactHash, timestamp);
+  }
+  db.prepare(
+    `INSERT INTO halt_state
+     (exchange, environment, account_id, category, position_mode, active, revision,
+      reason, raised_at, reconciliation_required)
+     VALUES ('bybit', 'mainnet', ?, 'linear', 'one-way', 1, 3, 'test', ?, 0)`,
+  ).run(accountId, timestamp);
+  db.prepare(
+    `INSERT INTO operator_mainnet_test_sources
+     (source_id, exchange, environment, account_id, category, position_mode,
+      plan_hash, plan_artifact_id, approval_hash, approval_artifact_id,
+      client_order_id, payload_json, payload_hash, created_at)
+     VALUES ('source-1', 'bybit', 'mainnet', ?, 'linear', 'one-way', ?,
+      'plan-artifact', ?, 'approval-artifact', 'client-1', '{}', ?, ?)`,
+  ).run(accountId, planHash, approvalHash, contentHash, timestamp);
+  db.prepare(
+    `INSERT INTO operator_mainnet_recovery_grants
+     (grant_id, exchange, environment, account_id, category, position_mode,
+      source_id, source_revision, plan_hash, plan_artifact_id, resolution_kind,
+      evidence_hash, attestation_hash, halt_revision, halt_origin_event_id,
+      halt_origin_revision, issued_at, expires_at, canonical_json, canonical_hash)
+     VALUES ('grant-1', 'bybit', 'mainnet', ?, 'linear', 'one-way', 'source-1',
+      1, ?, 'plan-artifact', 'api-resolved', ?, NULL, 3, NULL, NULL, ?, ?, '{}', ?)`,
+  ).run(
+    accountId,
+    planHash,
+    evidenceHash,
+    timestamp,
+    "2026-10-28T12:00:00.000Z",
+    contentHash,
+  );
+  db.close();
+
+  const migrated = openSqliteConnection({
+    environment: "mainnet",
+    databasePath: path,
+    runtime: supportedRuntime,
+  });
+  assert.equal(migrated.ok, true);
+  if (!migrated.ok) return;
+  const migratedDb = migrated.value.db;
+  assert.equal(
+    migratedDb
+      .prepare("SELECT active FROM halt_state WHERE account_id = ?")
+      .get(accountId)?.active,
+    1,
+  );
+  assert.equal(
+    migratedDb
+      .prepare(
+        "SELECT grant_id FROM operator_mainnet_recovery_grants WHERE grant_id = 'grant-1'",
+      )
+      .get()?.grant_id,
+    "grant-1",
+  );
+  assert.deepEqual(migratedDb.prepare("PRAGMA foreign_key_check").all(), []);
+  migrated.value.close();
 });
 
 test("v8 migration preserves populated v7 daily artifacts and prepared-leg source bytes", () => {
@@ -454,24 +538,27 @@ test("newer schema markers fail closed before execution authority", () => {
 test("failed pending migration rolls back its DDL and schema marker", () => {
   const { path } = temporaryDatabase();
   const db = openDatabase(path);
-  assert.equal(applyMigrations(db, MIGRATIONS.slice(0, 1)).ok, true);
+  assert.equal(applyMigrations(db, MIGRATIONS.slice(0, 10)).ok, true);
   db.exec("CREATE TABLE preserved_rows (value TEXT NOT NULL)");
   db.prepare("INSERT INTO preserved_rows (value) VALUES (?)").run("kept");
   const failingMigration: SqliteMigration = {
-    version: 5,
+    version: 11,
     name: "synthetic failure",
     apply(database) {
       database.exec("CREATE TABLE should_rollback (value TEXT NOT NULL)");
       throw new Error("synthetic migration failure");
     },
   };
-  const result = applyMigrations(db, [...MIGRATIONS, failingMigration]);
+  const result = applyMigrations(db, [
+    ...MIGRATIONS.slice(0, 10),
+    failingMigration,
+  ]);
   assert.equal(result.ok, false);
   assert.equal(
     db
       .prepare("SELECT schema_version FROM schema_meta WHERE singleton = 1")
       .get()?.schema_version,
-    1,
+    10,
   );
   assert.equal(
     db.prepare("SELECT value FROM preserved_rows").get()?.value,
