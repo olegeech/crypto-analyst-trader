@@ -232,6 +232,57 @@ test("each Bybit history stream uses its GET route, native scope and documented 
   assert.equal(calls[3]?.query.has("category"), false);
 });
 
+test("an empty Mainnet transaction-log page with a null cursor is terminal through the real transport", async () => {
+  // Sanitized structural observation from the authorized 2026-10-28 Mainnet
+  // probe: successful response, empty list, null cursor. No account data.
+  const transport = createBybitAccountReadTransport({
+    environment: "demo",
+    credentials,
+    budget: {
+      deadline: performance.now() + 30000,
+      attempts: 0,
+      maxAttempts: 1,
+      maxResponseBytes: 1024 * 1024,
+      maxObservedResponseBytes: 0,
+    },
+    clockOffsetMs: 0,
+    request: async () => envelope({ list: [], nextPageCursor: null }),
+  });
+  const page = await new BybitHistoryReadClient({ transport }).readPage({
+    source: "transaction-log",
+    window,
+  });
+  assert.equal(page.receivedRowCount, 0);
+  assert.deepEqual(page.facts, []);
+  assert.equal(page.nextCursor, null);
+});
+
+test("null or missing history cursors cannot terminate other sources or nonempty transaction pages", async () => {
+  for (const [source, response] of [
+    ["order-history", { list: [], nextPageCursor: null }],
+    ["executions", { list: [], nextPageCursor: null }],
+    ["closed-pnl", { list: [], nextPageCursor: null }],
+    ["transaction-log", { list: [] }],
+    [
+      "transaction-log",
+      {
+        ...(syntheticSourceResponses["transaction-log"] as object),
+        nextPageCursor: null,
+      },
+    ],
+  ] as const) {
+    const client = new BybitHistoryReadClient({
+      transport: { get: async () => ({ result: response }) },
+    });
+    await assert.rejects(
+      client.readPage({ source, window }),
+      (error: unknown) =>
+        error instanceof BybitAccountReadError &&
+        error.code === "INVALID_RESPONSE",
+    );
+  }
+});
+
 test("historical source facts retain exact source semantics and unknown provider values", async () => {
   const client = new BybitHistoryReadClient({
     transport: {

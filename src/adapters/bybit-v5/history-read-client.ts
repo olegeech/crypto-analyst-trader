@@ -84,7 +84,11 @@ function validateCursor(cursor: unknown): string | undefined {
   return cursor;
 }
 
-function validatePageCursor(response: AccountReadResponse): string | null {
+function validatePageCursor(
+  response: AccountReadResponse,
+  source: HistoryReadSource,
+  rowCount: number,
+): string | null {
   const result = response.result;
   if (
     result === null ||
@@ -94,6 +98,9 @@ function validatePageCursor(response: AccountReadResponse): string | null {
   )
     invalid();
   const cursor = result.nextPageCursor;
+  // Observed on successful empty Mainnet transaction-log responses.
+  if (source === "transaction-log" && rowCount === 0 && cursor === null)
+    return null;
   if (
     typeof cursor !== "string" ||
     cursor.length > 8192 ||
@@ -157,7 +164,7 @@ export class BybitHistoryReadClient implements HistoryReadPort {
       };
       const response = await this.transport.get(source.path, query);
       const rowCount = validateListLength(response, source.limit);
-      const nextCursor = validatePageCursor(response);
+      const nextCursor = validatePageCursor(response, request.source, rowCount);
       const collectedAt = this.clock();
       if (!Number.isSafeInteger(collectedAt) || collectedAt <= 0) invalid();
       const facts = mapBybitHistoryResponse(
