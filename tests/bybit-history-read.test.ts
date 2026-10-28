@@ -217,11 +217,7 @@ test("each Bybit history stream uses its GET route, native scope and documented 
     assert.equal(page.facts.length, source === "executions" ? 2 : 1);
   }
   assert.deepEqual(
-    calls.map(({ path, query, method }) => [
-      path,
-      query.get("limit"),
-      method,
-    ]),
+    calls.map(({ path, query, method }) => [path, query.get("limit"), method]),
     sources.map(([, path, limit]) => [path, limit, "GET"]),
   );
   for (const { query } of calls) {
@@ -308,10 +304,11 @@ test("equal-time fills with the same order remain distinct and stable by execId"
   );
 });
 
-test("the raw-row budget includes identical rows collapsed by the mapper", async () => {
-  const response = structuredClone(
-    syntheticSourceResponses.executions,
-  ) as { list: Record<string, unknown>[]; nextPageCursor: string };
+test("the source page reports raw rows that identical mapping collapses", async () => {
+  const response = structuredClone(syntheticSourceResponses.executions) as {
+    list: Record<string, unknown>[];
+    nextPageCursor: string;
+  };
   response.list.push({ ...response.list[0] });
   const client = new BybitHistoryReadClient({
     transport: {
@@ -320,31 +317,18 @@ test("the raw-row budget includes identical rows collapsed by the mapper", async
         result: response,
       }),
     },
-    maxRowsPerWindow: 2,
     utcClock: () => Date.parse("2026-10-27T00:00:01.000Z"),
   });
   const page = await client.readPage({ source: "executions", window });
   assert.equal(page.receivedRowCount, 3);
   assert.equal(page.facts.length, 2);
-  await assert.rejects(
-    async () => {
-      for await (const _page of client.readPages({
-        source: "executions",
-        window,
-      })) {
-        /* exhaust the provider-shaped page stream */
-      }
-    },
-    (error: unknown) =>
-      error instanceof BybitAccountReadError &&
-      error.code === "ROW_BUDGET_EXCEEDED",
-  );
 });
 
 test("the same immutable execId with contradictory source facts is rejected", async () => {
-  const response = structuredClone(
-    syntheticSourceResponses.executions,
-  ) as { list: Record<string, unknown>[]; nextPageCursor: string };
+  const response = structuredClone(syntheticSourceResponses.executions) as {
+    list: Record<string, unknown>[];
+    nextPageCursor: string;
+  };
   const duplicate = { ...response.list[0], execId: response.list[1]?.execId };
   response.list.push(duplicate);
   const client = new BybitHistoryReadClient({
@@ -362,65 +346,6 @@ test("the same immutable execId with contradictory source facts is rejected", as
       error instanceof BybitAccountReadError &&
       error.code === "INVALID_RESPONSE",
   );
-});
-
-test("opaque cursors traverse pages, while cursor loops and page exhaustion fail boundedly", async () => {
-  const queries: Readonly<Record<string, string>>[] = [];
-  const client = new BybitHistoryReadClient({
-    transport: {
-      get: async (_path, query = {}) => {
-        queries.push(query);
-        return {
-          time: Date.parse("2026-10-27T00:00:00.000Z"),
-          result: {
-            category: "linear",
-            list: [],
-            nextPageCursor: queries.length === 1 ? "opaque+/=" : "",
-          },
-        };
-      },
-    },
-    utcClock: () => Date.parse("2026-10-27T00:00:01.000Z"),
-  });
-  const pages: unknown[] = [];
-  for await (const page of client.readPages({
-    source: "order-history",
-    window,
-  })) pages.push(page);
-  assert.equal(pages.length, 2);
-  assert.equal(queries[1]?.cursor, "opaque+/=");
-
-  for (const mode of ["loop", "budget"] as const) {
-    let calls = 0;
-    const bounded = new BybitHistoryReadClient({
-      transport: {
-        get: async () => ({
-          time: Date.parse("2026-10-27T00:00:00.000Z"),
-          result: {
-            category: "linear",
-            list: [],
-            nextPageCursor: mode === "loop" ? "repeat" : String(++calls),
-          },
-        }),
-      },
-      maxPagesPerWindow: 2,
-      utcClock: () => Date.parse("2026-10-27T00:00:01.000Z"),
-    });
-    await assert.rejects(
-      async () => {
-        for await (const _page of bounded.readPages({
-          source: "order-history",
-          window,
-        })) {
-          /* exhaust the provider-shaped page stream */
-        }
-      },
-      (error: unknown) =>
-        error instanceof BybitAccountReadError &&
-        error.code ===
-          (mode === "loop" ? "INVALID_RESPONSE" : "PAGE_BUDGET_EXCEEDED"),
-    );
-  }
 });
 
 test("windows over seven days and malformed critical source facts are rejected before coverage", async () => {

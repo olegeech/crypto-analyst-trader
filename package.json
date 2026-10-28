@@ -37,6 +37,7 @@
     "trader:demo": "node --import tsx src/cli/trader-demo.ts",
     "mainnet:preflight": "node --import tsx src/cli/mainnet-preflight.ts",
     "mainnet:test": "node --import tsx src/cli/mainnet-operator-test.ts",
+    "history:sync": "node --import tsx src/cli/history-sync.ts",
     "daily:prepare": "node --import tsx src/cli/daily.ts prepare",
     "daily:review": "node --import tsx src/cli/daily.ts review",
     "daily:approve": "node --import tsx src/cli/daily.ts approve",

@@ -1,13 +1,17 @@
 import { deepFreeze } from "../shared/deep-freeze.js";
 import { DecimalValue } from "../shared/decimal.js";
 import { domainError } from "../shared/errors.js";
-import { hashCanonical, type PlanHash } from "../identity/canonical-serialization.js";
+import {
+  hashCanonical,
+  type PlanHash,
+} from "../identity/canonical-serialization.js";
 import type { Result } from "../shared/result.js";
 import { fail, ok } from "../shared/result.js";
 import { parseUtcTimestamp, type UtcTimestamp } from "../shared/time.js";
 import { requireIdentifier } from "../shared/validation.js";
 
-export const HISTORY_SOURCE_FACT_SCHEMA = "bybit-history-source-fact/v1" as const;
+export const HISTORY_SOURCE_FACT_SCHEMA =
+  "bybit-history-source-fact/v1" as const;
 
 export interface HistoryFeeDetail {
   readonly currency: string;
@@ -214,7 +218,9 @@ function validBool(value: unknown): boolean | null | undefined {
   return value === null || typeof value === "boolean" ? value : undefined;
 }
 
-function validFeeDetails(value: unknown): readonly HistoryFeeDetail[] | undefined {
+function validFeeDetails(
+  value: unknown,
+): readonly HistoryFeeDetail[] | undefined {
   if (!Array.isArray(value) || value.length > 100) return undefined;
   const output: HistoryFeeDetail[] = [];
   for (const entry of value) {
@@ -264,9 +270,7 @@ function validCommon(input: {
   return { providerEventTime, providerRevisionTime, collectedAt };
 }
 
-function semanticCommon(
-  common: ReturnType<typeof validCommon> & {},
-): {
+function semanticCommon(common: ReturnType<typeof validCommon> & {}): {
   providerEventTime: UtcTimestamp;
   providerRevisionTime: UtcTimestamp | null;
 } {
@@ -298,10 +302,22 @@ export function createHistorySourceFact(
   if (!common) return invalid();
 
   let core:
-    | Omit<OrderHistorySourceFact, "schemaVersion" | "collectedAt" | "contentHash">
-    | Omit<ExecutionHistorySourceFact, "schemaVersion" | "collectedAt" | "contentHash">
-    | Omit<ClosedPnlHistorySourceFact, "schemaVersion" | "collectedAt" | "contentHash">
-    | Omit<TransactionHistorySourceFact, "schemaVersion" | "collectedAt" | "contentHash">
+    | Omit<
+        OrderHistorySourceFact,
+        "schemaVersion" | "collectedAt" | "contentHash"
+      >
+    | Omit<
+        ExecutionHistorySourceFact,
+        "schemaVersion" | "collectedAt" | "contentHash"
+      >
+    | Omit<
+        ClosedPnlHistorySourceFact,
+        "schemaVersion" | "collectedAt" | "contentHash"
+      >
+    | Omit<
+        TransactionHistorySourceFact,
+        "schemaVersion" | "collectedAt" | "contentHash"
+      >
     | undefined;
 
   if (input.factKind === "order" && input.source === "order-history") {
@@ -375,7 +391,10 @@ export function createHistorySourceFact(
       price,
       feeDetails,
       ...nullable,
-    } as Omit<OrderHistorySourceFact, "schemaVersion" | "collectedAt" | "contentHash">;
+    } as Omit<
+      OrderHistorySourceFact,
+      "schemaVersion" | "collectedAt" | "contentHash"
+    >;
   } else if (input.factKind === "execution" && input.source === "executions") {
     const category = identifier(input.category);
     const symbol = identifier(input.symbol);
@@ -436,7 +455,10 @@ export function createHistorySourceFact(
       execPrice,
       execQty,
       ...nullable,
-    } as Omit<ExecutionHistorySourceFact, "schemaVersion" | "collectedAt" | "contentHash">;
+    } as Omit<
+      ExecutionHistorySourceFact,
+      "schemaVersion" | "collectedAt" | "contentHash"
+    >;
   } else if (input.factKind === "closed-pnl" && input.source === "closed-pnl") {
     const category = identifier(input.category);
     const symbol = identifier(input.symbol);
@@ -490,7 +512,10 @@ export function createHistorySourceFact(
       orderType,
       execType,
       ...decimalFields,
-    } as Omit<ClosedPnlHistorySourceFact, "schemaVersion" | "collectedAt" | "contentHash">;
+    } as Omit<
+      ClosedPnlHistorySourceFact,
+      "schemaVersion" | "collectedAt" | "contentHash"
+    >;
   } else if (
     input.factKind === "transaction" &&
     input.source === "transaction-log"
@@ -528,7 +553,10 @@ export function createHistorySourceFact(
       ...semanticCommon(common),
       transactionId,
       ...nullable,
-    } as Omit<TransactionHistorySourceFact, "schemaVersion" | "collectedAt" | "contentHash">;
+    } as Omit<
+      TransactionHistorySourceFact,
+      "schemaVersion" | "collectedAt" | "contentHash"
+    >;
   }
   if (!core) return invalid();
   const hash = hashCanonical(core);

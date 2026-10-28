@@ -5,20 +5,21 @@ import type {
   HistoryReadSource,
   HistoryReadWindow,
 } from "../../ports/history-read.js";
+import { HISTORY_READ_LIMITS } from "../../ports/history-read.js";
 import {
   BybitAccountReadError,
   type AccountReadResponse,
 } from "./account-read-transport.js";
 import { mapBybitHistoryResponse } from "./history-read-mappers.js";
 
-const MAX_HISTORY_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
-const DEFAULT_MAX_PAGES_PER_WINDOW = 20;
-const MAX_ROWS_PER_WINDOW = 10_000;
-
 const SOURCE_ROUTES: Readonly<
   Record<
     HistoryReadSource,
-    { readonly path: string; readonly limit: number; readonly category: boolean }
+    {
+      readonly path: string;
+      readonly limit: number;
+      readonly category: boolean;
+    }
   >
 > = Object.freeze({
   "order-history": {
@@ -53,8 +54,6 @@ interface HistoryTransport {
 export interface BybitHistoryReadClientOptions {
   readonly transport: HistoryTransport;
   readonly utcClock?: () => number;
-  readonly maxPagesPerWindow?: number;
-  readonly maxRowsPerWindow?: number;
 }
 
 function invalid(): never {
@@ -68,7 +67,7 @@ function validateWindow(window: HistoryReadWindow): void {
     !Number.isSafeInteger(window.toMs) ||
     window.fromMs < 0 ||
     window.toMs <= window.fromMs ||
-    window.toMs - window.fromMs > MAX_HISTORY_WINDOW_MS
+    window.toMs - window.fromMs > HISTORY_READ_LIMITS.maxWindowMs
   )
     invalid();
 }
@@ -129,8 +128,6 @@ function failure(error: unknown): never {
 export class BybitHistoryReadClient implements HistoryReadPort {
   private readonly transport: HistoryTransport;
   private readonly clock: () => number;
-  private readonly maxPagesPerWindow: number;
-  private readonly maxRowsPerWindow: number;
 
   constructor(options: BybitHistoryReadClientOptions) {
     if (
@@ -139,22 +136,8 @@ export class BybitHistoryReadClient implements HistoryReadPort {
       typeof options.transport.get !== "function"
     )
       invalid();
-    const maxPages =
-      options.maxPagesPerWindow ?? DEFAULT_MAX_PAGES_PER_WINDOW;
-    const maxRows = options.maxRowsPerWindow ?? MAX_ROWS_PER_WINDOW;
-    if (
-      !Number.isSafeInteger(maxPages) ||
-      maxPages < 1 ||
-      maxPages > DEFAULT_MAX_PAGES_PER_WINDOW ||
-      !Number.isSafeInteger(maxRows) ||
-      maxRows < 1 ||
-      maxRows > MAX_ROWS_PER_WINDOW
-    )
-      invalid();
     this.transport = options.transport;
     this.clock = options.utcClock ?? Date.now;
-    this.maxPagesPerWindow = maxPages;
-    this.maxRowsPerWindow = maxRows;
   }
 
   async readPage(request: HistoryReadPageRequest): Promise<HistoryReadPage> {
@@ -164,7 +147,9 @@ export class BybitHistoryReadClient implements HistoryReadPort {
       if (!Object.hasOwn(SOURCE_ROUTES, request.source)) invalid();
       const source = SOURCE_ROUTES[request.source];
       const query: Record<string, string> = {
-        ...(source.category ? { category: "linear" } : { accountType: "UNIFIED" }),
+        ...(source.category
+          ? { category: "linear" }
+          : { accountType: "UNIFIED" }),
         startTime: String(request.window.fromMs),
         endTime: String(request.window.toMs),
         limit: String(source.limit),
@@ -190,35 +175,6 @@ export class BybitHistoryReadClient implements HistoryReadPort {
       });
     } catch (error) {
       return failure(error);
-    }
-  }
-
-  async *readPages(
-    request: Omit<HistoryReadPageRequest, "cursor">,
-  ): AsyncIterable<HistoryReadPage> {
-    validateWindow(request.window);
-    let cursor: string | undefined;
-    let pageCount = 0;
-    let rowCount = 0;
-    const seenNextCursors = new Set<string>();
-    while (true) {
-      if (pageCount >= this.maxPagesPerWindow)
-        throw new BybitAccountReadError("PAGE_BUDGET_EXCEEDED");
-      const page = await this.readPage({
-        source: request.source,
-        window: request.window,
-        ...(cursor === undefined ? {} : { cursor }),
-      });
-      pageCount++;
-      rowCount += page.receivedRowCount;
-      if (rowCount > this.maxRowsPerWindow)
-        throw new BybitAccountReadError("ROW_BUDGET_EXCEEDED");
-      if (page.nextCursor && seenNextCursors.has(page.nextCursor))
-        throw new BybitAccountReadError("INVALID_RESPONSE");
-      yield page;
-      if (page.nextCursor === null) return;
-      seenNextCursors.add(page.nextCursor);
-      cursor = page.nextCursor;
     }
   }
 }

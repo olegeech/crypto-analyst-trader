@@ -15,13 +15,16 @@ import {
 import { fail, ok, type Result } from "../../domain/shared/result.js";
 import {
   parseUtcTimestamp,
+  timestampFromEpochMs,
   type UtcTimestamp,
 } from "../../domain/shared/time.js";
 import {
+  isRecord,
   requireHash,
   requireIdentifier,
 } from "../../domain/shared/validation.js";
 import {
+  HISTORY_READ_LIMITS,
   HISTORY_READ_SOURCES,
   type HistoryReadSource,
 } from "../../ports/history-read.js";
@@ -45,7 +48,6 @@ import type {
   MarkHistoryCoverageRequest,
 } from "../../ports/history-store.js";
 
-const MAX_HISTORY_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 const MAX_CURSOR_LENGTH = 4_096;
 const ALLOWED_SOURCES = new Set<string>(HISTORY_READ_SOURCES);
 
@@ -109,10 +111,6 @@ function inputError(
 
 function validTimestamp(value: unknown): value is UtcTimestamp {
   return typeof value === "string" && parseUtcTimestamp(value).ok;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function sourceFactInput(
@@ -277,13 +275,11 @@ function validateKey(
     return inputError("history source is unsupported");
   }
   if (
-    !Number.isSafeInteger(key.window.fromMs) ||
-    !Number.isSafeInteger(key.window.toMs) ||
+    !timestampFromEpochMs(key.window.fromMs).ok ||
+    !timestampFromEpochMs(key.window.toMs).ok ||
     key.window.fromMs < 0 ||
     key.window.toMs <= key.window.fromMs ||
-    key.window.toMs - key.window.fromMs > MAX_HISTORY_WINDOW_MS ||
-    new Date(key.window.fromMs).toString() === "Invalid Date" ||
-    new Date(key.window.toMs).toString() === "Invalid Date"
+    key.window.toMs - key.window.fromMs > HISTORY_READ_LIMITS.maxWindowMs
   ) {
     return inputError(
       "history window must be a valid positive range of at most seven days",

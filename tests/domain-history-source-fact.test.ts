@@ -105,10 +105,7 @@ test("closed-PnL identity remains a grouping key, not a claimed provider row ID"
 });
 
 test("malformed source IDs, timestamps and exact decimals are rejected", () => {
-  assert.equal(
-    createHistorySourceFact({ ...order, orderId: "" }).ok,
-    false,
-  );
+  assert.equal(createHistorySourceFact({ ...order, orderId: "" }).ok, false);
   assert.equal(
     createHistorySourceFact({
       ...order,

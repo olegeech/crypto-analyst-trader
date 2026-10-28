@@ -30,7 +30,9 @@ function record(value: unknown): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
-function rows(response: AccountReadResponse): readonly Record<string, unknown>[] {
+function rows(
+  response: AccountReadResponse,
+): readonly Record<string, unknown>[] {
   const envelope = record(response);
   const result = record(envelope.result);
   const list = result.list;
@@ -291,7 +293,11 @@ export function mapBybitExecutionResponse(
   );
   return sortFacts(unique, (value) =>
     value.factKind === "execution"
-      ? value.execId + "\u0000" + value.orderId + "\u0000" + (value.leavesQty ?? "")
+      ? value.execId +
+        "\u0000" +
+        value.orderId +
+        "\u0000" +
+        (value.leavesQty ?? "")
       : "",
   );
 }

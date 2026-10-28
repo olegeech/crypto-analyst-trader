@@ -345,7 +345,7 @@ export class BybitAccountReadTransport {
       if (parsed.retCode !== 0)
         throw new BybitAccountReadError(
           safeRetCode(parsed.retCode),
-          undefined,
+          response.status,
           parsed.retCode,
         );
       if (

@@ -1024,3 +1024,50 @@ Never use bulk cancellation or an unplanned market order as a routine shortcut.
 - Do not paste private snapshots or repeat unchanged strategy configuration in
   chat, issues or pull requests.
 - Do not edit product code, documentation or Git state during an operator run.
+
+## Explicit Bybit history synchronization (issue #26)
+
+History ingestion is a separate, GET-only command. With no arguments it uses
+in-memory SQLite and synthetic empty-page fixtures; it makes no network
+request, reads no credentials and does not open an environment database:
+
+```bash
+npm run history:sync
+```
+
+The live command requires an explicit mode, environment and absolute database
+path. Credentials are loaded from the matching macOS Keychain entry. It first
+verifies the authenticated Bybit account identity and only then opens/migrates
+the selected local database. It uses the read-only account transport and has
+no exchange-write adapter.
+
+```bash
+npm run history:sync -- --mode live --environment mainnet \
+  --database /absolute/path/to/mainnet.db --range maximum-history
+npm run history:sync -- --mode live --environment mainnet \
+  --database /absolute/path/to/mainnet.db --range resume
+npm run history:sync -- --mode live --environment mainnet \
+  --database /absolute/path/to/mainnet.db \
+  --from-ms 1792886400000 --to-ms 1793491200000
+```
+
+The default invocation budget is 100 physical GET attempts, 60 seconds, 20
+pages per source window and 10,000 provider rows; smaller explicit limits are
+available through `--max-gets`, `--max-duration-ms`,
+`--max-pages-per-window` and `--max-rows`. Every request window is at most
+seven days. `maximum-history` begins at the two-year boundary; `resume` retries
+pending and unavailable windows and refreshes the recent seven days. Explicit
+ranges replay the selected range with idempotent provider identities.
+
+The report separates the three linear detail streams (orders, executions and
+closed PnL) from the Unified Account transaction log, and shows per-source GETs,
+pages, rows, duplicates, conflicts, unmatched observations, coverage gaps and
+the next resumable window. It always reports `OPENING_BALANCE=UNKNOWN` and
+`ACCOUNTING_READY=NOT_CLAIMED`. The two-year query boundary is not full account
+history. Bybit order-history visibility is narrower: beyond seven days the API
+documents only orders with fills; cancelled, rejected and deactivated orders
+are visible only in the most recent 24 hours. These limits are printed as coverage
+limitations; an empty response does not prove that no older activity existed.
+This command does not clear HALT, change recovery grants or create accounting
+ledger postings. Do not run it against a production database without a
+separately authorized operator invocation.

@@ -135,37 +135,6 @@ function knownExpired(reasonCode: string | null): boolean {
   return reasonCode === "HISTORY_EXPIRED" || reasonCode === "RETENTION_EXPIRED";
 }
 
-function fundingEvidence(
-  observation: HistoryStoredObservation,
-): readonly HistoryFundingCoverage["evidence"][number][] {
-  const fact = observation.fact;
-  if (fact.factKind === "transaction") {
-    const isFunding =
-      fact.funding !== null ||
-      /fund/iu.test(`${fact.type ?? ""} ${fact.transSubType ?? ""}`);
-    return isFunding
-      ? [
-          {
-            observationId: observation.observationId,
-            component: "funding",
-            amount: fact.funding,
-            currency: fact.currency,
-          },
-        ]
-      : [];
-  }
-  if (fact.factKind === "closed-pnl")
-    return [
-      {
-        observationId: observation.observationId,
-        component: "funding-fee",
-        amount: fact.fundingFee,
-        currency: null,
-      },
-    ];
-  return [];
-}
-
 export function projectHistoryCoverage(
   input: HistoryCoverageInput,
 ): Result<HistoryCoverageProjection> {
@@ -276,28 +245,38 @@ export function projectHistoryCoverage(
         amount: component.amount,
       });
     if (component.unknownFields.includes("amount")) {
-      const unknownAmount: HistoryCoverageGap = {
-        kind:
-          component.component === "funding" ||
-          component.component === "funding-fee"
-            ? "funding-amount-unknown"
-            : "unknown-amount",
-        observationId: component.provenance.observationId,
-        component:
-          component.component === "funding" ||
-          component.component === "funding-fee"
-            ? component.component
-            : component.component,
-        ...(component.component === "funding" ||
+      if (
+        component.component === "funding" ||
         component.component === "funding-fee"
-          ? {}
-          : { currency: component.currency }),
-      } as HistoryCoverageGap;
-      gaps.push(unknownAmount);
+      ) {
+        gaps.push({
+          kind: "funding-amount-unknown",
+          observationId: component.provenance.observationId,
+          component: component.component,
+        });
+      } else {
+        gaps.push({
+          kind: "unknown-amount",
+          observationId: component.provenance.observationId,
+          component: component.component,
+          currency: component.currency,
+        });
+      }
     }
   }
 
-  const funding = input.observations.flatMap(fundingEvidence);
+  const funding = moneyComponents.flatMap((component) =>
+    component.component === "funding" || component.component === "funding-fee"
+      ? [
+          {
+            observationId: component.provenance.observationId,
+            component: component.component,
+            amount: component.amount,
+            currency: component.currency,
+          },
+        ]
+      : [],
+  );
   const observedFunding = funding.some(
     (item) => item.amount !== null && item.currency !== null,
   );

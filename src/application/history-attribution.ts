@@ -634,18 +634,16 @@ export function attributeHistoryObservations(
     const lineage = preparedLineage(snapshot);
     if (lineage) lineages.push(lineage);
   }
-  const validLineages = lineages.filter((lineage) =>
-    input.observations.some((observation) =>
-      usableScope(lineage.scope, observation.scope),
-    ),
-  );
+  const historyScope = input.observations[0]?.scope;
+  const validLineages =
+    historyScope === undefined
+      ? []
+      : lineages.filter((lineage) => usableScope(lineage.scope, historyScope));
   const orderResolutions = new Map<string, HistoryOwnership>();
   const orderObservationIds = new Map<string, string>();
   for (const observation of input.observations) {
     if (observation.fact.factKind !== "order") continue;
-    const scoped = validLineages.filter((lineage) =>
-      usableScope(lineage.scope, observation.scope),
-    );
+    const scoped = validLineages;
     const ownership = resolveMatches(orderMatches(observation.fact, scoped));
     orderResolutions.set(observation.fact.orderId, ownership);
     if (ownership.status === "matched") {
@@ -676,9 +674,7 @@ export function attributeHistoryObservations(
   }
   const rows: AttributedHistoryObservation[] = [];
   for (const observation of input.observations) {
-    const scoped = validLineages.filter((lineage) =>
-      usableScope(lineage.scope, observation.scope),
-    );
+    const scoped = validLineages;
     const ownership =
       observation.fact.factKind === "order"
         ? (orderResolutions.get(observation.fact.orderId) ?? {

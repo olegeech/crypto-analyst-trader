@@ -1,5 +1,5 @@
 import type { HistorySourceFact } from "../domain/accounting/history-source-fact.js";
-import type { HistoryReadSource } from "./history-read.js";
+import type { HistoryReadSource, HistoryReadWindow } from "./history-read.js";
 import type { PersistenceEnvironment } from "./persistence.js";
 import type { Result } from "../domain/shared/result.js";
 import type { UtcTimestamp } from "../domain/shared/time.js";
@@ -19,10 +19,7 @@ export type HistoryFilterValue =
   | readonly HistoryFilterValue[]
   | { readonly [key: string]: HistoryFilterValue };
 
-export interface HistoryWindow {
-  readonly fromMs: number;
-  readonly toMs: number;
-}
+export type HistoryWindow = HistoryReadWindow;
 
 export type HistoryCoverageStatus =
   "paging" | "partial" | "traversed" | "unavailable";
