@@ -246,6 +246,12 @@ function reason(result: Result<HistorySyncReport>): string {
   );
 }
 
+function safeGapReasonCode(reasonCode: string | undefined): string {
+  return reasonCode !== undefined && /^[A-Z0-9_]{1,64}$/u.test(reasonCode)
+    ? reasonCode
+    : "NONE";
+}
+
 function printReport(
   output: HistorySyncCliOutput,
   report: HistorySyncReport,
@@ -273,6 +279,10 @@ function printReport(
         ` NEXT_RESUME=${source.nextResumeWindow ? `${source.nextResumeWindow.fromMs}:${source.nextResumeWindow.toMs}` : "NONE"}` +
         ` REASONS=${source.reasonCodes.join(",") || "NONE"}\n`,
     );
+    for (const gap of source.gapDetails)
+      output.write(
+        `GAP_DETAIL_SOURCE=${source.source} KIND=${gap.kind} WINDOW=${gap.window.fromMs}:${gap.window.toMs} REASON=${safeGapReasonCode(gap.reasonCode)} STATUS=${gap.status ?? "NONE"}\n`,
+      );
     if (source.diagnostic) {
       output.write(
         `DIAGNOSTIC_SOURCE=${source.source} STAGE=${source.diagnostic.stage} ACTION=${source.diagnostic.attemptedAction} REASON=${source.diagnostic.reasonCode} OUTCOME=${source.diagnostic.outcome}\n` +

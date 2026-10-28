@@ -1056,13 +1056,22 @@ pages per source window and 10,000 provider rows; smaller explicit limits are
 available through `--max-gets`, `--max-duration-ms`,
 `--max-pages-per-window` and `--max-rows`. Every request window is at most
 seven days. `maximum-history` begins at the two-year boundary; `resume` retries
-pending and unavailable windows and refreshes the recent seven days. Explicit
-ranges replay the selected range with idempotent provider identities.
+pending windows with their saved cursors, then catches each source up from its
+latest fully traversed boundary (with a one-millisecond overlap) to the frozen
+Bybit time. Explicit ranges replay the selected range with idempotent provider
+identities.
 
 The report separates the three linear detail streams (orders, executions and
 closed PnL) from the Unified Account transaction log, and shows per-source GETs,
 pages, rows, duplicates, conflicts, unmatched observations, coverage gaps and
-the next resumable window. It always reports `OPENING_BALANCE=UNKNOWN` and
+the next resumable window. Each `GAP_DETAIL_SOURCE` line includes the exact
+unqueried, expired, unavailable or incomplete interval and its safe reason or
+status. Unqueried/incomplete intervals keep the source `PARTIAL`; expired or
+unavailable intervals keep the source `UNAVAILABLE` and the overall sync
+`PARTIAL`. Recording an interval as expired makes its boundary explicit but
+never marks it complete. The next action points to explicit replay for
+unqueried intervals; provider-expired intervals remain unresolved. It always
+reports `OPENING_BALANCE=UNKNOWN` and
 `ACCOUNTING_READY=NOT_CLAIMED`. The two-year query boundary is not full account
 history. Bybit order-history visibility is narrower: beyond seven days the API
 documents only orders with fills; cancelled, rejected and deactivated orders

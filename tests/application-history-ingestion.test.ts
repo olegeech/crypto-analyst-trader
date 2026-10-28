@@ -6,6 +6,7 @@ import { runHistoryIngestion } from "../src/application/history-ingestion.js";
 import { createSqliteHistoryStore } from "../src/adapters/sqlite/history-store.js";
 import { applyMigrations } from "../src/adapters/sqlite/migrations.js";
 import { registerTrustedClock } from "../src/adapters/sqlite/sqlite-helpers.js";
+import { projectHistoryCoverage } from "../src/application/history-coverage.js";
 import type { SqliteConnection } from "../src/adapters/sqlite/connection.js";
 import type {
   HistoryReadPage,
@@ -55,13 +56,40 @@ function input(
     replayId: "history-test-replay",
   },
   budget?: HistorySyncBudget,
+  frozenUpperBoundMs = upper,
 ) {
   return {
     scope,
     selection,
-    frozenUpperBoundMs: upper,
+    frozenUpperBoundMs,
     ...(budget === undefined ? {} : { budget }),
   };
+}
+
+async function traverseRange(
+  fixture: ReturnType<typeof memoryStore>,
+  selection: HistorySyncSelection,
+  frozenUpperBoundMs: number,
+  budget?: HistorySyncBudget,
+  seen?: { source: string; fromMs: number; toMs: number }[],
+) {
+  return runHistoryIngestion(input(selection, budget, frozenUpperBoundMs), {
+    store: fixture.store,
+    reader: {
+      async readPage(request) {
+        seen?.push({
+          source: request.source,
+          fromMs: request.window.fromMs,
+          toMs: request.window.toMs,
+        });
+        return emptyPage(request);
+      },
+    },
+    monotonicClock: (() => {
+      let now = 0;
+      return () => ++now;
+    })(),
+  });
 }
 
 function emptyPage(
@@ -126,6 +154,300 @@ test("one shared GET budget produces partial progress and resume finishes it", a
     assert.equal(resumed.value.status, "COMPLETE");
     assert.equal(resumed.value.getAttempts, 7);
     assert.ok(resumed.value.sources.every((row) => row.status === "traversed"));
+  } finally {
+    fixture.connection.close();
+  }
+});
+
+test("resume catches up more than seven days from each source's covered boundary", async () => {
+  const fixture = memoryStore();
+  const initialFrom = upper - 24 * 60 * 60 * 1_000;
+  const advancedUpper = upper + 31 * 24 * 60 * 60 * 1_000;
+  const seen: { source: string; fromMs: number; toMs: number }[] = [];
+  try {
+    const initial = await traverseRange(
+      fixture,
+      {
+        kind: "explicit-range",
+        fromMs: initialFrom,
+        toMs: upper,
+        replayId: "catchup-seed",
+      },
+      upper,
+    );
+    assert.equal(initial.ok, true);
+    if (!initial.ok) return;
+    assert.equal(initial.value.status, "COMPLETE");
+
+    const resumed = await traverseRange(
+      fixture,
+      { kind: "resume" },
+      advancedUpper,
+      undefined,
+      seen,
+    );
+    assert.equal(resumed.ok, true);
+    if (!resumed.ok) return;
+    assert.equal(resumed.value.status, "COMPLETE");
+    assert.equal(seen.length, HISTORY_READ_SOURCES.length * 5);
+
+    for (const source of HISTORY_READ_SOURCES) {
+      const windows = seen
+        .filter((request) => request.source === source)
+        .sort((left, right) => left.fromMs - right.fromMs);
+      assert.equal(windows[0]?.fromMs, upper - 1);
+      assert.equal(windows.at(-1)?.toMs, advancedUpper);
+      for (let index = 1; index < windows.length; index++)
+        assert.ok(windows[index]!.fromMs <= windows[index - 1]!.toMs + 1);
+    }
+    const checkpoints = fixture.store.listCoverage(scope);
+    assert.equal(checkpoints.ok, true);
+    if (checkpoints.ok) {
+      assert.ok(
+        HISTORY_READ_SOURCES.every((source) =>
+          checkpoints.value.some(
+            (checkpoint) =>
+              checkpoint.source === source &&
+              checkpoint.filters.purpose === "recent-refresh" &&
+              checkpoint.window.toMs === advancedUpper &&
+              checkpoint.status === "traversed",
+          ),
+        ),
+      );
+      const coverage = projectHistoryCoverage({
+        scope,
+        checkpoints: checkpoints.value,
+        observations: [],
+      });
+      assert.equal(coverage.ok, true);
+      if (coverage.ok)
+        assert.ok(
+          !coverage.value.gaps.some((gap) => gap.kind === "unqueried-window"),
+        );
+    }
+  } finally {
+    fixture.connection.close();
+  }
+});
+
+test("bounded catch-up persists every source range and resumes after restart", async () => {
+  const fixture = memoryStore();
+  const advancedUpper = upper + 31 * 24 * 60 * 60 * 1_000;
+  try {
+    const initial = await traverseRange(
+      fixture,
+      {
+        kind: "explicit-range",
+        fromMs: upper - 24 * 60 * 60 * 1_000,
+        toMs: upper,
+        replayId: "bounded-catchup-seed",
+      },
+      upper,
+    );
+    assert.equal(initial.ok, true);
+
+    const bounded = await traverseRange(
+      fixture,
+      { kind: "resume" },
+      advancedUpper,
+      { maxGetAttempts: 1 },
+    );
+    assert.equal(bounded.ok, true);
+    if (!bounded.ok) return;
+    assert.equal(bounded.value.status, "PARTIAL");
+    assert.ok(
+      bounded.value.sources.every((row) => row.nextResumeWindow !== undefined),
+    );
+    const pendingCheckpoints = fixture.store.listCoverage(scope);
+    assert.equal(pendingCheckpoints.ok, true);
+    if (pendingCheckpoints.ok)
+      assert.ok(
+        HISTORY_READ_SOURCES.every((source) =>
+          pendingCheckpoints.value.some(
+            (checkpoint) =>
+              checkpoint.source === source &&
+              checkpoint.filters.purpose === "recent-refresh" &&
+              checkpoint.filters.rangeEndMs === advancedUpper &&
+              (checkpoint.status === "partial" ||
+                checkpoint.status === "paging"),
+          ),
+        ),
+      );
+
+    const resumed = await traverseRange(
+      fixture,
+      { kind: "resume" },
+      advancedUpper,
+    );
+    assert.equal(resumed.ok, true);
+    if (!resumed.ok) return;
+    assert.equal(resumed.value.status, "COMPLETE");
+    assert.ok(resumed.value.sources.every((row) => row.status === "traversed"));
+  } finally {
+    fixture.connection.close();
+  }
+});
+
+test("expired history remains an explicit gap after a successful recent resume", async () => {
+  const fixture = memoryStore();
+  const expiredWindow = {
+    fromMs: upper - 300 * 24 * 60 * 60 * 1_000,
+    toMs: upper - 299 * 24 * 60 * 60 * 1_000,
+  };
+  try {
+    const expired = fixture.store.markCoverage({
+      scope,
+      source: "order-history",
+      filters: {
+        category: "linear",
+        purpose: "backfill",
+        rangeStartMs: expiredWindow.fromMs,
+        rangeEndMs: expiredWindow.toMs,
+      },
+      window: expiredWindow,
+      expectedRevision: 0,
+      status: "unavailable",
+      reasonCode: "HISTORY_EXPIRED",
+    });
+    assert.equal(expired.ok, true);
+
+    const resumed = await traverseRange(fixture, { kind: "resume" }, upper);
+    assert.equal(resumed.ok, true);
+    if (!resumed.ok) return;
+    assert.equal(resumed.value.status, "PARTIAL");
+    assert.match(
+      resumed.value.nextAction,
+      /leave provider-expired intervals unresolved/u,
+    );
+    assert.ok(
+      resumed.value.sources
+        .find((row) => row.source === "order-history")
+        ?.reasonCodes.includes("HISTORY_EXPIRED"),
+    );
+    assert.ok(
+      resumed.value.sources
+        .find((row) => row.source === "order-history")
+        ?.gapDetails.some(
+          (gap) =>
+            gap.kind === "history-expired" &&
+            gap.window.fromMs === expiredWindow.fromMs &&
+            gap.window.toMs === expiredWindow.toMs &&
+            gap.reasonCode === "HISTORY_EXPIRED",
+        ),
+    );
+    const coverage = fixture.store.listCoverage(scope);
+    assert.equal(coverage.ok, true);
+    if (coverage.ok) {
+      const projection = projectHistoryCoverage({
+        scope,
+        checkpoints: coverage.value,
+        observations: [],
+      });
+      assert.equal(projection.ok, true);
+      if (projection.ok)
+        assert.ok(
+          projection.value.gaps.some(
+            (gap) =>
+              gap.kind === "history-expired" &&
+              gap.source === "order-history" &&
+              gap.window.fromMs === expiredWindow.fromMs,
+          ),
+        );
+    }
+  } finally {
+    fixture.connection.close();
+  }
+});
+
+test("resume does not call a chronology gap complete across different filters", async () => {
+  const fixture = memoryStore();
+  try {
+    for (const selection of [
+      {
+        kind: "explicit-range" as const,
+        fromMs: upper - 20 * 24 * 60 * 60 * 1_000,
+        toMs: upper - 18 * 24 * 60 * 60 * 1_000,
+        replayId: "gap-before",
+      },
+      {
+        kind: "explicit-range" as const,
+        fromMs: upper - 2 * 24 * 60 * 60 * 1_000,
+        toMs: upper,
+        replayId: "gap-after",
+      },
+    ]) {
+      const traversed = await traverseRange(fixture, selection, upper);
+      assert.equal(traversed.ok, true);
+    }
+
+    const resumed = await traverseRange(fixture, { kind: "resume" }, upper);
+    assert.equal(resumed.ok, true);
+    if (!resumed.ok) return;
+    assert.equal(resumed.value.status, "PARTIAL");
+    assert.match(
+      resumed.value.nextAction,
+      /explicitly replay unqueried intervals/u,
+    );
+    assert.ok(
+      resumed.value.sources.every(
+        (source) =>
+          source.status === "partial" &&
+          source.reasonCodes.includes("UNQUERIED_WINDOW") &&
+          source.gaps > 0 &&
+          source.gapDetails.some(
+            (gap) =>
+              gap.kind === "unqueried-window" &&
+              gap.reasonCode === "UNQUERIED_WINDOW",
+          ),
+      ),
+    );
+  } finally {
+    fixture.connection.close();
+  }
+});
+
+test("daily resume with no new interval is idempotent", async () => {
+  const fixture = memoryStore();
+  const nextDay = upper + 24 * 60 * 60 * 1_000;
+  try {
+    const initial = await traverseRange(
+      fixture,
+      {
+        kind: "explicit-range",
+        fromMs: upper - 24 * 60 * 60 * 1_000,
+        toMs: upper,
+        replayId: "daily-resume-seed",
+      },
+      upper,
+    );
+    assert.equal(initial.ok, true);
+
+    const firstResume = await traverseRange(
+      fixture,
+      { kind: "resume" },
+      nextDay,
+    );
+    assert.equal(firstResume.ok, true);
+    if (!firstResume.ok) return;
+    assert.equal(firstResume.value.status, "COMPLETE");
+
+    let reads = 0;
+    const repeated = await runHistoryIngestion(
+      input({ kind: "resume" }, undefined, nextDay),
+      {
+        store: fixture.store,
+        reader: {
+          async readPage(request) {
+            reads += 1;
+            return emptyPage(request);
+          },
+        },
+      },
+    );
+    assert.equal(repeated.ok, true);
+    if (!repeated.ok) return;
+    assert.equal(repeated.value.status, "COMPLETE");
+    assert.equal(reads, 0);
   } finally {
     fixture.connection.close();
   }

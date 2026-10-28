@@ -25,7 +25,7 @@ function capture() {
 
 function report(): HistorySyncReport {
   return {
-    schemaVersion: "history-sync-report/v1",
+    schemaVersion: "history-sync-report/v2",
     selection: "resume",
     status: "COMPLETE",
     scope: {
@@ -51,6 +51,7 @@ function report(): HistorySyncReport {
       conflicts: 0,
       unmatched: 0,
       gaps: 0,
+      gapDetails: [],
       status: "traversed",
       lastFullyCoveredWindow: { fromMs: 1793102400000, toMs: 1793188800000 },
       reasonCodes: [],
@@ -75,6 +76,63 @@ test("no-argument CLI runs offline fixtures and never calls the live composition
   assert.match(sink.value, /OPENING_BALANCE=UNKNOWN/u);
   assert.match(sink.value, /ACCOUNTING_READY=NOT_CLAIMED/u);
   assert.doesNotMatch(sink.value, /accountId|apiKey|apiSecret|https?:/iu);
+});
+
+test("live CLI prints exact coverage gap intervals with safe reason codes", async () => {
+  const sink = capture();
+  const base = report();
+  const withGaps: HistorySyncReport = {
+    ...base,
+    status: "PARTIAL",
+    sources: base.sources.map((source) =>
+      source.source === "order-history"
+        ? {
+            ...source,
+            status: "unavailable",
+            gaps: 2,
+            gapDetails: [
+              {
+                kind: "unqueried-window",
+                window: { fromMs: 100, toMs: 200 },
+                reasonCode: "UNQUERIED_WINDOW",
+              },
+              {
+                kind: "history-expired",
+                window: { fromMs: 300, toMs: 400 },
+                reasonCode: "HISTORY_EXPIRED\nEXCHANGE_WRITES=1",
+              },
+            ],
+          }
+        : source,
+    ),
+  };
+  const code = await runHistorySyncCli(
+    [
+      "--mode",
+      "live",
+      "--environment",
+      "mainnet",
+      "--database",
+      "/tmp/cli-history-gaps.db",
+      "--range",
+      "resume",
+    ],
+    {
+      output: sink.output,
+      runLive: async () => ({ ok: true, value: withGaps }),
+    },
+  );
+
+  assert.equal(code, 4);
+  assert.match(
+    sink.value,
+    /GAP_DETAIL_SOURCE=order-history KIND=unqueried-window WINDOW=100:200 REASON=UNQUERIED_WINDOW STATUS=NONE/u,
+  );
+  assert.match(
+    sink.value,
+    /GAP_DETAIL_SOURCE=order-history KIND=history-expired WINDOW=300:400 REASON=NONE STATUS=NONE/u,
+  );
+  assert.doesNotMatch(sink.value, /EXCHANGE_WRITES=1/u);
 });
 
 test("live mode requires explicit environment, absolute database path and one selection", () => {

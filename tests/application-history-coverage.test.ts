@@ -133,6 +133,7 @@ test("expired history, missing opening balance, unknown currency and missing fun
     }),
   );
 
+  assert.equal(report.schemaVersion, "history-coverage-projection/v2");
   assert.equal(
     report.streams.find((row) => row.source === "order-history")?.windows[0]
       ?.status,
@@ -186,11 +187,12 @@ test("coverage rejects facts and checkpoints from a different account scope", ()
   assert.equal(report.ok, false);
 });
 
-test("coverage reports deliberate gaps between windows with matching filters", () => {
+test("coverage reports chronology gaps across distinct filter hashes", () => {
   const first = checkpoint("executions", "traversed");
   const second = {
     ...checkpoint("executions", "traversed"),
     window: { fromMs: window.toMs + 2, toMs: window.toMs + 3 },
+    filterHash: `sha256:${"c".repeat(64)}`,
   };
   const report = unwrap(
     projectHistoryCoverage({
@@ -205,9 +207,34 @@ test("coverage reports deliberate gaps between windows with matching filters", (
       (gap) =>
         gap.kind === "unqueried-window" &&
         gap.source === "executions" &&
+        gap.filterHashes.includes(first.filterHash) &&
+        gap.filterHashes.includes(second.filterHash) &&
         gap.window.fromMs === window.toMs + 1 &&
         gap.window.toMs === window.toMs + 1,
     ),
+  );
+});
+
+test("coverage does not report a gap at a contiguous filter-hash boundary", () => {
+  const first = checkpoint("executions", "traversed");
+  const second = {
+    ...checkpoint("executions", "traversed"),
+    window: { fromMs: window.toMs + 1, toMs: window.toMs + 3 },
+    filterHash: `sha256:${"c".repeat(64)}`,
+  };
+  const report = unwrap(
+    projectHistoryCoverage({
+      scope,
+      checkpoints: [first, second],
+      observations: [],
+    }),
+  );
+
+  assert.equal(
+    report.gaps.some(
+      (gap) => gap.kind === "unqueried-window" && gap.source === "executions",
+    ),
+    false,
   );
 });
 

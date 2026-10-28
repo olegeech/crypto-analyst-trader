@@ -4,12 +4,21 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
+import {
+  runHistoryIngestion,
+  type HistorySyncBudget,
+  type HistorySyncSelection,
+} from "../src/application/history-ingestion.js";
 import { runLiveHistorySync } from "../src/application/history-ingestion-composition.js";
 import { historyMoneyComponents } from "../src/application/history-attribution.js";
 import { createSqliteHistoryStore } from "../src/adapters/sqlite/history-store.js";
 import { openSqliteConnection } from "../src/adapters/sqlite/connection.js";
 import { runHistorySyncCli } from "../src/cli/history-sync.js";
-import type { HistoryReadSource } from "../src/ports/history-read.js";
+import {
+  HISTORY_READ_SOURCES,
+  type HistoryReadPageRequest,
+  type HistoryReadSource,
+} from "../src/ports/history-read.js";
 import type { HistorySyncReport } from "../src/application/history-ingestion.js";
 import type { Result } from "../src/domain/shared/result.js";
 import type { UtcTimestamp } from "../src/domain/shared/time.js";
@@ -363,6 +372,177 @@ test("Bybit fixtures pass through real mappers, SQLite restart, coverage project
       printed,
       /12345|synthetic-key|synthetic-secret|accountId/iu,
     );
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("bounded 31-day catch-up persists across a SQLite close and reopen", async () => {
+  const directory = mkdtempSync(
+    join(tmpdir(), "history-sync-catchup-restart-"),
+  );
+  const databasePath = join(directory, "history.db");
+  const scope = {
+    exchange: "bybit",
+    environment: "mainnet" as const,
+    accountId: `sha256:${"b".repeat(64)}`,
+  };
+  const targetUpper = nowMs + 31 * 24 * 60 * 60 * 1_000;
+  const observed: {
+    source: HistoryReadSource;
+    fromMs: number;
+    toMs: number;
+  }[] = [];
+  const reader = (record?: typeof observed) => ({
+    async readPage(request: HistoryReadPageRequest) {
+      record?.push({
+        source: request.source,
+        fromMs: request.window.fromMs,
+        toMs: request.window.toMs,
+      });
+      return {
+        source: request.source,
+        window: request.window,
+        cursor: request.cursor ?? null,
+        nextCursor: null,
+        receivedRowCount: 0,
+        facts: [],
+      };
+    },
+  });
+  const run = (
+    connection: ReturnType<typeof openDatabase>,
+    selection: HistorySyncSelection,
+    frozenUpperBoundMs: number,
+    budget?: HistorySyncBudget,
+    record?: typeof observed,
+  ) =>
+    runHistoryIngestion(
+      {
+        scope,
+        selection,
+        frozenUpperBoundMs,
+        ...(budget === undefined ? {} : { budget }),
+      },
+      {
+        store: createSqliteHistoryStore(connection),
+        reader: reader(record),
+        monotonicClock: (() => {
+          let tick = 0;
+          return () => ++tick;
+        })(),
+      },
+    );
+
+  try {
+    let connection = openDatabase(databasePath);
+    try {
+      const initial = await run(
+        connection,
+        {
+          kind: "explicit-range",
+          fromMs: nowMs - 24 * 60 * 60 * 1_000,
+          toMs: nowMs,
+          replayId: "restart-catchup-seed",
+        },
+        nowMs,
+      );
+      assert.equal(initial.ok, true);
+      if (!initial.ok) return;
+      assert.equal(initial.value.status, "COMPLETE");
+    } finally {
+      connection.close();
+    }
+
+    connection = openDatabase(databasePath);
+    try {
+      const bounded = await run(
+        connection,
+        { kind: "resume" },
+        targetUpper,
+        { maxGetAttempts: 1 },
+        observed,
+      );
+      assert.equal(bounded.ok, true);
+      if (!bounded.ok) return;
+      assert.equal(bounded.value.status, "PARTIAL");
+      assert.ok(
+        bounded.value.sources.every(
+          (source) => source.nextResumeWindow !== undefined,
+        ),
+      );
+    } finally {
+      connection.close();
+    }
+
+    connection = openDatabase(databasePath);
+    try {
+      const store = createSqliteHistoryStore(connection);
+      const persisted = store.listCoverage(scope);
+      assert.equal(persisted.ok, true);
+      if (persisted.ok)
+        assert.ok(
+          HISTORY_READ_SOURCES.every((source) =>
+            persisted.value.some(
+              (checkpoint) =>
+                checkpoint.source === source &&
+                checkpoint.filters.purpose === "recent-refresh" &&
+                checkpoint.filters.rangeEndMs === targetUpper &&
+                checkpoint.status !== "traversed",
+            ),
+          ),
+        );
+
+      const resumed = await run(
+        connection,
+        { kind: "resume" },
+        targetUpper,
+        undefined,
+        observed,
+      );
+      assert.equal(resumed.ok, true);
+      if (!resumed.ok) return;
+      assert.equal(resumed.value.status, "COMPLETE");
+      assert.ok(
+        resumed.value.sources.every((source) => source.status === "traversed"),
+      );
+
+      const completed = store.listCoverage(scope);
+      assert.equal(completed.ok, true);
+      if (completed.ok)
+        for (const source of HISTORY_READ_SOURCES) {
+          const windows = completed.value
+            .filter(
+              (checkpoint) =>
+                checkpoint.source === source &&
+                checkpoint.filters.purpose === "recent-refresh" &&
+                checkpoint.filters.rangeEndMs === targetUpper,
+            )
+            .sort((left, right) => left.window.fromMs - right.window.fromMs);
+          assert.equal(windows.length, 5);
+          assert.ok(
+            windows.every((checkpoint) => checkpoint.status === "traversed"),
+          );
+          assert.equal(windows[0]?.window.fromMs, nowMs - 1);
+          assert.equal(windows.at(-1)?.window.toMs, targetUpper);
+          for (let index = 1; index < windows.length; index++)
+            assert.ok(
+              windows[index]!.window.fromMs <=
+                windows[index - 1]!.window.toMs + 1,
+            );
+
+          const reads = observed
+            .filter((request) => request.source === source)
+            .sort((left, right) => left.fromMs - right.fromMs);
+          assert.equal(reads.length, 5);
+          assert.equal(reads[0]?.fromMs, nowMs - 1);
+          assert.equal(reads.at(-1)?.toMs, targetUpper);
+          for (let index = 1; index < reads.length; index++)
+            assert.ok(reads[index]!.fromMs <= reads[index - 1]!.toMs + 1);
+        }
+    } finally {
+      connection.close();
+    }
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }

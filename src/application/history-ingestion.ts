@@ -20,7 +20,10 @@ import type {
 import type { OperatorMainnetTestSnapshot } from "../ports/operator-mainnet-test-persistence.js";
 import type { PreparedLegRunSnapshot } from "../ports/persistence.js";
 import { attributeHistoryObservations } from "./history-attribution.js";
-import { projectHistoryCoverage } from "./history-coverage.js";
+import {
+  projectHistoryCoverage,
+  type HistoryCoverageGap,
+} from "./history-coverage.js";
 
 const MAX_LOOKBACK_YEARS = 2;
 export const HISTORY_SYNC_LIMITS = Object.freeze({
@@ -57,12 +60,24 @@ export interface HistorySourceSyncSummary {
   readonly conflicts: number;
   readonly unmatched: number;
   readonly gaps: number;
+  readonly gapDetails: readonly HistorySourceGapDetail[];
   readonly status:
     "missing" | "paging" | "partial" | "traversed" | "unavailable";
   readonly lastFullyCoveredWindow?: HistoryReadWindow;
   readonly nextResumeWindow?: HistoryReadWindow;
   readonly reasonCodes: readonly string[];
   readonly diagnostic?: HistorySyncDiagnostic;
+}
+
+export interface HistorySourceGapDetail {
+  readonly kind:
+    | "unqueried-window"
+    | "history-expired"
+    | "history-unavailable"
+    | "coverage-incomplete";
+  readonly window: HistoryReadWindow;
+  readonly reasonCode?: string;
+  readonly status?: "paging" | "partial";
 }
 
 export interface HistorySyncDiagnostic {
@@ -79,7 +94,7 @@ export interface HistorySyncDiagnostic {
 }
 
 export interface HistorySyncReport {
-  readonly schemaVersion: "history-sync-report/v1";
+  readonly schemaVersion: "history-sync-report/v2";
   readonly selection: HistorySyncSelection["kind"];
   readonly status: "COMPLETE" | "PARTIAL";
   readonly scope: HistoryStoreScope;
@@ -117,6 +132,8 @@ interface HistoryRange {
   readonly purpose: "backfill" | "recent-refresh" | "explicit-replay";
   readonly fromMs: number;
   readonly toMs: number;
+  /** Resume work is source-specific; initial explicit/backfill work is shared. */
+  readonly source?: HistoryReadSource;
   readonly replayId?: string;
 }
 
@@ -352,6 +369,7 @@ function rangeFromCheckpoint(
     purpose,
     fromMs: rangeStartMs,
     toMs: rangeEndMs,
+    source: checkpoint.source,
     ...(typeof replayId === "string" ? { replayId } : {}),
   };
 }
@@ -359,13 +377,24 @@ function rangeFromCheckpoint(
 function distinctRanges(
   checkpoints: readonly HistoryCheckpoint[],
   predicate: (checkpoint: HistoryCheckpoint) => boolean,
+  sourceSpecific = false,
 ): readonly HistoryRange[] {
   const ranges = new Map<string, HistoryRange>();
   for (const checkpoint of checkpoints) {
     if (!predicate(checkpoint)) continue;
-    const range = rangeFromCheckpoint(checkpoint);
-    if (range === undefined) continue;
-    const key = `${range.purpose}\u0000${range.fromMs}\u0000${range.toMs}\u0000${range.replayId ?? ""}`;
+    const checkpointRange = rangeFromCheckpoint(checkpoint);
+    if (checkpointRange === undefined) continue;
+    const range = sourceSpecific
+      ? checkpointRange
+      : {
+          purpose: checkpointRange.purpose,
+          fromMs: checkpointRange.fromMs,
+          toMs: checkpointRange.toMs,
+          ...(checkpointRange.replayId === undefined
+            ? {}
+            : { replayId: checkpointRange.replayId }),
+        };
+    const key = `${range.purpose}\u0000${range.fromMs}\u0000${range.toMs}\u0000${range.replayId ?? ""}\u0000${range.source ?? ""}`;
     ranges.set(key, range);
   }
   return [...ranges.values()].sort(
@@ -459,6 +488,64 @@ function coverageLimitations(): HistorySyncReport["coverageLimitations"] {
   }));
 }
 
+function safeStoredReasonCode(
+  reasonCode: string | null | undefined,
+): string | undefined {
+  return reasonCode !== null &&
+    reasonCode !== undefined &&
+    /^[A-Z0-9_]{1,64}$/u.test(reasonCode)
+    ? reasonCode
+    : undefined;
+}
+
+function sourceGapDetails(
+  gaps: readonly HistoryCoverageGap[],
+  checkpoints: readonly HistoryCheckpoint[],
+  source: HistoryReadSource,
+): readonly HistorySourceGapDetail[] {
+  return gaps.flatMap((gap): HistorySourceGapDetail[] => {
+    if (!("source" in gap) || gap.source !== source) return [];
+    if (gap.kind === "unqueried-window")
+      return [
+        {
+          kind: gap.kind,
+          window: gap.window,
+          reasonCode: "UNQUERIED_WINDOW",
+        },
+      ];
+    if (gap.kind === "history-expired" || gap.kind === "history-unavailable") {
+      const reasonCode = safeStoredReasonCode(gap.reasonCode);
+      return [
+        {
+          kind: gap.kind,
+          window: gap.window,
+          ...(reasonCode === undefined ? {} : { reasonCode }),
+        },
+      ];
+    }
+    if (gap.kind === "coverage-incomplete") {
+      const checkpoint = checkpoints.find(
+        (row) =>
+          row.source === source &&
+          row.filterHash === gap.filterHash &&
+          row.window.fromMs === gap.window.fromMs &&
+          row.window.toMs === gap.window.toMs &&
+          row.status === gap.status,
+      );
+      const reasonCode = safeStoredReasonCode(checkpoint?.reasonCode);
+      return [
+        {
+          kind: gap.kind,
+          window: gap.window,
+          status: gap.status,
+          ...(reasonCode === undefined ? {} : { reasonCode }),
+        },
+      ];
+    }
+    return [];
+  });
+}
+
 export function validateHistorySyncBudget(
   input?: HistorySyncBudget,
 ): Result<Required<HistorySyncBudget>> {
@@ -542,29 +629,57 @@ function rangesForSelection(
   const unfinished = distinctRanges(
     checkpoints,
     (checkpoint) =>
-      purposeOf(checkpoint) === "backfill" &&
-      (checkpoint.status === "partial" ||
-        checkpoint.status === "paging" ||
-        checkpoint.status === "unavailable"),
+      checkpoint.status === "partial" ||
+      checkpoint.status === "paging" ||
+      (checkpoint.status === "unavailable" &&
+        checkpoint.reasonCode !== "HISTORY_EXPIRED" &&
+        checkpoint.reasonCode !== "RETENTION_EXPIRED"),
+    true,
   );
-  const pendingReplays = distinctRanges(
-    checkpoints,
-    (checkpoint) =>
-      (purposeOf(checkpoint) === "explicit-replay" ||
-        purposeOf(checkpoint) === "recent-refresh") &&
-      (checkpoint.status === "partial" ||
-        checkpoint.status === "paging" ||
-        checkpoint.status === "unavailable"),
+  const catchups: HistoryRange[] = [];
+  const lookbackStart = previousCalendarYear(
+    frozenUpperBoundMs,
+    MAX_LOOKBACK_YEARS,
   );
-  const recent: HistoryRange = {
-    purpose: "recent-refresh",
-    fromMs: Math.max(0, frozenUpperBoundMs - HISTORY_READ_LIMITS.maxWindowMs),
-    toMs: frozenUpperBoundMs,
-  };
-  const all = [...unfinished, ...pendingReplays, recent];
+  for (const source of HISTORY_READ_SOURCES) {
+    const sourceCheckpoints = checkpoints.filter(
+      (checkpoint) => checkpoint.source === source,
+    );
+    const lastCoveredBoundary = sourceCheckpoints
+      .filter(
+        (checkpoint) =>
+          checkpoint.status === "traversed" &&
+          checkpoint.window.toMs <= frozenUpperBoundMs,
+      )
+      .reduce<number | undefined>(
+        (latest, checkpoint) => Math.max(latest ?? 0, checkpoint.window.toMs),
+        undefined,
+      );
+    const pendingRanges = unfinished.filter((range) => range.source === source);
+    const pendingBoundary = pendingRanges.reduce<number | undefined>(
+      (latest, range) => Math.max(latest ?? 0, range.toMs),
+      undefined,
+    );
+    const boundary = Math.max(lastCoveredBoundary ?? 0, pendingBoundary ?? 0);
+    const fromMs =
+      boundary === 0
+        ? Math.max(
+            lookbackStart,
+            frozenUpperBoundMs - HISTORY_READ_LIMITS.maxWindowMs,
+          )
+        : Math.max(lookbackStart, boundary - 1);
+    if (frozenUpperBoundMs > fromMs && boundary < frozenUpperBoundMs)
+      catchups.push({
+        purpose: "recent-refresh",
+        source,
+        fromMs,
+        toMs: frozenUpperBoundMs,
+      });
+  }
+  const all = [...unfinished, ...catchups];
   const unique = new Map<string, HistoryRange>();
   for (const range of all) {
-    const key = `${range.purpose}\u0000${range.fromMs}\u0000${range.toMs}\u0000${range.replayId ?? ""}`;
+    const key = `${range.purpose}\u0000${range.fromMs}\u0000${range.toMs}\u0000${range.replayId ?? ""}\u0000${range.source ?? ""}`;
     unique.set(key, range);
   }
   return ok([...unique.values()]);
@@ -594,7 +709,9 @@ function orderedWorkItems(
 ): Result<WorkItem[]> {
   const output: WorkItem[] = [];
   for (const range of ranges) {
-    for (const source of HISTORY_READ_SOURCES) {
+    const sources =
+      range.source === undefined ? HISTORY_READ_SOURCES : [range.source];
+    for (const source of sources) {
       const filters = filtersFor(source, range);
       const hash = hashCanonical(filters);
       if (!hash.ok) return hash;
@@ -735,6 +852,28 @@ export async function runHistoryIngestion(
     if (current !== undefined) rememberPending(current);
     for (const item of workQueue) rememberPending(item);
   };
+  const persistRemainingWork = (reasonCode: string): Result<true> => {
+    const persistedScopes = new Set<string>();
+    for (const item of workQueue) {
+      // One checkpoint carries the full parent range in its filters. Persist
+      // one marker per source/filter set; the remaining windows are rebuilt
+      // from that range on resume, while existing per-window cursors stay
+      // attached to their exact checkpoint keys.
+      const scopeKey = `${item.source}:${item.filterHash}`;
+      if (persistedScopes.has(scopeKey)) continue;
+      persistedScopes.add(scopeKey);
+      const checkpoint = mark(
+        dependencies.store,
+        input.scope,
+        item,
+        "partial",
+        reasonCode,
+        item.cursor,
+      );
+      if (!checkpoint.ok) return checkpoint;
+    }
+    return ok(true);
+  };
   const recordDiagnostic = (
     sourceSummary: MutableSourceSummary,
     error: unknown,
@@ -782,6 +921,8 @@ export async function runHistoryIngestion(
       if (!checkpoint.ok) return checkpoint;
       sourceSummary.reasonCodes.add(reasonCode);
       rememberRemainingWork(item);
+      const persisted = persistRemainingWork(reasonCode);
+      if (!persisted.ok) return persisted;
       globalStop = true;
       nextAction =
         "Resume later from the saved provider cursor; if Bybit rejects it as stale, the next retry restarts the fixed window.";
@@ -841,6 +982,8 @@ export async function runHistoryIngestion(
         rememberPending(item);
       if (isFatalAuthenticationError(reasonCode)) {
         rememberRemainingWork(item);
+        const persisted = persistRemainingWork(reasonCode);
+        if (!persisted.ok) return persisted;
         globalStop = true;
         nextAction =
           "Check the read-only API key, environment and account identity before another sync.";
@@ -848,6 +991,8 @@ export async function runHistoryIngestion(
       }
       if (isInvocationBudgetError(reasonCode)) {
         rememberRemainingWork(item);
+        const persisted = persistRemainingWork(reasonCode);
+        if (!persisted.ok) return persisted;
         globalStop = true;
         nextAction =
           "Resume later from the saved provider cursor; if Bybit rejects it as stale, the next retry restarts the fixed window.";
@@ -896,6 +1041,8 @@ export async function runHistoryIngestion(
       if (!checkpoint.ok) return checkpoint;
       sourceSummary.reasonCodes.add("ROW_BUDGET_EXCEEDED");
       rememberRemainingWork(item);
+      const persisted = persistRemainingWork("ROW_BUDGET_EXCEEDED");
+      if (!persisted.ok) return persisted;
       globalStop = true;
       nextAction =
         "Resume later; the uncommitted provider page will be fetched again.";
@@ -1012,8 +1159,21 @@ export async function runHistoryIngestion(
         .filter((checkpoint) => checkpoint.source === source)
         .sort((left, right) => left.window.fromMs - right.window.fromMs);
       const lastFullyCoveredWindow = sourceCheckpoints
-        .filter((checkpoint) => checkpoint.status === "traversed")
-        .at(-1)?.window;
+        .filter(
+          (checkpoint) =>
+            checkpoint.status === "traversed" &&
+            checkpoint.window.toMs <= input.frozenUpperBoundMs,
+        )
+        .reduce<HistoryReadWindow | undefined>(
+          (latest, checkpoint) =>
+            latest === undefined ||
+            checkpoint.window.toMs > latest.toMs ||
+            (checkpoint.window.toMs === latest.toMs &&
+              checkpoint.window.fromMs > latest.fromMs)
+              ? checkpoint.window
+              : latest,
+          undefined,
+        );
       const nextResumeWindow = [...pendingWindows.entries()]
         .filter(([key]) => key.startsWith(`${source}:`))
         .map(([, window]) => window)
@@ -1021,9 +1181,15 @@ export async function runHistoryIngestion(
       const sourceConflicts = conflicts.value.filter(
         (row) => row.source === source,
       ).length;
-      const sourceGaps = coverage.value.gaps.filter(
+      const sourceCoverageGaps = coverage.value.gaps.filter(
         (gap) => "source" in gap && gap.source === source,
-      ).length;
+      );
+      const sourceGaps = sourceCoverageGaps.length;
+      const gapDetails = sourceGapDetails(
+        coverage.value.gaps,
+        sourceCheckpoints,
+        source,
+      );
       const unmatched = attribution.value.observations.filter(
         (row) =>
           row.observation.source === source &&
@@ -1033,6 +1199,8 @@ export async function runHistoryIngestion(
       for (const checkpoint of sourceCheckpoints)
         if (checkpoint.reasonCode !== null)
           reasonCodes.add(checkpoint.reasonCode);
+      if (sourceCoverageGaps.some((gap) => gap.kind === "unqueried-window"))
+        reasonCodes.add("UNQUERIED_WINDOW");
       if (sourceConflicts > 0) reasonCodes.add("SOURCE_CONFLICT");
       return {
         source,
@@ -1044,7 +1212,12 @@ export async function runHistoryIngestion(
         conflicts: sourceConflicts,
         unmatched,
         gaps: sourceGaps,
-        status: stream.status,
+        gapDetails,
+        status:
+          stream.status === "traversed" &&
+          sourceCoverageGaps.some((gap) => gap.kind === "unqueried-window")
+            ? "partial"
+            : stream.status,
         ...(lastFullyCoveredWindow === undefined
           ? {}
           : { lastFullyCoveredWindow }),
@@ -1057,7 +1230,10 @@ export async function runHistoryIngestion(
     },
   );
   const pending = output.some(
-    (source) => source.status === "partial" || source.status === "unavailable",
+    (source) =>
+      source.status === "missing" ||
+      source.status === "partial" ||
+      source.status === "unavailable",
   );
   const getAttempts = dependencies.getAttemptCount
     ? Math.max(0, dependencies.getAttemptCount() - attemptsAtStart)
@@ -1066,8 +1242,14 @@ export async function runHistoryIngestion(
     pending || globalStop || conflicts.value.length > 0
       ? "PARTIAL"
       : "COMPLETE";
+  const hasUnqueriedWindows = output.some((source) =>
+    source.gapDetails.some((gap) => gap.kind === "unqueried-window"),
+  );
+  const hasExpiredWindows = output.some((source) =>
+    source.gapDetails.some((gap) => gap.kind === "history-expired"),
+  );
   return ok({
-    schemaVersion: "history-sync-report/v1",
+    schemaVersion: "history-sync-report/v2",
     selection: input.selection.kind,
     status,
     scope: input.scope,
@@ -1080,7 +1262,13 @@ export async function runHistoryIngestion(
     nextAction:
       status === "COMPLETE"
         ? "No selected windows remain pending; use --range resume for a later incremental refresh."
-        : nextAction,
+        : !globalStop && hasUnqueriedWindows && hasExpiredWindows
+          ? "Review GAP_DETAIL lines, explicitly replay unqueried intervals, and leave provider-expired intervals unresolved."
+          : !globalStop && hasUnqueriedWindows
+            ? "Review GAP_DETAIL lines and explicitly replay unqueried intervals."
+            : !globalStop && hasExpiredWindows
+              ? "Review GAP_DETAIL lines; provider-expired intervals remain unresolved and cannot be marked complete."
+              : nextAction,
   });
 }
 

@@ -47,13 +47,15 @@ export type HistoryCoverageGap =
   | {
       readonly kind: "coverage-incomplete";
       readonly source: HistoryReadSource;
+      readonly filterHash: string;
       readonly window: HistoryCheckpoint["window"];
       readonly status: "paging" | "partial";
     }
   | {
       readonly kind: "unqueried-window";
       readonly source: HistoryReadSource;
-      readonly filterHash: string;
+      /** Filter identities on the checkpoints that bound this chronology gap. */
+      readonly filterHashes: readonly string[];
       readonly window: HistoryCheckpoint["window"];
     }
   | {
@@ -94,7 +96,7 @@ export interface HistoryFundingCoverage {
 }
 
 export interface HistoryCoverageProjection {
-  readonly schemaVersion: "history-coverage-projection/v1";
+  readonly schemaVersion: "history-coverage-projection/v2";
   readonly scope: HistoryStoreScope;
   readonly streams: readonly HistoryStreamCoverage[];
   readonly moneyComponents: readonly HistoryMoneyComponent[];
@@ -164,32 +166,42 @@ export function projectHistoryCoverage(
       );
     if (selected.length === 0)
       gaps.push({ kind: "stream-coverage-missing", source });
-    const windowsByFilter = new Map<string, HistoryCheckpoint[]>();
-    for (const checkpoint of selected) {
-      const group = windowsByFilter.get(checkpoint.filterHash) ?? [];
-      group.push(checkpoint);
-      windowsByFilter.set(checkpoint.filterHash, group);
-    }
-    for (const [filterHash, checkpoints] of windowsByFilter) {
-      let coveredThrough: number | undefined;
-      for (const checkpoint of checkpoints) {
-        if (
-          coveredThrough !== undefined &&
-          checkpoint.window.fromMs > coveredThrough + 1
-        )
-          gaps.push({
-            kind: "unqueried-window",
-            source,
-            filterHash,
-            window: {
-              fromMs: coveredThrough + 1,
-              toMs: checkpoint.window.fromMs - 1,
-            },
-          });
-        coveredThrough = Math.max(
-          coveredThrough ?? checkpoint.window.toMs,
-          checkpoint.window.toMs,
-        );
+    const chronological = [...selected].sort(
+      (left, right) =>
+        left.window.fromMs - right.window.fromMs ||
+        left.window.toMs - right.window.toMs ||
+        left.filterHash.localeCompare(right.filterHash),
+    );
+    let coveredThrough: number | undefined;
+    let endFilterHashes = new Set<string>();
+    for (const checkpoint of chronological) {
+      if (
+        coveredThrough !== undefined &&
+        checkpoint.window.fromMs > coveredThrough + 1
+      ) {
+        gaps.push({
+          kind: "unqueried-window",
+          source,
+          filterHashes: [
+            ...new Set([...endFilterHashes, checkpoint.filterHash]),
+          ].sort(),
+          window: {
+            fromMs: coveredThrough + 1,
+            toMs: checkpoint.window.fromMs - 1,
+          },
+        });
+        coveredThrough = checkpoint.window.toMs;
+        endFilterHashes = new Set([checkpoint.filterHash]);
+        continue;
+      }
+      if (
+        coveredThrough === undefined ||
+        checkpoint.window.toMs > coveredThrough
+      ) {
+        coveredThrough = checkpoint.window.toMs;
+        endFilterHashes = new Set([checkpoint.filterHash]);
+      } else if (checkpoint.window.toMs === coveredThrough) {
+        endFilterHashes.add(checkpoint.filterHash);
       }
     }
     for (const checkpoint of selected) {
@@ -215,6 +227,7 @@ export function projectHistoryCoverage(
         gaps.push({
           kind: "coverage-incomplete",
           source,
+          filterHash: checkpoint.filterHash,
           window: checkpoint.window,
           status: checkpoint.status,
         });
@@ -292,7 +305,7 @@ export function projectHistoryCoverage(
   });
 
   return ok({
-    schemaVersion: "history-coverage-projection/v1",
+    schemaVersion: "history-coverage-projection/v2",
     scope: input.scope,
     streams,
     moneyComponents,
