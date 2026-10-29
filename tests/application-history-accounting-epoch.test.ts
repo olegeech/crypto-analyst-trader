@@ -1102,6 +1102,57 @@ test("a conflict outside a narrow report epoch does not block a broad covered wi
   assert.equal(result.reasonCodes.includes("HISTORY_COVERAGE_CONFLICT"), false);
 });
 
+test("a matched conflict in an anchor-capture query window blocks readiness", () => {
+  for (const [window, storedTime] of [
+    [
+      { fromMs: startMs - 100, toMs: startMs },
+      new Date(startMs - 1_000).toISOString(),
+    ],
+    [
+      { fromMs: endMs, toMs: endMs + 100 },
+      new Date(endMs + 1_000).toISOString(),
+    ],
+  ] as const) {
+    const stored = supportingObservation(
+      "order-history",
+      "boundary-conflict",
+      storedTime,
+    );
+    const boundaryCheckpoint = checkpoint(
+      "order-history",
+      window.fromMs,
+      window.toMs,
+      { conflictCount: 1 },
+    );
+    const result = unwrap(
+      project({
+        observations: [stored],
+        conflicts: [
+          {
+            conflictId: "boundary-order-revision",
+            source: "order-history",
+            eventIdentity: stored.eventIdentity,
+            existingHash: stored.contentHash,
+            incomingHash: `sha256:${"c".repeat(64)}`,
+            reason: "ORDER_REVISION_CONTENT_CHANGED",
+            recordedAt: "2026-10-27T10:08:00.000Z" as UtcTimestamp,
+            windows: [
+              {
+                filterHash: boundaryCheckpoint.filterHash,
+                window: boundaryCheckpoint.window,
+              },
+            ],
+          },
+        ],
+        coverage: [...completeCoverage(), boundaryCheckpoint],
+      }),
+    );
+
+    assert.equal(result.status, "NOT_READY", result.reasonCodes.join(","));
+    assert.ok(result.reasonCodes.includes("HISTORY_SOURCE_CONFLICT"));
+  }
+});
+
 test("an unlocated checkpoint conflict remains fail-closed", () => {
   const conflicted = checkpoint("executions", startMs + 1, endMs, {
     conflictCount: 1,

@@ -112,6 +112,40 @@ test("report store is append-only, idempotent, scope-bound and verifies readback
   }
 });
 
+test("report append rolls back an injected SQLite insert failure", () => {
+  const { db, connection } = database();
+  try {
+    const { record } = persistedReport(connection);
+    const store = createSqliteHistoryAccountingReportStore(connection);
+    db.exec(`
+      CREATE TRIGGER reject_history_report_insert
+      BEFORE INSERT ON history_accounting_reports
+      BEGIN
+        SELECT RAISE(ABORT, 'injected report insert failure');
+      END;
+    `);
+
+    assert.equal(store.append(record).ok, false);
+    assert.equal(
+      db
+        .prepare("SELECT COUNT(*) AS count FROM history_accounting_reports")
+        .get()?.count,
+      0,
+    );
+
+    db.exec("DROP TRIGGER reject_history_report_insert");
+    assert.equal(store.append(record).ok, true);
+    assert.equal(
+      db
+        .prepare("SELECT COUNT(*) AS count FROM history_accounting_reports")
+        .get()?.count,
+      1,
+    );
+  } finally {
+    db.close();
+  }
+});
+
 test("report store refuses absent, wrong-scope, reversed, or same anchors", () => {
   const { db, connection } = database();
   try {

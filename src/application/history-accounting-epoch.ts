@@ -687,15 +687,37 @@ function conflictIsInEpoch(
       ({ window }) => window.fromMs <= closing && window.toMs >= opening,
     );
   }
-  return matched.some((observation) => {
-    return observationIsInEpochOrBoundary(
-      observation,
-      opening,
-      closing,
-      openingAnchor,
-      closingAnchor,
-    );
-  });
+  return (
+    matched.some((observation) =>
+      observationIsInEpochOrBoundary(
+        observation,
+        opening,
+        closing,
+        openingAnchor,
+        closingAnchor,
+      ),
+    ) ||
+    (conflict.windows?.some(
+      ({ window }) =>
+        windowIsConfinedToAnchorCaptureBracket(window, openingAnchor) ||
+        windowIsConfinedToAnchorCaptureBracket(window, closingAnchor),
+    ) ??
+      false)
+  );
+}
+
+function windowIsConfinedToAnchorCaptureBracket(
+  window: { readonly fromMs: number; readonly toMs: number },
+  anchor: HistoryAccountingWalletAnchor,
+): boolean {
+  const bracketStart = timestampMs(anchor.capture.providerTimeBefore);
+  const bracketEnd = timestampMs(anchor.capture.providerTimeAfter);
+  return (
+    bracketStart !== undefined &&
+    bracketEnd !== undefined &&
+    window.fromMs >= bracketStart &&
+    window.toMs <= bracketEnd
+  );
 }
 
 function observationIsInEpochOrBoundary(

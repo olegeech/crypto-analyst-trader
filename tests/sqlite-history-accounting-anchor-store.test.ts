@@ -224,6 +224,43 @@ test("append is immutable, hash-checked, and can replay after a database reopen"
   }
 });
 
+test("append rolls back an injected SQLite insert failure", () => {
+  const { db, store } = memoryStore();
+  const captured = capturedWalletAnchorForStoreTest(anchor());
+  try {
+    db.exec(`
+      CREATE TRIGGER reject_wallet_anchor_insert
+      BEFORE INSERT ON history_accounting_wallet_anchors
+      BEGIN
+        SELECT RAISE(ABORT, 'injected anchor insert failure');
+      END;
+    `);
+
+    assert.equal(store.append({ anchor: captured }).ok, false);
+    assert.equal(
+      db
+        .prepare(
+          "SELECT COUNT(*) AS count FROM history_accounting_wallet_anchors",
+        )
+        .get()?.count,
+      0,
+    );
+
+    db.exec("DROP TRIGGER reject_wallet_anchor_insert");
+    assert.equal(store.append({ anchor: captured }).ok, true);
+    assert.equal(
+      db
+        .prepare(
+          "SELECT COUNT(*) AS count FROM history_accounting_wallet_anchors",
+        )
+        .get()?.count,
+      1,
+    );
+  } finally {
+    db.close();
+  }
+});
+
 test("same anchor identity cannot be reused with changed evidence or another scope", () => {
   const { db, store } = memoryStore();
   assert.equal(
