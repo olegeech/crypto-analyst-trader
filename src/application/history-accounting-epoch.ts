@@ -819,14 +819,28 @@ function project(
   const epochStart = opening ?? 0;
   const epochEnd = closing ?? epochStart;
   const transactionStart = epochStart + 1;
+  const openingCaptureStart =
+    plainRecord(input.opening) && plainRecord(input.opening.capture)
+      ? timestampMs(input.opening.capture.providerTimeBefore)
+      : undefined;
+  const closingCaptureEnd =
+    plainRecord(input.closing) && plainRecord(input.closing.capture)
+      ? timestampMs(input.closing.capture.providerTimeAfter)
+      : undefined;
+  const coverageStart = validEpoch
+    ? Math.min(openingCaptureStart ?? transactionStart, transactionStart)
+    : transactionStart;
+  const coverageEnd = validEpoch
+    ? Math.max(closingCaptureEnd ?? epochEnd, epochEnd)
+    : epochEnd;
   const sourceCoverage = validEpoch
     ? HISTORY_READ_SOURCES.map((source) =>
         projectSourceCoverage(
           source,
           input.coverage,
           input.scope,
-          transactionStart,
-          epochEnd,
+          coverageStart,
+          coverageEnd,
           reasons,
         ),
       )
@@ -903,8 +917,8 @@ function project(
       input.coverage,
       input.conflicts,
       input.scope,
-      transactionStart,
-      epochEnd,
+      coverageStart,
+      coverageEnd,
       reasons,
     );
   const selected = selectCanonicalHistoryEvidence({

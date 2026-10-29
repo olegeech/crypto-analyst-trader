@@ -99,25 +99,23 @@ async function setup() {
     connection.value,
     HISTORY_ACCOUNTING_TEST_AUTH_KEY,
   );
-  const opening = anchorStore.append({
-    anchor: capturedWalletAnchorForStoreTest({
-      ...walletAnchor("opening", openingBoundary),
-      anchorId: "proof-opening",
-    }),
+  const openingAnchor = capturedWalletAnchorForStoreTest({
+    ...walletAnchor("opening", openingBoundary),
+    anchorId: "proof-opening",
   });
-  const closing = anchorStore.append({
-    anchor: capturedWalletAnchorForStoreTest({
-      ...walletAnchor("closing", closingBoundary),
-      anchorId: "proof-closing",
-    }),
+  const closingAnchor = capturedWalletAnchorForStoreTest({
+    ...walletAnchor("closing", closingBoundary),
+    anchorId: "proof-closing",
   });
+  const opening = anchorStore.append({ anchor: openingAnchor });
+  const closing = anchorStore.append({ anchor: closingAnchor });
   assert.equal(opening.ok, true, opening.ok ? "" : opening.error.message);
   assert.equal(closing.ok, true, closing.ok ? "" : closing.error.message);
   if (!opening.ok || !closing.ok)
     throw new Error("test anchors could not be recorded");
 
-  const fromMs = Date.parse(openingBoundary);
-  const toMs = Date.parse(closingBoundary);
+  const fromMs = Date.parse(openingAnchor.capture.providerTimeBefore);
+  const toMs = Date.parse(closingAnchor.capture.providerTimeAfter);
   const historyStore = createSqliteHistoryStore(connection.value);
   for (const source of HISTORY_READ_SOURCES) {
     const filters = {
@@ -172,7 +170,15 @@ async function setup() {
     closingAnchorId: closing.value.anchorId,
     dependencyHash: reconciled.value.dependencyHash,
   };
-  return { root, databasePath, open, request, report: reconciled.value };
+  return {
+    root,
+    databasePath,
+    open,
+    request,
+    report: reconciled.value,
+    coverageFromMs: fromMs,
+    coverageToMs: toMs,
+  };
 }
 
 test("proof validation accepts an exact persisted current report and does not expire historical anchors by default", async () => {
@@ -397,10 +403,13 @@ test("proof validation ignores an out-of-epoch transaction but detects a late in
       filters: {
         accountType: "UNIFIED",
         purpose: "backfill",
-        rangeStartMs: openingMs,
-        rangeEndMs: closingMs,
+        rangeStartMs: fixture.coverageFromMs,
+        rangeEndMs: fixture.coverageToMs,
       },
-      window: { fromMs: openingMs, toMs: closingMs },
+      window: {
+        fromMs: fixture.coverageFromMs,
+        toMs: fixture.coverageToMs,
+      },
       expectedRevision: 1,
       cursor: null,
       nextCursor: null,

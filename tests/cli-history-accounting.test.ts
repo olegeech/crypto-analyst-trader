@@ -112,7 +112,17 @@ test("capture CLI keeps GET count visible but does not print account or balance 
   );
   assert.equal(exit, 0);
   assert.match(capture.read(), /STATUS=RECORDED/u);
+  assert.ok(
+    capture
+      .read()
+      .includes(`PROVIDER_TIME_BEFORE=${anchor.capture.providerTimeBefore}`),
+  );
   assert.match(capture.read(), /EXCHANGE_READS=5/u);
+  assert.ok(
+    capture
+      .read()
+      .includes(`PROVIDER_TIME_AFTER=${anchor.capture.providerTimeAfter}`),
+  );
   assert.match(capture.read(), /EXCHANGE_WRITES=0/u);
   assert.equal(
     capture.read().includes(historyAccountingScope.accountId),

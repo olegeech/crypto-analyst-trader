@@ -1098,10 +1098,12 @@ replace it or edit the SQLite MAC. Without the original key, existing anchors
 cannot prove their capture provenance.
 
 For an explicitly selected period, capture the opening anchor before the
-period and the closing anchor after it. Save both printed anchor IDs and
-`PROVIDER_RESPONSE_TIME` values. Convert those ISO-8601 provider timestamps to
-Unix epoch milliseconds for `history:sync`; do not substitute the local clock.
-Then import exactly that interval and run the local reconciliation:
+period and the closing anchor after it. Save both printed anchor IDs and the
+`PROVIDER_TIME_BEFORE`, `PROVIDER_RESPONSE_TIME`, and `PROVIDER_TIME_AFTER`
+values. Import from the opening capture's `PROVIDER_TIME_BEFORE` through the
+closing capture's `PROVIDER_TIME_AFTER`. This covers both wallet-read
+uncertainty brackets; do not substitute the local clock. Then run the local
+reconciliation:
 
 ```bash
 npm run accounting:reconcile -- --mode capture-anchor \
@@ -1110,8 +1112,8 @@ npm run accounting:reconcile -- --mode capture-anchor \
   --environment mainnet --database /absolute/path/to/mainnet.db --kind closing
 npm run history:sync -- --mode live --environment mainnet \
   --database /absolute/path/to/mainnet.db \
-  --from-ms <opening-provider-time-epoch-ms> \
-  --to-ms <closing-provider-time-epoch-ms>
+  --from-ms <opening-provider-time-before-epoch-ms> \
+  --to-ms <closing-provider-time-after-epoch-ms>
 npm run accounting:reconcile -- --mode reconcile \
   --environment mainnet --database /absolute/path/to/mainnet.db \
   --opening-anchor-id <opening-ANCHOR_ID> \

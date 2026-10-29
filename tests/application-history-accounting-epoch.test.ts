@@ -465,8 +465,8 @@ function executionObservation(
 
 function checkpoint(
   source: (typeof sources)[number],
-  fromMs = startMs + 1,
-  toMs = endMs,
+  fromMs = startMs - 100,
+  toMs = endMs + 100,
   overrides: Partial<HistoryCheckpoint> = {},
 ): HistoryCheckpoint {
   const filters =
@@ -1028,29 +1028,47 @@ test("counts an exact native transaction identity once and blocks changed identi
 test("requires contiguous leading, interior, and trailing coverage for every source", () => {
   for (const source of sources) {
     const leading = completeCoverage().filter((row) => row.source !== source);
-    leading.push(checkpoint(source, startMs + 2, endMs));
+    leading.push(checkpoint(source, startMs - 99, endMs + 100));
     assert.ok(
       reasons(project({ coverage: leading })).includes("HISTORY_COVERAGE_GAP"),
     );
 
     const interior = completeCoverage().filter((row) => row.source !== source);
-    interior.push(checkpoint(source, startMs + 1, startMs + 10_000));
-    interior.push(checkpoint(source, startMs + 10_002, endMs));
+    interior.push(checkpoint(source, startMs - 100, startMs + 10_000));
+    interior.push(checkpoint(source, startMs + 10_002, endMs + 100));
     assert.ok(
       reasons(project({ coverage: interior })).includes("HISTORY_COVERAGE_GAP"),
     );
 
     const trailing = completeCoverage().filter((row) => row.source !== source);
-    trailing.push(checkpoint(source, startMs + 1, endMs - 1));
+    trailing.push(checkpoint(source, startMs - 100, endMs + 99));
     assert.ok(
       reasons(project({ coverage: trailing })).includes("HISTORY_COVERAGE_GAP"),
     );
   }
 });
 
+test("requires every source to cover both wallet-capture uncertainty brackets", () => {
+  for (const source of sources) {
+    for (const [fromMs, toMs] of [
+      [startMs + 1, endMs + 100],
+      [startMs - 100, endMs],
+    ]) {
+      const coverage = completeCoverage().filter(
+        (row) => row.source !== source,
+      );
+      coverage.push(checkpoint(source, fromMs, toMs));
+      assert.ok(
+        reasons(project({ coverage })).includes("HISTORY_COVERAGE_GAP"),
+        `${source} must cover ${fromMs}..${toMs}`,
+      );
+    }
+  }
+});
+
 test("a conflict outside a narrow report epoch does not block a broad covered window", () => {
   const outsideMs = startMs - 60_000;
-  const broad = checkpoint("executions", outsideMs, endMs, {
+  const broad = checkpoint("executions", outsideMs, endMs + 100, {
     conflictCount: 1,
   });
   const outsideObservation = executionObservation({
@@ -1147,11 +1165,11 @@ test("requires compatible filters and traversed status for all four coverage sou
     category: "spot",
     purpose: "backfill",
     rangeStartMs: startMs - 10_000,
-    rangeEndMs: startMs - 1,
+    rangeEndMs: startMs - 101,
   };
   const withOldOutOfEpochWindow = [
     ...completeCoverage(),
-    checkpoint("executions", startMs - 10_000, startMs - 1, {
+    checkpoint("executions", startMs - 10_000, startMs - 101, {
       filters: obsoleteFilters,
       filterHash: unwrap(hashCanonical(obsoleteFilters)),
     }),
@@ -1168,8 +1186,8 @@ test("accepts a genuine historical opening anchor without expiring it by capture
   const historic = anchor("opening", oldOpeningTime);
   const current = anchor("closing", currentClosingTime);
   const coverage: HistoryCheckpoint[] = [];
-  const firstWindowStart = Date.parse(oldOpeningTime) + 1;
-  const finalWindowEnd = Date.parse(currentClosingTime);
+  const firstWindowStart = Date.parse(oldOpeningTime) - 100;
+  const finalWindowEnd = Date.parse(currentClosingTime) + 100;
   const maxWindowMs = 7 * 24 * 60 * 60 * 1_000;
   for (const source of sources) {
     let fromMs = firstWindowStart;

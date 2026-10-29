@@ -228,7 +228,10 @@ export async function runHistoryAccountingCli(
     }
     output.write(
       `MODE=CAPTURE_ANCHOR\nENVIRONMENT=${parsed.input.environment}\nKIND=${result.value.anchor.kind}\n` +
-        `ANCHOR_ID=${result.value.anchor.anchorId}\nPROVIDER_RESPONSE_TIME=${result.value.anchor.capture.providerResponseTime}\n` +
+        `ANCHOR_ID=${result.value.anchor.anchorId}\n` +
+        `PROVIDER_TIME_BEFORE=${result.value.anchor.capture.providerTimeBefore}\n` +
+        `PROVIDER_RESPONSE_TIME=${result.value.anchor.capture.providerResponseTime}\n` +
+        `PROVIDER_TIME_AFTER=${result.value.anchor.capture.providerTimeAfter}\n` +
         `ASSETS=${result.value.anchor.assets.length}\nSTATUS=RECORDED\n` +
         `EXCHANGE_READS=${result.value.getAttempts}\nEXCHANGE_WRITES=0\n`,
     );

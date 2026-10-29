@@ -171,8 +171,8 @@ export function appendAuthenticatedWalletAnchorForStoreTest(
 }
 
 export function completeHistoryCoverage(): readonly HistoryCheckpoint[] {
-  const fromMs = Date.parse(openingBoundary);
-  const toMs = Date.parse(closingBoundary);
+  const fromMs = Date.parse(openingBoundary) - 300;
+  const toMs = Date.parse(closingBoundary) + 300;
   return HISTORY_READ_SOURCES.map((source) => {
     const filters = {
       ...(source === "transaction-log"

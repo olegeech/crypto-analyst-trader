@@ -1,8 +1,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { createHistoryAccountingReport } from "../src/application/history-accounting-report.js";
-import { hashCanonical } from "../src/domain/identity/canonical-serialization.js";
+import {
+  createHistoryAccountingReport,
+  decodeHistoryAccountingReport,
+  encodeHistoryAccountingReport,
+} from "../src/application/history-accounting-report.js";
+import {
+  canonicalSerialize,
+  hashCanonical,
+} from "../src/domain/identity/canonical-serialization.js";
 import { DecimalValue } from "../src/domain/shared/decimal.js";
 import { HISTORY_READ_SOURCES } from "../src/ports/history-read.js";
 import type { HistoryCheckpoint } from "../src/ports/history-store.js";
@@ -175,4 +182,60 @@ test("report epoch boundaries use the verified provider response times", () => {
     result.ok && result.value.epoch.epoch.closingBoundary,
     closingBoundary,
   );
+});
+
+test("a persisted incomplete report remains NOT_READY after decoding", () => {
+  const input = completeReportInput();
+  const report = createHistoryAccountingReport({
+    ...input,
+    coverage: input.coverage.filter(
+      (checkpoint) => checkpoint.source !== "transaction-log",
+    ),
+  });
+  assert.equal(report.ok, true);
+  if (!report.ok) return;
+  assert.equal(report.value.status, "NOT_READY");
+
+  const encoded = encodeHistoryAccountingReport(report.value);
+  assert.equal(encoded.ok, true);
+  if (!encoded.ok) return;
+  const decoded = decodeHistoryAccountingReport(encoded.value);
+  assert.equal(decoded.ok, true, decoded.ok ? "" : decoded.error.message);
+  assert.equal(decoded.ok && decoded.value.status, "NOT_READY");
+  assert.equal(decoded.ok && decoded.value.preEpochHistory, "UNKNOWN");
+});
+
+test("report decoder rejects a correctly rehashed payload with an invalid domain shape", () => {
+  const report = createHistoryAccountingReport(completeReportInput());
+  assert.equal(report.ok, true);
+  if (!report.ok) return;
+  const encoded = encodeHistoryAccountingReport(report.value);
+  assert.equal(encoded.ok, true);
+  if (!encoded.ok) return;
+
+  const { contentHash: _contentHash, ...payload } = report.value;
+  void _contentHash;
+  const malformedPayload = {
+    ...payload,
+    preEpochHistory: "KNOWN",
+  } as Record<string, unknown>;
+  delete malformedPayload.performance;
+  delete malformedPayload.transactions;
+  const contentHash = hashCanonical(malformedPayload);
+  assert.equal(contentHash.ok, true);
+  if (!contentHash.ok) return;
+  const malformedReport = {
+    ...malformedPayload,
+    contentHash: contentHash.value,
+  };
+  const canonicalJson = canonicalSerialize(malformedReport);
+  assert.equal(canonicalJson.ok, true);
+  if (!canonicalJson.ok) return;
+
+  const decoded = decodeHistoryAccountingReport({
+    ...encoded.value,
+    contentHash: contentHash.value,
+    canonicalJson: canonicalJson.value,
+  });
+  assert.equal(decoded.ok, false);
 });
