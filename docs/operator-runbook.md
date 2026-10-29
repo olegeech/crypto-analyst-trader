@@ -1080,3 +1080,61 @@ limitations; an empty response does not prove that no older activity existed.
 This command does not clear HALT, change recovery grants or create accounting
 ledger postings. Do not run it against a production database without a
 separately authorized operator invocation.
+
+## Period-scoped account reconciliation (issue #27)
+
+The accounting workflow records two immutable Unified Account wallet anchors,
+imports Bybit history for the bounded interval, then appends a local report.
+It does not create orders, change account state, clear HALT or authorize a
+strategy. Use the same environment and database for every command. The
+`capture-anchor` mode performs authenticated Bybit GETs and writes the verified
+anchor to the selected local SQLite database; `reconcile` reads local evidence
+only, appends an immutable report and performs zero exchange requests.
+The first explicit capture also creates one random local anchor-authentication
+key in the macOS Keychain for that environment. Reconciliation and proof
+validation require that same item but never create or rotate it. If it is
+missing, inaccessible or malformed, stop and restore Keychain access; do not
+replace it or edit the SQLite MAC. Without the original key, existing anchors
+cannot prove their capture provenance.
+
+For an explicitly selected period, capture the opening anchor before the
+period and the closing anchor after it. Save both printed anchor IDs and the
+`PROVIDER_TIME_BEFORE`, `PROVIDER_RESPONSE_TIME`, and `PROVIDER_TIME_AFTER`
+values. Import from the opening capture's `PROVIDER_TIME_BEFORE` through the
+closing capture's `PROVIDER_TIME_AFTER`. This covers both wallet-read
+uncertainty brackets; do not substitute the local clock. Then run the local
+reconciliation:
+
+```bash
+npm run accounting:reconcile -- --mode capture-anchor \
+  --environment mainnet --database /absolute/path/to/mainnet.db --kind opening
+npm run accounting:reconcile -- --mode capture-anchor \
+  --environment mainnet --database /absolute/path/to/mainnet.db --kind closing
+npm run history:sync -- --mode live --environment mainnet \
+  --database /absolute/path/to/mainnet.db \
+  --from-ms <opening-provider-time-before-epoch-ms> \
+  --to-ms <closing-provider-time-after-epoch-ms>
+npm run accounting:reconcile -- --mode reconcile \
+  --environment mainnet --database /absolute/path/to/mainnet.db \
+  --opening-anchor-id <opening-ANCHOR_ID> \
+  --closing-anchor-id <closing-ANCHOR_ID>
+```
+
+The example is an operator procedure, not authorization to access an account
+or a production database. Run each authenticated command only as an explicit
+operator action. Use the capture output's provider timestamps, not the local
+clock. Before interpreting a report, confirm the four history sources have
+complete interval coverage and inspect its reason codes. Missing or ambiguous
+boundary evidence, unsupported non-USDT assets or movements, incomplete
+history, conflicts, or unexplained USDT drift keep the result `NOT_READY`;
+do not fill missing values with zero or infer a starting balance. History
+before the opening anchor remains `UNKNOWN`, even when the selected period is
+`ACCOUNTING_READY`.
+
+Reports and anchors are immutable local evidence. A later relevant history
+import can make an earlier report fail proof validation; run reconciliation
+again to append a report against the updated evidence. Do not edit SQLite rows
+manually. `ACCOUNTING_READY` proves only the selected account, environment,
+period and evidence scope; it does not grant trading or exchange-write
+authority. Never use it to bypass the existing consent, capital, position,
+HALT, TP or no-resend requirements.

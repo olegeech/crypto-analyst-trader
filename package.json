@@ -38,6 +38,7 @@
     "mainnet:preflight": "node --import tsx src/cli/mainnet-preflight.ts",
     "mainnet:test": "node --import tsx src/cli/mainnet-operator-test.ts",
     "history:sync": "node --import tsx src/cli/history-sync.ts",
+    "accounting:reconcile": "node --import tsx src/cli/history-accounting.ts",
     "daily:prepare": "node --import tsx src/cli/daily.ts prepare",
     "daily:review": "node --import tsx src/cli/daily.ts review",
     "daily:approve": "node --import tsx src/cli/daily.ts approve",

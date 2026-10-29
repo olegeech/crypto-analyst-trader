@@ -266,10 +266,21 @@ test("mutable order revisions append while equal revision conflicts stay visible
   if (conflicting.ok) assert.equal(conflicting.value.conflicts.length, 1);
   const facts = store.readFacts(scope, "order-history");
   const conflicts = store.readConflicts(scope);
+  const checkpoints = store.listCoverage(scope, "order-history");
   assert.equal(facts.ok, true);
   assert.equal(conflicts.ok, true);
+  assert.equal(checkpoints.ok, true);
   if (facts.ok) assert.equal(facts.value.length, 3);
-  if (conflicts.ok) assert.equal(conflicts.value.length, 1);
+  if (conflicts.ok) {
+    assert.equal(conflicts.value.length, 1);
+    assert.equal(conflicts.value[0]?.windows?.length, 1);
+    assert.deepEqual(conflicts.value[0]?.windows?.[0]?.window, window);
+    if (checkpoints.ok)
+      assert.equal(
+        conflicts.value[0]?.windows?.[0]?.filterHash,
+        checkpoints.value[0]?.filterHash,
+      );
+  }
   db.close();
 });
 
@@ -306,10 +317,21 @@ test("immutable execution identity conflicts are retained as evidence", () => {
   }
   const facts = store.readFacts(scope, "executions");
   const conflicts = store.readConflicts(scope);
+  const checkpoints = store.listCoverage(scope, "executions");
   assert.equal(facts.ok, true);
   assert.equal(conflicts.ok, true);
+  assert.equal(checkpoints.ok, true);
   if (facts.ok) assert.equal(facts.value.length, 2);
-  if (conflicts.ok) assert.equal(conflicts.value.length, 1);
+  if (conflicts.ok) {
+    assert.equal(conflicts.value.length, 1);
+    assert.equal(conflicts.value[0]?.windows?.length, 1);
+    assert.deepEqual(conflicts.value[0]?.windows?.[0]?.window, window);
+    if (checkpoints.ok)
+      assert.equal(
+        conflicts.value[0]?.windows?.[0]?.filterHash,
+        checkpoints.value[0]?.filterHash,
+      );
+  }
   db.close();
 });
 

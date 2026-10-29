@@ -361,7 +361,7 @@ test("operator create intent, canonical artifacts and exact payload commit atomi
       .get()?.count,
     2,
   );
-  assert.equal(CURRENT_SCHEMA_VERSION, 11);
+  assert.equal(CURRENT_SCHEMA_VERSION, 13);
 });
 
 test("prepared plan is durable and readable before any CREATE intent", () => {
@@ -1484,7 +1484,7 @@ test("manual recovery rejects nonterminal source TP status even when account-wid
   fixture.connection.close();
 });
 
-test("v8 through v11 migrations preserve populated historical v1 intent bytes and recovery records", () => {
+test("v8 through v13 migrations preserve populated historical v1 intent bytes and recovery records", () => {
   const fixture = setup();
   const created = value(prepare(fixture));
   value(
@@ -1497,7 +1497,8 @@ test("v8 through v11 migrations preserve populated historical v1 intent bytes an
     }),
   );
   // Reconstitute the v8 projections and canonical v1 record before opening it
-  // with the v11 adapter. The additive recovery/history tables are absent in a v8 database.
+  // with the current adapter. Additive recovery, history, and accounting tables
+  // are absent in a v8 database.
   fixture.connection.db.exec(`
     ALTER TABLE operator_mainnet_test_write_intents ADD COLUMN lease_owner_run_id TEXT NOT NULL DEFAULT 'historic-run';
     ALTER TABLE operator_mainnet_test_write_intents ADD COLUMN lease_epoch INTEGER NOT NULL DEFAULT 1 CHECK (lease_epoch > 0);
@@ -1509,6 +1510,8 @@ test("v8 through v11 migrations preserve populated historical v1 intent bytes an
     DROP TABLE history_window_checkpoints;
     DROP TABLE history_source_conflicts;
     DROP TABLE history_source_observations;
+    DROP TABLE history_accounting_reports;
+    DROP TABLE history_accounting_wallet_anchors;
     UPDATE schema_meta SET schema_version = 8;
   `);
   const historical = value(
@@ -1562,6 +1565,12 @@ test("v8 through v11 migrations preserve populated historical v1 intent bytes an
     artifacts,
   );
   assert.deepEqual(migrated.db.prepare("PRAGMA foreign_key_check").all(), []);
+  assert.equal(
+    migrated.db
+      .prepare("SELECT schema_version FROM schema_meta WHERE singleton = 1")
+      .get()?.schema_version,
+    CURRENT_SCHEMA_VERSION,
+  );
   const columns = migrated.db
     .prepare("PRAGMA table_info(operator_mainnet_test_write_intents)")
     .all()

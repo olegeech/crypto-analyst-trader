@@ -82,8 +82,8 @@ test("fresh and reopened journals configure verified SQLite durability state", (
   assert.equal(statSync(root).isDirectory(), true);
 });
 
-test("operator Mainnet journal uses v11 history schema with empty source tables", () => {
-  assert.equal(CURRENT_SCHEMA_VERSION, 11);
+test("operator Mainnet journal uses v13 history/accounting schema with empty source tables", () => {
+  assert.equal(CURRENT_SCHEMA_VERSION, 13);
   const { path } = temporaryDatabase();
   const opened = openSqliteConnection({
     environment: "mainnet",
@@ -107,6 +107,7 @@ test("operator Mainnet journal uses v11 history schema with empty source tables"
     "history_source_conflicts",
     "history_window_conflicts",
     "history_window_checkpoints",
+    "history_accounting_wallet_anchors",
   ]) {
     assert.equal(
       db
@@ -213,6 +214,78 @@ test("v11 history migration preserves a v10 HALT and recovery grant", () => {
       )
       .get()?.grant_id,
     "grant-1",
+  );
+  assert.deepEqual(migratedDb.prepare("PRAGMA foreign_key_check").all(), []);
+  migrated.value.close();
+});
+
+test("v12-v13 accounting migrations preserve v11 history, HALT, and database identity", () => {
+  const { path } = temporaryDatabase();
+  const db = openDatabase(path);
+  db.exec("PRAGMA foreign_keys = ON");
+  assert.equal(applyMigrations(db, MIGRATIONS.slice(0, 11)).ok, true);
+  const accountId = `sha256:${"a".repeat(64)}`;
+  const timestamp = "2026-10-27T12:00:00.000Z";
+  const hash = `sha256:${"b".repeat(64)}`;
+  db.prepare(
+    "INSERT INTO database_identity (singleton, environment, created_at) VALUES (1, 'mainnet', ?)",
+  ).run(timestamp);
+  db.prepare(
+    `INSERT INTO halt_state
+     (exchange, environment, account_id, category, position_mode, active, revision,
+      reason, raised_at, reconciliation_required)
+     VALUES ('bybit', 'mainnet', ?, 'linear', 'one-way', 1, 7, 'migration-test', ?, 0)`,
+  ).run(accountId, timestamp);
+  db.prepare(
+    `INSERT INTO history_source_observations
+     (observation_id, exchange, environment, account_id, source, event_identity,
+      content_hash, canonical_hash, provider_event_time, provider_revision_time,
+      collected_at, canonical_json, recorded_at)
+     VALUES ('history-observation-1', 'bybit', 'mainnet', ?, 'order-history',
+      'order-1', ?, ?, ?, NULL, ?, '{}', ?)`,
+  ).run(accountId, hash, hash, timestamp, timestamp, timestamp);
+  db.close();
+
+  const migrated = openSqliteConnection({
+    environment: "mainnet",
+    databasePath: path,
+    runtime: supportedRuntime,
+  });
+  assert.equal(migrated.ok, true);
+  if (!migrated.ok) return;
+  const migratedDb = migrated.value.db;
+  const migratedIdentity = migratedDb
+    .prepare(
+      "SELECT environment, created_at FROM database_identity WHERE singleton = 1",
+    )
+    .get();
+  assert.equal(migratedIdentity?.environment, "mainnet");
+  assert.equal(migratedIdentity?.created_at, timestamp);
+  assert.equal(
+    migratedDb
+      .prepare(
+        "SELECT observation_id FROM history_source_observations WHERE observation_id = 'history-observation-1'",
+      )
+      .get()?.observation_id,
+    "history-observation-1",
+  );
+  assert.equal(
+    migratedDb
+      .prepare("SELECT active, revision FROM halt_state WHERE account_id = ?")
+      .get(accountId)?.active,
+    1,
+  );
+  assert.equal(
+    migratedDb
+      .prepare("SELECT revision FROM halt_state WHERE account_id = ?")
+      .get(accountId)?.revision,
+    7,
+  );
+  assert.equal(
+    migratedDb
+      .prepare("SELECT schema_version FROM schema_meta WHERE singleton = 1")
+      .get()?.schema_version,
+    CURRENT_SCHEMA_VERSION,
   );
   assert.deepEqual(migratedDb.prepare("PRAGMA foreign_key_check").all(), []);
   migrated.value.close();
