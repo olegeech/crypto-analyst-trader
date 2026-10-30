@@ -31,8 +31,11 @@ import {
   type MainnetOperatorTestStatusObservation,
 } from "./mainnet-operator-test-status.js";
 import {
+  createMainnetGetCounts,
+  createMainnetInvocationMetrics,
   snapshotExchangeCredentials,
-  withExchangeCounts,
+  withMainnetInvocationMetrics,
+  type MainnetInvocationMetrics,
 } from "./mainnet-composition-helpers.js";
 
 const ORDER_REALTIME_PATH = "/v5/order/realtime";
@@ -174,7 +177,7 @@ async function pagedRecords<T>(input: {
   throw new Error("status page budget exhausted");
 }
 
-class ReadOnlyOperatorStatusExchange {
+export class ReadOnlyOperatorStatusExchange {
   private readonly transport: BybitAccountReadTransport;
   private reads: number;
 
@@ -446,17 +449,32 @@ export async function runMainnetOperatorTestStatusComposition(input: {
     "entry-remainder-cancelled" | "position-closed" | "other";
   readonly actor?: unknown;
 }) {
+  const getCounts = createMainnetGetCounts();
+  const stageStarted = performance.now();
   let exchangeReads = 0;
   let statusExchange: ReadOnlyOperatorStatusExchange | undefined;
+  const metricsFor = (reads: number): MainnetInvocationMetrics => {
+    const elapsed = performance.now() - stageStarted;
+    return createMainnetInvocationMetrics({
+      stage: "status",
+      exchangeReads: reads,
+      exchangeGetCounts: getCounts.summary(),
+      exchangeEvidencePath: "none",
+      ...(Number.isFinite(elapsed) && elapsed >= 0
+        ? { exchangeStageElapsedMs: elapsed }
+        : {}),
+    });
+  };
+  const withCounts = <T>(result: Result<T>, reads: number) =>
+    withMainnetInvocationMetrics(result, reads, 0, metricsFor(reads));
   const resolved = resolveOperatorMainnetSource(input.sourceId);
-  if (!resolved.ok) return withExchangeCounts(resolved, exchangeReads, 0);
+  if (!resolved.ok) return withCounts(resolved, exchangeReads);
   if (!resolved.value)
-    return withExchangeCounts(
+    return withCounts(
       fail(
         domainError("INVALID_VALUE", "operator status source was not found"),
       ),
       exchangeReads,
-      0,
     );
   const wall = Date.now;
   const monotonic = () => performance.now();
@@ -472,14 +490,13 @@ export async function runMainnetOperatorTestStatusComposition(input: {
     scope: resolved.value.scope,
     clock: localClock,
   });
-  if (!persistence.ok) return withExchangeCounts(persistence, exchangeReads, 0);
+  if (!persistence.ok) return withCounts(persistence, exchangeReads);
   try {
     const journal = persistence.value.operatorMainnetTest;
     if (!journal)
-      return withExchangeCounts(
+      return withCounts(
         failClosed("OPERATOR_JOURNAL_UNAVAILABLE"),
         exchangeReads,
-        0,
       );
     const provider = createMacOSKeychainProvider();
     const credentials = snapshotExchangeCredentials(
@@ -493,17 +510,20 @@ export async function runMainnetOperatorTestStatusComposition(input: {
       maxResponseBytes: MAX_RESPONSE_BYTES,
       maxObservedResponseBytes: 0,
     };
-    const identityRequest: typeof fetch = async (url, init) => {
-      if ((init?.method ?? "GET").toUpperCase() !== "GET")
-        throw new Error("status permits GET only");
+    const request: typeof fetch = async (url, init) => {
+      const method = (
+        init?.method ?? (url instanceof Request ? url.method : "GET")
+      ).toUpperCase();
+      if (method !== "GET") throw new Error("status permits GET only");
       exchangeReads += 1;
+      getCounts.record(url, init);
       return fetch(url, init);
     };
     const identityTransport = new BybitAccountReadTransport({
       environment: "mainnet",
       credentials,
       budget: identityBudget,
-      request: identityRequest,
+      request,
       clock: wall,
       monotonicClock: monotonic,
       timeoutMs: 5_000,
@@ -511,11 +531,7 @@ export async function runMainnetOperatorTestStatusComposition(input: {
     const authenticatedAtMs = await identityTransport.readExchangeTime();
     const authenticatedAt = timestampFromEpochMs(authenticatedAtMs);
     if (!authenticatedAt.ok)
-      return withExchangeCounts(
-        failClosed("ACCOUNT_TIME_INVALID"),
-        exchangeReads,
-        0,
-      );
+      return withCounts(failClosed("ACCOUNT_TIME_INVALID"), exchangeReads);
     const identity = mapAccountReadIdentity(
       await identityTransport.get("/v5/user/query-api"),
       credentials.accountId,
@@ -526,16 +542,12 @@ export async function runMainnetOperatorTestStatusComposition(input: {
       identity.accountBinding.accountIdentityHash !==
       resolved.value.snapshot.plan.accountIdentityHash
     )
-      return withExchangeCounts(
-        failClosed("ACCOUNT_IDENTITY_MISMATCH"),
-        exchangeReads,
-        0,
-      );
+      return withCounts(failClosed("ACCOUNT_IDENTITY_MISMATCH"), exchangeReads);
     statusExchange = new ReadOnlyOperatorStatusExchange(
       credentials,
       monotonic,
       wall,
-      fetch,
+      request,
       observationDeadline,
       exchangeReads,
     );
@@ -545,16 +557,26 @@ export async function runMainnetOperatorTestStatusComposition(input: {
       exchange: statusExchange,
       clock: localClock,
     });
-    return withExchangeCounts(result, statusExchange.readCount(), 0);
+    const reads = statusExchange.readCount();
+    const counted = withCounts(result, reads);
+    return counted.ok
+      ? {
+          ok: true,
+          value: {
+            ...counted.value,
+            ...metricsFor(reads),
+            exchangeReads: reads,
+          },
+        }
+      : counted;
   } catch (error) {
-    return withExchangeCounts(
+    return withCounts(
       failClosed(
         error instanceof BybitAccountReadError
           ? `READ_${error.code}`
           : "STATUS_COMPOSITION_FAILED",
       ),
       statusExchange?.readCount() ?? exchangeReads,
-      0,
     );
   } finally {
     persistence.value.close();

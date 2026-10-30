@@ -71,8 +71,11 @@ import {
 import { deriveMainnetExecutionReadiness } from "./mainnet-execution-readiness.js";
 import {
   createMainnetGetCounts,
+  createMainnetInvocationMetrics,
   snapshotExchangeCredentials,
-  withExchangeCounts,
+  withMainnetInvocationMetrics,
+  type MainnetEvidencePath,
+  type MainnetInvocationMetrics,
 } from "./mainnet-composition-helpers.js";
 
 import {
@@ -264,10 +267,26 @@ export async function runMainnetOperatorTestComposition(
   input: MainnetOperatorTestInput,
 ): Promise<Result<MainnetOperatorTestOutcome>> {
   const getCounts = createMainnetGetCounts();
-  const withCounts = <T>(result: Result<T>, reads: number, writes: number) =>
-    withExchangeCounts(result, reads, writes, getCounts.summary());
+  const stageStarted = performance.now();
   let exchangeReads = 0;
   let exchangeWrites = 0;
+  let evidencePath: MainnetEvidencePath = "none";
+  let compactFallbackReason: string | undefined;
+  const metricsFor = (reads: number): MainnetInvocationMetrics => {
+    const elapsed = performance.now() - stageStarted;
+    return createMainnetInvocationMetrics({
+      stage: "execute",
+      exchangeReads: reads,
+      exchangeGetCounts: getCounts.summary(),
+      ...(Number.isFinite(elapsed) && elapsed >= 0
+        ? { exchangeStageElapsedMs: elapsed }
+        : {}),
+      exchangeEvidencePath: evidencePath,
+      ...(compactFallbackReason === undefined ? {} : { compactFallbackReason }),
+    });
+  };
+  const withCounts = <T>(result: Result<T>, reads: number, writes: number) =>
+    withMainnetInvocationMetrics(result, reads, writes, metricsFor(reads));
   const normalized = inputIdentity(input);
   if (!normalized)
     return withCounts(
@@ -337,9 +356,10 @@ export async function runMainnetOperatorTestComposition(
       const method = (
         init?.method ?? (url instanceof Request ? url.method : "GET")
       ).toUpperCase();
-      getCounts.record(url, init);
-      if (method === "GET") exchangeReads += 1;
-      else if (method === "POST") exchangeWrites += 1;
+      if (method === "GET") {
+        exchangeReads += 1;
+        getCounts.record(url, init);
+      } else if (method === "POST") exchangeWrites += 1;
       else throw new Error("operator composition permits GET and CREATE only");
       return fetch(url, init);
     };
@@ -479,6 +499,7 @@ export async function runMainnetOperatorTestComposition(
       collect: async (symbol) => {
         if (symbol !== admitted.plan.symbol)
           throw new Error("operator source symbol mismatch");
+        evidencePath = "compact";
         try {
           compactAccount = await collectCompactOperatorAccountEvidence(
             accountReader.reader,
@@ -631,6 +652,23 @@ export async function runMainnetOperatorTestComposition(
             throw new OperatorEvidenceReadError(
               "FRESH_MAINNET_EVIDENCE_UNAVAILABLE",
             );
+          const reasonCode =
+            error instanceof CompactAccountEvidenceUnavailable
+              ? error.reasonCode
+              : error instanceof BybitAccountReadError
+                ? error.code
+                : error instanceof BybitMainnetReadCapabilityError
+                  ? error.code
+                  : error instanceof BybitPublicTransportError
+                    ? error.reasonCode
+                    : error instanceof BybitPublicMarketMappingError
+                      ? error.kind
+                      : "COMPACT_READ_FAILED";
+          compactFallbackReason =
+            typeof reasonCode === "string" &&
+            /^[A-Z][A-Z0-9_]{0,79}$/u.test(reasonCode)
+              ? reasonCode
+              : "COMPACT_READ_FAILED";
         }
 
         if (manualRecoveryAttestation)
@@ -640,6 +678,7 @@ export async function runMainnetOperatorTestComposition(
           );
 
         let fullAccountTransport: BybitAccountReadTransport | undefined;
+        evidencePath = "compact-to-full";
         accountResult = await collectAccountEvidence({
           environment: "mainnet",
           runId: admitted.runId,
@@ -754,7 +793,7 @@ export async function runMainnetOperatorTestComposition(
             ...result.value,
             exchangeReads,
             exchangeWrites,
-            exchangeGetCounts: getCounts.summary(),
+            ...metricsFor(exchangeReads),
           },
         }
       : withCounts(result, exchangeReads, exchangeWrites);

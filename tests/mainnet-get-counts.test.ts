@@ -32,6 +32,47 @@ test("GET counts include repeated attempts, exclude writes, and retain no reques
     assert.equal(failure.error.details?.exchangeGetCounts, counts.summary());
 });
 
+test("physical fetch attempts independently reconcile retries, pages, rejection, and writes", async () => {
+  const counts = createMainnetGetCounts();
+  const attempts: { readonly path: string; readonly method: string }[] = [];
+  let feeAttempts = 0;
+  const request = async (url: string, init?: RequestInit) => {
+    const method = (init?.method ?? "GET").toUpperCase();
+    counts.record(url, init);
+    attempts.push({ path: new URL(url).pathname, method });
+    if (url.includes("/v5/account/fee-rate") && ++feeAttempts === 1)
+      throw new Error("private response text");
+    return new Response("{}", { status: 200 });
+  };
+
+  await assert.rejects(() =>
+    request("https://api.bybit.com/v5/account/fee-rate?secret=value"),
+  );
+  await request("https://api.bybit.com/v5/account/fee-rate?secret=value");
+  await request("https://api.bybit.com/v5/order/history?cursor=private");
+  await request("https://api.bybit.com/v5/order/history?cursor=next-private");
+  await request("https://api.bybit.com/v5/order/create", { method: "POST" });
+
+  const oracle: Record<string, number> = {};
+  for (const attempt of attempts) {
+    if (attempt.method !== "GET") continue;
+    const group =
+      attempt.path === "/v5/account/fee-rate"
+        ? "fees"
+        : attempt.path === "/v5/order/history"
+          ? "order-history"
+          : "other";
+    oracle[group] = (oracle[group] ?? 0) + 1;
+  }
+  assert.deepEqual(JSON.parse(counts.summary()), oracle);
+  assert.equal(attempts.length, 5);
+  assert.equal(
+    Object.values(oracle).reduce((sum, count) => sum + count, 0),
+    4,
+  );
+  assert.doesNotMatch(counts.summary(), /secret|private|cursor|value/u);
+});
+
 test("metric formatting rejects unknown groups and unsafe values without echoing them", () => {
   assert.equal(
     safeMainnetGetCounts('{"wallet":2,"positions":1}'),

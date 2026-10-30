@@ -162,7 +162,16 @@ test("prepare persists and displays the frozen plan without exchange writes", as
       ...terminal,
       prepare: async () => {
         prepared += 1;
-        return ok({ plan, exchangeReads: 6, exchangeWrites: 0 });
+        return ok({
+          plan,
+          exchangeReads: 6,
+          exchangeWrites: 0,
+          exchangeGetCounts: '{"wallet":6}',
+          exchangeGetCountsStatus: "available",
+          exchangeStage: "prepare",
+          exchangeStageElapsedMs: 12.5,
+          exchangeEvidencePath: "compact",
+        });
       },
     },
   );
@@ -182,6 +191,46 @@ test("prepare persists and displays the frozen plan without exchange writes", as
   assert.doesNotMatch(terminal.text(), /APPROVAL_EXPIRES=/u);
   assert.match(terminal.text(), /EXCHANGE_READS=6/u);
   assert.match(terminal.text(), /EXCHANGE_WRITES=0/u);
+  assert.match(terminal.text(), /MEASURED_STAGE=PREPARE/u);
+  assert.match(terminal.text(), /STAGE_ELAPSED_MS=12\.5/u);
+  assert.match(terminal.text(), /EVIDENCE_PATH=COMPACT/u);
+  assert.match(terminal.text(), /GET_COUNTS_PREPARE_STATUS=AVAILABLE/u);
+  assert.match(terminal.text(), /GET_COUNTS_PREPARE=\{"wallet":6\}/u);
+});
+
+test("count mismatch is reported as unavailable diagnostics without changing the preparation outcome", async () => {
+  const terminal = streams(false);
+  const code = await runMainnetOperatorTestCli(
+    [
+      "prepare",
+      "--symbol",
+      "BTCUSDT",
+      "--allocation",
+      "10",
+      "--gross-cap",
+      "8",
+      "--max-deviation-bps",
+      "10",
+    ],
+    {
+      ...terminal,
+      prepare: async () =>
+        ok({
+          plan,
+          exchangeReads: 1,
+          exchangeWrites: 0,
+          exchangeGetCounts: '{"wallet":2}',
+          exchangeGetCountsStatus: "mismatch",
+          exchangeStage: "prepare",
+        }),
+    },
+  );
+
+  assert.equal(code, 0);
+  assert.match(terminal.text(), /VERDICT=PREPARED/u);
+  assert.match(terminal.text(), /EXCHANGE_READS=1/u);
+  assert.match(terminal.text(), /GET_COUNTS_PREPARE_STATUS=MISMATCH/u);
+  assert.doesNotMatch(terminal.text(), /GET_COUNTS_PREPARE=\{|HALT/u);
 });
 
 test("manual preparation requires an attended terminal and forwards the saved UI attestation to planning", async (t) => {
@@ -242,7 +291,13 @@ test("manual preparation requires an attended terminal and forwards the saved UI
       },
       prepare: async (input) => {
         preparationInput = input;
-        return ok({ plan: manualPlan, exchangeReads: 4, exchangeWrites: 0 });
+        return ok({
+          plan: manualPlan,
+          exchangeReads: 4,
+          exchangeWrites: 0,
+          exchangeStage: "prepare",
+          exchangeGetCountsStatus: "unavailable",
+        });
       },
     },
   );
@@ -795,6 +850,10 @@ test("status records manual-action declarations and sanitizes terminal fields", 
         lifecycleOutcome: "PARTIAL_EVIDENCE",
         cleanupStatus: "pending",
         exchangeReads: 4,
+        exchangeGetCounts: '{"identity":1,"open-orders":2,"time":1}',
+        exchangeGetCountsStatus: "available",
+        exchangeStage: "status",
+        exchangeStageElapsedMs: 43,
         journaled: true,
         latestSnapshot: {
           plan: {
@@ -885,6 +944,14 @@ test("status records manual-action declarations and sanitizes terminal fields", 
   assert.match(terminal.text(), /UNCERTAINTY=PROOFINJECTED/u);
   assert.match(terminal.text(), /NEXT_ACTION=inspect the parent remainder/u);
   assert.match(terminal.text(), /EXCHANGE_READS=4/u);
+  assert.match(terminal.text(), /MEASURED_STAGE=STATUS/u);
+  assert.match(terminal.text(), /STAGE_ELAPSED_MS=43/u);
+  assert.match(terminal.text(), /EVIDENCE_PATH=NONE/u);
+  assert.match(terminal.text(), /GET_COUNTS_STATUS_VALIDATION=AVAILABLE/u);
+  assert.match(
+    terminal.text(),
+    /GET_COUNTS_STATUS=\{"identity":1,"open-orders":2,"time":1\}/u,
+  );
   assert.match(terminal.text(), /EXCHANGE_WRITES=0/u);
   assert.equal(terminal.text().includes("\nINJECTED\n"), false);
 });
@@ -1040,6 +1107,11 @@ test("unknown post-intent execution gives concrete manual Bybit guidance without
           attemptOutcome: "ambiguous",
           exchangeReads: 8,
           exchangeWrites: 1,
+          exchangeGetCounts: '{"fees":2,"time":6}',
+          exchangeGetCountsStatus: "available",
+          exchangeStage: "execute",
+          exchangeStageElapsedMs: 18,
+          exchangeEvidencePath: "compact-to-full",
         });
       },
     },
@@ -1047,6 +1119,11 @@ test("unknown post-intent execution gives concrete manual Bybit guidance without
   assert.equal(code, 5);
   assert.equal(calls, 1);
   assert.match(terminal.text(), /EXECUTION_STATE=RECOVERY_ONLY/u);
+  assert.match(terminal.text(), /GET_COUNTS_EXECUTE_STATUS=AVAILABLE/u);
+  assert.match(terminal.text(), /GET_COUNTS_EXECUTE=\{"fees":2,"time":6\}/u);
+  assert.match(terminal.text(), /MEASURED_STAGE=EXECUTE/u);
+  assert.match(terminal.text(), /STAGE_ELAPSED_MS=18/u);
+  assert.match(terminal.text(), /EVIDENCE_PATH=COMPACT_TO_FULL/u);
   assert.match(
     terminal.text(),
     /inspect Bybit UI orders, fills and position using CLIENT_ORDER_ID/u,
@@ -1278,8 +1355,14 @@ test("execute GET breakdown survives a pre-intent failure and suppresses unsafe 
     else
       assert.doesNotMatch(
         terminal.text(),
-        /GET_COUNTS_EXECUTE|private-account/u,
+        /GET_COUNTS_EXECUTE=\{|private-account/u,
       );
+    assert.match(
+      terminal.text(),
+      expected
+        ? /GET_COUNTS_EXECUTE_STATUS=AVAILABLE/u
+        : /GET_COUNTS_EXECUTE_STATUS=UNAVAILABLE/u,
+    );
     assert.match(terminal.text(), /EXECUTION_NOT_STARTED/u);
   }
 });

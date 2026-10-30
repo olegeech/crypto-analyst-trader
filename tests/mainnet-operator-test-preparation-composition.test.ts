@@ -30,6 +30,33 @@ const input = {
   maxDeviationBps: "10",
 };
 
+function groupedFromFetchAttempts(paths: readonly string[]) {
+  const groups: Readonly<Record<string, string>> = {
+    "/v5/market/time": "time",
+    "/v5/user/query-api": "identity",
+    "/v5/account/info": "account",
+    "/v5/account/wallet-balance": "wallet",
+    "/v5/account/collateral-info": "collateral",
+    "/v5/spot-margin-trade/collateral": "collateral-tiers",
+    "/v5/position/list": "positions",
+    "/v5/order/realtime": "open-orders",
+    "/v5/order/history": "order-history",
+    "/v5/execution/list": "executions",
+    "/v5/market/instruments-info": "instruments",
+    "/v5/market/option-base-coins": "option-discovery",
+    "/v5/market/tickers": "quote",
+    "/v5/account/fee-rate": "fees",
+  };
+  const counts: Record<string, number> = {};
+  for (const path of paths) {
+    const group = groups[path] ?? "other";
+    counts[group] = (counts[group] ?? 0) + 1;
+  }
+  return Object.fromEntries(
+    Object.entries(counts).sort(([left], [right]) => left.localeCompare(right)),
+  );
+}
+
 async function prepare(options: {
   balance: string;
   fee?: string;
@@ -42,6 +69,7 @@ async function prepare(options: {
   failPositionRead?: boolean;
   failOpenOrdersRead?: boolean;
   recoveryAttestation?: OperatorMainnetRecoveryAttestation;
+  stageMonotonicClock?: () => number;
 }) {
   const root = mkdtempSync(join(tmpdir(), "operator-prepare-capacity-"));
   roots.push(root);
@@ -60,6 +88,9 @@ async function prepare(options: {
     },
     {
       utcClock: () => now,
+      ...(options.stageMonotonicClock === undefined
+        ? {}
+        : { stageMonotonicClock: options.stageMonotonicClock }),
       credentialProvider: {
         load: async () => ({
           apiKey: "synthetic-key",
@@ -321,6 +352,13 @@ test("prepare with sufficient fresh funds reaches persistence through production
   assert.equal(run.paths.length, 17);
   assert.equal(run.result.ok, true, JSON.stringify(run.result));
   if (!run.result.ok) return;
+  assert.deepEqual(
+    JSON.parse(run.result.value.exchangeGetCounts!),
+    groupedFromFetchAttempts(run.paths),
+  );
+  assert.equal(run.result.value.exchangeGetCountsStatus, "available");
+  assert.equal(run.result.value.exchangeEvidencePath, "compact");
+  assert.equal(run.result.value.exchangeStage, "prepare");
   const reopened = openSqlitePersistence({
     environment: "mainnet",
     rootDirectory: run.root,
@@ -462,6 +500,18 @@ test("unknown or stale compact balance records fallback and cannot reuse it as p
       run.paths.includes("/v5/order/history"),
       JSON.stringify(run.paths),
     );
+    assert.deepEqual(
+      JSON.parse(String(run.result.error.details?.exchangeGetCounts)),
+      groupedFromFetchAttempts(run.paths),
+    );
+    assert.equal(
+      run.result.error.details?.exchangeGetCountsStatus,
+      "available",
+    );
+    assert.equal(
+      run.result.error.details?.exchangeEvidencePath,
+      "compact-to-full",
+    );
   }
 });
 
@@ -480,11 +530,24 @@ test("full fallback uses its own balance and preserves fee-inclusive insufficien
       JSON.stringify(run.result),
     );
     assert.equal(run.result.error.details?.availableBalance, "0");
+    assert.deepEqual(
+      JSON.parse(String(run.result.error.details?.exchangeGetCounts)),
+      groupedFromFetchAttempts(run.paths),
+    );
+    assert.equal(
+      run.result.error.details?.exchangeEvidencePath,
+      "compact-to-full",
+    );
   }
 });
 
 test("successful full fallback preserves its reason and endpoint counts", async () => {
-  const run = await prepare({ balance: "11", unknownFirstBalance: true });
+  let clockCalls = 0;
+  const run = await prepare({
+    balance: "11",
+    unknownFirstBalance: true,
+    stageMonotonicClock: () => (clockCalls++ === 0 ? 100 : 147),
+  });
   assert.equal(run.result.ok, true, JSON.stringify(run.result));
   if (!run.result.ok) return;
   assert.equal(run.opened, 1);
@@ -501,6 +564,11 @@ test("successful full fallback preserves its reason and endpoint counts", async 
     Object.values(counts).reduce((sum, count) => sum + count, 0),
     run.paths.length,
   );
+  assert.deepEqual(counts, groupedFromFetchAttempts(run.paths));
+  assert.equal(run.result.value.exchangeStage, "prepare");
+  assert.equal(run.result.value.exchangeStageElapsedMs, 47);
+  assert.equal(run.result.value.exchangeEvidencePath, "compact-to-full");
+  assert.equal(run.result.value.exchangeGetCountsStatus, "available");
 });
 
 test("proven compact permission and balance-change blockers do not trigger a full audit", async () => {
@@ -537,6 +605,15 @@ test("failed preparation fee read reports its source without target reads or a f
     assert.equal(run.result.error.details?.source, "fee");
     assert.equal(run.result.error.details?.compactFallbackReason, undefined);
     assert.doesNotMatch(JSON.stringify(run.result), /PRIVATE_FEE_RESPONSE/u);
+    const counts = JSON.parse(
+      String(run.result.error.details?.exchangeGetCounts),
+    ) as Record<string, number>;
+    assert.deepEqual(counts, groupedFromFetchAttempts(run.paths));
+    assert.equal(
+      run.result.error.details?.exchangeGetCountsStatus,
+      "available",
+    );
+    assert.equal(run.result.error.details?.exchangeEvidencePath, "compact");
   }
   assert.equal(
     run.paths.filter((path) => path === "/v5/account/fee-rate").length,
@@ -548,4 +625,28 @@ test("failed preparation fee read reports its source without target reads or a f
     "/v5/market/instruments-info",
   ])
     assert.equal(run.paths.includes(path), false);
+});
+
+test("pre-fetch preparation failure reports a measured zero and keeps timing diagnostic-only", async () => {
+  let clockCalls = 0;
+  const result = await prepareMainnetOperatorTest(
+    {
+      symbol: "INVALID",
+      allocation: "10",
+      grossNotionalCap: "10",
+      maxDeviationBps: "10",
+    },
+    {
+      stageMonotonicClock: () => (clockCalls++ === 0 ? 50 : 61),
+    },
+  );
+
+  assert.equal(result.ok, false);
+  if (result.ok) return;
+  assert.equal(result.error.details?.exchangeReads, 0);
+  assert.equal(result.error.details?.exchangeGetCounts, "{}");
+  assert.equal(result.error.details?.exchangeGetCountsStatus, "available");
+  assert.equal(result.error.details?.exchangeStage, "prepare");
+  assert.equal(result.error.details?.exchangeStageElapsedMs, 11);
+  assert.equal(result.error.details?.exchangeEvidencePath, "none");
 });

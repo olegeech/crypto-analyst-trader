@@ -52,8 +52,11 @@ import {
 import { PROVISIONAL_M1_MAX_ACCOUNT_EVIDENCE_AGE_MS } from "./policies/provisional-m1.js";
 import {
   createMainnetGetCounts,
+  createMainnetInvocationMetrics,
   snapshotExchangeCredentials,
-  withExchangeCounts,
+  withMainnetInvocationMetrics,
+  type MainnetEvidencePath,
+  type MainnetInvocationMetrics,
 } from "./mainnet-composition-helpers.js";
 
 export interface MainnetOperatorTestPrepareInput {
@@ -65,12 +68,14 @@ export interface MainnetOperatorTestPrepareInput {
   readonly recoveryAttestation?: unknown;
 }
 
-export interface MainnetOperatorTestPreparation {
+export interface MainnetOperatorTestPreparation extends Omit<
+  MainnetInvocationMetrics,
+  "exchangeStage"
+> {
   readonly plan: OperatorMainnetTestPlan;
   readonly exchangeReads: number;
-  readonly exchangeGetCounts?: string;
   readonly exchangeWrites: 0;
-  readonly compactFallbackReason?: string;
+  readonly exchangeStage: "prepare";
 }
 
 function scopeFor(accountId: string) {
@@ -116,6 +121,8 @@ export interface MainnetOperatorTestPreparationDependencies {
   readonly credentialProvider?: Pick<CredentialProvider, "load">;
   readonly openPersistence?: typeof openSqlitePersistence;
   readonly utcClock?: () => number;
+  /** Measurement-only clock; provider and freshness clocks remain unchanged. */
+  readonly stageMonotonicClock?: () => number;
 }
 
 /** GET-only preparation and canonical persistence; it has no private write transport. */
@@ -124,9 +131,39 @@ export async function prepareMainnetOperatorTest(
   dependencies: MainnetOperatorTestPreparationDependencies = {},
 ): Promise<Result<MainnetOperatorTestPreparation>> {
   const getCounts = createMainnetGetCounts();
+  const stageClock =
+    dependencies.stageMonotonicClock ?? (() => performance.now());
+  let stageStarted: number | undefined;
+  try {
+    const value = stageClock();
+    if (Number.isFinite(value)) stageStarted = value;
+  } catch {
+    // Missing measurement time does not affect preparation admission.
+  }
   let compactFallbackReason: string | undefined;
+  let evidencePath: MainnetEvidencePath = "none";
+  const metricsFor = (exchangeReads: number) => {
+    let elapsed: number | undefined;
+    if (stageStarted !== undefined) {
+      try {
+        const current = stageClock();
+        const duration = current - stageStarted;
+        if (Number.isFinite(duration) && duration >= 0) elapsed = duration;
+      } catch {
+        // Timing is diagnostic only and never changes an admission outcome.
+      }
+    }
+    return createMainnetInvocationMetrics({
+      stage: "prepare",
+      exchangeReads,
+      exchangeGetCounts: getCounts.summary(),
+      ...(elapsed === undefined ? {} : { exchangeStageElapsedMs: elapsed }),
+      exchangeEvidencePath: evidencePath,
+      ...(compactFallbackReason === undefined ? {} : { compactFallbackReason }),
+    });
+  };
   const withCounts = <T>(result: Result<T>, reads: number, writes: number) =>
-    withExchangeCounts(
+    withMainnetInvocationMetrics(
       !result.ok && compactFallbackReason
         ? fail(
             domainError(result.error.code, result.error.message, {
@@ -137,7 +174,7 @@ export async function prepareMainnetOperatorTest(
         : result,
       reads,
       writes,
-      getCounts.summary(),
+      metricsFor(reads),
     );
   let exchangeReads = 0;
   if (
@@ -238,6 +275,7 @@ export async function prepareMainnetOperatorTest(
       utcClock: wall,
       monotonicClock: monotonic,
     });
+    evidencePath = "compact";
     accountTransport = compactReader.transport;
     compactAccount = await collectCompactOperatorAccountEvidence(
       compactReader.reader,
@@ -444,6 +482,7 @@ export async function prepareMainnetOperatorTest(
       compactPreparation?.warningCodes;
 
     if (!compactPreparation) {
+      evidencePath = "compact-to-full";
       accountResult = await collectAccountEvidence({
         environment: "mainnet",
         runId,
@@ -665,8 +704,7 @@ export async function prepareMainnetOperatorTest(
             plan: plan.value,
             exchangeReads,
             exchangeWrites: 0,
-            exchangeGetCounts: getCounts.summary(),
-            ...(compactFallbackReason ? { compactFallbackReason } : {}),
+            ...metricsFor(exchangeReads),
           })
         : withCounts(stored, exchangeReads, 0);
     } finally {

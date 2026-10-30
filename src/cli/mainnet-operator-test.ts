@@ -1,4 +1,7 @@
-import { safeMainnetGetCounts } from "../application/mainnet-composition-helpers.js";
+import {
+  mainnetGetCountsStatus,
+  safeMainnetGetCounts,
+} from "../application/mainnet-composition-helpers.js";
 import { readFileSync } from "node:fs";
 import { ACCOUNT_CRITICAL_GROUPS } from "../domain/account/account-evidence-consistency.js";
 import { randomUUID } from "node:crypto";
@@ -281,7 +284,7 @@ function resultCount(
 function printGetCounts(
   output: OutputStream,
   result: unknown,
-  stage: "PREPARE" | "EXECUTE",
+  stage: "PREPARE" | "EXECUTE" | "STATUS",
 ): void {
   const envelope = evidenceRecord(result);
   const payload =
@@ -289,14 +292,56 @@ function printGetCounts(
       ? evidenceRecord(envelope.value)
       : evidenceRecord(evidenceRecord(envelope?.error)?.details);
   const fallback = payload?.compactFallbackReason;
-  if (
-    stage === "PREPARE" &&
-    typeof fallback === "string" &&
-    /^[A-Z][A-Z0-9_]{0,79}$/u.test(fallback)
-  )
-    line(output, `PREPARE_COMPACT_FALLBACK_REASON=${fallback}`);
+  if (typeof fallback === "string" && /^[A-Z][A-Z0-9_]{0,79}$/u.test(fallback))
+    line(output, `${stage}_COMPACT_FALLBACK_REASON=${fallback}`);
+  line(output, `MEASURED_STAGE=${stage}`);
+  const elapsed = payload?.exchangeStageElapsedMs;
+  line(
+    output,
+    `STAGE_ELAPSED_MS=${
+      typeof elapsed === "number" &&
+      Number.isFinite(elapsed) &&
+      elapsed >= 0 &&
+      elapsed <= Number.MAX_SAFE_INTEGER
+        ? String(elapsed)
+        : "UNKNOWN"
+    }`,
+  );
+  const evidencePath =
+    payload?.exchangeEvidencePath ?? (stage === "STATUS" ? "none" : undefined);
+  const allowedEvidencePaths = ["none", "compact", "full", "compact-to-full"];
+  line(
+    output,
+    `EVIDENCE_PATH=${
+      typeof evidencePath === "string" &&
+      allowedEvidencePaths.includes(evidencePath)
+        ? evidencePath.toUpperCase().replaceAll("-", "_")
+        : "UNKNOWN"
+    }`,
+  );
   const counts = safeMainnetGetCounts(payload?.exchangeGetCounts);
-  if (counts !== undefined) line(output, `GET_COUNTS_${stage}=${counts}`);
+  const calculatedStatus = mainnetGetCountsStatus(
+    payload?.exchangeGetCounts,
+    payload?.exchangeReads,
+  );
+  const declaredStatus = payload?.exchangeGetCountsStatus;
+  const status =
+    calculatedStatus === "mismatch" || declaredStatus === "mismatch"
+      ? "MISMATCH"
+      : calculatedStatus === "available" &&
+          (declaredStatus === undefined || declaredStatus === "available")
+        ? "AVAILABLE"
+        : "UNAVAILABLE";
+  const statusKey =
+    stage === "STATUS"
+      ? "GET_COUNTS_STATUS_VALIDATION"
+      : `GET_COUNTS_${stage}_STATUS`;
+  line(output, `${statusKey}=${status}`);
+  if (status === "AVAILABLE" && counts !== undefined)
+    line(
+      output,
+      `${stage === "STATUS" ? "GET_COUNTS_STATUS" : `GET_COUNTS_${stage}`}=${counts}`,
+    );
 }
 
 function evidenceText(value: unknown): string {
@@ -955,6 +1000,7 @@ function printOperatorFailureDiagnostic(
 }
 
 function printStatusResult(output: OutputStream, result: unknown): number {
+  printGetCounts(output, result, "STATUS");
   line(output, "EXCHANGE_WRITES=0");
   if (typeof result !== "object" || result === null || !("ok" in result)) {
     line(output, "LIFECYCLE_OUTCOME=UNKNOWN");

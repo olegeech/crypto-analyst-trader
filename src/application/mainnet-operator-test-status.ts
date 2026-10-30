@@ -19,6 +19,7 @@ import type {
   OperatorMainnetTestSnapshot,
 } from "../ports/operator-mainnet-test-persistence.js";
 import type { HaltState, PersistencePort } from "../ports/persistence.js";
+import type { MainnetInvocationMetrics } from "./mainnet-composition-helpers.js";
 
 const MAX_OBSERVATION_AGE_MS = 60_000;
 
@@ -67,7 +68,7 @@ export interface MainnetOperatorTestStatusInput {
   readonly actor?: unknown;
 }
 
-export interface MainnetOperatorTestStatusResult {
+export interface MainnetOperatorTestStatusResult extends Partial<MainnetInvocationMetrics> {
   readonly sourceId: string;
   readonly lifecycleOutcome: OperatorMainnetTestLifecycleOutcome;
   readonly cleanupStatus: OperatorMainnetTestCleanupStatus;
