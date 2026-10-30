@@ -8,8 +8,13 @@ import { openSqliteConnection } from "../src/adapters/sqlite/connection.js";
 import { createSqliteHistoryAccountingWalletAnchorStore } from "../src/adapters/sqlite/history-accounting-anchor-store.js";
 import { createSqliteHistoryStore } from "../src/adapters/sqlite/history-store.js";
 import { reconcileHistoryAccounting } from "../src/application/history-accounting-composition.js";
-import { validateHistoryAccountingProof as validateProof } from "../src/application/history-accounting-proof.js";
+import {
+  validateHistoryAccountingProof as validateProof,
+  type HistoryAccountingProofRequestV2,
+} from "../src/application/history-accounting-proof.js";
 import { createHistorySourceFact } from "../src/domain/accounting/history-source-fact.js";
+import { domainError } from "../src/domain/shared/errors.js";
+import { OPERATOR_MAINNET_TEST_POLICY_VERSION } from "../src/domain/execution/operator-mainnet-test-plan.js";
 import {
   canonicalSerialize,
   hashCanonical,
@@ -27,6 +32,8 @@ import {
   openingBoundary,
   walletAnchor,
 } from "./history-accounting-fixtures.js";
+import { resolveHistoryAccountingScope } from "../src/application/history-accounting-scope.js";
+import { PROVISIONAL_M1_POLICY_VERSION } from "../src/application/policies/provisional-m1.js";
 
 const runtime = { nodeVersion: "22.22.3", sqliteVersion: "3.51.3" } as const;
 const currentTime = "2026-11-01T10:00:00.000Z" as UtcTimestamp;
@@ -43,7 +50,11 @@ function validateHistoryAccountingProof(
   return validateProof(request, { ...dependencies, anchorKeyProvider });
 }
 
-function transferFact(transactionId: string, providerEventTime: string) {
+function transferFact(
+  transactionId: string,
+  providerEventTime: string,
+  currency = "USDT",
+) {
   const fact = createHistorySourceFact({
     factKind: "transaction",
     source: "transaction-log",
@@ -51,7 +62,7 @@ function transferFact(transactionId: string, providerEventTime: string) {
     category: null,
     symbol: null,
     side: null,
-    currency: "USDT",
+    currency,
     type: "TRANSFER_IN",
     transSubType: "MANUAL",
     qty: null,
@@ -78,7 +89,7 @@ function transferFact(transactionId: string, providerEventTime: string) {
   return fact.value;
 }
 
-async function setup() {
+async function setup(scoped = false, completeCoverage = true) {
   const root = mkdtempSync(join(tmpdir(), "history-accounting-proof-"));
   const databasePath = join(root, "account.db");
   const clock = { now: () => currentTime };
@@ -99,12 +110,21 @@ async function setup() {
     connection.value,
     HISTORY_ACCOUNTING_TEST_AUTH_KEY,
   );
+  const openingBase = walletAnchor("opening", openingBoundary);
+  const closingBase = walletAnchor("closing", closingBoundary);
+  const withTechnicalBalance = <T extends typeof openingBase>(base: T) =>
+    scoped
+      ? {
+          ...base,
+          assets: [...base.assets, { ...base.assets[0]!, coin: "MNT" }],
+        }
+      : base;
   const openingAnchor = capturedWalletAnchorForStoreTest({
-    ...walletAnchor("opening", openingBoundary),
+    ...withTechnicalBalance(openingBase),
     anchorId: "proof-opening",
   });
   const closingAnchor = capturedWalletAnchorForStoreTest({
-    ...walletAnchor("closing", closingBoundary),
+    ...withTechnicalBalance(closingBase),
     anchorId: "proof-closing",
   });
   const opening = anchorStore.append({ anchor: openingAnchor });
@@ -118,6 +138,7 @@ async function setup() {
   const toMs = Date.parse(closingAnchor.capture.providerTimeAfter);
   const historyStore = createSqliteHistoryStore(connection.value);
   for (const source of HISTORY_READ_SOURCES) {
+    if (!completeCoverage && source === "order-history") continue;
     const filters = {
       ...(source === "transaction-log"
         ? { accountType: "UNIFIED" }
@@ -144,24 +165,29 @@ async function setup() {
   }
   connection.value.close();
 
-  const report = reconcileHistoryAccounting(
+  const reconciled = await reconcileHistoryAccounting(
     {
       environment: "demo",
       databasePath,
       openingAnchorId: opening.value.anchorId,
       closingAnchorId: closing.value.anchorId,
+      ...(scoped
+        ? { accountingPolicyVersion: OPERATOR_MAINNET_TEST_POLICY_VERSION }
+        : {}),
     },
     { openConnection: open, anchorKeyProvider },
   );
-  const reconciled = await report;
   assert.equal(
     reconciled.ok,
     true,
     reconciled.ok ? "" : reconciled.error.message,
   );
   if (!reconciled.ok) throw new Error("test report could not be reconciled");
-  assert.equal(reconciled.value.status, "ACCOUNTING_READY");
-  const request = {
+  assert.equal(
+    reconciled.value.status,
+    completeCoverage ? "ACCOUNTING_READY" : "NOT_READY",
+  );
+  const requestBase = {
     environment: "demo" as const,
     databasePath,
     reportId: reconciled.value.reportId,
@@ -170,6 +196,22 @@ async function setup() {
     closingAnchorId: closing.value.anchorId,
     dependencyHash: reconciled.value.dependencyHash,
   };
+  const request = scoped
+    ? (() => {
+        const accountingScope = resolveHistoryAccountingScope(
+          OPERATOR_MAINNET_TEST_POLICY_VERSION,
+        );
+        assert.equal(accountingScope.ok, true);
+        if (!accountingScope.ok)
+          throw new Error("approved accounting scope did not resolve");
+        return {
+          ...requestBase,
+          schemaVersion: "history-accounting-proof-request/v2" as const,
+          accountingScope: accountingScope.value,
+          accountingScopeHash: accountingScope.value.scopeHash,
+        };
+      })()
+    : requestBase;
   return {
     root,
     databasePath,
@@ -179,6 +221,58 @@ async function setup() {
     coverageFromMs: fromMs,
     coverageToMs: toMs,
   };
+}
+
+function asScopedRequest(
+  fixture: Awaited<ReturnType<typeof setup>>,
+): HistoryAccountingProofRequestV2 {
+  assert.ok("schemaVersion" in fixture.request);
+  if (!("schemaVersion" in fixture.request))
+    throw new Error("test fixture did not create a scoped proof request");
+  return fixture.request as HistoryAccountingProofRequestV2;
+}
+
+function appendTransaction(
+  fixture: Awaited<ReturnType<typeof setup>>,
+  transactionId: string,
+  currency: string,
+) {
+  const connection = fixture.open({
+    environment: "demo",
+    databasePath: fixture.databasePath,
+  });
+  assert.equal(connection.ok, true);
+  if (!connection.ok) throw new Error("test database could not be reopened");
+  const store = createSqliteHistoryStore(connection.value);
+  const coverage = store.listCoverage(historyAccountingScope);
+  assert.equal(coverage.ok, true, coverage.ok ? "" : coverage.error.message);
+  if (!coverage.ok) throw new Error("test history coverage is unavailable");
+  const checkpoint = coverage.value.find(
+    (row) =>
+      row.source === "transaction-log" &&
+      row.window.fromMs === fixture.coverageFromMs &&
+      row.window.toMs === fixture.coverageToMs,
+  );
+  assert.ok(checkpoint);
+  if (!checkpoint) throw new Error("test transaction checkpoint is missing");
+  const committed = store.commitPage({
+    scope: checkpoint.scope,
+    source: checkpoint.source,
+    filters: checkpoint.filters,
+    window: checkpoint.window,
+    expectedRevision: checkpoint.revision,
+    cursor: checkpoint.cursor,
+    nextCursor: checkpoint.cursor,
+    facts: [
+      transferFact(
+        transactionId,
+        new Date(Date.parse(openingBoundary) + 5 * 60_000).toISOString(),
+        currency,
+      ),
+    ],
+  });
+  connection.value.close();
+  assert.equal(committed.ok, true, committed.ok ? "" : committed.error.message);
 }
 
 test("proof validation accepts an exact persisted current report and does not expire historical anchors by default", async () => {
@@ -500,6 +594,360 @@ test("irrelevant out-of-epoch coverage preserves proof, while relevant coverage 
     });
     assert.equal(
       invalidated.ok && invalidated.value.reasonCodes[0],
+      "RELEVANT_EVIDENCE_CHANGED",
+    );
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("scoped v2 proof accepts only the exact policy descriptor and reports its scope", async () => {
+  const fixture = await setup(true);
+  try {
+    const request = asScopedRequest(fixture);
+    const accepted = await validateHistoryAccountingProof(request, {
+      openConnection: fixture.open,
+    });
+    assert.equal(accepted.ok, true, accepted.ok ? "" : accepted.error.message);
+    assert.equal(accepted.ok && accepted.value.decision, "ACCEPT");
+    assert.equal(accepted.ok && accepted.value.authority, "evidence-only");
+    assert.ok(accepted.ok && "schemaVersion" in accepted.value);
+    assert.deepEqual(
+      accepted.ok && "accountingScope" in accepted.value
+        ? accepted.value.accountingScope?.nativeCurrencies
+        : undefined,
+      ["USDT"],
+    );
+    assert.equal(
+      accepted.ok && "accountingScopeHash" in accepted.value
+        ? accepted.value.accountingScopeHash
+        : undefined,
+      request.accountingScopeHash,
+    );
+
+    const wrongAccount = await validateHistoryAccountingProof(
+      {
+        ...request,
+        expectedScope: {
+          ...request.expectedScope,
+          accountId: `sha256:${"b".repeat(64)}`,
+        },
+      },
+      { openConnection: fixture.open },
+    );
+    assert.equal(
+      wrongAccount.ok && wrongAccount.value.reasonCodes[0],
+      "SCOPE_MISMATCH",
+    );
+    const wrongEpoch = await validateHistoryAccountingProof(
+      { ...request, closingAnchorId: "different-closing-anchor" },
+      { openConnection: fixture.open },
+    );
+    assert.equal(
+      wrongEpoch.ok && wrongEpoch.value.reasonCodes[0],
+      "EPOCH_MISMATCH",
+    );
+    const requestedCoverageAndFreshness = await validateHistoryAccountingProof(
+      {
+        ...request,
+        coverageThrough: closingBoundary,
+        freshness: { now: currentTime, maxAgeMs: 5 * 24 * 60 * 60 * 1_000 },
+      },
+      { openConnection: fixture.open },
+    );
+    assert.equal(
+      requestedCoverageAndFreshness.ok &&
+        requestedCoverageAndFreshness.value.decision,
+      "ACCEPT",
+    );
+    const stale = await validateHistoryAccountingProof(
+      {
+        ...request,
+        freshness: { now: currentTime, maxAgeMs: 0 },
+      },
+      { openConnection: fixture.open },
+    );
+    assert.equal(stale.ok && stale.value.reasonCodes[0], "FRESHNESS_EXCEEDED");
+
+    const otherPolicy = resolveHistoryAccountingScope(
+      PROVISIONAL_M1_POLICY_VERSION,
+    );
+    assert.equal(otherPolicy.ok, true);
+    if (!otherPolicy.ok) return;
+    const wrongPolicy = await validateHistoryAccountingProof(
+      {
+        ...request,
+        accountingScope: otherPolicy.value,
+        accountingScopeHash: otherPolicy.value.scopeHash,
+      },
+      { openConnection: fixture.open },
+    );
+    assert.equal(
+      wrongPolicy.ok && wrongPolicy.value.reasonCodes[0],
+      "ACCOUNTING_SCOPE_MISMATCH",
+    );
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("scoped proof refuses when anchor authentication is unavailable or invalid", async () => {
+  const fixture = await setup(true);
+  try {
+    const request = asScopedRequest(fixture);
+    const unavailable = await validateProof(request, {
+      openConnection: fixture.open,
+      anchorKeyProvider: {
+        async read() {
+          return {
+            ok: false as const,
+            error: domainError("INVALID_VALUE", "anchor key unavailable"),
+          };
+        },
+      },
+    });
+    assert.equal(
+      unavailable.ok && unavailable.value.reasonCodes[0],
+      "ANCHOR_INTEGRITY_INVALID",
+    );
+
+    const invalidAuthenticator = await validateProof(request, {
+      openConnection: fixture.open,
+      anchorKeyProvider: {
+        async read() {
+          return {
+            ok: true as const,
+            value: new Uint8Array(32).fill(0x41),
+          };
+        },
+      },
+    });
+    assert.equal(
+      invalidAuthenticator.ok && invalidAuthenticator.value.reasonCodes[0],
+      "ANCHOR_INTEGRITY_INVALID",
+    );
+
+    const connection = fixture.open({
+      environment: "demo",
+      databasePath: fixture.databasePath,
+    });
+    assert.equal(connection.ok, true);
+    if (!connection.ok) return;
+    connection.value.db.exec(
+      "DROP TRIGGER history_accounting_wallet_anchors_no_delete",
+    );
+    connection.value.db.exec("PRAGMA foreign_keys = OFF");
+    connection.value.db
+      .prepare(
+        "DELETE FROM history_accounting_wallet_anchors WHERE anchor_id = ?",
+      )
+      .run(request.openingAnchorId);
+    connection.value.close();
+    const missingAnchor = await validateHistoryAccountingProof(request, {
+      openConnection: fixture.open,
+    });
+    assert.equal(
+      missingAnchor.ok && missingAnchor.value.reasonCodes[0],
+      "ANCHOR_NOT_FOUND",
+    );
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("proof replay refuses a v2 report with mixed nested epoch versions", async () => {
+  const fixture = await setup(true);
+  try {
+    const request = asScopedRequest(fixture);
+    const connection = fixture.open({
+      environment: "demo",
+      databasePath: fixture.databasePath,
+    });
+    assert.equal(connection.ok, true);
+    if (!connection.ok) return;
+    const row = connection.value.db
+      .prepare(
+        "SELECT canonical_json FROM history_accounting_reports WHERE report_id = ?",
+      )
+      .get(request.reportId) as { canonical_json?: unknown } | undefined;
+    assert.equal(typeof row?.canonical_json, "string");
+    if (typeof row?.canonical_json !== "string") return;
+    const corrupted = JSON.parse(row.canonical_json) as Record<string, unknown>;
+    const epoch = corrupted.epoch as Record<string, unknown>;
+    corrupted.epoch = {
+      ...epoch,
+      schemaVersion: "history-accounting-epoch-projection/v1",
+    };
+    delete corrupted.contentHash;
+    const contentHash = hashCanonical(corrupted);
+    assert.equal(contentHash.ok, true);
+    if (!contentHash.ok) return;
+    corrupted.contentHash = contentHash.value;
+    const canonical = canonicalSerialize(corrupted);
+    assert.equal(canonical.ok, true);
+    if (!canonical.ok) return;
+    connection.value.db.exec(
+      "DROP TRIGGER history_accounting_reports_no_update",
+    );
+    connection.value.db
+      .prepare(
+        "UPDATE history_accounting_reports SET content_hash = ?, canonical_json = ? WHERE report_id = ?",
+      )
+      .run(contentHash.value, canonical.value, request.reportId);
+    connection.value.close();
+
+    const refused = await validateHistoryAccountingProof(request, {
+      openConnection: fixture.open,
+    });
+    assert.equal(
+      refused.ok && refused.value.reasonCodes[0],
+      "REPORT_INTEGRITY_INVALID",
+    );
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("legacy and scoped proof requests cannot promote reports across versions", async () => {
+  const scopedFixture = await setup(true);
+  try {
+    const scoped = asScopedRequest(scopedFixture);
+    const legacyRequest = {
+      environment: scoped.environment,
+      databasePath: scoped.databasePath,
+      reportId: scoped.reportId,
+      expectedScope: scoped.expectedScope,
+      openingAnchorId: scoped.openingAnchorId,
+      closingAnchorId: scoped.closingAnchorId,
+      dependencyHash: scoped.dependencyHash,
+      ...(scoped.coverageThrough === undefined
+        ? {}
+        : { coverageThrough: scoped.coverageThrough }),
+      ...(scoped.freshness === undefined
+        ? {}
+        : { freshness: scoped.freshness }),
+    };
+    const legacyAgainstScoped = await validateHistoryAccountingProof(
+      legacyRequest,
+      { openConnection: scopedFixture.open },
+    );
+    assert.equal(
+      legacyAgainstScoped.ok && legacyAgainstScoped.value.reasonCodes[0],
+      "REPORT_VERSION_MISMATCH",
+    );
+  } finally {
+    rmSync(scopedFixture.root, { recursive: true, force: true });
+  }
+
+  const legacyFixture = await setup();
+  try {
+    const accountingScope = resolveHistoryAccountingScope(
+      OPERATOR_MAINNET_TEST_POLICY_VERSION,
+    );
+    assert.equal(accountingScope.ok, true);
+    if (!accountingScope.ok) return;
+    const scopedAgainstLegacy = await validateHistoryAccountingProof(
+      {
+        ...legacyFixture.request,
+        schemaVersion: "history-accounting-proof-request/v2",
+        accountingScope: accountingScope.value,
+        accountingScopeHash: accountingScope.value.scopeHash,
+      },
+      { openConnection: legacyFixture.open },
+    );
+    assert.equal(
+      scopedAgainstLegacy.ok && scopedAgainstLegacy.value.reasonCodes[0],
+      "REPORT_VERSION_MISMATCH",
+    );
+  } finally {
+    rmSync(legacyFixture.root, { recursive: true, force: true });
+  }
+});
+
+test("scoped proof rejects forged capabilities, unknown versions and NOT_READY reports", async () => {
+  const fixture = await setup(true);
+  try {
+    const request = asScopedRequest(fixture);
+    const forgedPayload = {
+      schemaVersion: request.accountingScope.schemaVersion,
+      policyIdentity: request.accountingScope.policyIdentity,
+      policyVersion: request.accountingScope.policyVersion,
+      productKind: request.accountingScope.productKind,
+      accountingContractVersion:
+        request.accountingScope.accountingContractVersion,
+      nativeCurrencies: ["USDC", "USDT"],
+    };
+    const forgedHash = hashCanonical(forgedPayload);
+    assert.equal(forgedHash.ok, true);
+    if (!forgedHash.ok) return;
+    const forgedScope = {
+      ...forgedPayload,
+      scopeHash: forgedHash.value,
+    };
+    const forged = await validateHistoryAccountingProof(
+      {
+        ...request,
+        accountingScope: forgedScope,
+        accountingScopeHash: forgedScope.scopeHash,
+      },
+      { openConnection: fixture.open },
+    );
+    assert.equal(
+      forged.ok && forged.value.reasonCodes[0],
+      "ACCOUNTING_SCOPE_INVALID",
+    );
+
+    const unsupported = await validateHistoryAccountingProof(
+      {
+        ...request,
+        schemaVersion: "history-accounting-proof-request/v99",
+      } as unknown as HistoryAccountingProofRequestV2,
+      { openConnection: fixture.open },
+    );
+    assert.equal(
+      unsupported.ok && unsupported.value.reasonCodes[0],
+      "UNSUPPORTED_PROOF_VERSION",
+    );
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+
+  const incompleteFixture = await setup(true, false);
+  try {
+    const notReady = await validateHistoryAccountingProof(
+      asScopedRequest(incompleteFixture),
+      { openConnection: incompleteFixture.open },
+    );
+    assert.equal(
+      notReady.ok && notReady.value.reasonCodes[0],
+      "REPORT_NOT_READY",
+    );
+  } finally {
+    rmSync(incompleteFixture.root, { recursive: true, force: true });
+  }
+});
+
+test("scoped proof ignores an independent MNT transfer but invalidates for new USDT evidence", async () => {
+  const fixture = await setup(true);
+  try {
+    const request = asScopedRequest(fixture);
+    appendTransaction(fixture, "technical-mnt-transfer", "MNT");
+    const afterTechnicalArrival = await validateHistoryAccountingProof(
+      request,
+      { openConnection: fixture.open },
+    );
+    assert.equal(
+      afterTechnicalArrival.ok && afterTechnicalArrival.value.decision,
+      "ACCEPT",
+      JSON.stringify(afterTechnicalArrival),
+    );
+
+    appendTransaction(fixture, "late-usdt-transfer", "USDT");
+    const afterRelevantArrival = await validateHistoryAccountingProof(request, {
+      openConnection: fixture.open,
+    });
+    assert.equal(
+      afterRelevantArrival.ok && afterRelevantArrival.value.reasonCodes[0],
       "RELEVANT_EVIDENCE_CHANGED",
     );
   } finally {
