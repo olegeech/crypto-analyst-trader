@@ -1,11 +1,20 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import { createSqliteHistoryAccountingWalletAnchorStore } from "../src/adapters/sqlite/history-accounting-anchor-store.js";
+import { createSqliteHistoryStore } from "../src/adapters/sqlite/history-store.js";
 import { createSqliteHistoryAccountingReportStore } from "../src/adapters/sqlite/history-accounting-report-store.js";
 import { applyMigrations } from "../src/adapters/sqlite/migrations.js";
 import { registerTrustedClock } from "../src/adapters/sqlite/sqlite-helpers.js";
+import { calculateHistoryAccountingReportFromLocalEvidence } from "../src/application/history-accounting-composition.js";
+import {
+  canonicalSerialize,
+  hashCanonical,
+} from "../src/domain/identity/canonical-serialization.js";
 import {
   createHistoryAccountingReport,
   decodeHistoryAccountingReport,
@@ -13,16 +22,55 @@ import {
 } from "../src/application/history-accounting-report.js";
 import type { UtcTimestamp } from "../src/domain/shared/time.js";
 import type { SqliteConnection } from "../src/adapters/sqlite/connection.js";
+import type { HistoryAccountingReportRecord } from "../src/ports/history-accounting-report-store.js";
+import { OPERATOR_MAINNET_TEST_POLICY_VERSION } from "../src/domain/execution/operator-mainnet-test-plan.js";
 import {
   HISTORY_ACCOUNTING_TEST_AUTH_KEY,
   completeReportInput,
   capturedWalletAnchorForStoreTest,
   closingBoundary,
+  completeHistoryCoverage,
   openingBoundary,
+  historyAccountingScope,
   walletAnchor,
 } from "./history-accounting-fixtures.js";
 
 const runtime = { nodeVersion: "22.22.3", sqliteVersion: "3.51.3" } as const;
+
+function rehashedReportRecord(
+  record: HistoryAccountingReportRecord,
+  mutate: (report: Record<string, unknown>) => void,
+) {
+  const report = JSON.parse(record.canonicalJson) as Record<string, unknown>;
+  mutate(report);
+  delete report.contentHash;
+  const identity = hashCanonical({
+    schemaVersion: report.schemaVersion,
+    scope: report.scope,
+    accountingScope: report.accountingScope,
+    dependencyHash: report.dependencyHash,
+  });
+  assert.equal(identity.ok, true);
+  if (!identity.ok)
+    throw new Error("mutated report identity could not be hashed");
+  report.reportId = `history-accounting-report:${identity.value.slice(7)}`;
+  const contentHash = hashCanonical(report);
+  assert.equal(contentHash.ok, true);
+  if (!contentHash.ok)
+    throw new Error("mutated report content could not be hashed");
+  report.contentHash = contentHash.value;
+  const canonicalJson = canonicalSerialize(report);
+  assert.equal(canonicalJson.ok, true);
+  if (!canonicalJson.ok)
+    throw new Error("mutated report could not be serialized");
+  return {
+    ...record,
+    reportId: report.reportId as string,
+    dependencyHash: report.dependencyHash as string,
+    contentHash: contentHash.value,
+    canonicalJson: canonicalJson.value,
+  };
+}
 
 function database() {
   const db = new DatabaseSync(":memory:");
@@ -109,6 +157,190 @@ test("report store is append-only, idempotent, scope-bound and verifies readback
     );
   } finally {
     db.close();
+  }
+});
+
+test("composition persists and reopens a scoped v2 report with MNT excluded", () => {
+  const root = mkdtempSync(join(tmpdir(), "history-accounting-v2-store-"));
+  const path = join(root, "reports.sqlite");
+  const makeConnection = (db: DatabaseSync): SqliteConnection => ({
+    db,
+    path,
+    environment: "demo",
+    runtime,
+    clock: { now: () => "2026-10-28T09:00:00.000Z" as UtcTimestamp },
+    close: () => db.close(),
+  });
+  let db = new DatabaseSync(path);
+  let connection = makeConnection(db);
+  try {
+    db.exec("PRAGMA foreign_keys = ON");
+    const migrations = applyMigrations(db);
+    assert.equal(migrations.ok, true);
+    registerTrustedClock(db, {
+      now: () => "2026-10-28T09:00:00.000Z" as UtcTimestamp,
+    });
+    const anchorStore = createSqliteHistoryAccountingWalletAnchorStore(
+      connection,
+      HISTORY_ACCOUNTING_TEST_AUTH_KEY,
+    );
+    const openingBase = walletAnchor("opening", openingBoundary);
+    const closingBase = walletAnchor("closing", closingBoundary);
+    const openingMnt = { ...openingBase.assets[0]!, coin: "MNT" as const };
+    const closingMnt = { ...closingBase.assets[0]!, coin: "MNT" as const };
+    const opening = anchorStore.append({
+      anchor: capturedWalletAnchorForStoreTest({
+        ...openingBase,
+        anchorId: "scoped-opening-anchor",
+        assets: [...openingBase.assets, openingMnt],
+      }),
+    });
+    const closing = anchorStore.append({
+      anchor: capturedWalletAnchorForStoreTest({
+        ...closingBase,
+        anchorId: "scoped-closing-anchor",
+        assets: [...closingBase.assets, closingMnt],
+      }),
+    });
+    assert.equal(opening.ok, true, opening.ok ? "" : opening.error.message);
+    assert.equal(closing.ok, true, closing.ok ? "" : closing.error.message);
+    if (!opening.ok || !closing.ok) return;
+
+    const history = createSqliteHistoryStore(connection);
+    for (const checkpoint of completeHistoryCoverage()) {
+      const committed = history.commitPage({
+        scope: checkpoint.scope,
+        source: checkpoint.source,
+        filters: checkpoint.filters,
+        window: checkpoint.window,
+        expectedRevision: 0,
+        cursor: null,
+        nextCursor: null,
+        facts: [],
+      });
+      assert.equal(
+        committed.ok,
+        true,
+        committed.ok ? "" : committed.error.message,
+      );
+    }
+
+    const calculated = calculateHistoryAccountingReportFromLocalEvidence(
+      connection,
+      historyAccountingScope,
+      opening.value,
+      closing.value,
+      OPERATOR_MAINNET_TEST_POLICY_VERSION,
+    );
+    assert.equal(
+      calculated.ok,
+      true,
+      calculated.ok ? "" : calculated.error.message,
+    );
+    if (!calculated.ok) return;
+    assert.equal(
+      calculated.value.schemaVersion,
+      "history-accounting-reconciliation-report/v2",
+    );
+    assert.equal(calculated.value.status, "ACCOUNTING_READY");
+    assert.deepEqual(
+      calculated.value.epoch.currencies.map(({ currency }) => currency),
+      ["USDT"],
+    );
+    const encoded = encodeHistoryAccountingReport(calculated.value);
+    assert.equal(encoded.ok, true, encoded.ok ? "" : encoded.error.message);
+    if (!encoded.ok) return;
+    const store = createSqliteHistoryAccountingReportStore(connection);
+    const mixedVersion = rehashedReportRecord(encoded.value, (report) => {
+      const epoch = report.epoch as Record<string, unknown>;
+      report.epoch = {
+        ...epoch,
+        schemaVersion: "history-accounting-epoch-projection/v1",
+      };
+    });
+    assert.equal(store.append(mixedVersion).ok, false);
+    assert.equal(
+      db
+        .prepare("SELECT COUNT(*) AS count FROM history_accounting_reports")
+        .get()?.count,
+      0,
+    );
+    const persisted = store.append(encoded.value);
+    assert.equal(
+      persisted.ok,
+      true,
+      persisted.ok ? "" : persisted.error.message,
+    );
+
+    connection.close();
+    db = new DatabaseSync(path);
+    connection = makeConnection(db);
+    const reopenedStore = createSqliteHistoryAccountingReportStore(connection);
+    const reopened = reopenedStore.readById(encoded.value.reportId);
+    assert.equal(reopened.ok, true, reopened.ok ? "" : reopened.error.message);
+    assert.ok(reopened.ok && reopened.value);
+    if (!reopened.ok || !reopened.value) return;
+    const decoded = decodeHistoryAccountingReport(reopened.value);
+    assert.equal(decoded.ok, true, decoded.ok ? "" : decoded.error.message);
+    assert.deepEqual(decoded.ok && decoded.value, calculated.value);
+
+    const reopenedAnchors = createSqliteHistoryAccountingWalletAnchorStore(
+      connection,
+      HISTORY_ACCOUNTING_TEST_AUTH_KEY,
+    );
+    const replayOpening = reopenedAnchors.readById(opening.value.anchorId);
+    const replayClosing = reopenedAnchors.readById(closing.value.anchorId);
+    assert.equal(replayOpening.ok, true);
+    assert.equal(replayClosing.ok, true);
+    if (
+      !replayOpening.ok ||
+      !replayOpening.value ||
+      !replayClosing.ok ||
+      !replayClosing.value
+    )
+      return;
+    const replay = calculateHistoryAccountingReportFromLocalEvidence(
+      connection,
+      historyAccountingScope,
+      replayOpening.value,
+      replayClosing.value,
+      OPERATOR_MAINNET_TEST_POLICY_VERSION,
+    );
+    assert.equal(replay.ok, true, replay.ok ? "" : replay.error.message);
+    const replayRecord = replay.ok
+      ? encodeHistoryAccountingReport(replay.value)
+      : undefined;
+    assert.equal(
+      replayRecord?.ok,
+      true,
+      replayRecord?.ok ? "" : replayRecord?.error.message,
+    );
+    assert.equal(
+      replayRecord?.ok && replayRecord.value.canonicalJson,
+      encoded.value.canonicalJson,
+    );
+
+    const legacy = createHistoryAccountingReport(
+      completeReportInput({ opening: opening.value, closing: closing.value }),
+    );
+    assert.equal(legacy.ok, true, legacy.ok ? "" : legacy.error.message);
+    const legacyRecord = legacy.ok
+      ? encodeHistoryAccountingReport(legacy.value)
+      : undefined;
+    assert.equal(legacyRecord?.ok, true);
+    if (legacyRecord?.ok) {
+      assert.notEqual(legacyRecord.value.reportId, encoded.value.reportId);
+      assert.equal(reopenedStore.append(legacyRecord.value).ok, true);
+      assert.equal(
+        db
+          .prepare("SELECT COUNT(*) AS count FROM history_accounting_reports")
+          .get()?.count,
+        2,
+      );
+    }
+  } finally {
+    if (db.isOpen) db.close();
+    rmSync(root, { recursive: true, force: true });
   }
 });
 
