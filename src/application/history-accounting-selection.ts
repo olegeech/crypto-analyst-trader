@@ -11,13 +11,16 @@ import { deepFreeze } from "../domain/shared/deep-freeze.js";
 import { domainError } from "../domain/shared/errors.js";
 import { fail, ok, type Result } from "../domain/shared/result.js";
 import { parseUtcTimestamp, type UtcTimestamp } from "../domain/shared/time.js";
+import { requireHash } from "../domain/shared/validation.js";
 import { HISTORY_READ_SOURCES } from "../ports/history-read.js";
 import type {
   HistoryConflictSummary,
+  HistoryCheckpoint,
   HistoryStoreScope,
   HistoryStoredObservation,
 } from "../ports/history-store.js";
 import {
+  compareObservationOrder,
   selectCanonicalHistoryEvidence,
   type HistoryAccountingSelectionConflict,
 } from "./history-accounting-normalization.js";
@@ -84,7 +87,53 @@ export interface ScopedHistoryAccountingEvidence {
   readonly exclusionsTruncated: boolean;
 }
 
-const SHA256 = /^sha256:[a-f0-9]{64}$/u;
+export function ignoreProvenIndependentScopedConflicts(
+  checkpoints: readonly HistoryCheckpoint[],
+  conflicts: readonly HistoryConflictSummary[],
+  selection: ScopedHistoryAccountingEvidence,
+): readonly HistoryCheckpoint[] {
+  const dispositionByConflictId = new Map(
+    selection.conflicts.flatMap((disposition) =>
+      disposition.conflictIds.map(
+        (id) => [id, disposition.disposition] as const,
+      ),
+    ),
+  );
+  return checkpoints.map((checkpoint) => {
+    // Ingestion marks even a terminal conflict page partial; scoped coverage
+    // may restore traversal only after proving every located conflict below.
+    const terminalConflict =
+      checkpoint.cursor === null &&
+      (checkpoint.status === "traversed" || checkpoint.status === "partial");
+    if (
+      checkpoint.reasonCode !== "SOURCE_CONFLICT" ||
+      !terminalConflict ||
+      !Number.isSafeInteger(checkpoint.conflictCount) ||
+      checkpoint.conflictCount <= 0
+    )
+      return checkpoint;
+    const located = conflicts.filter(
+      (conflict) =>
+        conflict.source === checkpoint.source &&
+        conflict.windows?.some(
+          ({ filterHash, window }) =>
+            filterHash === checkpoint.filterHash &&
+            window.fromMs === checkpoint.window.fromMs &&
+            window.toMs === checkpoint.window.toMs,
+        ),
+    );
+    if (
+      located.length !== checkpoint.conflictCount ||
+      located.some((conflict) => {
+        const disposition = dispositionByConflictId.get(conflict.conflictId);
+        return disposition !== "independent-excluded";
+      })
+    )
+      return checkpoint;
+    return { ...checkpoint, status: "traversed", reasonCode: null };
+  });
+}
+
 const MAX_EXCLUSIONS = 128;
 const SAFE_OUTSIDE_TYPES = new Set([
   "TRANSFER_IN",
@@ -168,22 +217,6 @@ function inEpochOrBoundary(
   const opening = timestampMs(epoch.openingBoundary)!;
   const closing = timestampMs(epoch.closingBoundary)!;
   return (time >= opening && time <= closing) || inCaptureBracket(time, epoch);
-}
-
-function compareObservation(
-  left: HistoryStoredObservation,
-  right: HistoryStoredObservation,
-): number {
-  return (
-    left.source.localeCompare(right.source) ||
-    left.providerEventTime.localeCompare(right.providerEventTime) ||
-    left.eventIdentity.localeCompare(right.eventIdentity) ||
-    (left.providerRevisionTime ?? "").localeCompare(
-      right.providerRevisionTime ?? "",
-    ) ||
-    left.contentHash.localeCompare(right.contentHash) ||
-    left.observationId.localeCompare(right.observationId)
-  );
 }
 
 function groupTransactions(
@@ -302,10 +335,8 @@ function validConflict(value: unknown): value is HistoryConflictSummary {
     !(HISTORY_READ_SOURCES as readonly string[]).includes(conflict.source) ||
     typeof conflict.eventIdentity !== "string" ||
     conflict.eventIdentity.length === 0 ||
-    typeof conflict.existingHash !== "string" ||
-    !SHA256.test(conflict.existingHash) ||
-    typeof conflict.incomingHash !== "string" ||
-    !SHA256.test(conflict.incomingHash) ||
+    !requireHash(conflict.existingHash, "existingHash").ok ||
+    !requireHash(conflict.incomingHash, "incomingHash").ok ||
     ![
       "IMMUTABLE_ID_CONTENT_CHANGED",
       "ORDER_REVISION_CONTENT_CHANGED",
@@ -340,23 +371,18 @@ function conflictInEpoch(
   rows: readonly HistoryStoredObservation[],
   epoch: ScopedHistoryAccountingEpochBounds,
 ): boolean {
+  const overlapsCaptureBracket = ({
+    window,
+  }: NonNullable<HistoryConflictSummary["windows"]>[number]) =>
+    window.fromMs <= epoch.closingCaptureBracket.toMs &&
+    window.toMs >= epoch.openingCaptureBracket.fromMs;
+
   if (rows.length > 0) {
     if (rows.some((row) => inEpochOrBoundary(row, epoch))) return true;
-    return (
-      conflict.windows?.some(({ window }) =>
-        [epoch.openingCaptureBracket, epoch.closingCaptureBracket].some(
-          (bracket) =>
-            window.fromMs >= bracket.fromMs && window.toMs <= bracket.toMs,
-        ),
-      ) ?? false
-    );
+    return conflict.windows?.some(overlapsCaptureBracket) ?? false;
   }
   if (!conflict.windows || conflict.windows.length === 0) return true;
-  const opening = timestampMs(epoch.openingBoundary)!;
-  const closing = timestampMs(epoch.closingBoundary)!;
-  return conflict.windows.some(
-    ({ window }) => window.fromMs <= closing && window.toMs >= opening,
-  );
+  return conflict.windows.some(overlapsCaptureBracket);
 }
 
 function addDisposition(
@@ -431,10 +457,13 @@ function select(
   if (!input.conflicts.every(validConflict))
     return invalid("stored history conflict is malformed");
 
-  const observations = [...input.observations].sort(compareObservation);
-  const groups = groupTransactions(observations);
+  const groups = groupTransactions(input.observations);
   const byIdentity = new Map<string, HistoryStoredObservation[]>();
-  for (const row of observations) {
+  const byObservationId = new Map<string, HistoryStoredObservation[]>();
+  for (const row of input.observations) {
+    const matchingIds = byObservationId.get(row.observationId) ?? [];
+    matchingIds.push(row);
+    byObservationId.set(row.observationId, matchingIds);
     const key = `${row.source}\u0000${row.eventIdentity}`;
     const matches = byIdentity.get(key) ?? [];
     matches.push(row);
@@ -463,6 +492,13 @@ function select(
   }
 
   const exclusions: ScopedHistoryAccountingExclusion[] = [];
+  let exclusionCount = 0;
+  const compareExclusions = (
+    left: Pick<ScopedHistoryAccountingExclusion, "currency" | "eventIdentity">,
+    right: Pick<ScopedHistoryAccountingExclusion, "currency" | "eventIdentity">,
+  ): number =>
+    left.currency.localeCompare(right.currency) ||
+    left.eventIdentity.localeCompare(right.eventIdentity);
   const independentIds = new Set<string>();
   for (const [id, rows] of groups) {
     const inWindow = rows.some((row) => inEpochOrBoundary(row, input.epoch));
@@ -476,15 +512,36 @@ function select(
     );
     if (independent) {
       independentIds.add(id);
-      if (inWindow)
-        exclusions.push({
+      if (inWindow) {
+        exclusionCount += 1;
+        const exclusion = {
           source: "transaction-log",
           eventIdentity: `transaction:${id}`,
-          observationIds: rows.map(({ observationId }) => observationId).sort(),
           currency: independent.currency,
           type: independent.type,
           reason: "independent-out-of-scope-transaction",
-        });
+        } as const;
+        const last = exclusions.at(-1);
+        if (
+          exclusions.length === MAX_EXCLUSIONS &&
+          last !== undefined &&
+          compareExclusions(exclusion, last) >= 0
+        )
+          continue;
+        const completeExclusion: ScopedHistoryAccountingExclusion = {
+          ...exclusion,
+          observationIds: rows.map(({ observationId }) => observationId).sort(),
+        };
+        const insertionIndex = exclusions.findIndex(
+          (existing) => compareExclusions(completeExclusion, existing) < 0,
+        );
+        exclusions.splice(
+          insertionIndex < 0 ? exclusions.length : insertionIndex,
+          0,
+          completeExclusion,
+        );
+        if (exclusions.length > MAX_EXCLUSIONS) exclusions.pop();
+      }
     } else if (inWindow) {
       const canonicalRow = canonicalByTransaction.get(id);
       if (canonicalRow) selected.set(canonicalRow.observationId, canonicalRow);
@@ -545,8 +602,8 @@ function select(
 
   for (const conflict of canonical.value.conflicts) {
     const identity = canonicalConflictIdentity(conflict);
-    const rows = observations.filter((row) =>
-      conflict.observationIds.includes(row.observationId),
+    const rows = conflict.observationIds.flatMap(
+      (observationId) => byObservationId.get(observationId) ?? [],
     );
     const relevant = rows.some(
       (row) =>
@@ -580,18 +637,15 @@ function select(
     });
   }
 
-  const selectedObservations = [...selected.values()].sort(compareObservation);
+  const selectedObservations = [...selected.values()].sort(
+    compareObservationOrder,
+  );
   const identities = selectedObservations.map((row) => ({
     source: row.source,
     eventIdentity: row.eventIdentity,
     contentHash: row.contentHash,
     observationId: row.observationId,
   }));
-  const orderedExclusions = exclusions.sort(
-    (left, right) =>
-      left.currency.localeCompare(right.currency) ||
-      left.eventIdentity.localeCompare(right.eventIdentity),
-  );
   const conflicts = [...dispositions.values()]
     .map((value) => ({
       source: value.source,
@@ -614,9 +668,9 @@ function select(
       selectedObservations,
       identities,
       conflicts,
-      exclusions: orderedExclusions.slice(0, MAX_EXCLUSIONS),
-      exclusionCount: orderedExclusions.length,
-      exclusionsTruncated: orderedExclusions.length > MAX_EXCLUSIONS,
+      exclusions,
+      exclusionCount,
+      exclusionsTruncated: exclusionCount > MAX_EXCLUSIONS,
     }),
   );
 }

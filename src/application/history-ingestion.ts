@@ -744,18 +744,14 @@ function orderedWorkItems(
           // window start on the next invocation.
           cursor:
             prior !== undefined &&
-            (prior.status === "paging" ||
-              (prior.status === "partial" &&
-                prior.reasonCode !== "SOURCE_CONFLICT"))
+            (prior.status === "paging" || prior.status === "partial")
               ? prior.cursor
               : null,
           revision: prior?.revision ?? 0,
           pages: 0,
           seenCursors: new Set(
             prior?.cursor &&
-              (prior.status === "paging" ||
-                (prior.status === "partial" &&
-                  prior.reasonCode !== "SOURCE_CONFLICT"))
+              (prior.status === "paging" || prior.status === "partial")
               ? [prior.cursor]
               : [],
           ),
@@ -784,6 +780,12 @@ function mark(
   reasonCode: string,
   cursor?: string | null,
 ): Result<HistoryCheckpoint> {
+  // Keep the provider conflict visible while resuming a known conflicted
+  // window; the current invocation still reports its transient stop reason.
+  const persistedReasonCode =
+    status === "partial" && item.prior?.reasonCode === "SOURCE_CONFLICT"
+      ? "SOURCE_CONFLICT"
+      : reasonCode;
   return store.markCoverage({
     scope,
     source: item.source,
@@ -791,7 +793,7 @@ function mark(
     window: item.window,
     expectedRevision: item.revision,
     status,
-    reasonCode,
+    reasonCode: persistedReasonCode,
     ...(cursor === undefined ? {} : { cursor }),
   });
 }

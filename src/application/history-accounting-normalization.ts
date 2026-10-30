@@ -120,7 +120,7 @@ function compareObservationRecency(
   );
 }
 
-function compareObservationOrder(
+export function compareObservationOrder(
   left: HistoryStoredObservation,
   right: HistoryStoredObservation,
 ): number {

@@ -3,6 +3,7 @@ import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 
 import { runHistoryIngestion } from "../src/application/history-ingestion.js";
+import { createHistorySourceFact } from "../src/domain/accounting/history-source-fact.js";
 import { createSqliteHistoryStore } from "../src/adapters/sqlite/history-store.js";
 import { applyMigrations } from "../src/adapters/sqlite/migrations.js";
 import { registerTrustedClock } from "../src/adapters/sqlite/sqlite-helpers.js";
@@ -105,6 +106,40 @@ function emptyPage(
   };
 }
 
+function mntTransferFact(change: string) {
+  const fact = createHistorySourceFact({
+    factKind: "transaction",
+    source: "transaction-log",
+    providerEventTime: "2026-10-25T00:00:00.000Z",
+    providerRevisionTime: null,
+    collectedAt: "2026-10-28T12:00:00.000Z",
+    transactionId: "conflicted-mnt-transfer",
+    category: null,
+    symbol: null,
+    side: null,
+    currency: "MNT",
+    type: "TRANSFER_IN",
+    transSubType: null,
+    qty: "1",
+    size: null,
+    tradePrice: null,
+    cashFlow: change,
+    funding: null,
+    fee: null,
+    feeRate: null,
+    change,
+    bonusChange: null,
+    cashBalance: null,
+    tradeId: null,
+    orderId: null,
+    orderLinkId: null,
+    displayType: null,
+    extraFees: null,
+  });
+  if (!fact.ok) throw new Error(fact.error.message);
+  return fact.value;
+}
+
 function success<T>(value: T): Result<T> {
   return { ok: true, value };
 }
@@ -154,6 +189,119 @@ test("one shared GET budget produces partial progress and resume finishes it", a
     assert.equal(resumed.value.status, "COMPLETE");
     assert.equal(resumed.value.getAttempts, 7);
     assert.ok(resumed.value.sources.every((row) => row.status === "traversed"));
+  } finally {
+    fixture.connection.close();
+  }
+});
+
+test("resume continues after a nonterminal source conflict instead of replaying page one", async () => {
+  const fixture = memoryStore();
+  const selection: HistorySyncSelection = {
+    kind: "explicit-range",
+    fromMs: from,
+    toMs: to,
+    replayId: "resume-after-source-conflict",
+  };
+  const frozenInput = input(selection, undefined, to);
+  try {
+    const first = await runHistoryIngestion(frozenInput, {
+      store: fixture.store,
+      reader: {
+        async readPage(request) {
+          if (request.source !== "transaction-log") return emptyPage(request);
+          assert.equal(request.cursor ?? null, null);
+          return {
+            ...emptyPage(request),
+            nextCursor: "page-2-cursor",
+            receivedRowCount: 2,
+            facts: [mntTransferFact("1"), mntTransferFact("2")],
+          };
+        },
+      },
+      monotonicClock: (() => {
+        let now = 0;
+        return () => ++now;
+      })(),
+    });
+    assert.equal(first.ok, true);
+    if (!first.ok) return;
+
+    const afterFirst = fixture.store.listCoverage(scope, "transaction-log");
+    assert.equal(afterFirst.ok, true);
+    if (!afterFirst.ok) return;
+    const partial = afterFirst.value.find(
+      (checkpoint) => checkpoint.window.fromMs === from,
+    );
+    assert.equal(partial?.status, "partial");
+    assert.equal(partial?.reasonCode, "SOURCE_CONFLICT");
+    assert.equal(partial?.cursor, "page-2-cursor");
+
+    const resumeInput = input({ kind: "resume" }, undefined, to);
+    const budgetStop = await runHistoryIngestion(resumeInput, {
+      store: fixture.store,
+      reader: {
+        async readPage(request) {
+          if (request.source === "transaction-log")
+            throw Object.assign(new Error("budget exhausted"), {
+              code: "GET_BUDGET_EXCEEDED",
+            });
+          return emptyPage(request);
+        },
+      },
+      monotonicClock: (() => {
+        let now = 0;
+        return () => ++now;
+      })(),
+    });
+    assert.equal(budgetStop.ok, true);
+    if (!budgetStop.ok) return;
+    assert.ok(
+      budgetStop.value.sources
+        .find((row) => row.source === "transaction-log")
+        ?.reasonCodes.includes("GET_BUDGET_EXCEEDED"),
+    );
+
+    const afterBudgetStop = fixture.store.listCoverage(
+      scope,
+      "transaction-log",
+    );
+    assert.equal(afterBudgetStop.ok, true);
+    if (!afterBudgetStop.ok) return;
+    const stillPartial = afterBudgetStop.value.find(
+      (checkpoint) => checkpoint.window.fromMs === from,
+    );
+    assert.equal(stillPartial?.status, "partial");
+    assert.equal(stillPartial?.reasonCode, "SOURCE_CONFLICT");
+    assert.equal(stillPartial?.cursor, "page-2-cursor");
+
+    const resumedCursors: (string | null)[] = [];
+    const resumed = await runHistoryIngestion(resumeInput, {
+      store: fixture.store,
+      reader: {
+        async readPage(request) {
+          if (request.source === "transaction-log")
+            resumedCursors.push(request.cursor ?? null);
+          return emptyPage(request);
+        },
+      },
+      monotonicClock: (() => {
+        let now = 0;
+        return () => ++now;
+      })(),
+    });
+    assert.equal(resumed.ok, true);
+    if (!resumed.ok) return;
+    assert.deepEqual(resumedCursors, ["page-2-cursor"]);
+
+    const afterResume = fixture.store.listCoverage(scope, "transaction-log");
+    assert.equal(afterResume.ok, true);
+    if (!afterResume.ok) return;
+    const terminal = afterResume.value.find(
+      (checkpoint) => checkpoint.window.fromMs === from,
+    );
+    assert.equal(terminal?.status, "traversed");
+    assert.equal(terminal?.reasonCode, "SOURCE_CONFLICT");
+    assert.equal(terminal?.cursor, null);
   } finally {
     fixture.connection.close();
   }

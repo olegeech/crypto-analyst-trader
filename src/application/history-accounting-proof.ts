@@ -15,6 +15,7 @@ import { requireHash, requireIdentifier } from "../domain/shared/validation.js";
 import type { CredentialEnvironment } from "../ports/credential-provider.js";
 import type { HistoryAccountingAnchorKeyProvider } from "../ports/history-accounting-anchor-key-provider.js";
 import type { HistoryStoreScope } from "../ports/history-store.js";
+import type { HistoryAccountingWalletAnchorStorePort } from "../ports/history-accounting-anchor-store.js";
 import { calculateHistoryAccountingReportFromLocalEvidence } from "./history-accounting-composition.js";
 import { decodeHistoryAccountingReport } from "./history-accounting-report.js";
 import { resolveHistoryAccountingScope } from "./history-accounting-scope.js";
@@ -203,21 +204,15 @@ function canonicalValuesEqual(left: unknown, right: unknown): boolean {
 }
 
 function reportReferencesMissingAnchor(
-  connection: SqliteConnection,
+  anchorStore: HistoryAccountingWalletAnchorStorePort,
   input: HistoryAccountingProofRequest,
 ): boolean {
-  try {
-    const row = connection.db
-      .prepare(
-        `SELECT COUNT(*) AS count FROM history_accounting_wallet_anchors
-         WHERE anchor_id IN (?, ?)`,
-      )
-      .get(input.openingAnchorId, input.closingAnchorId) as
-      { readonly count?: unknown } | undefined;
-    return typeof row?.count === "number" && row.count < 2;
-  } catch {
-    return false;
-  }
+  const opening = anchorStore.readById(input.openingAnchorId);
+  const closing =
+    input.openingAnchorId === input.closingAnchorId
+      ? opening
+      : anchorStore.readById(input.closingAnchorId);
+  return opening.ok && closing.ok && (!opening.value || !closing.value);
 }
 
 function validInput(input: HistoryAccountingProofRequest): boolean {
@@ -335,11 +330,16 @@ function validateWithinConnection(
       closingBoundary,
     );
 
+  const anchorStore = createSqliteHistoryAccountingWalletAnchorStore(
+    connection,
+    authenticationKey,
+  );
   const reportStore = createSqliteHistoryAccountingReportStore(connection);
   const stored = reportStore.readById(input.reportId);
   if (!stored.ok)
     return refuse(
-      reportReferencesMissingAnchor(connection, input)
+      isScopedRequest(input) &&
+        reportReferencesMissingAnchor(anchorStore, input)
         ? "ANCHOR_NOT_FOUND"
         : "REPORT_INTEGRITY_INVALID",
       input.reportId,
@@ -393,10 +393,6 @@ function validateWithinConnection(
       closingBoundary.value,
     );
 
-  const anchorStore = createSqliteHistoryAccountingWalletAnchorStore(
-    connection,
-    authenticationKey,
-  );
   const opening = anchorStore.readById(input.openingAnchorId);
   const closing = anchorStore.readById(input.closingAnchorId);
   if (!opening.ok || !closing.ok)
@@ -500,10 +496,7 @@ function validateWithinConnection(
   if (
     current.value.schemaVersion !== report.schemaVersion ||
     current.value.dependencyHash !== report.dependencyHash ||
-    // Scoped report content can list newly observed independent exclusions;
-    // the scope-bound dependency hash intentionally excludes those details.
-    (report.schemaVersion === "history-accounting-reconciliation-report/v1" &&
-      current.value.contentHash !== report.contentHash) ||
+    current.value.contentHash !== report.contentHash ||
     current.value.status !== "ACCOUNTING_READY"
   )
     return refuse(

@@ -35,6 +35,7 @@ import type {
   TransactionHistorySourceFact,
 } from "../domain/accounting/history-source-fact.js";
 import {
+  ignoreProvenIndependentScopedConflicts,
   selectScopedHistoryAccountingEvidence,
   type ScopedHistoryAccountingEvidence,
   type ScopedHistoryAccountingEvidenceIdentity,
@@ -360,15 +361,7 @@ function readBalances(
       addReason(reasons, "DUPLICATE_COIN_BALANCE");
       continue;
     }
-    const balance = rawAsset.walletBalance;
-    const parsedBalance =
-      plainRecord(balance) &&
-      balance.state === "known" &&
-      balance.unit === "coin" &&
-      balance.value instanceof DecimalValue &&
-      !balance.value.isNegative()
-        ? balance.value
-        : null;
+    const parsedBalance = knownWalletCoinBalance(rawAsset.walletBalance);
     values.set(coin, parsedBalance);
     if (parsedBalance === null) addReason(reasons, "MISSING_COIN_BALANCE");
     if (coin !== "USDT") addReason(reasons, "UNSUPPORTED_CURRENCY");
@@ -1237,7 +1230,7 @@ interface ScopedBalanceIndex extends BalanceIndex {
 
 const MAX_SCOPED_EXCLUSIONS = 128;
 
-function scopedWalletBalance(value: unknown): DecimalValue | null {
+function knownWalletCoinBalance(value: unknown): DecimalValue | null {
   return plainRecord(value) &&
     value.state === "known" &&
     value.unit === "coin" &&
@@ -1289,7 +1282,7 @@ function readScopedBalances(
       continue;
     }
     const currency = rawAsset.coin;
-    const balance = scopedWalletBalance(rawAsset.walletBalance);
+    const balance = knownWalletCoinBalance(rawAsset.walletBalance);
     if (values.has(currency)) {
       if (included.has(currency)) {
         values.set(currency, null);
@@ -1432,7 +1425,10 @@ function invalidScopedProjection(
 
 function projectScoped(
   input: ProjectScopedHistoryAccountingEpochInput,
-): Result<HistoryAccountingEpochProjectionV2> {
+): Result<{
+  readonly projection: HistoryAccountingEpochProjectionV2;
+  readonly selection: ScopedHistoryAccountingEvidence | undefined;
+}> {
   if (
     !plainRecord(input) ||
     !plainRecord(input.scope) ||
@@ -1440,9 +1436,16 @@ function projectScoped(
     !Array.isArray(input.conflicts) ||
     !Array.isArray(input.coverage)
   )
-    return ok(invalidScopedProjection(undefined));
+    return ok({
+      projection: invalidScopedProjection(undefined),
+      selection: undefined,
+    });
   const decodedScope = decodeHistoryAccountingScope(input.accountingScope);
-  if (!decodedScope.ok) return ok(invalidScopedProjection(input.scope));
+  if (!decodedScope.ok)
+    return ok({
+      projection: invalidScopedProjection(input.scope),
+      selection: undefined,
+    });
   const accountingScope = decodedScope.value;
 
   const reasons = new Set<HistoryAccountingEpochReasonCode>();
@@ -1488,33 +1491,6 @@ function projectScoped(
   const coverageEnd = validEpoch
     ? Math.max(closingCaptureEnd ?? epochEnd, epochEnd)
     : epochEnd;
-  const sourceCoverage = validEpoch
-    ? HISTORY_READ_SOURCES.map((source) =>
-        projectSourceCoverage(
-          source,
-          input.coverage,
-          input.scope,
-          coverageStart,
-          coverageEnd,
-          reasons,
-        ),
-      )
-    : HISTORY_READ_SOURCES.map((source) =>
-        Object.freeze({ source, covered: false, gaps: Object.freeze([]) }),
-      );
-  if (!validEpoch) addReason(reasons, "HISTORY_COVERAGE_GAP");
-
-  // Locate checkpoint conflicts before the scoped selector classifies relevance.
-  if (validEpoch)
-    checkpointConflictCountsAreLocated(
-      input.coverage,
-      input.conflicts,
-      input.scope,
-      coverageStart,
-      coverageEnd,
-      reasons,
-    );
-
   let selection: ScopedHistoryAccountingEvidence | undefined;
   if (anchorsTrusted) {
     const selected = selectScopedHistoryAccountingEvidence({
@@ -1538,6 +1514,40 @@ function projectScoped(
     if (selected.ok) selection = selected.value;
     else addReason(reasons, "INVALID_HISTORY_EVIDENCE");
   }
+
+  // Only located conflicts proven independent of the selected scope stop
+  // invalidating an otherwise complete provider traversal.
+  if (validEpoch)
+    checkpointConflictCountsAreLocated(
+      input.coverage,
+      input.conflicts,
+      input.scope,
+      coverageStart,
+      coverageEnd,
+      reasons,
+    );
+  const coverageForProjection = selection
+    ? ignoreProvenIndependentScopedConflicts(
+        input.coverage,
+        input.conflicts,
+        selection,
+      )
+    : input.coverage;
+  const sourceCoverage = validEpoch
+    ? HISTORY_READ_SOURCES.map((source) =>
+        projectSourceCoverage(
+          source,
+          coverageForProjection,
+          input.scope,
+          coverageStart,
+          coverageEnd,
+          reasons,
+        ),
+      )
+    : HISTORY_READ_SOURCES.map((source) =>
+        Object.freeze({ source, covered: false, gaps: Object.freeze([]) }),
+      );
+  if (!validEpoch) addReason(reasons, "HISTORY_COVERAGE_GAP");
 
   if (
     input.observations.some(
@@ -1715,8 +1725,8 @@ function projectScoped(
   const allExclusions = [...anchorExclusions, ...transactionExclusions];
   const reasonCodes = Object.freeze([...reasons].sort());
   const status = reasonCodes.length === 0 ? "RECONCILED" : "NOT_READY";
-  return ok(
-    Object.freeze({
+  return ok({
+    projection: Object.freeze({
       schemaVersion: "history-accounting-epoch-projection/v2",
       status,
       readiness: status === "RECONCILED" ? "ACCOUNTING_READY" : "NOT_READY",
@@ -1743,21 +1753,33 @@ function projectScoped(
         (selection?.exclusionsTruncated ?? false),
       reasonCodes,
     }),
-  );
+    selection,
+  });
+}
+
+export function projectScopedHistoryAccountingEpochWithSelection(
+  input: ProjectScopedHistoryAccountingEpochInput,
+): Result<{
+  readonly projection: HistoryAccountingEpochProjectionV2;
+  readonly selection: ScopedHistoryAccountingEvidence | undefined;
+}> {
+  try {
+    return projectScoped(input);
+  } catch {
+    return ok({
+      projection: invalidScopedProjection(
+        plainRecord(input) && plainRecord(input.scope)
+          ? (input.scope as unknown as HistoryStoreScope)
+          : undefined,
+      ),
+      selection: undefined,
+    });
+  }
 }
 
 export function projectScopedHistoryAccountingEpoch(
   input: ProjectScopedHistoryAccountingEpochInput,
 ): Result<HistoryAccountingEpochProjectionV2> {
-  try {
-    return projectScoped(input);
-  } catch {
-    return ok(
-      invalidScopedProjection(
-        plainRecord(input) && plainRecord(input.scope)
-          ? (input.scope as unknown as HistoryStoreScope)
-          : undefined,
-      ),
-    );
-  }
+  const result = projectScopedHistoryAccountingEpochWithSelection(input);
+  return result.ok ? ok(result.value.projection) : result;
 }

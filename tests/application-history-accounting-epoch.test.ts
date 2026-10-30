@@ -1314,6 +1314,73 @@ test("an unlocated checkpoint conflict remains fail-closed", () => {
   assert.ok(result.reasonCodes.includes("HISTORY_COVERAGE_CONFLICT"));
 });
 
+test("a hash-only conflict with an out-of-epoch row blocks the scoped period", () => {
+  const outsideMs = startMs - 30_000;
+  const conflicted = checkpoint(
+    "transaction-log",
+    startMs - 60_000,
+    endMs + 100,
+    { conflictCount: 1, reasonCode: "SOURCE_CONFLICT" },
+  );
+  const outsideObservation = transaction("outside-epoch-conflict", "1", {
+    currency: "MNT",
+    type: "TRANSFER_IN",
+    providerEventTime: new Date(outsideMs).toISOString(),
+  });
+  const result = unwrap(
+    projectScoped({
+      observations: [outsideObservation],
+      conflicts: [
+        {
+          conflictId: "outside-epoch-revision",
+          source: "transaction-log",
+          eventIdentity: outsideObservation.eventIdentity,
+          existingHash: outsideObservation.contentHash,
+          incomingHash: `sha256:${"d".repeat(64)}`,
+          reason: "IMMUTABLE_ID_CONTENT_CHANGED",
+          recordedAt: "2026-10-27T10:08:00.000Z" as UtcTimestamp,
+          windows: [
+            { filterHash: conflicted.filterHash, window: conflicted.window },
+          ],
+        },
+      ],
+      coverage: [...completeCoverage(), conflicted],
+    }),
+  );
+
+  assert.equal(result.readiness, "NOT_READY");
+  assert.ok(result.reasonCodes.includes("TRANSACTION_IDENTITY_CONFLICT"));
+});
+
+test("a hash-only conflict inside an anchor capture bracket blocks without a stored row", () => {
+  const conflicted = checkpoint("transaction-log", startMs - 90, startMs - 80, {
+    conflictCount: 1,
+    reasonCode: "SOURCE_CONFLICT",
+  });
+  const result = unwrap(
+    projectScoped({
+      conflicts: [
+        {
+          conflictId: "unlocated-opening-bracket-conflict",
+          source: "transaction-log",
+          eventIdentity: "transaction:missing-opening-bracket-event",
+          existingHash: `sha256:${"c".repeat(64)}`,
+          incomingHash: `sha256:${"d".repeat(64)}`,
+          reason: "IMMUTABLE_ID_CONTENT_CHANGED",
+          recordedAt: "2026-10-27T10:08:00.000Z" as UtcTimestamp,
+          windows: [
+            { filterHash: conflicted.filterHash, window: conflicted.window },
+          ],
+        },
+      ],
+      coverage: [...completeCoverage(), conflicted],
+    }),
+  );
+
+  assert.equal(result.readiness, "NOT_READY");
+  assert.ok(result.reasonCodes.includes("TRANSACTION_IDENTITY_CONFLICT"));
+});
+
 test("requires compatible filters and traversed status for all four coverage sources", () => {
   for (const source of sources) {
     const wrongFilter = completeCoverage();

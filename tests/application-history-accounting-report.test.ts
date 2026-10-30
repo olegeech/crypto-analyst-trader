@@ -326,6 +326,7 @@ function transactionObservation(input: {
   readonly cashFlow?: string | null;
   readonly funding?: string | null;
   readonly fee?: string | null;
+  readonly cashBalance?: string;
   readonly orderId?: string | null;
   readonly tradeId?: string | null;
   readonly side?: string | null;
@@ -352,7 +353,7 @@ function transactionObservation(input: {
     feeRate: null,
     change: input.change,
     bonusChange: input.bonusChange,
-    cashBalance: "8",
+    cashBalance: input.cashBalance ?? "8",
     tradeId: input.tradeId ?? null,
     orderId: input.orderId ?? null,
     orderLinkId: null,
@@ -606,6 +607,42 @@ test("scoped report roundtrips v2, excludes technical balances, and binds policy
   );
 });
 
+test("scoped report preserves the full excluded-anchor count when its sample is bounded", () => {
+  const base = scopedInput();
+  const template = base.opening.assets[0]!;
+  const technicalAssets = Array.from({ length: 128 }, (_, index) => ({
+    ...template,
+    coin: `TECH${String(index).padStart(3, "0")}`,
+  }));
+  const input = {
+    ...base,
+    opening: capturedWalletAnchorForStoreTest({
+      ...base.opening,
+      assets: [...base.opening.assets, ...technicalAssets],
+    }),
+    closing: capturedWalletAnchorForStoreTest({
+      ...base.closing,
+      assets: [...base.closing.assets, ...technicalAssets],
+    }),
+  };
+
+  const report = createHistoryAccountingReport(input);
+  assert.equal(report.ok, true, report.ok ? "" : report.error.message);
+  if (!report.ok) return;
+  const scopedReport = report.value as HistoryAccountingReconciliationReportV2;
+  assert.equal(scopedReport.status, "ACCOUNTING_READY");
+  assert.equal(scopedReport.epoch.exclusions.length, 128);
+  assert.equal(scopedReport.epoch.exclusionCount, 129);
+  assert.equal(scopedReport.epoch.exclusionsTruncated, true);
+
+  const encoded = encodeHistoryAccountingReport(scopedReport);
+  assert.equal(encoded.ok, true, encoded.ok ? "" : encoded.error.message);
+  if (!encoded.ok) return;
+  const decoded = decodeHistoryAccountingReport(encoded.value);
+  assert.equal(decoded.ok, true, decoded.ok ? "" : decoded.error.message);
+  assert.deepEqual(decoded.ok && decoded.value, scopedReport);
+});
+
 test("scoped dependencies ignore technical arrivals and incidental coverage metadata but bind relevant evidence", () => {
   const input = scopedInput();
   const baseline = createHistoryAccountingReport(input);
@@ -750,6 +787,83 @@ test("scoped dependencies bind changed USDT costs and conflicting revisions", ()
   );
   assert.notEqual(revised.value.dependencyHash, original.value.dependencyHash);
   assert.notEqual(revised.value.reportId, original.value.reportId);
+});
+
+test("independent outside-currency revisions do not change a scoped report identity", () => {
+  const input = scopedInput();
+  const baseline = createHistoryAccountingReport(input);
+  assert.equal(baseline.ok, true, baseline.ok ? "" : baseline.error.message);
+  if (!baseline.ok) return;
+
+  const original = transactionObservation({
+    id: "mnt-independent-transfer",
+    observationId: "mnt-independent-transfer-original",
+    currency: "MNT",
+    type: "TRANSFER_IN",
+    change: "1",
+    bonusChange: null,
+    cashBalance: "8",
+  });
+  const revised = transactionObservation({
+    id: "mnt-independent-transfer",
+    observationId: "mnt-independent-transfer-revised",
+    currency: "MNT",
+    type: "TRANSFER_IN",
+    change: "1",
+    bonusChange: null,
+    cashBalance: "9",
+  });
+  const checkpoint = input.coverage.find(
+    (candidate) => candidate.source === "transaction-log",
+  );
+  assert.ok(checkpoint);
+  if (!checkpoint) return;
+  const conflict: HistoryConflictSummary = {
+    conflictId: "mnt-independent-transfer-revision",
+    source: "transaction-log",
+    eventIdentity: original.eventIdentity,
+    existingHash: original.contentHash,
+    incomingHash: revised.contentHash,
+    reason: "IMMUTABLE_ID_CONTENT_CHANGED",
+    recordedAt: "2026-10-27T10:07:00.000Z" as UtcTimestamp,
+    windows: [{ filterHash: checkpoint.filterHash, window: checkpoint.window }],
+  };
+  const revisedReport = createHistoryAccountingReport({
+    ...input,
+    observations: [original, revised],
+    conflicts: [conflict],
+    coverage: input.coverage.map((candidate) =>
+      candidate.source === "transaction-log"
+        ? { ...candidate, conflictCount: 1 }
+        : candidate,
+    ),
+  });
+  assert.equal(
+    revisedReport.ok,
+    true,
+    revisedReport.ok ? "" : revisedReport.error.message,
+  );
+  if (!revisedReport.ok) return;
+  assert.equal(revisedReport.value.status, "ACCOUNTING_READY");
+  assert.equal(revisedReport.value.reportId, baseline.value.reportId);
+  assert.equal(
+    revisedReport.value.dependencyHash,
+    baseline.value.dependencyHash,
+  );
+  assert.deepEqual(
+    (revisedReport.value as HistoryAccountingReconciliationReportV2).epoch
+      .conflictDispositions,
+    [],
+  );
+  const baselineRecord = encodeHistoryAccountingReport(baseline.value);
+  const revisedRecord = encodeHistoryAccountingReport(revisedReport.value);
+  assert.equal(baselineRecord.ok, true);
+  assert.equal(revisedRecord.ok, true);
+  if (!baselineRecord.ok || !revisedRecord.ok) return;
+  assert.equal(
+    revisedRecord.value.canonicalJson,
+    baselineRecord.value.canonicalJson,
+  );
 });
 
 test("scoped dependencies bind owned lineage while preserving two sources and USDT transfers", () => {

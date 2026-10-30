@@ -54,6 +54,7 @@ function transferFact(
   transactionId: string,
   providerEventTime: string,
   currency = "USDT",
+  cashBalance = "100",
 ) {
   const fact = createHistorySourceFact({
     factKind: "transaction",
@@ -74,7 +75,7 @@ function transferFact(
     feeRate: null,
     change: "0",
     bonusChange: "0",
-    cashBalance: "100",
+    cashBalance,
     tradeId: null,
     orderId: null,
     orderLinkId: null,
@@ -236,6 +237,7 @@ function appendTransaction(
   fixture: Awaited<ReturnType<typeof setup>>,
   transactionId: string,
   currency: string,
+  cashBalance = "100",
 ) {
   const connection = fixture.open({
     environment: "demo",
@@ -268,6 +270,7 @@ function appendTransaction(
         transactionId,
         new Date(Date.parse(openingBoundary) + 5 * 60_000).toISOString(),
         currency,
+        cashBalance,
       ),
     ],
   });
@@ -299,6 +302,82 @@ test("proof validation accepts an exact persisted current report and does not ex
     assert.equal(
       oldAnchorStillUsable.ok && oldAnchorStillUsable.value.decision,
       "ACCEPT",
+    );
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("scoped proof stays valid after an overlapping empty explicit-replay checkpoint", async () => {
+  const fixture = await setup(true);
+  try {
+    const request = asScopedRequest(fixture);
+    const connection = fixture.open({
+      environment: "demo",
+      databasePath: fixture.databasePath,
+    });
+    assert.equal(connection.ok, true);
+    if (!connection.ok) return;
+    const replayFrom = fixture.coverageFromMs + 5_000;
+    const replayTo = fixture.coverageToMs - 5_000;
+    const filters = {
+      category: "linear",
+      purpose: "explicit-replay",
+      rangeStartMs: replayFrom,
+      rangeEndMs: replayTo,
+      replayId: "proof-overlap-no-new-rows",
+    };
+    const committed = createSqliteHistoryStore(connection.value).commitPage({
+      scope: historyAccountingScope,
+      source: "executions",
+      filters,
+      window: { fromMs: replayFrom, toMs: replayTo },
+      expectedRevision: 0,
+      cursor: null,
+      nextCursor: null,
+      facts: [],
+    });
+    connection.value.close();
+    assert.equal(
+      committed.ok,
+      true,
+      committed.ok ? "" : committed.error.message,
+    );
+
+    const accepted = await validateHistoryAccountingProof(request, {
+      openConnection: fixture.open,
+    });
+    assert.equal(
+      accepted.ok && accepted.value.decision,
+      "ACCEPT",
+      JSON.stringify(accepted),
+    );
+    const replay = await reconcileHistoryAccounting(
+      {
+        environment: "demo",
+        databasePath: fixture.databasePath,
+        openingAnchorId: request.openingAnchorId,
+        closingAnchorId: request.closingAnchorId,
+        accountingPolicyVersion: OPERATOR_MAINNET_TEST_POLICY_VERSION,
+      },
+      { openConnection: fixture.open, anchorKeyProvider },
+    );
+    assert.equal(replay.ok, true, replay.ok ? "" : replay.error.message);
+    assert.deepEqual(
+      replay.ok &&
+        replay.value.schemaVersion ===
+          "history-accounting-reconciliation-report/v2"
+        ? replay.value.dependencies
+        : undefined,
+      fixture.report.schemaVersion ===
+        "history-accounting-reconciliation-report/v2"
+        ? fixture.report.dependencies
+        : undefined,
+    );
+    assert.equal(replay.ok && replay.value.reportId, fixture.report.reportId);
+    assert.equal(
+      replay.ok && replay.value.dependencyHash,
+      fixture.report.dependencyHash,
     );
   } finally {
     rmSync(fixture.root, { recursive: true, force: true });
@@ -432,6 +511,104 @@ test("proof validation refuses a self-hashed report whose accounting values were
     assert.ok(
       refused.ok &&
         refused.value.reasonCodes.includes("RELEVANT_EVIDENCE_CHANGED"),
+    );
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("scoped proof refuses a self-hashed report whose accounting values were altered", async () => {
+  const fixture = await setup(true);
+  try {
+    const request = asScopedRequest(fixture);
+    const connection = fixture.open({
+      environment: "demo",
+      databasePath: fixture.databasePath,
+    });
+    assert.equal(connection.ok, true);
+    if (!connection.ok) return;
+    const row = connection.value.db
+      .prepare(
+        "SELECT canonical_json FROM history_accounting_reports WHERE report_id = ?",
+      )
+      .get(request.reportId) as { canonical_json?: unknown } | undefined;
+    assert.equal(typeof row?.canonical_json, "string");
+    if (typeof row?.canonical_json !== "string") return;
+    const stored = JSON.parse(row.canonical_json) as Record<string, unknown>;
+    const epoch = stored.epoch as Record<string, unknown>;
+    const currencies = epoch.currencies as Record<string, unknown>[];
+    assert.ok(currencies.length > 0);
+    const forgedWithoutHash: Record<string, unknown> = {
+      ...stored,
+      epoch: {
+        ...epoch,
+        currencies: [
+          { ...currencies[0], transactionChange: "999999" },
+          ...currencies.slice(1),
+        ],
+      },
+    };
+    delete forgedWithoutHash.contentHash;
+    const forgedHash = hashCanonical(forgedWithoutHash);
+    assert.equal(forgedHash.ok, true);
+    if (!forgedHash.ok) return;
+    const forged = { ...forgedWithoutHash, contentHash: forgedHash.value };
+    const canonical = canonicalSerialize(forged);
+    assert.equal(canonical.ok, true);
+    if (!canonical.ok) return;
+    connection.value.db.exec(
+      "DROP TRIGGER history_accounting_reports_no_update",
+    );
+    connection.value.db
+      .prepare(
+        "UPDATE history_accounting_reports SET content_hash = ?, canonical_json = ? WHERE report_id = ?",
+      )
+      .run(forgedHash.value, canonical.value, request.reportId);
+    connection.value.close();
+
+    const refused = await validateHistoryAccountingProof(request, {
+      openConnection: fixture.open,
+    });
+    assert.equal(refused.ok && refused.value.decision, "REFUSE");
+    assert.equal(
+      refused.ok && refused.value.reasonCodes[0],
+      "RELEVANT_EVIDENCE_CHANGED",
+    );
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("legacy proof keeps stored-report corruption separate from missing caller anchors", async () => {
+  const fixture = await setup();
+  try {
+    const connection = fixture.open({
+      environment: "demo",
+      databasePath: fixture.databasePath,
+    });
+    assert.equal(connection.ok, true);
+    if (!connection.ok) return;
+    connection.value.db.exec(
+      "DROP TRIGGER history_accounting_reports_no_update",
+    );
+    connection.value.db
+      .prepare(
+        "UPDATE history_accounting_reports SET canonical_json = ? WHERE report_id = ?",
+      )
+      .run("{invalid", fixture.report.reportId);
+    connection.value.close();
+
+    const refused = await validateHistoryAccountingProof(
+      {
+        ...fixture.request,
+        openingAnchorId: "missing-opening-anchor",
+        closingAnchorId: "missing-closing-anchor",
+      },
+      { openConnection: fixture.open },
+    );
+    assert.equal(
+      refused.ok && refused.value.reasonCodes[0],
+      "REPORT_INTEGRITY_INVALID",
     );
   } finally {
     rmSync(fixture.root, { recursive: true, force: true });
@@ -940,6 +1117,90 @@ test("scoped proof ignores an independent MNT transfer but invalidates for new U
       afterTechnicalArrival.ok && afterTechnicalArrival.value.decision,
       "ACCEPT",
       JSON.stringify(afterTechnicalArrival),
+    );
+
+    appendTransaction(fixture, "technical-mnt-transfer", "MNT", "101");
+    const conflictConnection = fixture.open({
+      environment: "demo",
+      databasePath: fixture.databasePath,
+    });
+    assert.equal(conflictConnection.ok, true);
+    if (!conflictConnection.ok) return;
+    const conflictStore = createSqliteHistoryStore(conflictConnection.value);
+    const conflictCheckpoint = conflictStore.listCoverage(
+      historyAccountingScope,
+      "transaction-log",
+    );
+    assert.equal(conflictCheckpoint.ok, true);
+    if (!conflictCheckpoint.ok) return;
+    const transactionCheckpoint = conflictCheckpoint.value.find(
+      (checkpoint) =>
+        checkpoint.window.fromMs === fixture.coverageFromMs &&
+        checkpoint.window.toMs === fixture.coverageToMs,
+    );
+    assert.ok(transactionCheckpoint);
+    if (!transactionCheckpoint) return;
+    assert.equal(transactionCheckpoint.status, "traversed");
+    assert.equal(transactionCheckpoint.reasonCode, "SOURCE_CONFLICT");
+    // This is the terminal partial state recorded by runHistoryIngestion
+    // after a conflicted page whose provider cursor is null.
+    const markedPartial = conflictStore.markCoverage({
+      scope: transactionCheckpoint.scope,
+      source: transactionCheckpoint.source,
+      filters: transactionCheckpoint.filters,
+      window: transactionCheckpoint.window,
+      expectedRevision: transactionCheckpoint.revision,
+      status: "partial",
+      reasonCode: "SOURCE_CONFLICT",
+      cursor: null,
+    });
+    conflictConnection.value.close();
+    assert.equal(
+      markedPartial.ok,
+      true,
+      markedPartial.ok ? "" : markedPartial.error.message,
+    );
+
+    const replay = await reconcileHistoryAccounting(
+      {
+        environment: "demo",
+        databasePath: fixture.databasePath,
+        openingAnchorId: request.openingAnchorId,
+        closingAnchorId: request.closingAnchorId,
+        accountingPolicyVersion: OPERATOR_MAINNET_TEST_POLICY_VERSION,
+      },
+      { openConnection: fixture.open, anchorKeyProvider },
+    );
+    assert.equal(replay.ok, true, replay.ok ? "" : replay.error.message);
+    assert.equal(replay.ok && replay.value.status, "ACCOUNTING_READY");
+    assert.deepEqual(
+      replay.ok &&
+        replay.value.schemaVersion ===
+          "history-accounting-reconciliation-report/v2"
+        ? replay.value.dependencies
+        : undefined,
+      fixture.report.schemaVersion ===
+        "history-accounting-reconciliation-report/v2"
+        ? fixture.report.dependencies
+        : undefined,
+    );
+    assert.equal(replay.ok && replay.value.reportId, fixture.report.reportId);
+    assert.equal(
+      replay.ok && replay.value.dependencyHash,
+      fixture.report.dependencyHash,
+    );
+    assert.equal(
+      replay.ok && replay.value.contentHash,
+      fixture.report.contentHash,
+    );
+    const afterTechnicalRevision = await validateHistoryAccountingProof(
+      request,
+      { openConnection: fixture.open },
+    );
+    assert.equal(
+      afterTechnicalRevision.ok && afterTechnicalRevision.value.decision,
+      "ACCEPT",
+      JSON.stringify(afterTechnicalRevision),
     );
 
     appendTransaction(fixture, "late-usdt-transfer", "USDT");

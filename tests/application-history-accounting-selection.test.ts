@@ -229,3 +229,21 @@ test("retains unknown outside-currency transaction types as potentially relevant
   );
   assert.equal(selected.exclusions.length, 0);
 });
+
+test("bounds exclusion samples while retaining deterministic total counts", () => {
+  const observations = Array.from({ length: 130 }, (_, index) =>
+    transaction(`tx-${String(index).padStart(3, "0")}`),
+  );
+  const selected = select([...observations].reverse());
+  const reordered = select(observations);
+
+  assert.equal(selected.exclusionCount, 130);
+  assert.equal(selected.exclusionsTruncated, true);
+  assert.deepEqual(
+    selected.exclusions.map(({ eventIdentity }) => eventIdentity),
+    reordered.exclusions.map(({ eventIdentity }) => eventIdentity),
+  );
+  assert.equal(selected.exclusions.length, 128);
+  assert.equal(selected.exclusions[0]?.eventIdentity, "transaction:tx-000");
+  assert.equal(selected.exclusions.at(-1)?.eventIdentity, "transaction:tx-127");
+});
