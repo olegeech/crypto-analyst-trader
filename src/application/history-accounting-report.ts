@@ -1006,6 +1006,22 @@ function isScopedExclusion(value: unknown): boolean {
   );
 }
 
+function isReportScopedEpochProjection(
+  value: unknown,
+  scope: unknown,
+  accountingScope: HistoryAccountingScope,
+): value is HistoryAccountingEpochProjectionV2 {
+  return (
+    isScopedEpochProjection(value, scope, accountingScope) &&
+    value.exclusions.every(
+      (exclusion) =>
+        plainRecord(exclusion) && exclusion.kind === "anchor-balance",
+    ) &&
+    value.exclusionCount === value.exclusions.length &&
+    !value.exclusionsTruncated
+  );
+}
+
 function isCoverageWitness(
   value: unknown,
 ): value is HistoryAccountingCoverageWitness {
@@ -1230,7 +1246,11 @@ function isScopedReportDomainValue(
   )
     return false;
   if (
-    !isScopedEpochProjection(value.epoch, value.scope, accountingScope.value) ||
+    !isReportScopedEpochProjection(
+      value.epoch,
+      value.scope,
+      accountingScope.value,
+    ) ||
     !isPerformanceProjection(value.performance, value.scope) ||
     !isScopedDependencies(value.dependencies)
   )
@@ -2144,6 +2164,18 @@ function createScopedHistoryAccountingReport(
       coverage: input.coverage,
     });
     if (!epoch.ok) return epoch;
+    // The persisted report identifies excluded observed anchor assets. Details
+    // of independent outside-currency history remain in the projection used
+    // for selection, but do not alter the scoped report snapshot or identity.
+    const reportedAnchorExclusions = epoch.value.exclusions.filter(
+      (exclusion) => exclusion.kind === "anchor-balance",
+    );
+    const reportEpoch: HistoryAccountingEpochProjectionV2 = {
+      ...epoch.value,
+      exclusions: reportedAnchorExclusions,
+      exclusionCount: reportedAnchorExclusions.length,
+      exclusionsTruncated: false,
+    };
     const bounds = scopedEpochBounds(input);
     if (!bounds.ok) return bounds;
     const selection = selectScopedHistoryAccountingEvidence({
@@ -2284,7 +2316,7 @@ function createScopedHistoryAccountingReport(
       status: epoch.value.readiness,
       dependencyHash: dependencyHash.value,
       dependencies,
-      epoch: epoch.value,
+      epoch: reportEpoch,
       performance: performance.value,
       transactions,
       accountUnrealizedPnlUsd: {

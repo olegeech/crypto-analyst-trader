@@ -642,6 +642,15 @@ test("scoped dependencies ignore technical arrivals and incidental coverage meta
     baseline.value.dependencyHash,
   );
   assert.equal(afterTechnical.value.reportId, baseline.value.reportId);
+  const baselineRecord = encodeHistoryAccountingReport(baseline.value);
+  const technicalRecord = encodeHistoryAccountingReport(afterTechnical.value);
+  assert.equal(baselineRecord.ok, true);
+  assert.equal(technicalRecord.ok, true);
+  if (!baselineRecord.ok || !technicalRecord.ok) return;
+  assert.equal(
+    technicalRecord.value.canonicalJson,
+    baselineRecord.value.canonicalJson,
+  );
 
   const relevant = transactionObservation({
     id: "usdt-transfer-1",
