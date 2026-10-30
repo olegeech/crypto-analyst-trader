@@ -1131,6 +1131,23 @@ do not fill missing values with zero or infer a starting balance. History
 before the opening anchor remains `UNKNOWN`, even when the selected period is
 `ACCOUNTING_READY`.
 
+The command above has no accounting-policy selector, so it writes the existing
+v1 whole-account report. A non-USDT wallet balance such as MNT therefore keeps
+that legacy report `NOT_READY`. When one of the known code-owned policies
+governs the selected period, an operator may explicitly request its scoped v2
+report by adding `--accounting-policy operator-mainnet-test/v1` or
+`--accounting-policy provisional-m1-v1` to the reconcile command. Both current
+policies cover the USDT linear accounting bridge. The v2 report lists observed
+out-of-scope anchor balances such as MNT and states
+`WHOLE_ACCOUNT_RECONCILIATION=UNCLAIMED`; selecting a policy does not prove that
+its strategy traded during the period, so strategy ownership still needs its
+own evidence. An unrelated MNT balance or movement does not block this scoped
+claim, but a fee or funding event exactly linked to an included trade remains
+relevant even when denominated in MNT. Missing fee denomination or required
+valuation stays unresolved and can keep the report `NOT_READY`. Do not infer a
+conversion, zero an unknown cost, or treat a scoped `ACCOUNTING_READY` as a
+whole-account result.
+
 Reports and anchors are immutable local evidence. A later relevant history
 import can make an earlier report fail proof validation; run reconciliation
 again to append a report against the updated evidence. Do not edit SQLite rows

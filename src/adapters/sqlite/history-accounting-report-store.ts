@@ -2,6 +2,7 @@ import {
   canonicalSerialize,
   hashCanonical,
 } from "../../domain/identity/canonical-serialization.js";
+import { decodeHistoryAccountingScope } from "../../domain/accounting/accounting-scope.js";
 import { domainError } from "../../domain/shared/errors.js";
 import { fail, ok, type Result } from "../../domain/shared/result.js";
 import { parseUtcTimestamp } from "../../domain/shared/time.js";
@@ -46,6 +47,12 @@ function integrityFailure(): Result<never> {
       "stored history accounting report failed verification",
     ),
   );
+}
+
+function sameCanonical(left: unknown, right: unknown): boolean {
+  const leftJson = canonicalSerialize(left);
+  const rightJson = canonicalSerialize(right);
+  return leftJson.ok && rightJson.ok && leftJson.value === rightJson.value;
 }
 
 function validateScope(
@@ -176,17 +183,61 @@ function validateRecord(
   const calculatedHash = hashCanonical(payload);
   if (!calculatedHash.ok || calculatedHash.value !== contentHash.value)
     return invalid();
-  const calculatedReportId = hashCanonical({
-    schemaVersion: decoded.schemaVersion,
-    scope: decoded.scope,
-    dependencyHash: decoded.dependencyHash,
-  });
+  let calculatedReportId: ReturnType<typeof hashCanonical>;
+  let versionedEnvelopeValid = false;
+  if (decoded.schemaVersion === "history-accounting-reconciliation-report/v1") {
+    // Keep the original v1 identity and acceptance path byte-compatible.
+    calculatedReportId = hashCanonical({
+      schemaVersion: decoded.schemaVersion,
+      scope: decoded.scope,
+      dependencyHash: decoded.dependencyHash,
+    });
+    versionedEnvelopeValid = true;
+  } else if (
+    decoded.schemaVersion === "history-accounting-reconciliation-report/v2" &&
+    plainRecord(decoded.epoch) &&
+    plainRecord(decoded.dependencies)
+  ) {
+    const accountingScope = decodeHistoryAccountingScope(
+      decoded.accountingScope,
+    );
+    const epoch = decoded.epoch;
+    const dependencies = decoded.dependencies;
+    const dependencyHashValue = hashCanonical(dependencies);
+    calculatedReportId = hashCanonical({
+      schemaVersion: decoded.schemaVersion,
+      scope: decoded.scope,
+      accountingScope: decoded.accountingScope,
+      dependencyHash: decoded.dependencyHash,
+    });
+    versionedEnvelopeValid =
+      accountingScope.ok &&
+      accountingScope.value.scopeHash === decoded.accountingScopeHash &&
+      epoch.schemaVersion === "history-accounting-epoch-projection/v2" &&
+      epoch.accountingScopeHash === decoded.accountingScopeHash &&
+      sameCanonical(epoch.accountingScope, accountingScope.value) &&
+      dependencies.schemaVersion === "history-accounting-dependencies/v2" &&
+      dependencies.accountingScopeHash === decoded.accountingScopeHash &&
+      sameCanonical(dependencies.accountingScope, accountingScope.value) &&
+      sameCanonical(dependencies.scope, decoded.scope) &&
+      sameCanonical(dependencies.epoch, epoch.epoch) &&
+      plainRecord(dependencies.anchors) &&
+      plainRecord(dependencies.anchors.opening) &&
+      plainRecord(dependencies.anchors.closing) &&
+      plainRecord(epoch.epoch) &&
+      dependencies.anchors.opening.anchorId === epoch.epoch.openingAnchorId &&
+      dependencies.anchors.closing.anchorId === epoch.epoch.closingAnchorId &&
+      dependencyHashValue.ok &&
+      dependencyHashValue.value === dependencyHash.value;
+  } else {
+    return invalid();
+  }
   const reportScope = validateScope(decoded.scope, connection.environment);
   if (!reportScope.ok) return invalid();
   const expectedScopeHash = hashCanonical(scope.value);
   const actualScopeHash = hashCanonical(reportScope.value);
   if (
-    decoded.schemaVersion !== "history-accounting-reconciliation-report/v1" ||
+    !versionedEnvelopeValid ||
     !calculatedReportId.ok ||
     !expectedScopeHash.ok ||
     !actualScopeHash.ok ||

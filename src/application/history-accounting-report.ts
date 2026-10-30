@@ -4,9 +4,8 @@ import {
 } from "../domain/identity/canonical-serialization.js";
 import { domainError } from "../domain/shared/errors.js";
 import { fail, ok, type Result } from "../domain/shared/result.js";
-import { DecimalValue } from "../domain/shared/decimal.js";
+import type { HistoryAccountingScope } from "../domain/accounting/accounting-scope.js";
 import type { UtcTimestamp } from "../domain/shared/time.js";
-import { parseUtcTimestamp } from "../domain/shared/time.js";
 import type { HistoryAccountingWalletAnchor } from "../ports/history-accounting-anchor-store.js";
 import type {
   HistoryConflictSummary,
@@ -26,6 +25,7 @@ import { indexHistoryObservationsByIdentity } from "./history-accounting-normali
 import {
   projectHistoryAccountingEpoch,
   type HistoryAccountingEpochProjection,
+  type HistoryAccountingEpochProjectionV2,
 } from "./history-accounting-epoch.js";
 import {
   projectHistoryAccountingPerformance,
@@ -39,6 +39,24 @@ import {
   type CanonicalHistoryEvidence,
   type NormalizedHistoryTransaction,
 } from "./history-accounting-normalization.js";
+import {
+  failure,
+  recordWithKeys,
+  isNullableString,
+  isTimestamp,
+  isNullableDecimal,
+  isStringArray,
+  isScope,
+  sameScopeValue,
+  isCurrencyBridge,
+  isPerformanceProjection,
+  overlapsRange,
+} from "./history-accounting-report-common.js";
+import {
+  createScopedHistoryAccountingReport,
+  decodeScopedHistoryAccountingReport,
+  isScopedReportDomainValue,
+} from "./history-accounting-report-v2.js";
 
 export interface HistoryAccountingReportTransaction extends NormalizedHistoryTransaction {
   readonly providerEventTime: UtcTimestamp;
@@ -46,7 +64,7 @@ export interface HistoryAccountingReportTransaction extends NormalizedHistoryTra
   readonly transactionSubType: string | null;
 }
 
-export interface HistoryAccountingReconciliationReport {
+export interface HistoryAccountingReconciliationReportV1 {
   readonly schemaVersion: "history-accounting-reconciliation-report/v1";
   readonly reportId: string;
   readonly scope: HistoryStoreScope;
@@ -66,6 +84,89 @@ export interface HistoryAccountingReconciliationReport {
   readonly preEpochHistory: "UNKNOWN";
 }
 
+export interface HistoryAccountingCoverageWitness {
+  readonly source: (typeof HISTORY_READ_SOURCES)[number];
+  readonly requiredWindow: { readonly fromMs: number; readonly toMs: number };
+  readonly normalizedQueryFilterIdentity: string;
+  readonly mergedCoveredIntervals: readonly {
+    readonly fromMs: number;
+    readonly toMs: number;
+  }[];
+  readonly terminalComplete: boolean;
+  readonly conflictLocationsValid: boolean;
+  readonly relevantConflicts: readonly {
+    readonly conflictId: string;
+    readonly source: string;
+    readonly eventIdentity: string;
+    readonly existingHash: string;
+    readonly incomingHash: string;
+    readonly reason: string;
+  }[];
+}
+
+export interface HistoryAccountingReportDependenciesV2 {
+  readonly schemaVersion: "history-accounting-dependencies/v2";
+  readonly scope: HistoryStoreScope;
+  readonly accountingScope: HistoryAccountingScope;
+  readonly accountingScopeHash: string;
+  readonly epoch: HistoryAccountingEpochProjectionV2["epoch"];
+  readonly anchors: {
+    readonly opening: {
+      readonly anchorId: string;
+      readonly contentHash: string;
+    };
+    readonly closing: {
+      readonly anchorId: string;
+      readonly contentHash: string;
+    };
+  };
+  readonly sourceDependencies: readonly {
+    readonly observationId: string;
+    readonly source: string;
+    readonly eventIdentity: string;
+    readonly contentHash: string;
+  }[];
+  readonly coverageWitness: readonly HistoryAccountingCoverageWitness[];
+  readonly conflictDependencies: readonly unknown[];
+  readonly lineageDependencies: readonly {
+    readonly sourceKind: "operator-mainnet-test" | "prepared-leg";
+    readonly sourceId: string;
+    readonly contentHash: string;
+  }[];
+  readonly settlementCurrencyBySymbol: Readonly<
+    Record<string, VerifiedSettlementCurrency>
+  >;
+  readonly positionUplEvidence: HistoryPositionUplEvidence | null;
+  readonly performanceSelectionConflicts: readonly unknown[];
+}
+
+export interface HistoryAccountingReconciliationReportV2 {
+  readonly schemaVersion: "history-accounting-reconciliation-report/v2";
+  readonly reportId: string;
+  readonly scope: HistoryStoreScope;
+  readonly accountingScope: HistoryAccountingScope;
+  readonly accountingScopeHash: string;
+  readonly evaluatedAt: UtcTimestamp;
+  readonly status: "ACCOUNTING_READY" | "NOT_READY";
+  readonly dependencyHash: string;
+  readonly contentHash: string;
+  readonly dependencies: HistoryAccountingReportDependenciesV2;
+  readonly epoch: HistoryAccountingEpochProjectionV2;
+  readonly performance: HistoryAccountingPerformanceProjection;
+  readonly transactions: readonly HistoryAccountingReportTransaction[];
+  readonly accountUnrealizedPnlUsd: {
+    readonly asOf: UtcTimestamp;
+    readonly amount: string | null;
+    readonly status: "known" | "unknown";
+    readonly allocation: "account-wide-unallocated";
+  };
+  readonly preEpochHistory: "UNKNOWN";
+}
+
+export type HistoryAccountingReconciliationReport =
+  | HistoryAccountingReconciliationReportV1
+  | HistoryAccountingReconciliationReportV2;
+
 export interface CreateHistoryAccountingReportInput {
   readonly scope: HistoryStoreScope;
   readonly opening: HistoryAccountingWalletAnchor;
@@ -79,6 +180,8 @@ export interface CreateHistoryAccountingReportInput {
     Record<string, VerifiedSettlementCurrency>
   >;
   readonly positionUplEvidence?: HistoryPositionUplEvidence;
+  /** Selecting a known policy opts into the explicitly scoped v2 contract. */
+  readonly accountingScope?: HistoryAccountingScope;
 }
 
 export interface HistoryAccountingReportDependencies {
@@ -101,6 +204,11 @@ export interface HistoryAccountingReportDependencies {
 export function encodeHistoryAccountingReport(
   report: HistoryAccountingReconciliationReport,
 ): Result<HistoryAccountingReportRecord> {
+  if (
+    report.schemaVersion === "history-accounting-reconciliation-report/v2" &&
+    !isScopedReportDomainValue(report)
+  )
+    return failure("scoped history accounting report is invalid");
   const canonicalJson = canonicalSerialize(report);
   if (!canonicalJson.ok) return canonicalJson;
   return ok({
@@ -130,7 +238,6 @@ export function decodeHistoryAccountingReport(
       return failure("stored accounting report is malformed");
     const value = decoded as Record<string, unknown>;
     if (
-      value.schemaVersion !== "history-accounting-reconciliation-report/v1" ||
       value.reportId !== record.reportId ||
       value.status !== record.status ||
       value.dependencyHash !== record.dependencyHash ||
@@ -143,6 +250,13 @@ export function decodeHistoryAccountingReport(
       Array.isArray(value.epoch)
     )
       return failure("stored accounting report metadata does not match");
+    if (value.schemaVersion === "history-accounting-reconciliation-report/v2")
+      return decodeScopedHistoryAccountingReport(
+        record,
+        value as unknown as HistoryAccountingReconciliationReportV2,
+      );
+    if (value.schemaVersion !== "history-accounting-reconciliation-report/v1")
+      return failure("stored accounting report version is unsupported");
     const epoch = value.epoch as Record<string, unknown>;
     if (
       epoch.epoch === null ||
@@ -184,116 +298,6 @@ export function decodeHistoryAccountingReport(
   } catch {
     return failure("stored accounting report could not be decoded");
   }
-}
-
-function failure(message: string): Result<never> {
-  return fail(domainError("INVALID_ACCOUNTING", message));
-}
-
-type UnknownRecord = Record<string, unknown>;
-
-function plainRecord(value: unknown): value is UnknownRecord {
-  return (
-    value !== null &&
-    typeof value === "object" &&
-    !Array.isArray(value) &&
-    Object.getPrototypeOf(value) === Object.prototype &&
-    Object.values(Object.getOwnPropertyDescriptors(value)).every((descriptor) =>
-      Object.hasOwn(descriptor, "value"),
-    )
-  );
-}
-
-function recordWithKeys(
-  value: unknown,
-  keys: readonly string[],
-): value is UnknownRecord {
-  return (
-    plainRecord(value) &&
-    Reflect.ownKeys(value).length === keys.length &&
-    keys.every((key) => Object.hasOwn(value, key))
-  );
-}
-
-function isString(value: unknown): value is string {
-  return typeof value === "string";
-}
-
-function isNullableString(value: unknown): value is string | null {
-  return value === null || isString(value);
-}
-
-function isTimestamp(value: unknown): value is string {
-  return typeof value === "string" && parseUtcTimestamp(value).ok;
-}
-
-function isDecimal(value: unknown): value is string {
-  if (typeof value !== "string") return false;
-  const parsed = DecimalValue.fromString(value);
-  return parsed.ok && parsed.value.toString() === value;
-}
-
-function isNullableDecimal(value: unknown): value is string | null {
-  return value === null || isDecimal(value);
-}
-
-function isStringArray(value: unknown): value is string[] {
-  return Array.isArray(value) && value.every(isString);
-}
-
-function isScope(value: unknown): value is UnknownRecord {
-  return (
-    recordWithKeys(value, ["exchange", "environment", "accountId"]) &&
-    value.exchange === "bybit" &&
-    ["demo", "testnet", "mainnet"].includes(String(value.environment)) &&
-    typeof value.accountId === "string" &&
-    /^sha256:[0-9a-f]{64}$/u.test(value.accountId)
-  );
-}
-
-function sameScopeValue(left: unknown, right: unknown): boolean {
-  return (
-    isScope(left) &&
-    isScope(right) &&
-    left.exchange === right.exchange &&
-    left.environment === right.environment &&
-    left.accountId === right.accountId
-  );
-}
-
-function isLineageSource(value: unknown): boolean {
-  return (
-    recordWithKeys(value, ["kind", "sourceId"]) &&
-    (value.kind === "operator-mainnet-test" || value.kind === "prepared-leg") &&
-    typeof value.sourceId === "string" &&
-    value.sourceId.length > 0
-  );
-}
-
-function isCurrencyBridge(value: unknown): boolean {
-  if (
-    !recordWithKeys(value, [
-      "currency",
-      "openingBalance",
-      "transactionChange",
-      "transferChange",
-      "expectedClosingBalance",
-      "closingBalance",
-      "unexplainedDrift",
-    ]) ||
-    typeof value.currency !== "string" ||
-    value.currency.length === 0
-  )
-    return false;
-  const amounts = [
-    value.openingBalance,
-    value.transactionChange,
-    value.transferChange,
-    value.expectedClosingBalance,
-    value.closingBalance,
-    value.unexplainedDrift,
-  ];
-  return amounts.every(isNullableDecimal);
 }
 
 function isEpochProjection(
@@ -393,186 +397,9 @@ function isEpochProjection(
   return true;
 }
 
-function isPerformanceProjection(value: unknown, scope: unknown): boolean {
-  if (
-    !recordWithKeys(value, [
-      "schemaVersion",
-      "scope",
-      "ownedClosedPnl",
-      "notStrategyPerformance",
-      "ownedRunSymbolDays",
-      "ownedRunDays",
-      "accountDays",
-      "positionUpl",
-      "selectionConflicts",
-    ]) ||
-    value.schemaVersion !== "history-accounting-performance-projection/v1" ||
-    !sameScopeValue(value.scope, scope) ||
-    !Array.isArray(value.ownedClosedPnl) ||
-    !Array.isArray(value.notStrategyPerformance) ||
-    !Array.isArray(value.ownedRunSymbolDays) ||
-    !Array.isArray(value.ownedRunDays) ||
-    !Array.isArray(value.accountDays) ||
-    !Array.isArray(value.selectionConflicts)
-  )
-    return false;
-
-  const ownedRowsValid = value.ownedClosedPnl.every(
-    (row: unknown) =>
-      recordWithKeys(row, [
-        "observationId",
-        "source",
-        "symbol",
-        "utcDay",
-        "currency",
-        "reportedClosedPnl",
-        "status",
-        "reasonCodes",
-        "feeFunding",
-      ]) &&
-      typeof row.observationId === "string" &&
-      isLineageSource(row.source) &&
-      typeof row.symbol === "string" &&
-      /^\d{4}-\d{2}-\d{2}$/u.test(String(row.utcDay)) &&
-      isNullableString(row.currency) &&
-      isNullableDecimal(row.reportedClosedPnl) &&
-      ["complete", "partial", "unknown"].includes(String(row.status)) &&
-      isStringArray(row.reasonCodes) &&
-      recordWithKeys(row.feeFunding, [
-        "openFee",
-        "closeFee",
-        "fundingFee",
-        "currency",
-        "status",
-        "includedInReportedClosedPnl",
-      ]) &&
-      isNullableDecimal(row.feeFunding.openFee) &&
-      isNullableDecimal(row.feeFunding.closeFee) &&
-      isNullableDecimal(row.feeFunding.fundingFee) &&
-      isNullableString(row.feeFunding.currency) &&
-      ["complete", "incomplete"].includes(String(row.feeFunding.status)) &&
-      row.feeFunding.includedInReportedClosedPnl === false,
-  );
-  const nonStrategyRowsValid = value.notStrategyPerformance.every(
-    (row: unknown) =>
-      recordWithKeys(row, [
-        "observationId",
-        "symbol",
-        "utcDay",
-        "currency",
-        "reportedClosedPnl",
-        "ownership",
-        "reason",
-        "candidates",
-      ]) &&
-      typeof row.observationId === "string" &&
-      typeof row.symbol === "string" &&
-      /^\d{4}-\d{2}-\d{2}$/u.test(String(row.utcDay)) &&
-      isNullableString(row.currency) &&
-      isNullableDecimal(row.reportedClosedPnl) &&
-      ["unmatched", "ambiguous"].includes(String(row.ownership)) &&
-      ["NO_EXACT_LINEAGE", "MULTIPLE_EXACT_LINEAGES"].includes(
-        String(row.reason),
-      ) &&
-      Array.isArray(row.candidates) &&
-      row.candidates.every(isLineageSource),
-  );
-  const groupsValid = [
-    ...value.ownedRunSymbolDays,
-    ...value.ownedRunDays,
-    ...value.accountDays,
-  ].every(
-    (row: unknown) =>
-      recordWithKeys(row, [
-        "level",
-        "source",
-        "symbol",
-        "utcDay",
-        "currency",
-        "amount",
-        "status",
-        "reasonCodes",
-        "observationIds",
-      ]) &&
-      ["account-day", "owned-run-day", "owned-run-symbol-day"].includes(
-        String(row.level),
-      ) &&
-      (row.source === null || isLineageSource(row.source)) &&
-      isNullableString(row.symbol) &&
-      /^\d{4}-\d{2}-\d{2}$/u.test(String(row.utcDay)) &&
-      isNullableString(row.currency) &&
-      isNullableDecimal(row.amount) &&
-      ["complete", "partial", "unknown"].includes(String(row.status)) &&
-      isStringArray(row.reasonCodes) &&
-      isStringArray(row.observationIds),
-  );
-  const positionUplValid =
-    value.positionUpl === null ||
-    (recordWithKeys(value.positionUpl, ["scope", "asOf", "positions"]) &&
-      sameScopeValue(value.positionUpl.scope, scope) &&
-      isTimestamp(value.positionUpl.asOf) &&
-      Array.isArray(value.positionUpl.positions) &&
-      value.positionUpl.positions.every(
-        (position: unknown) =>
-          plainRecord(position) &&
-          [
-            "positionId",
-            "symbol",
-            "asOf",
-            "unrealizedPnl",
-            "currency",
-            "status",
-            "allocation",
-            "executionObservationIds",
-          ].every((key) => Object.hasOwn(position, key)) &&
-          Object.keys(position).every(
-            (key) => key !== "source" || isLineageSource(position.source),
-          ) &&
-          typeof position.positionId === "string" &&
-          typeof position.symbol === "string" &&
-          isTimestamp(position.asOf) &&
-          isDecimal(position.unrealizedPnl) &&
-          isNullableString(position.currency) &&
-          ["known", "unknown"].includes(String(position.status)) &&
-          ["account-level-unallocated", "owned-run"].includes(
-            String(position.allocation),
-          ) &&
-          isStringArray(position.executionObservationIds),
-      ));
-  const conflictsValid = value.selectionConflicts.every((conflict: unknown) => {
-    if (!plainRecord(conflict) || typeof conflict.kind !== "string")
-      return false;
-    if (conflict.kind === "transaction-identity-conflict")
-      return (
-        recordWithKeys(conflict, [
-          "kind",
-          "transactionId",
-          "observationIds",
-          "conflictIds",
-        ]) &&
-        typeof conflict.transactionId === "string" &&
-        isStringArray(conflict.observationIds) &&
-        isStringArray(conflict.conflictIds)
-      );
-    return (
-      conflict.kind === "closed-pnl-revision-conflict" &&
-      recordWithKeys(conflict, ["kind", "groupingKey", "observationIds"]) &&
-      plainRecord(conflict.groupingKey) &&
-      isStringArray(conflict.observationIds)
-    );
-  });
-  return (
-    ownedRowsValid &&
-    nonStrategyRowsValid &&
-    groupsValid &&
-    positionUplValid &&
-    conflictsValid
-  );
-}
-
 function isReportDomainValue(
   value: unknown,
-): value is HistoryAccountingReconciliationReport {
+): value is HistoryAccountingReconciliationReportV1 {
   if (
     !recordWithKeys(value, [
       "schemaVersion",
@@ -673,14 +500,6 @@ function isReportDomainValue(
 function inEpoch(time: string, opening: string, closing: string): boolean {
   const value = Date.parse(time);
   return value > Date.parse(opening) && value <= Date.parse(closing);
-}
-
-function overlapsRange(
-  window: { readonly fromMs: number; readonly toMs: number },
-  from: number,
-  to: number,
-): boolean {
-  return window.fromMs <= to && window.toMs >= from;
 }
 
 function dependencySet(
@@ -873,7 +692,7 @@ function dependencySet(
   });
 }
 
-export function createHistoryAccountingReport(
+function createHistoryAccountingReportV1(
   input: CreateHistoryAccountingReportInput,
 ): Result<HistoryAccountingReconciliationReport> {
   try {
@@ -1034,4 +853,12 @@ export function createHistoryAccountingReport(
       ),
     );
   }
+}
+
+export function createHistoryAccountingReport(
+  input: CreateHistoryAccountingReportInput,
+): Result<HistoryAccountingReconciliationReport> {
+  return input.accountingScope === undefined
+    ? createHistoryAccountingReportV1(input)
+    : createScopedHistoryAccountingReport(input);
 }

@@ -13,10 +13,12 @@ import { fail, type Result } from "../domain/shared/result.js";
 import { domainError } from "../domain/shared/errors.js";
 import { requireIdentifier } from "../domain/shared/validation.js";
 import type { CredentialEnvironment } from "../ports/credential-provider.js";
+import { resolveHistoryAccountingScope } from "../application/history-accounting-scope.js";
 
 export const HISTORY_ACCOUNTING_USAGE = `Usage:
   npm run accounting:reconcile -- --mode capture-anchor --environment <demo|testnet|mainnet> --database <absolute-path> --kind <opening|closing>
   npm run accounting:reconcile -- --mode reconcile --environment <demo|testnet|mainnet> --database <absolute-path> --opening-anchor-id <id> --closing-anchor-id <id>
+  npm run accounting:reconcile -- --mode reconcile --environment <demo|testnet|mainnet> --database <absolute-path> --opening-anchor-id <id> --closing-anchor-id <id> --accounting-policy <operator-mainnet-test/v1|provisional-m1-v1>
 
 Reconcile reads only local SQLite evidence. capture-anchor performs authenticated Bybit GETs only.`;
 
@@ -93,12 +95,15 @@ function parse(argv: readonly string[]): Parsed {
   if (mode === "reconcile") {
     const openingAnchorId = values.get("--opening-anchor-id");
     const closingAnchorId = values.get("--closing-anchor-id");
+    const accountingPolicyVersion = values.get("--accounting-policy");
     if (
-      values.size !== 5 ||
+      (values.size !== 5 && values.size !== 6) ||
       openingAnchorId === undefined ||
       closingAnchorId === undefined ||
       !requireIdentifier(openingAnchorId, "openingAnchorId").ok ||
       !requireIdentifier(closingAnchorId, "closingAnchorId").ok ||
+      (accountingPolicyVersion !== undefined &&
+        !resolveHistoryAccountingScope(accountingPolicyVersion).ok) ||
       [...values.keys()].some(
         (key) =>
           ![
@@ -107,13 +112,22 @@ function parse(argv: readonly string[]): Parsed {
             "--database",
             "--opening-anchor-id",
             "--closing-anchor-id",
+            "--accounting-policy",
           ].includes(key),
       )
     )
       return { kind: "invalid" };
     return {
       kind: "reconcile",
-      input: { environment, databasePath, openingAnchorId, closingAnchorId },
+      input: {
+        environment,
+        databasePath,
+        openingAnchorId,
+        closingAnchorId,
+        ...(accountingPolicyVersion === undefined
+          ? {}
+          : { accountingPolicyVersion }),
+      },
     };
   }
   return { kind: "invalid" };
@@ -149,13 +163,36 @@ function printReport(
   output: HistoryAccountingCliOutput,
   report: HistoryAccountingReconciliationReport,
 ): void {
+  const scoped =
+    report.schemaVersion === "history-accounting-reconciliation-report/v2";
+  const anchorExclusions = scoped
+    ? report.epoch.exclusions
+        .filter((exclusion) => exclusion.kind === "anchor-balance")
+        .map((exclusion) => exclusion.currency)
+    : [];
+  const anchorExclusionCount = scoped ? report.epoch.exclusionCount : 0;
   output.write(
     `MODE=RECONCILE\nSTATUS=${report.status}\nREPORT_ID=${report.reportId}\n` +
+      `REPORT_CONTRACT=${report.schemaVersion}\n` +
       `EPOCH=${report.epoch.epoch.openingBoundary}:${report.epoch.epoch.closingBoundary}\n` +
       `PRE_EPOCH_HISTORY=${report.preEpochHistory}\n` +
       `TRANSACTIONS=${report.transactions.length}\n` +
       `ACCOUNT_UNREALIZED_PNL_USD=${report.accountUnrealizedPnlUsd.amount ?? "UNKNOWN"} AS_OF=${report.accountUnrealizedPnlUsd.asOf} ALLOCATION=${report.accountUnrealizedPnlUsd.allocation}\n`,
   );
+  if (scoped)
+    output.write(
+      `ACCOUNTING_POLICY_VERSION=${report.accountingScope.policyVersion}\n` +
+        `ACCOUNTING_SCOPE_HASH=${report.accountingScopeHash}\n` +
+        `INCLUDED_CURRENCIES=${report.accountingScope.nativeCurrencies.join(",")}\n` +
+        `EXCLUDED_ANCHOR_CURRENCIES=${anchorExclusions.join(",") || "NONE"}\n` +
+        `EXCLUDED_ANCHOR_CURRENCY_COUNT=${anchorExclusionCount}\n` +
+        `EXCLUDED_ANCHOR_CURRENCIES_TRUNCATED=${report.epoch.exclusionsTruncated ? "YES" : "NO"}\n` +
+        "WHOLE_ACCOUNT_RECONCILIATION=UNCLAIMED\n",
+    );
+  else
+    output.write(
+      `WHOLE_ACCOUNT_RECONCILIATION=${report.status === "ACCOUNTING_READY" ? "ACCOUNTING_READY" : "NOT_READY"}\n`,
+    );
   for (const currency of report.epoch.currencies)
     output.write(
       `CURRENCY=${currency.currency} OPENING=${currency.openingBalance ?? "UNKNOWN"} ` +
@@ -177,9 +214,17 @@ function printReport(
     `UNMATCHED_OR_AMBIGUOUS_CLOSED_PNL=${report.performance.notStrategyPerformance.length}\n` +
       `ACCOUNTING_READY=${report.status === "ACCOUNTING_READY" ? "YES" : "NO"}\n` +
       `REASON_CODES=${safeCodeList(report.epoch.reasonCodes)}\n` +
-      `NEXT_ACTION=${report.status === "ACCOUNTING_READY" ? "Use this report only for its verified period and evidence scope." : "Review the reason codes, fill any in-period history gaps, and recapture anchors after account changes."}\n` +
+      `NEXT_ACTION=${report.status === "ACCOUNTING_READY" ? (scoped ? "Use this report only for its selected policy, currencies and period; whole-account reconciliation remains unclaimed." : "Use this report only for its verified period and evidence scope.") : "Review the reason codes, fill any in-period history gaps, and recapture anchors after account changes."}\n` +
       "EXCHANGE_READS=0\nEXCHANGE_WRITES=0\n",
   );
+  if (
+    !scoped &&
+    report.status === "NOT_READY" &&
+    report.epoch.reasonCodes.includes("UNSUPPORTED_CURRENCY")
+  )
+    output.write(
+      "SCOPED_SELECTOR_HINT=If an approved strategy governs this period, explicitly rerun with --accounting-policy <operator-mainnet-test/v1|provisional-m1-v1>; this does not change the legacy report.\n",
+    );
 }
 
 export async function runHistoryAccountingCli(

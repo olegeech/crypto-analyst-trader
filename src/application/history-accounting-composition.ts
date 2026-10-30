@@ -12,6 +12,7 @@ import type { CredentialEnvironment } from "../ports/credential-provider.js";
 import type { HistoryAccountingAnchorKeyProvider } from "../ports/history-accounting-anchor-key-provider.js";
 import type { HistoryAccountingWalletAnchor } from "../ports/history-accounting-anchor-store.js";
 import type { HistoryStoreScope } from "../ports/history-store.js";
+import { resolveHistoryAccountingScope } from "./history-accounting-scope.js";
 import type { HistoryAccountingReconciliationReport } from "./history-accounting-report.js";
 import {
   createHistoryAccountingReport,
@@ -25,6 +26,8 @@ export interface ReconcileHistoryAccountingInput {
   readonly databasePath: string;
   readonly openingAnchorId: string;
   readonly closingAnchorId: string;
+  /** Explicitly selects the scoped v2 accounting contract. */
+  readonly accountingPolicyVersion?: string;
 }
 
 export interface ReconcileHistoryAccountingDependencies {
@@ -67,6 +70,7 @@ export function calculateHistoryAccountingReportFromLocalEvidence(
   scope: HistoryStoreScope,
   opening: HistoryAccountingWalletAnchor,
   closing: HistoryAccountingWalletAnchor,
+  accountingPolicyVersion?: string,
 ): Result<HistoryAccountingReconciliationReport> {
   if (
     connection.environment !== scope.environment ||
@@ -79,6 +83,17 @@ export function calculateHistoryAccountingReportFromLocalEvidence(
       "ANCHOR_SCOPE_MISMATCH",
       "selected anchors must match the report account and environment",
       "anchor-validation",
+    );
+
+  const accountingScope =
+    accountingPolicyVersion === undefined
+      ? undefined
+      : resolveHistoryAccountingScope(accountingPolicyVersion);
+  if (accountingScope !== undefined && !accountingScope.ok)
+    return error(
+      "INVALID_ACCOUNTING_POLICY",
+      "select a supported accounting policy version",
+      "request-validation",
     );
 
   const historyStore = createSqliteHistoryStore(connection);
@@ -115,6 +130,7 @@ export function calculateHistoryAccountingReportFromLocalEvidence(
     // denomination unknown until verified metadata is supplied in a later
     // bounded addition; never infer it from the symbol suffix.
     settlementCurrencyBySymbol: {},
+    ...(accountingScope?.ok ? { accountingScope: accountingScope.value } : {}),
   });
   return report.ok
     ? report
@@ -140,7 +156,9 @@ export async function reconcileHistoryAccounting(
     typeof input.openingAnchorId !== "string" ||
     typeof input.closingAnchorId !== "string" ||
     input.openingAnchorId.length === 0 ||
-    input.closingAnchorId.length === 0
+    input.closingAnchorId.length === 0 ||
+    (input.accountingPolicyVersion !== undefined &&
+      typeof input.accountingPolicyVersion !== "string")
   )
     return error(
       "INVALID_REQUEST",
@@ -208,6 +226,7 @@ export async function reconcileHistoryAccounting(
       scope,
       opening.value,
       closing.value,
+      input.accountingPolicyVersion,
     );
     if (!report.ok) return report;
     const encoded = encodeHistoryAccountingReport(report.value);

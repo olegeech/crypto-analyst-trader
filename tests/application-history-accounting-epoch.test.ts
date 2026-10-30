@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { projectHistoryAccountingEpoch } from "../src/application/history-accounting-epoch.js";
+import {
+  projectHistoryAccountingEpoch,
+  projectScopedHistoryAccountingEpoch,
+} from "../src/application/history-accounting-epoch.js";
+import { resolveHistoryAccountingScope } from "../src/application/history-accounting-scope.js";
 import {
   mapBybitExecutionResponse,
   mapBybitTransactionLogResponse,
@@ -27,6 +31,9 @@ const scope: HistoryStoreScope = {
   environment: "mainnet",
   accountId: `sha256:${"a".repeat(64)}`,
 };
+const accountingScope = unwrap(
+  resolveHistoryAccountingScope("provisional-m1-v1"),
+);
 const openingAt = "2026-10-27T10:00:00.000Z" as UtcTimestamp;
 const closingAt = "2026-10-27T10:10:00.000Z" as UtcTimestamp;
 const startMs = Date.parse(openingAt);
@@ -524,6 +531,24 @@ function project(options: {
   });
 }
 
+function projectScoped(options: {
+  opening?: HistoryAccountingWalletAnchor;
+  closing?: HistoryAccountingWalletAnchor;
+  observations?: readonly HistoryStoredObservation[];
+  conflicts?: readonly HistoryConflictSummary[];
+  coverage?: readonly HistoryCheckpoint[];
+}) {
+  return projectScopedHistoryAccountingEpoch({
+    scope,
+    accountingScope,
+    opening: options.opening ?? anchor("opening", openingAt),
+    closing: options.closing ?? anchor("closing", closingAt),
+    observations: options.observations ?? [],
+    conflicts: options.conflicts ?? [],
+    coverage: options.coverage ?? completeCoverage(),
+  });
+}
+
 function reasons(result: ReturnType<typeof projectHistoryAccountingEpoch>) {
   if (!result.ok) throw new Error(result.error.message);
   return result.value.reasonCodes;
@@ -856,6 +881,125 @@ test("accepts a fully covered USDT-only bridge while rejecting unsupported mixed
   );
 });
 
+test("scoped epoch reconciles USDT while excluding an independent MNT transfer", () => {
+  const anchors = {
+    opening: anchor("opening", openingAt, { USDT: "100", MNT: "20" }),
+    closing: anchor("closing", closingAt, { USDT: "100", MNT: "21" }),
+  };
+  const observations = [
+    transaction("tx-mnt-transfer", "1", {
+      currency: "MNT",
+      type: "TRANSFER_IN",
+      cashFlow: "1",
+      funding: "0",
+      fee: "0",
+      change: "1",
+    }),
+  ];
+  const result = unwrap(projectScoped({ ...anchors, observations }));
+
+  assert.equal(result.schemaVersion, "history-accounting-epoch-projection/v2");
+  assert.equal(result.status, "RECONCILED", result.reasonCodes.join(","));
+  assert.equal(result.accountingScope?.scopeHash, accountingScope.scopeHash);
+  assert.deepEqual(
+    result.currencies.map((row) => row.currency),
+    ["USDT"],
+  );
+  assert.ok(
+    result.exclusions.some(
+      (row) => row.kind === "anchor-balance" && row.currency === "MNT",
+    ),
+  );
+  assert.ok(
+    result.exclusions.some(
+      (row) => row.kind === "transaction" && row.currency === "MNT",
+    ),
+  );
+
+  const legacy = unwrap(project({ ...anchors, observations }));
+  assert.equal(legacy.status, "NOT_READY");
+  assert.ok(legacy.reasonCodes.includes("UNSUPPORTED_CURRENCY"));
+});
+
+test("scoped epoch rejects structurally duplicated excluded anchor balances", () => {
+  const opening = anchor("opening", openingAt, { USDT: "100", MNT: "20" });
+  const mnt = opening.assets.find((row) => row.coin === "MNT");
+  assert.ok(mnt);
+  const duplicateOpening = authenticateFixtureAnchor({
+    ...opening,
+    assets: [...opening.assets, mnt],
+  });
+
+  const result = unwrap(projectScoped({ opening: duplicateOpening }));
+  assert.equal(result.status, "NOT_READY");
+  assert.ok(result.reasonCodes.includes("ANCHOR_CAPTURE_INVALID"));
+  assert.ok(!result.reasonCodes.includes("DUPLICATE_COIN_BALANCE"));
+});
+
+test("scoped epoch retains a linked MNT fee and blocks unknown MNT movements", () => {
+  const linkedFee = transaction("tx-mnt-fee", "-0.1", {
+    currency: "MNT",
+    type: "TRADE",
+    category: "linear",
+    symbol: "DOGEUSDT",
+    side: "Buy",
+    qty: "1",
+    tradePrice: "1",
+    cashFlow: "0",
+    funding: "0",
+    fee: "0.1",
+    orderId: "order-linked-fee",
+  });
+  const usdtTrade = transaction("tx-usdt-trade", "0", {
+    currency: "USDT",
+    type: "SETTLEMENT",
+    orderId: "order-linked-fee",
+  });
+  const feeResult = unwrap(
+    projectScoped({ observations: [usdtTrade, linkedFee] }),
+  );
+  assert.equal(feeResult.status, "NOT_READY");
+  assert.ok(feeResult.reasonCodes.includes("UNSUPPORTED_CURRENCY"));
+  assert.ok(
+    feeResult.selectedEvidenceIdentities.some(
+      (identity) => identity.eventIdentity === linkedFee.eventIdentity,
+    ),
+  );
+
+  const unknown = transaction("tx-mnt-unknown", "1", {
+    currency: "MNT",
+    type: "NEW_PROVIDER_TYPE",
+  });
+  const unknownResult = unwrap(projectScoped({ observations: [unknown] }));
+  assert.equal(unknownResult.status, "NOT_READY");
+  assert.ok(unknownResult.reasonCodes.includes("UNKNOWN_TRANSACTION_TYPE"));
+  assert.ok(unknownResult.reasonCodes.includes("UNSUPPORTED_CURRENCY"));
+});
+
+test("scoped epoch blocks an ambiguous MNT transaction revision", () => {
+  const mnt = transaction("tx-mnt-ambiguous", "1", {
+    currency: "MNT",
+    type: "TRANSFER_IN",
+  });
+  const conflict: HistoryConflictSummary = {
+    conflictId: "conflict-mnt-ambiguous",
+    source: "transaction-log",
+    eventIdentity: mnt.eventIdentity,
+    existingHash: mnt.contentHash,
+    incomingHash: `sha256:${"f".repeat(64)}`,
+    reason: "IMMUTABLE_ID_CONTENT_CHANGED",
+    recordedAt: "2026-10-27T10:07:00.000Z" as UtcTimestamp,
+    windows: [],
+  };
+  const result = unwrap(
+    projectScoped({ observations: [mnt], conflicts: [conflict] }),
+  );
+
+  assert.equal(result.status, "NOT_READY");
+  assert.ok(result.reasonCodes.includes("TRANSACTION_IDENTITY_CONFLICT"));
+  assert.equal(result.exclusions.length, 0);
+});
+
 test("unknown transaction type and incomplete funding components keep readiness blocked", () => {
   const unknownType = unwrap(
     project({
@@ -1168,6 +1312,73 @@ test("an unlocated checkpoint conflict remains fail-closed", () => {
 
   assert.equal(result.status, "NOT_READY");
   assert.ok(result.reasonCodes.includes("HISTORY_COVERAGE_CONFLICT"));
+});
+
+test("a hash-only conflict with an out-of-epoch row blocks the scoped period", () => {
+  const outsideMs = startMs - 30_000;
+  const conflicted = checkpoint(
+    "transaction-log",
+    startMs - 60_000,
+    endMs + 100,
+    { conflictCount: 1, reasonCode: "SOURCE_CONFLICT" },
+  );
+  const outsideObservation = transaction("outside-epoch-conflict", "1", {
+    currency: "MNT",
+    type: "TRANSFER_IN",
+    providerEventTime: new Date(outsideMs).toISOString(),
+  });
+  const result = unwrap(
+    projectScoped({
+      observations: [outsideObservation],
+      conflicts: [
+        {
+          conflictId: "outside-epoch-revision",
+          source: "transaction-log",
+          eventIdentity: outsideObservation.eventIdentity,
+          existingHash: outsideObservation.contentHash,
+          incomingHash: `sha256:${"d".repeat(64)}`,
+          reason: "IMMUTABLE_ID_CONTENT_CHANGED",
+          recordedAt: "2026-10-27T10:08:00.000Z" as UtcTimestamp,
+          windows: [
+            { filterHash: conflicted.filterHash, window: conflicted.window },
+          ],
+        },
+      ],
+      coverage: [...completeCoverage(), conflicted],
+    }),
+  );
+
+  assert.equal(result.readiness, "NOT_READY");
+  assert.ok(result.reasonCodes.includes("TRANSACTION_IDENTITY_CONFLICT"));
+});
+
+test("a hash-only conflict inside an anchor capture bracket blocks without a stored row", () => {
+  const conflicted = checkpoint("transaction-log", startMs - 90, startMs - 80, {
+    conflictCount: 1,
+    reasonCode: "SOURCE_CONFLICT",
+  });
+  const result = unwrap(
+    projectScoped({
+      conflicts: [
+        {
+          conflictId: "unlocated-opening-bracket-conflict",
+          source: "transaction-log",
+          eventIdentity: "transaction:missing-opening-bracket-event",
+          existingHash: `sha256:${"c".repeat(64)}`,
+          incomingHash: `sha256:${"d".repeat(64)}`,
+          reason: "IMMUTABLE_ID_CONTENT_CHANGED",
+          recordedAt: "2026-10-27T10:08:00.000Z" as UtcTimestamp,
+          windows: [
+            { filterHash: conflicted.filterHash, window: conflicted.window },
+          ],
+        },
+      ],
+      coverage: [...completeCoverage(), conflicted],
+    }),
+  );
+
+  assert.equal(result.readiness, "NOT_READY");
+  assert.ok(result.reasonCodes.includes("TRANSACTION_IDENTITY_CONFLICT"));
 });
 
 test("requires compatible filters and traversed status for all four coverage sources", () => {
