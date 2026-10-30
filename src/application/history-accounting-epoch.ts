@@ -5,6 +5,10 @@ import {
   type HistoryAccountingSelectionConflict,
 } from "./history-accounting-normalization.js";
 import { DecimalValue } from "../domain/shared/decimal.js";
+import {
+  decodeHistoryAccountingScope,
+  type HistoryAccountingScope,
+} from "../domain/accounting/accounting-scope.js";
 import type { HistoryAccountingWalletAnchor } from "../ports/history-accounting-anchor-store.js";
 import type {
   HistoryCheckpoint,
@@ -19,6 +23,7 @@ import {
 import { ok, type Result } from "../domain/shared/result.js";
 import { parseUtcTimestamp } from "../domain/shared/time.js";
 import {
+  createAccountCriticalPass,
   createAccountBinding,
   createAccountCredentialPosture,
 } from "../domain/account/account-evidence-bundle.js";
@@ -29,6 +34,13 @@ import type {
   ExecutionHistorySourceFact,
   TransactionHistorySourceFact,
 } from "../domain/accounting/history-source-fact.js";
+import {
+  selectScopedHistoryAccountingEvidence,
+  type ScopedHistoryAccountingEvidence,
+  type ScopedHistoryAccountingEvidenceIdentity,
+  type ScopedHistoryAccountingExclusion,
+  type ScopedHistoryAccountingConflictDisposition,
+} from "./history-accounting-selection.js";
 
 export type HistoryAccountingEpochReasonCode =
   | "INVALID_INPUT"
@@ -110,6 +122,48 @@ export interface ProjectHistoryAccountingEpochInput {
   readonly observations: readonly HistoryStoredObservation[];
   readonly conflicts: readonly HistoryConflictSummary[];
   readonly coverage: readonly HistoryCheckpoint[];
+}
+
+export interface ProjectScopedHistoryAccountingEpochInput extends ProjectHistoryAccountingEpochInput {
+  readonly accountingScope: HistoryAccountingScope;
+}
+
+export interface HistoryAccountingEpochAnchorExclusion {
+  readonly kind: "anchor-balance";
+  readonly currency: string;
+  readonly openingBalance: string | null;
+  readonly closingBalance: string | null;
+}
+
+export type HistoryAccountingEpochTransactionExclusion =
+  ScopedHistoryAccountingExclusion & { readonly kind: "transaction" };
+
+export interface HistoryAccountingEpochProjectionV2 {
+  readonly schemaVersion: "history-accounting-epoch-projection/v2";
+  readonly status: "RECONCILED" | "NOT_READY";
+  readonly readiness: "ACCOUNTING_READY" | "NOT_READY";
+  readonly scope: HistoryStoreScope;
+  readonly accountingScope: HistoryAccountingScope | null;
+  readonly accountingScopeHash: string | null;
+  readonly epoch: {
+    readonly openingAnchorId: string;
+    readonly closingAnchorId: string;
+    readonly openingBoundary: string;
+    readonly closingBoundary: string;
+    readonly transactionWindow: "(opening, closing]";
+  };
+  readonly sourceCoverage: readonly HistoryAccountingEpochSourceCoverage[];
+  readonly currencies: readonly HistoryAccountingEpochCurrencyBridge[];
+  readonly selectedTransactionCount: number;
+  readonly selectedEvidenceIdentities: readonly ScopedHistoryAccountingEvidenceIdentity[];
+  readonly conflictDispositions: readonly ScopedHistoryAccountingConflictDisposition[];
+  readonly exclusions: readonly (
+    | HistoryAccountingEpochAnchorExclusion
+    | HistoryAccountingEpochTransactionExclusion
+  )[];
+  readonly exclusionCount: number;
+  readonly exclusionsTruncated: boolean;
+  readonly reasonCodes: readonly HistoryAccountingEpochReasonCode[];
 }
 
 interface BalanceIndex {
@@ -247,6 +301,38 @@ function validateAnchor(
     return undefined;
   }
   return boundary;
+}
+
+function validateAnchorWalletStructure(
+  anchor: HistoryAccountingWalletAnchor,
+): boolean {
+  if (!plainRecord(anchor) || !Array.isArray(anchor.assets)) return false;
+  const seenCoins = new Set<string>();
+  for (const asset of anchor.assets) {
+    if (
+      !plainRecord(asset) ||
+      typeof asset.coin !== "string" ||
+      asset.coin.length === 0 ||
+      seenCoins.has(asset.coin)
+    )
+      return false;
+    seenCoins.add(asset.coin);
+  }
+  const unavailable = { state: "unavailable", reason: "not-returned" };
+  return createAccountCriticalPass({
+    account: {
+      utaStatus: unavailable,
+      marginMode: unavailable,
+      spotHedging: unavailable,
+    },
+    totals: anchor.totals,
+    assets: anchor.assets,
+    collateral: [],
+    positions: [],
+    orders: [],
+    modeProbes: [],
+    observations: [],
+  }).ok;
 }
 
 function readBalances(
@@ -1130,6 +1216,544 @@ export function projectHistoryAccountingEpoch(
   } catch {
     return ok(
       invalidProjection(
+        plainRecord(input) && plainRecord(input.scope)
+          ? (input.scope as unknown as HistoryStoreScope)
+          : undefined,
+      ),
+    );
+  }
+}
+
+interface ScopedBalanceIndex extends BalanceIndex {
+  readonly excluded: Map<
+    string,
+    {
+      currency: string;
+      openingBalance: string | null;
+      closingBalance: string | null;
+    }
+  >;
+}
+
+const MAX_SCOPED_EXCLUSIONS = 128;
+
+function scopedWalletBalance(value: unknown): DecimalValue | null {
+  return plainRecord(value) &&
+    value.state === "known" &&
+    value.unit === "coin" &&
+    value.value instanceof DecimalValue &&
+    !value.value.isNegative()
+    ? value.value
+    : null;
+}
+
+function recordExcludedAnchorBalance(
+  excluded: ScopedBalanceIndex["excluded"],
+  currency: string,
+  kind: "opening" | "closing",
+  balance: DecimalValue | null,
+): void {
+  const current = excluded.get(currency) ?? {
+    currency,
+    openingBalance: null,
+    closingBalance: null,
+  };
+  excluded.set(currency, {
+    ...current,
+    [kind === "opening" ? "openingBalance" : "closingBalance"]:
+      balance?.toString() ?? null,
+  });
+}
+
+function readScopedBalances(
+  anchor: HistoryAccountingWalletAnchor,
+  kind: "opening" | "closing",
+  currencies: readonly string[],
+  reasons: Set<HistoryAccountingEpochReasonCode>,
+  excluded: ScopedBalanceIndex["excluded"],
+): BalanceIndex {
+  const included = new Set(currencies);
+  const values = new Map<string, DecimalValue | null>();
+  if (!plainRecord(anchor) || !Array.isArray(anchor.assets)) {
+    addReason(reasons, "ANCHOR_CAPTURE_INVALID");
+    addReason(reasons, "MISSING_COIN_BALANCE");
+    return { values };
+  }
+  for (const rawAsset of anchor.assets) {
+    if (
+      !plainRecord(rawAsset) ||
+      typeof rawAsset.coin !== "string" ||
+      rawAsset.coin.trim().length === 0
+    ) {
+      addReason(reasons, "ANCHOR_CAPTURE_INVALID");
+      continue;
+    }
+    const currency = rawAsset.coin;
+    const balance = scopedWalletBalance(rawAsset.walletBalance);
+    if (values.has(currency)) {
+      if (included.has(currency)) {
+        values.set(currency, null);
+        addReason(reasons, "DUPLICATE_COIN_BALANCE");
+      }
+      continue;
+    }
+    if (!included.has(currency)) {
+      recordExcludedAnchorBalance(excluded, currency, kind, balance);
+      continue;
+    }
+    values.set(currency, balance);
+    if (balance === null) addReason(reasons, "MISSING_COIN_BALANCE");
+    for (const key of [
+      "bonus",
+      "borrowAmount",
+      "spotBorrow",
+      "accruedInterest",
+    ] as const) {
+      const fact = rawAsset[key];
+      if (
+        plainRecord(fact) &&
+        fact.state === "known" &&
+        fact.unit === "coin" &&
+        fact.value instanceof DecimalValue
+      ) {
+        if (!fact.value.isZero())
+          addReason(reasons, "UNSUPPORTED_BALANCE_SEMANTICS");
+      } else {
+        addReason(reasons, "UNSUPPORTED_BALANCE_SEMANTICS");
+      }
+    }
+  }
+  for (const currency of currencies)
+    if (!values.has(currency)) addReason(reasons, "MISSING_COIN_BALANCE");
+  return { values };
+}
+
+function projectScopedCurrencies(
+  opening: BalanceIndex,
+  closing: BalanceIndex,
+  transactions: readonly NormalizedRow[],
+  currencies: readonly string[],
+  reasons: Set<HistoryAccountingEpochReasonCode>,
+): readonly HistoryAccountingEpochCurrencyBridge[] {
+  const rows = [...currencies].sort().map((currency) => {
+    const row = emptyCurrencyRow(currency);
+    const openingBalance = opening.values.get(currency);
+    const closingBalance = closing.values.get(currency);
+    if (
+      openingBalance === undefined ||
+      closingBalance === undefined ||
+      openingBalance === null ||
+      closingBalance === null
+    ) {
+      addReason(reasons, "MISSING_COIN_BALANCE");
+    } else {
+      row.openingBalance = openingBalance.toString();
+      row.closingBalance = closingBalance.toString();
+    }
+
+    const matching = transactions.filter(
+      (transaction) => transaction.currency === currency,
+    );
+    if (matching.some((transaction) => transaction.change === null))
+      return Object.freeze(row);
+    const total = matching.reduce(
+      (sum, transaction) => sum.add(transaction.change!),
+      decimalZero(),
+    );
+    row.transactionChange = total.toString();
+    const transfers = matching.filter(
+      (transaction) => transaction.movementKind === "transfer",
+    );
+    if (
+      matching.some((transaction) => transaction.movementKind === "unknown")
+    ) {
+      row.transferChange = null;
+    } else {
+      row.transferChange = transfers
+        .reduce(
+          (sum, transaction) => sum.add(transaction.change ?? decimalZero()),
+          decimalZero(),
+        )
+        .toString();
+    }
+    if (row.openingBalance !== null && row.closingBalance !== null) {
+      const expected = openingBalance!.add(total);
+      row.expectedClosingBalance = expected.toString();
+      const drift = closingBalance!.subtract(expected);
+      row.unexplainedDrift = drift.toString();
+      if (!drift.isZero()) addReason(reasons, "UNEXPLAINED_DRIFT");
+    }
+    return Object.freeze(row);
+  });
+  if (transactions.some((transaction) => transaction.currency === null))
+    addReason(reasons, "UNKNOWN_TRANSACTION_CURRENCY");
+  return Object.freeze(rows);
+}
+
+function invalidScopedProjection(
+  scope: HistoryStoreScope | undefined,
+): HistoryAccountingEpochProjectionV2 {
+  const safeScope =
+    scope &&
+    typeof scope.exchange === "string" &&
+    typeof scope.environment === "string" &&
+    typeof scope.accountId === "string"
+      ? Object.freeze({ ...scope })
+      : Object.freeze({
+          exchange: "unknown",
+          environment: "mainnet" as const,
+          accountId: "unknown",
+        });
+  return Object.freeze({
+    schemaVersion: "history-accounting-epoch-projection/v2",
+    status: "NOT_READY",
+    readiness: "NOT_READY",
+    scope: safeScope,
+    accountingScope: null,
+    accountingScopeHash: null,
+    epoch: Object.freeze({
+      openingAnchorId: "unknown",
+      closingAnchorId: "unknown",
+      openingBoundary: "unknown",
+      closingBoundary: "unknown",
+      transactionWindow: "(opening, closing]" as const,
+    }),
+    sourceCoverage: Object.freeze([]),
+    currencies: Object.freeze([]),
+    selectedTransactionCount: 0,
+    selectedEvidenceIdentities: Object.freeze([]),
+    conflictDispositions: Object.freeze([]),
+    exclusions: Object.freeze([]),
+    exclusionCount: 0,
+    exclusionsTruncated: false,
+    reasonCodes: Object.freeze(["INVALID_INPUT"] as const),
+  });
+}
+
+function projectScoped(
+  input: ProjectScopedHistoryAccountingEpochInput,
+): Result<HistoryAccountingEpochProjectionV2> {
+  if (
+    !plainRecord(input) ||
+    !plainRecord(input.scope) ||
+    !Array.isArray(input.observations) ||
+    !Array.isArray(input.conflicts) ||
+    !Array.isArray(input.coverage)
+  )
+    return ok(invalidScopedProjection(undefined));
+  const decodedScope = decodeHistoryAccountingScope(input.accountingScope);
+  if (!decodedScope.ok) return ok(invalidScopedProjection(input.scope));
+  const accountingScope = decodedScope.value;
+
+  const reasons = new Set<HistoryAccountingEpochReasonCode>();
+  const opening = validateAnchor(
+    input.opening,
+    "opening",
+    input.scope,
+    reasons,
+  );
+  const closing = validateAnchor(
+    input.closing,
+    "closing",
+    input.scope,
+    reasons,
+  );
+  if (opening !== undefined && !validateAnchorWalletStructure(input.opening))
+    addReason(reasons, "ANCHOR_CAPTURE_INVALID");
+  if (closing !== undefined && !validateAnchorWalletStructure(input.closing))
+    addReason(reasons, "ANCHOR_CAPTURE_INVALID");
+  const validEpoch =
+    opening !== undefined && closing !== undefined && opening < closing;
+  if (!validEpoch) addReason(reasons, "ANCHOR_EPOCH_INVALID");
+  const anchorsTrusted =
+    validEpoch &&
+    !reasons.has("ANCHOR_KIND_MISMATCH") &&
+    !reasons.has("ANCHOR_SCOPE_MISMATCH") &&
+    !reasons.has("ANCHOR_CAPTURE_INVALID") &&
+    !reasons.has("ANCHOR_TIME_INVALID");
+  const epochStart = opening ?? 0;
+  const epochEnd = closing ?? epochStart;
+  const transactionStart = epochStart + 1;
+  const openingCaptureStart =
+    plainRecord(input.opening) && plainRecord(input.opening.capture)
+      ? timestampMs(input.opening.capture.providerTimeBefore)
+      : undefined;
+  const closingCaptureEnd =
+    plainRecord(input.closing) && plainRecord(input.closing.capture)
+      ? timestampMs(input.closing.capture.providerTimeAfter)
+      : undefined;
+  const coverageStart = validEpoch
+    ? Math.min(openingCaptureStart ?? transactionStart, transactionStart)
+    : transactionStart;
+  const coverageEnd = validEpoch
+    ? Math.max(closingCaptureEnd ?? epochEnd, epochEnd)
+    : epochEnd;
+  const sourceCoverage = validEpoch
+    ? HISTORY_READ_SOURCES.map((source) =>
+        projectSourceCoverage(
+          source,
+          input.coverage,
+          input.scope,
+          coverageStart,
+          coverageEnd,
+          reasons,
+        ),
+      )
+    : HISTORY_READ_SOURCES.map((source) =>
+        Object.freeze({ source, covered: false, gaps: Object.freeze([]) }),
+      );
+  if (!validEpoch) addReason(reasons, "HISTORY_COVERAGE_GAP");
+
+  // Locate checkpoint conflicts before the scoped selector classifies relevance.
+  if (validEpoch)
+    checkpointConflictCountsAreLocated(
+      input.coverage,
+      input.conflicts,
+      input.scope,
+      coverageStart,
+      coverageEnd,
+      reasons,
+    );
+
+  let selection: ScopedHistoryAccountingEvidence | undefined;
+  if (anchorsTrusted) {
+    const selected = selectScopedHistoryAccountingEvidence({
+      scope: input.scope,
+      accountingScope,
+      epoch: {
+        openingBoundary: input.opening.capture.providerResponseTime,
+        closingBoundary: input.closing.capture.providerResponseTime,
+        openingCaptureBracket: {
+          fromMs: openingCaptureStart!,
+          toMs: timestampMs(input.opening.capture.providerTimeAfter)!,
+        },
+        closingCaptureBracket: {
+          fromMs: timestampMs(input.closing.capture.providerTimeBefore)!,
+          toMs: closingCaptureEnd!,
+        },
+      },
+      observations: input.observations,
+      conflicts: input.conflicts,
+    });
+    if (selected.ok) selection = selected.value;
+    else addReason(reasons, "INVALID_HISTORY_EVIDENCE");
+  }
+
+  if (
+    input.observations.some(
+      (observation) => !sameScope(observation.scope, input.scope),
+    )
+  )
+    addReason(reasons, "HISTORY_SCOPE_MISMATCH");
+
+  const excludedAnchorBalances = new Map<
+    string,
+    {
+      currency: string;
+      openingBalance: string | null;
+      closingBalance: string | null;
+    }
+  >();
+  let openingBalances: BalanceIndex = { values: new Map() };
+  let closingBalances: BalanceIndex = { values: new Map() };
+  if (anchorsTrusted) {
+    openingBalances = readScopedBalances(
+      input.opening,
+      "opening",
+      accountingScope.nativeCurrencies,
+      reasons,
+      excludedAnchorBalances,
+    );
+    closingBalances = readScopedBalances(
+      input.closing,
+      "closing",
+      accountingScope.nativeCurrencies,
+      reasons,
+      excludedAnchorBalances,
+    );
+  }
+
+  const selectedTransactions: NormalizedRow[] = [];
+  const selectedTradeTransactions: TransactionHistorySourceFact[] = [];
+  const selectedEpochExecutions: ExecutionHistorySourceFact[] = [];
+  const selectedExecutions: ExecutionHistorySourceFact[] = [];
+  const selectedClosedPnlRows: ClosedPnlHistorySourceFact[] = [];
+  if (selection && anchorsTrusted) {
+    for (const conflict of selection.conflicts) {
+      if (conflict.disposition !== "blocking") continue;
+      addReason(
+        reasons,
+        conflict.source === "transaction-log"
+          ? "TRANSACTION_IDENTITY_CONFLICT"
+          : conflict.reason === "closed-pnl-revision-conflict"
+            ? "CLOSED_PNL_REVISION_CONFLICT"
+            : "HISTORY_SOURCE_CONFLICT",
+      );
+    }
+    for (const observation of selection.selectedObservations) {
+      const time = timestampMs(observation.providerEventTime);
+      if (time === undefined) {
+        addReason(reasons, "INVALID_HISTORY_EVIDENCE");
+        continue;
+      }
+      const fact = observation.fact;
+      if (
+        (fact.factKind === "execution" || fact.factKind === "closed-pnl") &&
+        (time === epochStart ||
+          time === epochEnd ||
+          anchorBracketContains(time, input.opening) ||
+          anchorBracketContains(time, input.closing))
+      )
+        addReason(reasons, "ANCHOR_BOUNDARY_EVENT_AMBIGUOUS");
+      if (fact.factKind === "execution") {
+        selectedExecutions.push(fact);
+        if (inRange(time, epochStart, epochEnd))
+          selectedEpochExecutions.push(fact);
+        continue;
+      }
+      if (fact.factKind === "closed-pnl") {
+        if (inRange(time, epochStart, epochEnd))
+          selectedClosedPnlRows.push(fact);
+        continue;
+      }
+      if (fact.factKind !== "transaction") continue;
+      if (
+        time === epochStart ||
+        time === epochEnd ||
+        anchorBracketContains(time, input.opening) ||
+        anchorBracketContains(time, input.closing)
+      )
+        addReason(reasons, "ANCHOR_BOUNDARY_EVENT_AMBIGUOUS");
+      if (!inRange(time, epochStart, epochEnd)) continue;
+      if (isTradeTransaction(fact)) selectedTradeTransactions.push(fact);
+      const normalized = normalizeHistoryTransaction(observation);
+      if (!normalized.ok) {
+        addReason(reasons, "INVALID_HISTORY_EVIDENCE");
+        continue;
+      }
+      const change =
+        normalized.value.change === null
+          ? null
+          : DecimalValue.fromString(normalized.value.change);
+      const bonusChange =
+        normalized.value.bonusChange === null
+          ? null
+          : DecimalValue.fromString(normalized.value.bonusChange);
+      if (
+        (change !== null && !change.ok) ||
+        (bonusChange !== null && !bonusChange.ok)
+      )
+        addReason(reasons, "INVALID_HISTORY_EVIDENCE");
+      const normalizedRow: NormalizedRow = {
+        category: normalized.value.category,
+        movementKind: normalized.value.movementKind,
+        currency: normalized.value.currency,
+        change: change === null ? null : change.ok ? change.value : null,
+        bonusChange:
+          bonusChange === null
+            ? null
+            : bonusChange.ok
+              ? bonusChange.value
+              : null,
+        componentCheck: normalized.value.componentCheck,
+      };
+      if (normalizedRow.movementKind === "unknown")
+        addReason(reasons, "UNKNOWN_TRANSACTION_TYPE");
+      if (
+        normalizedRow.movementKind !== "transfer" &&
+        normalizedRow.category !== "linear"
+      )
+        addReason(reasons, "UNSUPPORTED_TRANSACTION_CATEGORY");
+      if (normalizedRow.currency === null)
+        addReason(reasons, "UNKNOWN_TRANSACTION_CURRENCY");
+      if (normalizedRow.change === null)
+        addReason(reasons, "UNKNOWN_TRANSACTION_CHANGE");
+      if (normalizedRow.componentCheck === "incomplete")
+        addReason(reasons, "TRANSACTION_COMPONENTS_INCOMPLETE");
+      if (normalizedRow.componentCheck === "mismatched")
+        addReason(reasons, "TRANSACTION_COMPONENT_MISMATCH");
+      if (
+        normalizedRow.currency !== null &&
+        !accountingScope.nativeCurrencies.includes(normalizedRow.currency)
+      )
+        addReason(reasons, "UNSUPPORTED_CURRENCY");
+      if (
+        normalizedRow.bonusChange !== null &&
+        !normalizedRow.bonusChange.isZero()
+      )
+        addReason(reasons, "UNSUPPORTED_BONUS_MOVEMENT");
+      selectedTransactions.push(normalizedRow);
+    }
+  }
+
+  verifyExecutionAndCloseEvidence(
+    selectedTradeTransactions,
+    selectedEpochExecutions,
+    selectedExecutions,
+    selectedClosedPnlRows,
+    reasons,
+  );
+
+  const currencies = anchorsTrusted
+    ? projectScopedCurrencies(
+        openingBalances,
+        closingBalances,
+        selectedTransactions,
+        accountingScope.nativeCurrencies,
+        reasons,
+      )
+    : Object.freeze([]);
+  const anchorExclusions: HistoryAccountingEpochAnchorExclusion[] = [
+    ...excludedAnchorBalances.values(),
+  ]
+    .sort((left, right) => left.currency.localeCompare(right.currency))
+    .map((value) => ({ kind: "anchor-balance" as const, ...value }));
+  const transactionExclusions = (selection?.exclusions ?? []).map((value) => ({
+    kind: "transaction" as const,
+    ...value,
+  }));
+  const allExclusions = [...anchorExclusions, ...transactionExclusions];
+  const reasonCodes = Object.freeze([...reasons].sort());
+  const status = reasonCodes.length === 0 ? "RECONCILED" : "NOT_READY";
+  return ok(
+    Object.freeze({
+      schemaVersion: "history-accounting-epoch-projection/v2",
+      status,
+      readiness: status === "RECONCILED" ? "ACCOUNTING_READY" : "NOT_READY",
+      scope: Object.freeze({ ...input.scope }),
+      accountingScope,
+      accountingScopeHash: accountingScope.scopeHash,
+      epoch: Object.freeze({
+        openingAnchorId: anchorId(input.opening),
+        closingAnchorId: anchorId(input.closing),
+        openingBoundary: anchorBoundary(input.opening),
+        closingBoundary: anchorBoundary(input.closing),
+        transactionWindow: "(opening, closing]",
+      }),
+      sourceCoverage: Object.freeze(sourceCoverage),
+      currencies,
+      selectedTransactionCount: selectedTransactions.length,
+      selectedEvidenceIdentities: Object.freeze(selection?.identities ?? []),
+      conflictDispositions: Object.freeze(selection?.conflicts ?? []),
+      exclusions: Object.freeze(allExclusions.slice(0, MAX_SCOPED_EXCLUSIONS)),
+      exclusionCount:
+        excludedAnchorBalances.size + (selection?.exclusionCount ?? 0),
+      exclusionsTruncated:
+        allExclusions.length > MAX_SCOPED_EXCLUSIONS ||
+        (selection?.exclusionsTruncated ?? false),
+      reasonCodes,
+    }),
+  );
+}
+
+export function projectScopedHistoryAccountingEpoch(
+  input: ProjectScopedHistoryAccountingEpochInput,
+): Result<HistoryAccountingEpochProjectionV2> {
+  try {
+    return projectScoped(input);
+  } catch {
+    return ok(
+      invalidScopedProjection(
         plainRecord(input) && plainRecord(input.scope)
           ? (input.scope as unknown as HistoryStoreScope)
           : undefined,
