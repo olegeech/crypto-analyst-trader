@@ -2138,7 +2138,9 @@ test("admission preserves quote deviation and malformed fee diagnostics", async 
       "QUOTE_OUTSIDE_APPROVED_RANGE",
     );
   const harness = setup({ valuePlan, evidence: { ...fresh, quote } });
+  const stageStarted = performance.now();
   const execution = await harness.run();
+  const stageElapsedMs = performance.now() - stageStarted;
   assert.equal(execution.ok, false);
   if (!execution.ok)
     assert.equal(
@@ -2164,9 +2166,29 @@ test("admission preserves quote deviation and malformed fee diagnostics", async 
     );
   }
   assert.equal(harness.createObservations.length, 0);
+  assert.equal(harness.authorization.consumeCalls, 0);
   assert.equal(
     unwrap(harness.journal.findPendingOperatorMainnetTestSource()),
     undefined,
+  );
+  console.log(
+    `U2_QUOTE_DRIFT_PROFILE ${JSON.stringify({
+      baselineSha: "f107f0fc4b5ef5f0af9874fea68e754ac1fa0b20",
+      fixture: "synthetic-collected-evidence-quote-outside-approved-range",
+      commandContext: "application-admission-after-evidence-collection",
+      stage: "admission",
+      stageTimingModel:
+        "observed local duration with supplied synthetic evidence; excludes provider reads",
+      stageElapsedMs,
+      physicalGetAttempts: 0,
+      groups: { other: 0 },
+      independentStubFetchAttemptLogEntries: 0,
+      evidencePath: "provided-synthetic-evidence",
+      refusalPredicate: "QUOTE_OUTSIDE_APPROVED_RANGE",
+      exchangeWrites: 0,
+      persistedIntent: false,
+      authorizationConsumed: harness.authorization.consumeCalls,
+    })}`,
   );
   harness.persistence.close();
   const fee = validateMainnetOperatorTestEvidence(valuePlan, {

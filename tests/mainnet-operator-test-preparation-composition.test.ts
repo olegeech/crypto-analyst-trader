@@ -66,6 +66,10 @@ async function prepare(options: {
   unknownFirstBalance?: boolean;
   readOnly?: boolean;
   changingBalance?: boolean;
+  accountInfoStatus?: 5 | 6;
+  accountInfoNoTime?: boolean;
+  accountInfoUpdatedTime?: string;
+  stageCostPerAttemptMs?: number;
   failPositionRead?: boolean;
   failOpenOrdersRead?: boolean;
   recoveryAttestation?: OperatorMainnetRecoveryAttestation;
@@ -74,8 +78,25 @@ async function prepare(options: {
   const root = mkdtempSync(join(tmpdir(), "operator-prepare-capacity-"));
   roots.push(root);
   const paths: string[] = [];
+  const attempts: Array<{
+    readonly path: string;
+    readonly cursorPage: boolean;
+    readonly retry: boolean;
+    outcome: "ok" | "rejected";
+  }> = [];
   let opened = 0;
   let wallets = 0;
+  let feeAttempts = 0;
+  let stageClockCalls = 0;
+  const stageStart = 10_000;
+  const stageMonotonicClock =
+    options.stageMonotonicClock ??
+    (options.stageCostPerAttemptMs === undefined
+      ? undefined
+      : () =>
+          stageClockCalls++ === 0
+            ? stageStart
+            : stageStart + paths.length * options.stageCostPerAttemptMs!);
   const result = await prepareMainnetOperatorTest(
     {
       ...input,
@@ -88,9 +109,7 @@ async function prepare(options: {
     },
     {
       utcClock: () => now,
-      ...(options.stageMonotonicClock === undefined
-        ? {}
-        : { stageMonotonicClock: options.stageMonotonicClock }),
+      ...(stageMonotonicClock === undefined ? {} : { stageMonotonicClock }),
       credentialProvider: {
         load: async () => ({
           apiKey: "synthetic-key",
@@ -112,10 +131,46 @@ async function prepare(options: {
         const path = target.pathname;
         paths.push(path);
         if (
+          ![
+            "/v5/market/time",
+            "/v5/user/query-api",
+            "/v5/account/info",
+            "/v5/account/wallet-balance",
+            "/v5/account/fee-rate",
+            "/v5/market/instruments-info",
+            "/v5/market/tickers",
+            "/v5/position/list",
+            "/v5/account/collateral-info",
+            "/v5/spot-margin-trade/collateral",
+            "/v5/market/option-base-coins",
+            "/v5/order/realtime",
+            "/v5/order/history",
+            "/v5/execution/list",
+          ].includes(path)
+        ) {
+          attempts.push({
+            path,
+            cursorPage: target.searchParams.has("cursor"),
+            retry: false,
+            outcome: "rejected",
+          });
+          throw new Error("unmatched synthetic fetch path");
+        }
+        const retry = path === "/v5/account/fee-rate" && feeAttempts > 0;
+        const attempt: (typeof attempts)[number] = {
+          path,
+          cursorPage: target.searchParams.has("cursor"),
+          retry,
+          outcome: "ok" as const,
+        };
+        attempts.push(attempt);
+        if (
           (options.failPositionRead && path === "/v5/position/list") ||
           (options.failOpenOrdersRead && path === "/v5/order/realtime")
-        )
+        ) {
+          attempt.outcome = "rejected";
           throw new Error("synthetic target-state read failure");
+        }
         let time = now;
         let result: Record<string, unknown> = { list: [], nextPageCursor: "" };
         switch (path) {
@@ -140,6 +195,9 @@ async function prepare(options: {
             break;
           case "/v5/account/info":
             result = structuredClone(accountInfoResponse.result);
+            result.unifiedMarginStatus = options.accountInfoStatus ?? 5;
+            if (options.accountInfoUpdatedTime !== undefined)
+              result.updatedTime = options.accountInfoUpdatedTime;
             break;
           case "/v5/account/wallet-balance": {
             wallets++;
@@ -156,7 +214,11 @@ async function prepare(options: {
             break;
           }
           case "/v5/account/fee-rate":
-            if (options.feeReadThrows) throw new Error("PRIVATE_FEE_RESPONSE");
+            feeAttempts++;
+            if (options.feeReadThrows) {
+              attempt.outcome = "rejected";
+              throw new Error("PRIVATE_FEE_RESPONSE");
+            }
             result = {
               list: [
                 {
@@ -248,14 +310,22 @@ async function prepare(options: {
           ].includes(path)
         )
           result.category = target.searchParams.get("category");
+        attempt.outcome = "ok";
         return new Response(
-          JSON.stringify({ retCode: 0, retMsg: "OK", time, result }),
+          JSON.stringify({
+            retCode: 0,
+            retMsg: "OK",
+            ...(options.accountInfoNoTime && path === "/v5/account/info"
+              ? {}
+              : { time }),
+            result,
+          }),
           { status: 200 },
         );
       },
     },
   );
-  return { result, paths, opened, root };
+  return { result, paths, attempts, opened, root };
 }
 
 function manualRecoveryAttestation(
@@ -388,6 +458,166 @@ test("prepare with sufficient fresh funds reaches persistence through production
   assert.equal(run.paths.includes("/v5/order/history"), false);
 });
 
+test("U2 profiles match compact success and account-info no-time full fallback", async () => {
+  const oldUpdatedTime = "1600000000000";
+  const native5 = await prepare({
+    balance: "11",
+    accountInfoStatus: 5,
+    accountInfoUpdatedTime: oldUpdatedTime,
+    stageCostPerAttemptMs: 2,
+  });
+  const native6 = await prepare({
+    balance: "11",
+    accountInfoStatus: 6,
+    accountInfoUpdatedTime: oldUpdatedTime,
+    stageCostPerAttemptMs: 2,
+  });
+  const noTime6 = await prepare({
+    balance: "11",
+    accountInfoStatus: 6,
+    accountInfoNoTime: true,
+    accountInfoUpdatedTime: oldUpdatedTime,
+    stageCostPerAttemptMs: 2,
+  });
+
+  for (const run of [native5, native6]) {
+    assert.equal(run.result.ok, true, JSON.stringify(run.result));
+    if (!run.result.ok) continue;
+    assert.equal(run.result.value.exchangeEvidencePath, "compact");
+    assert.equal(run.result.value.compactFallbackReason, undefined);
+    assert.equal(run.result.value.exchangeGetCountsStatus, "available");
+    const groups = JSON.parse(run.result.value.exchangeGetCounts!) as Record<
+      string,
+      number
+    >;
+    assert.deepEqual(groups, groupedFromFetchAttempts(run.paths));
+    assert.equal(
+      Object.values(groups).reduce((sum, count) => sum + count, 0),
+      run.attempts.length,
+    );
+    assert.equal(run.result.value.exchangeReads, run.attempts.length);
+    assert.equal(
+      run.result.value.exchangeStageElapsedMs,
+      run.attempts.length * 2,
+    );
+  }
+
+  if (native6.result.ok) {
+    const value = native6.result.value;
+    const groups = JSON.parse(value.exchangeGetCounts!) as Record<
+      string,
+      number
+    >;
+    const profile = {
+      baselineSha: "f107f0fc4b5ef5f0af9874fea68e754ac1fa0b20",
+      fixture: "synthetic-uta6-regular-margin-old-updatedTime",
+      stage: value.exchangeStage,
+      stageTimingModel: "2 ms per independently logged stub fetch attempt",
+      stageStartMs: 10_000,
+      stageEndMs: 10_000 + native6.attempts.length * 2,
+      physicalGetAttempts: value.exchangeReads,
+      groups: { ...groups, other: groups.other ?? 0 },
+      independentAttemptLogEntries: native6.attempts.length,
+      retryAttempts: native6.attempts.filter((attempt) => attempt.retry).length,
+      cursorPages: native6.attempts.filter((attempt) => attempt.cursorPage)
+        .length,
+      evidencePath: value.exchangeEvidencePath,
+      compactFallbackReason: value.compactFallbackReason ?? null,
+      acceptedUtaStatus: 6,
+    };
+    console.log(`U2_PREP_PROFILE ${JSON.stringify(profile)}`);
+  }
+
+  assert.equal(noTime6.result.ok, true, JSON.stringify(noTime6.result));
+  if (noTime6.result.ok) {
+    const value = noTime6.result.value;
+    const groups = JSON.parse(value.exchangeGetCounts!) as Record<
+      string,
+      number
+    >;
+    assert.equal(value.exchangeEvidencePath, "compact-to-full");
+    assert.equal(value.compactFallbackReason, "ACCOUNT_EVIDENCE_INVALID");
+    assert.equal(value.exchangeStageElapsedMs, noTime6.attempts.length * 2);
+    assert.equal(value.exchangeReads, noTime6.attempts.length);
+    assert.deepEqual(groups, groupedFromFetchAttempts(noTime6.paths));
+    assert.equal(
+      Object.values(groups).reduce((sum, count) => sum + count, 0),
+      noTime6.attempts.length,
+    );
+    assert.equal(groups.other ?? 0, 0);
+    assert.equal(
+      noTime6.attempts.filter((attempt) => attempt.cursorPage).length,
+      0,
+    );
+    assert.equal(noTime6.attempts.filter((attempt) => attempt.retry).length, 0);
+    assert.doesNotMatch(
+      JSON.stringify(noTime6.result),
+      /1600000000000|updatedTime|secret|PRIVATE/u,
+    );
+    const profile = {
+      baselineSha: "f107f0fc4b5ef5f0af9874fea68e754ac1fa0b20",
+      fixture: "synthetic-uta6-regular-margin-old-updatedTime",
+      stage: value.exchangeStage,
+      stageTimingModel: "2 ms per independently logged stub fetch attempt",
+      stageStartMs: 10_000,
+      stageEndMs: 10_000 + noTime6.attempts.length * 2,
+      physicalGetAttempts: value.exchangeReads,
+      groups: { ...groups, other: groups.other ?? 0 },
+      independentAttemptLogEntries: noTime6.attempts.length,
+      retryAttempts: noTime6.attempts.filter((attempt) => attempt.retry).length,
+      cursorPages: noTime6.attempts.filter((attempt) => attempt.cursorPage)
+        .length,
+      evidencePath: value.exchangeEvidencePath,
+      compactFallbackReason: value.compactFallbackReason,
+      failedPredicate:
+        "account-info-observation-requires-response-envelope-time",
+      failedPass: "A",
+      failedStage: "compact-account",
+    };
+    console.log(`U2_PREP_PROFILE ${JSON.stringify(profile)}`);
+  }
+});
+
+test("U2 capacity-unknown preparation remains blocked before plan persistence", async () => {
+  const run = await prepare({ balance: "", stageCostPerAttemptMs: 2 });
+  assert.equal(run.result.ok, false);
+  assert.equal(run.opened, 0);
+  if (run.result.ok) return;
+  const details = run.result.error.details;
+  assert.equal(details?.compactFallbackReason, "WALLET_A_BALANCE_UNPROVEN");
+  assert.equal(details?.exchangeEvidencePath, "compact-to-full");
+  assert.equal(details?.exchangeGetCountsStatus, "available");
+  const groups = JSON.parse(String(details?.exchangeGetCounts)) as Record<
+    string,
+    number
+  >;
+  assert.deepEqual(groups, groupedFromFetchAttempts(run.paths));
+  assert.equal(details?.exchangeReads, run.attempts.length);
+  assert.equal(
+    Object.values(groups).reduce((sum, count) => sum + count, 0),
+    run.attempts.length,
+  );
+  assert.equal(details?.exchangeStageElapsedMs, run.attempts.length * 2);
+  assert.equal(run.paths.includes("/v5/order/history"), true);
+  const profile = {
+    baselineSha: "f107f0fc4b5ef5f0af9874fea68e754ac1fa0b20",
+    fixture: "synthetic-uta5-regular-margin-missing-compact-balance",
+    stage: "prepare",
+    stageTimingModel: "2 ms per independently logged stub fetch attempt",
+    physicalGetAttempts: details?.exchangeReads,
+    groups: { ...groups, other: groups.other ?? 0 },
+    independentAttemptLogEntries: run.attempts.length,
+    retryAttempts: run.attempts.filter((attempt) => attempt.retry).length,
+    cursorPages: run.attempts.filter((attempt) => attempt.cursorPage).length,
+    evidencePath: details?.exchangeEvidencePath,
+    compactFallbackReason: details?.compactFallbackReason,
+    finalPredicate: details?.reasonCode,
+    noPreparedPlan: run.opened === 0,
+    writes: details?.exchangeWrites,
+  };
+  console.log(`U2_PREP_PROFILE ${JSON.stringify(profile)}`);
+});
+
 test("manual recovery preparation survives unavailable target GETs while retaining machine gates", async () => {
   const recoveryAttestation = manualRecoveryAttestation();
   const run = await prepare({
@@ -479,6 +709,36 @@ test("unknown or stale fee cannot establish affordability or persist a plan", as
         "AVAILABLE_MARGIN_OR_FEE_RESERVE_INSUFFICIENT",
       );
   }
+});
+
+test("manual recovery prepare keeps account-info no-time terminal without full fallback", async () => {
+  const recoveryAttestation = manualRecoveryAttestation();
+  const run = await prepare({
+    balance: "11",
+    accountInfoNoTime: true,
+    recoveryAttestation,
+    stageCostPerAttemptMs: 2,
+  });
+
+  assert.equal(run.result.ok, false);
+  assert.equal(run.opened, 0);
+  if (run.result.ok) return;
+  assert.equal(
+    run.result.error.details?.reasonCode,
+    "ACCOUNT_EVIDENCE_INVALID",
+  );
+  assert.equal(
+    run.result.error.details?.compactFallbackReason,
+    "ACCOUNT_EVIDENCE_INVALID",
+  );
+  assert.equal(run.result.error.details?.exchangeEvidencePath, "compact");
+  assert.equal(run.result.error.details?.exchangeWrites, 0);
+  assert.equal(run.paths.includes("/v5/order/history"), false);
+  assert.equal(run.paths.includes("/v5/execution/list"), false);
+  assert.equal(
+    run.paths.every((path) => !path.startsWith("/v5/market/option")),
+    true,
+  );
 });
 
 test("unknown or stale compact balance records fallback and cannot reuse it as proven capacity", async () => {

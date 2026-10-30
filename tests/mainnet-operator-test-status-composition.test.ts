@@ -34,7 +34,12 @@ function groupForPath(path: string): string {
 
 test("status identity, nested pages, and rejected GET retries reconcile to physical fetch attempts", async () => {
   const counts = createMainnetGetCounts();
-  const attempts: string[] = [];
+  const attempts: Array<{
+    readonly path: string;
+    readonly cursorPage: boolean;
+    readonly retry: boolean;
+    outcome: "ok" | "rejected";
+  }> = [];
   let parentHistoryPaged = false;
   let executionAttempts = 0;
   const request: typeof fetch = async (input, init) => {
@@ -44,9 +49,17 @@ test("status identity, nested pages, and rejected GET retries reconcile to physi
     ).toUpperCase();
     assert.equal(method, "GET");
     counts.record(input, init);
-    attempts.push(url.pathname);
-    if (url.pathname === "/v5/execution/list" && ++executionAttempts === 1)
+    const attempt: (typeof attempts)[number] = {
+      path: url.pathname,
+      cursorPage: url.searchParams.has("cursor"),
+      retry: url.pathname === "/v5/execution/list" && executionAttempts > 0,
+      outcome: "ok" as const,
+    };
+    attempts.push(attempt);
+    if (url.pathname === "/v5/execution/list" && ++executionAttempts === 1) {
+      attempt.outcome = "rejected";
       throw new Error("synthetic private transport failure");
+    }
 
     let result: Record<string, unknown>;
     if (url.pathname === "/v5/market/time") {
@@ -103,6 +116,7 @@ test("status identity, nested pages, and rejected GET retries reconcile to physi
   };
 
   // The identity stage uses the same physical request boundary as the nested exchange.
+  const stageStarted = performance.now();
   await request("https://api.bybit.com/v5/market/time", { method: "GET" });
   await request("https://api.bybit.com/v5/user/query-api", { method: "GET" });
   const identityReads = attempts.length;
@@ -115,12 +129,13 @@ test("status identity, nested pages, and rejected GET retries reconcile to physi
     identityReads,
   );
   const observed = await exchange.observe(plan);
+  const stageElapsedMs = performance.now() - stageStarted;
 
   assert.equal(observed.ok, true, JSON.stringify({ observed, attempts }));
   if (!observed.ok) return;
   const oracle: Record<string, number> = {};
-  for (const path of attempts) {
-    const group = groupForPath(path);
+  for (const attempt of attempts) {
+    const group = groupForPath(attempt.path);
     oracle[group] = (oracle[group] ?? 0) + 1;
   }
   const grouped = Object.fromEntries(
@@ -133,9 +148,12 @@ test("status identity, nested pages, and rejected GET retries reconcile to physi
     "available",
   );
   assert.equal(
-    attempts.filter((path) => path === "/v5/execution/list").length,
+    attempts.filter((attempt) => attempt.path === "/v5/execution/list").length,
     2,
   );
+  assert.equal(attempts.filter((attempt) => attempt.retry).length, 1);
+  assert.equal(attempts.filter((attempt) => attempt.cursorPage).length, 1);
+  assert.equal(grouped.other ?? 0, 0);
   assert.equal(
     Object.values(grouped).reduce((sum, count) => sum + count, 0),
     attempts.length,
@@ -143,5 +161,24 @@ test("status identity, nested pages, and rejected GET retries reconcile to physi
   assert.doesNotMatch(
     counts.summary(),
     /synthetic-private-cursor|synthetic-account/u,
+  );
+  console.log(
+    `U2_STATUS_PROFILE ${JSON.stringify({
+      baselineSha: "f107f0fc4b5ef5f0af9874fea68e754ac1fa0b20",
+      fixture:
+        "synthetic-empty-status-reads-with-bounded-retry-and-one-history-cursor-page",
+      stage: "status",
+      stageTimingModel:
+        "observed local duration with immediate stub responses; not provider latency",
+      stageElapsedMs,
+      physicalGetAttempts: observed.value.exchangeReads,
+      groups: { ...grouped, other: grouped.other ?? 0 },
+      independentAttemptLogEntries: attempts.length,
+      retryAttempts: attempts.filter((attempt) => attempt.retry).length,
+      cursorPages: attempts.filter((attempt) => attempt.cursorPage).length,
+      exchangeWrites: 0,
+      evidencePath: "none",
+      fallbackPredicate: null,
+    })}`,
   );
 });
