@@ -319,6 +319,14 @@ function printGetCounts(
         : "UNKNOWN"
     }`,
   );
+  if (
+    payload?.exchangeCoverageWarningCode ===
+    "UNRELATED_AUXILIARY_HISTORY_NOT_COLLECTED"
+  )
+    line(
+      output,
+      "ACCOUNT_COVERAGE_WARNING=UNRELATED_AUXILIARY_HISTORY_NOT_COLLECTED",
+    );
   const counts = safeMainnetGetCounts(payload?.exchangeGetCounts);
   const calculatedStatus = mainnetGetCountsStatus(
     payload?.exchangeGetCounts,

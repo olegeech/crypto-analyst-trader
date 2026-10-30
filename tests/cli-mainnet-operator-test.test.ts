@@ -170,7 +170,10 @@ test("prepare persists and displays the frozen plan without exchange writes", as
           exchangeGetCountsStatus: "available",
           exchangeStage: "prepare",
           exchangeStageElapsedMs: 12.5,
-          exchangeEvidencePath: "compact",
+          exchangeEvidencePath: "compact-to-full",
+          compactFallbackReason: "ACCOUNT_EVIDENCE_INVALID",
+          exchangeCoverageWarningCode:
+            "UNRELATED_AUXILIARY_HISTORY_NOT_COLLECTED",
         });
       },
     },
@@ -193,7 +196,15 @@ test("prepare persists and displays the frozen plan without exchange writes", as
   assert.match(terminal.text(), /EXCHANGE_WRITES=0/u);
   assert.match(terminal.text(), /MEASURED_STAGE=PREPARE/u);
   assert.match(terminal.text(), /STAGE_ELAPSED_MS=12\.5/u);
-  assert.match(terminal.text(), /EVIDENCE_PATH=COMPACT/u);
+  assert.match(
+    terminal.text(),
+    /PREPARE_COMPACT_FALLBACK_REASON=ACCOUNT_EVIDENCE_INVALID/u,
+  );
+  assert.match(terminal.text(), /EVIDENCE_PATH=COMPACT_TO_FULL/u);
+  assert.match(
+    terminal.text(),
+    /ACCOUNT_COVERAGE_WARNING=UNRELATED_AUXILIARY_HISTORY_NOT_COLLECTED/u,
+  );
   assert.match(terminal.text(), /GET_COUNTS_PREPARE_STATUS=AVAILABLE/u);
   assert.match(terminal.text(), /GET_COUNTS_PREPARE=\{"wallet":6\}/u);
 });

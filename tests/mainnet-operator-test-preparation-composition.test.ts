@@ -66,6 +66,9 @@ async function prepare(options: {
   unknownFirstBalance?: boolean;
   readOnly?: boolean;
   changingBalance?: boolean;
+  changingAssetSnapshot?: boolean;
+  nonTargetPositionUnknownMargin?: boolean;
+  nonTargetActiveOrderUnknownPrice?: boolean;
   accountInfoStatus?: 5 | 6;
   accountInfoNoTime?: boolean;
   accountInfoUpdatedTime?: string;
@@ -203,7 +206,34 @@ async function prepare(options: {
             wallets++;
             result = structuredClone(walletResponse.result);
             const rows = result.list as Record<string, unknown>[];
-            rows[0]!.coin = [];
+            const changedAssetSnapshot =
+              options.changingAssetSnapshot && wallets === 2;
+            rows[0]!.coin = options.changingAssetSnapshot
+              ? [
+                  {
+                    coin: "USDC",
+                    walletBalance: changedAssetSnapshot ? "99" : "100",
+                    equity: changedAssetSnapshot ? "99" : "100",
+                    usdValue: changedAssetSnapshot ? "99" : "100",
+                    locked: "0",
+                    bonus: "0",
+                    borrowAmount: "0",
+                    spotBorrow: "0",
+                    accruedInterest: "0",
+                    totalOrderIM: "0",
+                    totalPositionIM: "0",
+                    totalPositionMM: "0",
+                    unrealisedPnl: "0",
+                    marginCollateral: true,
+                    collateralSwitch: true,
+                  },
+                ]
+              : [];
+            if (changedAssetSnapshot) {
+              rows[0]!.totalEquity = "99";
+              rows[0]!.totalWalletBalance = "99";
+              rows[0]!.totalMarginBalance = "99";
+            }
             rows[0]!.totalAvailableBalance =
               options.unknownFirstBalance && wallets === 1
                 ? ""
@@ -269,11 +299,17 @@ async function prepare(options: {
               ],
             };
             break;
-          case "/v5/position/list":
+          case "/v5/position/list": {
+            const targetSymbol = target.searchParams.get("symbol");
+            const includeNonTarget =
+              options.nonTargetPositionUnknownMargin &&
+              target.searchParams.get("category") === "linear" &&
+              target.searchParams.get("settleCoin") === "USDT" &&
+              targetSymbol === null;
             result = {
               category: target.searchParams.get("category"),
-              list:
-                target.searchParams.get("symbol") === input.symbol
+              list: [
+                ...(targetSymbol === input.symbol
                   ? [
                       {
                         symbol: input.symbol,
@@ -283,10 +319,26 @@ async function prepare(options: {
                         leverage: "1",
                       },
                     ]
-                  : [],
+                  : []),
+                ...(includeNonTarget
+                  ? [
+                      {
+                        symbol: "BTCUSDT",
+                        positionIdx: 0,
+                        side: "Buy",
+                        size: "1",
+                        avgPrice: "100",
+                        positionValue: "100",
+                        positionIM: "",
+                        leverage: "2",
+                      },
+                    ]
+                  : []),
+              ],
               nextPageCursor: "",
             };
             break;
+          }
           case "/v5/account/collateral-info":
             result = structuredClone(collateralResponse.result);
             break;
@@ -310,6 +362,29 @@ async function prepare(options: {
           ].includes(path)
         )
           result.category = target.searchParams.get("category");
+        if (
+          options.nonTargetActiveOrderUnknownPrice &&
+          path === "/v5/order/realtime" &&
+          target.searchParams.get("category") === "linear" &&
+          target.searchParams.get("settleCoin") === "USDT"
+        )
+          result.list = [
+            {
+              symbol: "BTCUSDT",
+              orderId: "other-linear-order",
+              orderLinkId: "",
+              orderStatus: "New",
+              side: "Buy",
+              orderType: "Limit",
+              qty: "1",
+              price: "",
+              cumExecQty: "0",
+              leavesQty: "1",
+              positionIdx: 0,
+              reduceOnly: false,
+              createdTime: String(now),
+            },
+          ];
         attempt.outcome = "ok";
         return new Response(
           JSON.stringify({
@@ -537,8 +612,23 @@ test("U2 profiles match compact success and account-info no-time full fallback",
     >;
     assert.equal(value.exchangeEvidencePath, "compact-to-full");
     assert.equal(value.compactFallbackReason, "ACCOUNT_EVIDENCE_INVALID");
+    assert.equal(
+      value.exchangeCoverageWarningCode,
+      "UNRELATED_AUXILIARY_HISTORY_NOT_COLLECTED",
+    );
     assert.equal(value.exchangeStageElapsedMs, noTime6.attempts.length * 2);
     assert.equal(value.exchangeReads, noTime6.attempts.length);
+    assert.equal(value.exchangeReads, 51);
+    assert.equal(57 - value.exchangeReads, 6);
+    assert.equal(groups["order-history"], 1);
+    assert.equal(groups.executions, 1);
+    assert.equal(groups.positions, 10);
+    assert.equal(groups["open-orders"], 10);
+    assert.equal(groups.account, 3);
+    assert.equal(groups.wallet, 2);
+    assert.equal(groups.collateral, 2);
+    assert.equal(groups["collateral-tiers"], 1);
+    assert.equal(groups["option-discovery"], 2);
     assert.deepEqual(groups, groupedFromFetchAttempts(noTime6.paths));
     assert.equal(
       Object.values(groups).reduce((sum, count) => sum + count, 0),
@@ -555,7 +645,10 @@ test("U2 profiles match compact success and account-info no-time full fallback",
       /1600000000000|updatedTime|secret|PRIVATE/u,
     );
     const profile = {
-      baselineSha: "f107f0fc4b5ef5f0af9874fea68e754ac1fa0b20",
+      baselineSha: "a3817b1884bcca2efa11d8bdfbc53107c0355377",
+      baselinePhysicalGetAttempts: 57,
+      candidatePhysicalGetAttempts: value.exchangeReads,
+      savedPhysicalGetAttempts: 6,
       fixture: "synthetic-uta6-regular-margin-old-updatedTime",
       stage: value.exchangeStage,
       stageTimingModel: "2 ms per independently logged stub fetch attempt",
@@ -568,6 +661,7 @@ test("U2 profiles match compact success and account-info no-time full fallback",
       cursorPages: noTime6.attempts.filter((attempt) => attempt.cursorPage)
         .length,
       evidencePath: value.exchangeEvidencePath,
+      coverageWarning: value.exchangeCoverageWarningCode,
       compactFallbackReason: value.compactFallbackReason,
       failedPredicate:
         "account-info-observation-requires-response-envelope-time",
@@ -575,6 +669,101 @@ test("U2 profiles match compact success and account-info no-time full fallback",
       failedStage: "compact-account",
     };
     console.log(`U2_PREP_PROFILE ${JSON.stringify(profile)}`);
+  }
+});
+
+test("R4 operator fallback preserves account-wide A/B blocks while skipping only optional history", async () => {
+  const scenarios = [
+    {
+      options: { changingBalance: true },
+      reasonCode: "AVAILABLE_BALANCE_SNAPSHOTS_DIFFER",
+    },
+    {
+      options: { changingAssetSnapshot: true },
+      reasonCode: "CRITICAL_STATE_CHANGED",
+    },
+    {
+      options: { nonTargetPositionUnknownMargin: true },
+      reasonCode: "READINESS_CRITICAL_STATE_UNPROVEN",
+    },
+    {
+      options: { nonTargetActiveOrderUnknownPrice: true },
+      reasonCode: "READINESS_CRITICAL_STATE_UNPROVEN",
+    },
+  ];
+  for (const { options, reasonCode } of scenarios) {
+    const run = await prepare({
+      balance: "11",
+      accountInfoNoTime: true,
+      stageCostPerAttemptMs: 2,
+      ...options,
+    });
+    assert.equal(run.result.ok, false, JSON.stringify(run.result));
+    assert.equal(run.opened, 0);
+    if (!run.result.ok) {
+      assert.equal(
+        run.result.error.details?.exchangeEvidencePath,
+        "compact-to-full",
+      );
+      assert.equal(
+        run.result.error.details?.exchangeCoverageWarningCode,
+        "UNRELATED_AUXILIARY_HISTORY_NOT_COLLECTED",
+      );
+      assert.equal(run.result.error.details?.exchangeWrites, 0);
+      assert.equal(
+        run.result.error.details?.reasonCode,
+        reasonCode,
+        JSON.stringify(run.result.error.details),
+      );
+      if (options.changingAssetSnapshot) {
+        assert.equal(
+          run.result.error.details?.reasonCode,
+          "CRITICAL_STATE_CHANGED",
+        );
+        assert.equal(run.result.error.details?.criticalChangedGroups, "assets");
+      }
+    }
+    const groups = groupedFromFetchAttempts(run.paths);
+    assert.equal(groups.positions, 10);
+    assert.equal(groups["open-orders"], 10);
+    assert.equal(groups["order-history"], 1);
+    assert.equal(groups.executions, 1);
+    assert.equal(run.paths.includes("/v5/order/history"), true);
+    assert.equal(run.paths.includes("/v5/execution/list"), true);
+    assert.equal(run.attempts.length, run.paths.length);
+  }
+});
+
+test("R4 characterizes compact and full-fallback account-commitment differences", async () => {
+  const scenarios = [
+    {
+      options: { changingAssetSnapshot: true },
+      fallbackReason: "CRITICAL_STATE_CHANGED",
+    },
+    {
+      options: { nonTargetPositionUnknownMargin: true },
+      fallbackReason: "READINESS_CRITICAL_STATE_UNPROVEN",
+    },
+    {
+      options: { nonTargetActiveOrderUnknownPrice: true },
+      fallbackReason: "READINESS_CRITICAL_STATE_UNPROVEN",
+    },
+  ];
+  for (const { options, fallbackReason } of scenarios) {
+    const compact = await prepare({ balance: "11", ...options });
+    const fallback = await prepare({
+      balance: "11",
+      accountInfoNoTime: true,
+      ...options,
+    });
+    assert.equal(compact.result.ok, true, JSON.stringify(compact.result));
+    assert.equal(compact.opened, 1);
+    if (compact.result.ok)
+      assert.equal(compact.result.value.exchangeEvidencePath, "compact");
+    assert.equal(fallback.result.ok, false, JSON.stringify(fallback.result));
+    assert.equal(fallback.opened, 0);
+    if (!fallback.result.ok)
+      assert.equal(fallback.result.error.details?.reasonCode, fallbackReason);
   }
 });
 

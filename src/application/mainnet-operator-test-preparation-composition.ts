@@ -159,6 +159,12 @@ export async function prepareMainnetOperatorTest(
       exchangeGetCounts: getCounts.summary(),
       ...(elapsed === undefined ? {} : { exchangeStageElapsedMs: elapsed }),
       exchangeEvidencePath: evidencePath,
+      ...(evidencePath === "compact-to-full"
+        ? {
+            exchangeCoverageWarningCode:
+              "UNRELATED_AUXILIARY_HISTORY_NOT_COLLECTED" as const,
+          }
+        : {}),
       ...(compactFallbackReason === undefined ? {} : { compactFallbackReason }),
     });
   };
@@ -488,6 +494,7 @@ export async function prepareMainnetOperatorTest(
         runId,
         configuredM1Symbols: [input.symbol],
         credentialLoader,
+        evidenceProfile: "operator-execution",
         utcClock: wall,
         monotonicClock: monotonic,
         createReadPort: (options) => {

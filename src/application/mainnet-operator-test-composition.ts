@@ -282,6 +282,12 @@ export async function runMainnetOperatorTestComposition(
         ? { exchangeStageElapsedMs: elapsed }
         : {}),
       exchangeEvidencePath: evidencePath,
+      ...(evidencePath === "compact-to-full"
+        ? {
+            exchangeCoverageWarningCode:
+              "UNRELATED_AUXILIARY_HISTORY_NOT_COLLECTED" as const,
+          }
+        : {}),
       ...(compactFallbackReason === undefined ? {} : { compactFallbackReason }),
     });
   };
@@ -684,6 +690,7 @@ export async function runMainnetOperatorTestComposition(
           runId: admitted.runId,
           configuredM1Symbols: [admitted.plan.symbol],
           credentialLoader,
+          evidenceProfile: "operator-execution",
           utcClock: wall,
           monotonicClock: monotonic,
           createReadPort: (configuration) => {

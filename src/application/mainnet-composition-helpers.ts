@@ -34,11 +34,14 @@ export type MainnetMeasurementStage = "prepare" | "execute" | "status";
 export type MainnetEvidencePath =
   "none" | "compact" | "full" | "compact-to-full";
 export type MainnetGetCountsStatus = "available" | "mismatch" | "unavailable";
+export type MainnetCoverageWarningCode =
+  "UNRELATED_AUXILIARY_HISTORY_NOT_COLLECTED";
 
 export interface MainnetInvocationMetrics {
   readonly exchangeStage: MainnetMeasurementStage;
   readonly exchangeStageElapsedMs?: number;
   readonly exchangeEvidencePath?: MainnetEvidencePath;
+  readonly exchangeCoverageWarningCode?: MainnetCoverageWarningCode;
   readonly compactFallbackReason?: string;
   readonly exchangeGetCountsStatus: MainnetGetCountsStatus;
   readonly exchangeGetCounts?: string;
@@ -72,6 +75,7 @@ export function createMainnetInvocationMetrics<
   readonly exchangeGetCounts: string;
   readonly exchangeStageElapsedMs?: number;
   readonly exchangeEvidencePath?: MainnetEvidencePath;
+  readonly exchangeCoverageWarningCode?: MainnetCoverageWarningCode;
   readonly compactFallbackReason?: string;
 }): MainnetInvocationMetrics & { readonly exchangeStage: Stage } {
   const status = mainnetGetCountsStatus(
@@ -87,6 +91,13 @@ export function createMainnetInvocationMetrics<
     ...(input.exchangeEvidencePath === undefined
       ? {}
       : { exchangeEvidencePath: input.exchangeEvidencePath }),
+    ...(input.exchangeCoverageWarningCode ===
+    "UNRELATED_AUXILIARY_HISTORY_NOT_COLLECTED"
+      ? {
+          exchangeCoverageWarningCode:
+            "UNRELATED_AUXILIARY_HISTORY_NOT_COLLECTED" as const,
+        }
+      : {}),
     ...(typeof input.compactFallbackReason === "string" &&
     /^[A-Z][A-Z0-9_]{0,79}$/u.test(input.compactFallbackReason)
       ? { compactFallbackReason: input.compactFallbackReason }
