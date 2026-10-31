@@ -19,6 +19,7 @@ import {
   accountEvidencePolicyHash,
   accountEvidencePartitionKey,
   deriveExpectedAccountEvidencePartitions,
+  isOptionalOperatorAuxiliaryHistoryPartition,
   type AccountEvidenceDiscovery,
   type AccountEvidencePartition,
 } from "../domain/account/account-evidence-policy.js";
@@ -85,17 +86,6 @@ export interface AccountEvidenceCollectionOptions {
   }) => AccountEvidenceReadPort;
 }
 
-/** Live cross-category positions/orders stay in A/B; only non-linear history is optional for linear execution admission. */
-function isOptionalOperatorAuxiliaryHistory(
-  partition: AccountEvidencePartition,
-): boolean {
-  return (
-    partition.pass === "auxiliary" &&
-    (partition.endpoint === "order-history" ||
-      partition.endpoint === "executions") &&
-    partition.category !== "linear"
-  );
-}
 function timestamp(value: number): UtcTimestamp {
   const parsed = timestampFromEpochMs(value);
   if (!parsed.ok) throw new BybitAccountReadError("INVALID_RESPONSE");
@@ -570,7 +560,7 @@ export async function collectAccountEvidence(
     ).filter((p) => p.endpoint === "tiers" || p.endpoint === "order-history")) {
       if (
         options.evidenceProfile === "operator-execution" &&
-        isOptionalOperatorAuxiliaryHistory(p)
+        isOptionalOperatorAuxiliaryHistoryPartition(p)
       )
         continue;
       const result = await read(p, window);
@@ -611,7 +601,7 @@ export async function collectAccountEvidence(
     )) {
       if (
         options.evidenceProfile === "operator-execution" &&
-        isOptionalOperatorAuxiliaryHistory(p)
+        isOptionalOperatorAuxiliaryHistoryPartition(p)
       )
         continue;
       const result = await read(p, window);
