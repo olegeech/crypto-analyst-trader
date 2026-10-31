@@ -13,7 +13,7 @@ import {
 } from "../shared/time.js";
 import { isRecord, requireHash } from "../shared/validation.js";
 import {
-  createOperatorMainnetTestPlan,
+  createOperatorMainnetDirectTradeBasePlan,
   deriveOperatorMainnetTestSourceId,
   OPERATOR_MAINNET_TRADE_COMMAND_PLAN_SCHEMA_VERSION,
   OPERATOR_MAINNET_TRADE_COMMAND_POLICY_VERSION,
@@ -21,8 +21,10 @@ import {
   type OperatorMainnetTestPlan,
 } from "./operator-mainnet-test-plan.js";
 import {
+  OPERATOR_MAINNET_TRADE_COMMAND_RECEIPT_V1_SCHEMA_VERSION,
+  operatorMainnetTradeCommandTakeProfit,
   rehydrateOperatorMainnetTradeCommandReceipt,
-  type OperatorMainnetTradeCommandReceipt,
+  type AnyOperatorMainnetTradeCommandReceipt,
 } from "./operator-mainnet-trade-command-receipt.js";
 
 export {
@@ -68,7 +70,7 @@ export interface OperatorMainnetTradeCommandPlan extends Omit<
   readonly commandReceiptHash: PlanHash;
   readonly commandAcceptedAt: UtcTimestamp;
   readonly commandExpiresAt: UtcTimestamp;
-  readonly tradeCommandReceipt: OperatorMainnetTradeCommandReceipt;
+  readonly tradeCommandReceipt: AnyOperatorMainnetTradeCommandReceipt;
 }
 
 export interface OperatorMainnetTradeCommandBinding {
@@ -86,7 +88,7 @@ export interface OperatorMainnetTradeCommandBinding {
   /** Evidence only. This value is never a transport capability. */
   readonly executionAuthority: "none";
   readonly replayInputs: {
-    readonly receipt: OperatorMainnetTradeCommandReceipt;
+    readonly receipt: AnyOperatorMainnetTradeCommandReceipt;
     readonly plan: OperatorMainnetTradeCommandPlan;
   };
   readonly contentHash: PlanHash;
@@ -129,18 +131,28 @@ export function createOperatorMainnetTradeCommandPlan(
         "a valid receipt and preparation time are required",
       ),
     );
-  const base = createOperatorMainnetTestPlan({
-    accountIdentityHash: receipt.value.accountIdentityHash,
-    symbol: receipt.value.symbol,
-    nonce: receipt.value.commandId,
-    allocation: receipt.value.allocation,
-    grossNotionalCap: receipt.value.grossNotionalCap,
-    maxDeviationBps: receipt.value.maxDeviationBps,
-    quote: input.quote,
-    warningCodes: input.warningCodes,
-    constraints: input.constraints,
-    preparedAt: preparedAt.value,
-  });
+  const takeProfit = operatorMainnetTradeCommandTakeProfit(receipt.value);
+  const base = createOperatorMainnetDirectTradeBasePlan(
+    {
+      accountIdentityHash: receipt.value.accountIdentityHash,
+      symbol: receipt.value.symbol,
+      nonce: receipt.value.commandId,
+      allocation: receipt.value.allocation,
+      grossNotionalCap: receipt.value.grossNotionalCap,
+      maxDeviationBps: receipt.value.maxDeviationBps,
+      quote: input.quote,
+      warningCodes: input.warningCodes,
+      constraints: input.constraints,
+      preparedAt: preparedAt.value,
+    },
+    {
+      mode: takeProfit.mode,
+      value: takeProfit.value,
+      legacyDirectPolicy:
+        receipt.value.schemaVersion ===
+        OPERATOR_MAINNET_TRADE_COMMAND_RECEIPT_V1_SCHEMA_VERSION,
+    },
+  );
   if (!base.ok) return base as Result<OperatorMainnetTradeCommandPlan>;
   const {
     contentHash: _baseHash,

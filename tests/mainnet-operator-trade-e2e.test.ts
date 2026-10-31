@@ -54,7 +54,7 @@ function orderRows(clientOrderId: string, quantity: string, tp: string) {
       orderId: "entry-order-1",
       orderLinkId: clientOrderId,
       parentOrderLinkId: "",
-      symbol: "DOGEUSDT",
+      symbol: "INJUSDT",
       side: "Buy",
       orderType: "Limit",
       timeInForce: "GTC",
@@ -79,7 +79,7 @@ function orderRows(clientOrderId: string, quantity: string, tp: string) {
       orderId: "tp-order-1",
       orderLinkId: "",
       parentOrderLinkId: clientOrderId,
-      symbol: "DOGEUSDT",
+      symbol: "INJUSDT",
       side: "Sell",
       orderType: "Market",
       timeInForce: "IOC",
@@ -87,8 +87,8 @@ function orderRows(clientOrderId: string, quantity: string, tp: string) {
       cumExecQty: quantity,
       leavesQty: "0",
       orderStatus: "Filled",
-      price: "0.0755",
-      avgPrice: "0.0755",
+      price: "0.0757",
+      avgPrice: "0.0757",
       triggerPrice: tp,
       takeProfit: "0",
       stopLoss: "0",
@@ -104,7 +104,7 @@ function orderRows(clientOrderId: string, quantity: string, tp: string) {
   ];
 }
 
-test("U5 production path: CLI trade keeps frozen Limit after lower bid and reconciles TP fills", async (t) => {
+test("U5 production path: INJUSDT .50% command keeps frozen Limit after lower bid and reconciles TP fills", async (t) => {
   const root = mkdtempSync(join(tmpdir(), "operator-trade-e2e-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const databasePath = join(root, "mainnet.db");
@@ -151,7 +151,7 @@ test("U5 production path: CLI trade keeps frozen Limit after lower bid and recon
       assert.equal(typeof rawBody, "string");
       createBody = JSON.parse(rawBody as string) as Record<string, unknown>;
       assert.equal(createBody.category, "linear");
-      assert.equal(createBody.symbol, "DOGEUSDT");
+      assert.equal(createBody.symbol, "INJUSDT");
       assert.equal(createBody.side, "Buy");
       assert.equal(createBody.orderType, "Limit");
       assert.equal(createBody.timeInForce, "GTC");
@@ -194,7 +194,7 @@ test("U5 production path: CLI trade keeps frozen Limit after lower bid and recon
         return response({
           list: [
             {
-              symbol: "DOGEUSDT",
+              symbol: "INJUSDT",
               makerFeeRate: "0.0002",
               takerFeeRate: "0.001",
               rpiMakerFeeRate: "",
@@ -208,7 +208,7 @@ test("U5 production path: CLI trade keeps frozen Limit after lower bid and recon
           category: "linear",
           list: [
             {
-              symbol: "DOGEUSDT",
+              symbol: "INJUSDT",
               status: "Trading",
               contractType: "LinearPerpetual",
               quoteCoin: "USDT",
@@ -224,6 +224,11 @@ test("U5 production path: CLI trade keeps frozen Limit after lower bid and recon
                 maxOrderQty: "1000000",
                 minNotionalValue: "5",
               },
+              leverageFilter: {
+                minLeverage: "1",
+                maxLeverage: "100",
+                leverageStep: "0.01",
+              },
             },
           ],
           nextPageCursor: "",
@@ -237,7 +242,7 @@ test("U5 production path: CLI trade keeps frozen Limit after lower bid and recon
           category: "linear",
           list: [
             {
-              symbol: "DOGEUSDT",
+              symbol: "INJUSDT",
               bid1Price: bid,
               ask1Price: ask,
               lastPrice: bid,
@@ -255,10 +260,10 @@ test("U5 production path: CLI trade keeps frozen Limit after lower bid and recon
         return response({
           category: target.searchParams.get("category"),
           list:
-            target.searchParams.get("symbol") === "DOGEUSDT"
+            target.searchParams.get("symbol") === "INJUSDT"
               ? [
                   {
-                    symbol: "DOGEUSDT",
+                    symbol: "INJUSDT",
                     positionIdx: 0,
                     side: "",
                     size: "0",
@@ -271,7 +276,7 @@ test("U5 production path: CLI trade keeps frozen Limit after lower bid and recon
       case "/v5/order/realtime":
       case "/v5/order/history": {
         const rows =
-          created && target.searchParams.get("symbol") === "DOGEUSDT"
+          created && target.searchParams.get("symbol") === "INJUSDT"
             ? orderRows(
                 createdClientOrderId,
                 createdQuantity,
@@ -298,10 +303,10 @@ test("U5 production path: CLI trade keeps frozen Limit after lower bid and recon
                   execId: "tp-exec-1",
                   orderId: "tp-order-1",
                   orderLinkId: "",
-                  symbol: "DOGEUSDT",
+                  symbol: "INJUSDT",
                   side: "Sell",
                   execQty: createdQuantity,
-                  execPrice: "0.0755",
+                  execPrice: "0.0757",
                   execTime: String(NOW),
                   execFee: "0.0001",
                   feeCurrency: "USDT",
@@ -312,7 +317,7 @@ test("U5 production path: CLI trade keeps frozen Limit after lower bid and recon
                   execId: "entry-exec-1",
                   orderId: "entry-order-1",
                   orderLinkId: createdClientOrderId,
-                  symbol: "DOGEUSDT",
+                  symbol: "INJUSDT",
                   side: "Buy",
                   execQty: createdQuantity,
                   execPrice: "0.0753",
@@ -386,13 +391,15 @@ test("U5 production path: CLI trade keeps frozen Limit after lower bid and recon
     [
       "trade",
       "--symbol",
-      "DOGEUSDT",
+      "INJUSDT",
       "--allocation",
       "10",
       "--gross-cap",
       "10",
       "--max-deviation-bps",
       "10",
+      "--tp-percent",
+      "0.50",
     ],
     {
       trade: (input, callbacks) =>
@@ -416,7 +423,8 @@ test("U5 production path: CLI trade keeps frozen Limit after lower bid and recon
   assert.equal(createCalls, 1);
   assert.ok(createBody);
   assert.equal(createBody!.price, "0.0753");
-  assert.equal(createBody!.takeProfit, "0.0755");
+  assert.equal(createBody!.takeProfit, "0.0757");
+  assert.match(tradeText, /^TP_EFFECTIVE_PERCENT=0\.531208499335989/mu);
   assert.equal(tickerReads, 4);
   const readsAfterTrade = attempts.filter(
     ({ method }) => method === "GET",
@@ -498,7 +506,7 @@ test("U5 production path: CLI trade keeps frozen Limit after lower bid and recon
   assert.ok(created, "the synthetic CREATE acknowledgement was reached");
   assert.ok(createBody, "the captured immutable CREATE payload exists");
   assert.match(String(createBody?.orderLinkId), /^omt-[a-f0-9]{32}$/u);
-  assert.equal(createdTakeProfit, "0.0755");
+  assert.equal(createdTakeProfit, "0.0757");
   assert.equal(createdQuantity, String(createBody?.qty));
   assert.equal(
     attempts.some(({ path }) => path === "/v5/order/create"),

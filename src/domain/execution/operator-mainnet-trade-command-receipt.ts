@@ -19,8 +19,10 @@ import {
 } from "../shared/time.js";
 import { requireHash, requireIdentifier } from "../shared/validation.js";
 
-export const OPERATOR_MAINNET_TRADE_COMMAND_RECEIPT_SCHEMA_VERSION =
+export const OPERATOR_MAINNET_TRADE_COMMAND_RECEIPT_V1_SCHEMA_VERSION =
   "operator-mainnet-trade-command-receipt/v1" as const;
+export const OPERATOR_MAINNET_TRADE_COMMAND_RECEIPT_SCHEMA_VERSION =
+  "operator-mainnet-trade-command-receipt/v2" as const;
 export const OPERATOR_MAINNET_TRADE_COMMAND_CHANNEL =
   "local-owner-cli/v1" as const;
 export const OPERATOR_MAINNET_APPROVAL_TTL_MS = 900_000 as const;
@@ -28,7 +30,6 @@ export const OPERATOR_MAINNET_APPROVAL_TTL_MS = 900_000 as const;
 const PRICE_DERIVATION_POLICY = "initial-best-bid-floor-to-tick/v1" as const;
 const QUANTITY_DERIVATION_POLICY =
   "budget-over-limit-price-floor-to-step/v1" as const;
-const FIXED_TP_PERCENT = "0.20";
 const RECEIPT_FIELDS = [
   "schemaVersion",
   "commandId",
@@ -59,24 +60,48 @@ const RECEIPT_INPUT_FIELDS = [
   "allocation",
   "grossNotionalCap",
   "maxDeviationBps",
+  "takeProfitMode",
+  "takeProfitValue",
   "acceptedAt",
 ] as const;
-const TP_POLICY_FIELDS = [
+const LEGACY_TP_POLICY_FIELDS = [
   "grossTargetPercent",
   "tpslMode",
   "orderType",
   "triggerBy",
 ] as const;
+const TP_POLICY_FIELDS = [
+  "mode",
+  "value",
+  "tpslMode",
+  "orderType",
+  "triggerBy",
+] as const;
 
-export interface OperatorMainnetTradeCommandReceipt {
-  readonly schemaVersion: typeof OPERATOR_MAINNET_TRADE_COMMAND_RECEIPT_SCHEMA_VERSION;
+export type OperatorMainnetTradeCommandTakeProfit =
+  | {
+      readonly mode: "percent";
+      readonly value: DecimalValue;
+      readonly tpslMode: "Partial";
+      readonly orderType: "Market";
+      readonly triggerBy: "LastPrice";
+    }
+  | {
+      readonly mode: "price";
+      readonly value: DecimalValue;
+      readonly tpslMode: "Partial";
+      readonly orderType: "Market";
+      readonly triggerBy: "LastPrice";
+    };
+
+interface ReceiptBase {
   readonly commandId: string;
   readonly actorIdentityHash: PlanHash;
   readonly channel: typeof OPERATOR_MAINNET_TRADE_COMMAND_CHANNEL;
   readonly accountIdentityHash: PlanHash;
   readonly environment: "mainnet";
   readonly category: "linear";
-  readonly symbol: MarketEvidenceSymbol;
+  readonly symbol: string;
   readonly side: "Buy";
   readonly allocation: DecimalValue;
   readonly grossNotionalCap: DecimalValue;
@@ -84,17 +109,33 @@ export interface OperatorMainnetTradeCommandReceipt {
   readonly leverage: "1";
   readonly priceDerivationPolicy: typeof PRICE_DERIVATION_POLICY;
   readonly quantityDerivationPolicy: typeof QUANTITY_DERIVATION_POLICY;
+  readonly stopLoss: "none";
+  readonly acceptedAt: UtcTimestamp;
+  readonly expiresAt: UtcTimestamp;
+  readonly contentHash: PlanHash;
+}
+
+export interface LegacyOperatorMainnetTradeCommandReceipt extends ReceiptBase {
+  readonly schemaVersion: typeof OPERATOR_MAINNET_TRADE_COMMAND_RECEIPT_V1_SCHEMA_VERSION;
+  readonly symbol: MarketEvidenceSymbol;
   readonly takeProfitPolicy: {
     readonly grossTargetPercent: DecimalValue;
     readonly tpslMode: "Partial";
     readonly orderType: "Market";
     readonly triggerBy: "LastPrice";
   };
-  readonly stopLoss: "none";
-  readonly acceptedAt: UtcTimestamp;
-  readonly expiresAt: UtcTimestamp;
-  readonly contentHash: PlanHash;
 }
+
+export interface ConfiguredOperatorMainnetTradeCommandReceipt extends ReceiptBase {
+  readonly schemaVersion: typeof OPERATOR_MAINNET_TRADE_COMMAND_RECEIPT_SCHEMA_VERSION;
+  readonly takeProfitPolicy: OperatorMainnetTradeCommandTakeProfit;
+}
+
+export type OperatorMainnetTradeCommandReceipt =
+  | LegacyOperatorMainnetTradeCommandReceipt
+  | ConfiguredOperatorMainnetTradeCommandReceipt;
+export type AnyOperatorMainnetTradeCommandReceipt =
+  OperatorMainnetTradeCommandReceipt;
 
 function exactRecord(
   value: unknown,
@@ -123,14 +164,7 @@ function positiveDecimal(value: unknown, field: string): Result<DecimalValue> {
   return parsed;
 }
 
-function normalizeReceipt(
-  input: unknown,
-): Result<OperatorMainnetTradeCommandReceipt> {
-  if (
-    !exactRecord(input, RECEIPT_FIELDS) ||
-    !exactRecord(input.takeProfitPolicy, TP_POLICY_FIELDS)
-  )
-    return invalidReceipt();
+function validatedBase(input: Record<string, unknown>) {
   const commandId = requireIdentifier(input.commandId, "commandId");
   const actorIdentityHash = requireHash(
     input.actorIdentityHash,
@@ -151,18 +185,14 @@ function normalizeReceipt(
     input.maxDeviationBps,
     "maxDeviationBps",
   );
-  const grossTargetPercent = positiveDecimal(
-    input.takeProfitPolicy.grossTargetPercent,
-    "takeProfitPolicy.grossTargetPercent",
-  );
   const contentHash = requireHash(input.contentHash, "contentHash");
+  const deviationLimit = DecimalValue.fromString("10000");
   const expectedExpiry = acceptedAt.ok
     ? (new Date(
         timestampToEpochMs(acceptedAt.value) + OPERATOR_MAINNET_APPROVAL_TTL_MS,
       ).toISOString() as UtcTimestamp)
     : undefined;
-  const symbol = input.symbol;
-  const deviationLimit = DecimalValue.fromString("10000");
+  const symbol = requireIdentifier(input.symbol, "symbol");
   if (
     !commandId.ok ||
     !actorIdentityHash.ok ||
@@ -172,16 +202,12 @@ function normalizeReceipt(
     !allocation.ok ||
     !grossNotionalCap.ok ||
     !maxDeviationBps.ok ||
-    !grossTargetPercent.ok ||
     !contentHash.ok ||
     !deviationLimit.ok ||
-    grossTargetPercent.value.toString() !== "0.2" ||
+    !symbol.ok ||
+    !/^[A-Z0-9]{1,26}USDT$/u.test(symbol.value) ||
     maxDeviationBps.value.compare(deviationLimit.value) >= 0 ||
     expiresAt.value !== expectedExpiry ||
-    typeof symbol !== "string" ||
-    !MARKET_EVIDENCE_SYMBOLS.includes(symbol as MarketEvidenceSymbol) ||
-    input.schemaVersion !==
-      OPERATOR_MAINNET_TRADE_COMMAND_RECEIPT_SCHEMA_VERSION ||
     input.channel !== OPERATOR_MAINNET_TRADE_COMMAND_CHANNEL ||
     input.environment !== "mainnet" ||
     input.category !== "linear" ||
@@ -189,22 +215,17 @@ function normalizeReceipt(
     input.leverage !== "1" ||
     input.priceDerivationPolicy !== PRICE_DERIVATION_POLICY ||
     input.quantityDerivationPolicy !== QUANTITY_DERIVATION_POLICY ||
-    input.stopLoss !== "none" ||
-    input.takeProfitPolicy.tpslMode !== "Partial" ||
-    input.takeProfitPolicy.orderType !== "Market" ||
-    input.takeProfitPolicy.triggerBy !== "LastPrice"
+    input.stopLoss !== "none"
   )
-    return invalidReceipt("receipt scope or fixed trade policy is invalid");
-
-  const payload = {
-    schemaVersion: OPERATOR_MAINNET_TRADE_COMMAND_RECEIPT_SCHEMA_VERSION,
+    return undefined;
+  return {
     commandId: commandId.value,
     actorIdentityHash: actorIdentityHash.value as PlanHash,
     channel: OPERATOR_MAINNET_TRADE_COMMAND_CHANNEL,
     accountIdentityHash: accountIdentityHash.value as PlanHash,
     environment: "mainnet" as const,
     category: "linear" as const,
-    symbol: symbol as MarketEvidenceSymbol,
+    symbol: symbol.value,
     side: "Buy" as const,
     allocation: allocation.value,
     grossNotionalCap: grossNotionalCap.value,
@@ -212,32 +233,105 @@ function normalizeReceipt(
     leverage: "1" as const,
     priceDerivationPolicy: PRICE_DERIVATION_POLICY,
     quantityDerivationPolicy: QUANTITY_DERIVATION_POLICY,
-    takeProfitPolicy: {
-      grossTargetPercent: grossTargetPercent.value,
-      tpslMode: "Partial" as const,
-      orderType: "Market" as const,
-      triggerBy: "LastPrice" as const,
-    },
     stopLoss: "none" as const,
     acceptedAt: acceptedAt.value,
     expiresAt: expiresAt.value,
+    contentHash: contentHash.value as PlanHash,
   };
+}
+
+function normalizeReceipt(
+  input: unknown,
+): Result<OperatorMainnetTradeCommandReceipt> {
+  if (
+    !exactRecord(input, RECEIPT_FIELDS) ||
+    typeof input.takeProfitPolicy !== "object" ||
+    input.takeProfitPolicy === null ||
+    Array.isArray(input.takeProfitPolicy)
+  )
+    return invalidReceipt();
+  const base = validatedBase(input);
+  if (!base)
+    return invalidReceipt("receipt scope or fixed trade policy is invalid");
+  const { contentHash: _storedContentHash, ...basePayload } = base;
+  void _storedContentHash;
+  const policy = input.takeProfitPolicy as Record<string, unknown>;
+  let payload: Record<string, unknown>;
+  if (
+    input.schemaVersion ===
+    OPERATOR_MAINNET_TRADE_COMMAND_RECEIPT_V1_SCHEMA_VERSION
+  ) {
+    if (!exactRecord(policy, LEGACY_TP_POLICY_FIELDS)) return invalidReceipt();
+    const target = positiveDecimal(
+      policy.grossTargetPercent,
+      "takeProfitPolicy.grossTargetPercent",
+    );
+    if (
+      !target.ok ||
+      target.value.toString() !== "0.2" ||
+      !MARKET_EVIDENCE_SYMBOLS.includes(base.symbol as MarketEvidenceSymbol) ||
+      policy.tpslMode !== "Partial" ||
+      policy.orderType !== "Market" ||
+      policy.triggerBy !== "LastPrice"
+    )
+      return invalidReceipt(
+        "legacy receipt policy differs from the fixed v1 trade policy",
+      );
+    payload = {
+      schemaVersion: OPERATOR_MAINNET_TRADE_COMMAND_RECEIPT_V1_SCHEMA_VERSION,
+      ...basePayload,
+      symbol: base.symbol as MarketEvidenceSymbol,
+      takeProfitPolicy: {
+        grossTargetPercent: target.value,
+        tpslMode: "Partial",
+        orderType: "Market",
+        triggerBy: "LastPrice",
+      },
+    };
+  } else if (
+    input.schemaVersion ===
+    OPERATOR_MAINNET_TRADE_COMMAND_RECEIPT_SCHEMA_VERSION
+  ) {
+    if (!exactRecord(policy, TP_POLICY_FIELDS)) return invalidReceipt();
+    const target = positiveDecimal(policy.value, "takeProfitPolicy.value");
+    if (
+      !target.ok ||
+      (policy.mode !== "percent" && policy.mode !== "price") ||
+      policy.tpslMode !== "Partial" ||
+      policy.orderType !== "Market" ||
+      policy.triggerBy !== "LastPrice"
+    )
+      return invalidReceipt("take-profit instruction is invalid");
+    payload = {
+      schemaVersion: OPERATOR_MAINNET_TRADE_COMMAND_RECEIPT_SCHEMA_VERSION,
+      ...basePayload,
+      takeProfitPolicy: {
+        mode: policy.mode,
+        value: target.value,
+        tpslMode: "Partial",
+        orderType: "Market",
+        triggerBy: "LastPrice",
+      },
+    };
+  } else {
+    return invalidReceipt("receipt schema is unsupported");
+  }
   const expectedHash = hashCanonical(payload);
-  if (!expectedHash.ok || expectedHash.value !== contentHash.value)
+  if (!expectedHash.ok || expectedHash.value !== base.contentHash)
     return invalidReceipt("receipt identity differs from its bound fields");
-  const normalized = { ...payload, contentHash: contentHash.value };
+  const normalized = { ...payload, contentHash: base.contentHash };
   const actualCanonical = canonicalSerialize(input);
   const expectedCanonical = canonicalSerialize(normalized);
   return actualCanonical.ok &&
     expectedCanonical.ok &&
     actualCanonical.value === expectedCanonical.value
-    ? ok(deepFreeze(normalized) as OperatorMainnetTradeCommandReceipt)
+    ? ok(deepFreeze(normalized) as AnyOperatorMainnetTradeCommandReceipt)
     : invalidReceipt("receipt differs from deterministic replay");
 }
 
 function canonicalizeReceipt(
   input: unknown,
-): Result<OperatorMainnetTradeCommandReceipt> {
+): Result<ConfiguredOperatorMainnetTradeCommandReceipt> {
   if (!exactRecord(input, RECEIPT_INPUT_FIELDS)) return invalidReceipt();
   const commandId = requireIdentifier(input.commandId, "commandId");
   const actorIdentityHash = requireHash(
@@ -258,7 +352,12 @@ function canonicalizeReceipt(
     input.maxDeviationBps,
     "maxDeviationBps",
   );
+  const takeProfitValue = positiveDecimal(
+    input.takeProfitValue,
+    "takeProfitValue",
+  );
   const deviationLimit = DecimalValue.fromString("10000");
+  const symbol = requireIdentifier(input.symbol, "symbol");
   if (
     !commandId.ok ||
     !actorIdentityHash.ok ||
@@ -267,16 +366,16 @@ function canonicalizeReceipt(
     !allocation.ok ||
     !grossNotionalCap.ok ||
     !maxDeviationBps.ok ||
+    !takeProfitValue.ok ||
     !deviationLimit.ok ||
+    !symbol.ok ||
+    !/^[A-Z0-9]{1,26}USDT$/u.test(symbol.value) ||
     maxDeviationBps.value.compare(deviationLimit.value) >= 0 ||
-    typeof input.symbol !== "string" ||
-    !MARKET_EVIDENCE_SYMBOLS.includes(input.symbol as MarketEvidenceSymbol)
+    (input.takeProfitMode !== "percent" && input.takeProfitMode !== "price")
   )
     return invalidReceipt(
-      "receipt requires a valid local actor, account and trade scope",
+      "receipt requires valid command identity, bounds and take-profit input",
     );
-  const target = DecimalValue.fromString(FIXED_TP_PERCENT);
-  if (!target.ok) return invalidReceipt("fixed take-profit policy is invalid");
   const expiresAt = new Date(
     timestampToEpochMs(acceptedAt.value) + OPERATOR_MAINNET_APPROVAL_TTL_MS,
   ).toISOString() as UtcTimestamp;
@@ -288,7 +387,7 @@ function canonicalizeReceipt(
     accountIdentityHash: accountIdentityHash.value as PlanHash,
     environment: "mainnet" as const,
     category: "linear" as const,
-    symbol: input.symbol as MarketEvidenceSymbol,
+    symbol: symbol.value,
     side: "Buy" as const,
     allocation: allocation.value,
     grossNotionalCap: grossNotionalCap.value,
@@ -297,7 +396,8 @@ function canonicalizeReceipt(
     priceDerivationPolicy: PRICE_DERIVATION_POLICY,
     quantityDerivationPolicy: QUANTITY_DERIVATION_POLICY,
     takeProfitPolicy: {
-      grossTargetPercent: target.value,
+      mode: input.takeProfitMode,
+      value: takeProfitValue.value,
       tpslMode: "Partial" as const,
       orderType: "Market" as const,
       triggerBy: "LastPrice" as const,
@@ -308,13 +408,18 @@ function canonicalizeReceipt(
   };
   const contentHash = hashCanonical(payload);
   return contentHash.ok
-    ? ok(deepFreeze({ ...payload, contentHash: contentHash.value }))
+    ? ok(
+        deepFreeze({
+          ...payload,
+          contentHash: contentHash.value,
+        }) as ConfiguredOperatorMainnetTradeCommandReceipt,
+      )
     : contentHash;
 }
 
 export function createOperatorMainnetTradeCommandReceipt(
   input: unknown,
-): Result<OperatorMainnetTradeCommandReceipt> {
+): Result<ConfiguredOperatorMainnetTradeCommandReceipt> {
   return canonicalizeReceipt(input);
 }
 
@@ -322,4 +427,19 @@ export function rehydrateOperatorMainnetTradeCommandReceipt(
   input: unknown,
 ): Result<OperatorMainnetTradeCommandReceipt> {
   return normalizeReceipt(input);
+}
+
+export function operatorMainnetTradeCommandTakeProfit(
+  receipt: AnyOperatorMainnetTradeCommandReceipt,
+): OperatorMainnetTradeCommandTakeProfit {
+  return receipt.schemaVersion ===
+    OPERATOR_MAINNET_TRADE_COMMAND_RECEIPT_V1_SCHEMA_VERSION
+    ? {
+        mode: "percent",
+        value: receipt.takeProfitPolicy.grossTargetPercent,
+        tpslMode: receipt.takeProfitPolicy.tpslMode,
+        orderType: receipt.takeProfitPolicy.orderType,
+        triggerBy: receipt.takeProfitPolicy.triggerBy,
+      }
+    : receipt.takeProfitPolicy;
 }

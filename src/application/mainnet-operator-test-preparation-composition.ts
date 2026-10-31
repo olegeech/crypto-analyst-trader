@@ -3,7 +3,10 @@ import { randomUUID } from "node:crypto";
 import { createMacOSKeychainProvider } from "../adapters/macos-keychain.js";
 import { BybitAccountReadTransport } from "../adapters/bybit-v5/account-read-transport.js";
 import { BybitAccountReadClient } from "../adapters/bybit-v5/account-read-client.js";
-import { BybitMainnetReadCapabilityFacade } from "../adapters/bybit-v5/read-capability-facade.js";
+import {
+  BybitMainnetReadCapabilityError,
+  BybitMainnetReadCapabilityFacade,
+} from "../adapters/bybit-v5/read-capability-facade.js";
 import { BybitMainnetExecutionAdapter } from "../adapters/bybit-v5/execution-adapter.js";
 import { BybitPrivateTransport } from "../adapters/bybit-v5/transport.js";
 import { BybitPublicMarketClient } from "../adapters/bybit-v5/public-market-client.js";
@@ -221,7 +224,8 @@ export async function prepareMainnetOperatorTest(
     Object.hasOwn(input, "recoveryAttestationHash") !==
       Object.hasOwn(input, "recoveryAttestation") ||
     typeof input.symbol !== "string" ||
-    !isPlanningSymbol(input.symbol) ||
+    (!isPlanningSymbol(input.symbol) &&
+      !(hasTradeCommandReceipt && /^[A-Z0-9]{2,32}$/u.test(input.symbol))) ||
     [input.allocation, input.grossNotionalCap, input.maxDeviationBps].some(
       (value) => typeof value !== "string" || value.length > 128,
     )
@@ -446,11 +450,15 @@ export async function prepareMainnetOperatorTest(
       );
     const instrument = await new BybitMainnetReadCapabilityFacade(
       compactReader.transport,
-    ).readInstrument(input.symbol);
+    ).readInstrument(input.symbol, {
+      requireOneX: tradeCommandReceipt?.ok === true,
+    });
     const publicMarkets = new BybitPublicMarketClient({
       transport: new BybitPublicTransport({ request }),
     });
-    const quote = await publicMarkets.readOperatorQuote(input.symbol);
+    const quote = await publicMarkets.readOperatorQuote(input.symbol, {
+      directTrade: tradeCommandReceipt?.ok === true,
+    });
     // Exact venue rounding and both entry/exit fees own affordability. Do this
     // before the comparatively expensive target-state reads or persistence.
     const candidate = makePlan({
@@ -563,6 +571,19 @@ export async function prepareMainnetOperatorTest(
           : "COMPACT_EVIDENCE_INVALID";
     }
   } catch (error) {
+    if (error instanceof BybitMainnetReadCapabilityError)
+      return withCounts(
+        failed(
+          error.code === "UNSUPPORTED_LEVERAGE"
+            ? "TARGET_LEVERAGE_UNSUPPORTED"
+            : error.code === "UNSUPPORTED_INSTRUMENT"
+              ? "TARGET_INSTRUMENT_UNSUPPORTED"
+              : "INSTRUMENT_RESPONSE_INVALID",
+          { source: "instrument", causeCode: error.code },
+        ),
+        exchangeReads,
+        0,
+      );
     // No raw provider error is exposed. The route and safe reason explain extra reads.
     compactFallbackReason =
       error instanceof CompactAccountEvidenceUnavailable &&
@@ -628,11 +649,15 @@ export async function prepareMainnetOperatorTest(
         );
       instrument = await new BybitMainnetReadCapabilityFacade(
         accountTransport,
-      ).readInstrument(input.symbol);
+      ).readInstrument(input.symbol, {
+        requireOneX: tradeCommandReceipt?.ok === true,
+      });
       const publicMarkets = new BybitPublicMarketClient({
         transport: new BybitPublicTransport({ request }),
       });
-      quote = await publicMarkets.readOperatorQuote(input.symbol);
+      quote = await publicMarkets.readOperatorQuote(input.symbol, {
+        directTrade: tradeCommandReceipt?.ok === true,
+      });
       const fallbackFee = await readPreparationFee(
         accountTransport,
         input.symbol,
@@ -822,12 +847,18 @@ export async function prepareMainnetOperatorTest(
   } catch (error) {
     return withCounts(
       failed(
-        error instanceof BybitPublicTransportError
-          ? (error.reasonCode ??
+        error instanceof BybitMainnetReadCapabilityError
+          ? error.code === "UNSUPPORTED_LEVERAGE"
+            ? "TARGET_LEVERAGE_UNSUPPORTED"
+            : error.code === "UNSUPPORTED_INSTRUMENT"
+              ? "TARGET_INSTRUMENT_UNSUPPORTED"
+              : "INSTRUMENT_RESPONSE_INVALID"
+          : error instanceof BybitPublicTransportError
+            ? (error.reasonCode ??
               `PUBLIC_${error.kind.toUpperCase().replaceAll("-", "_")}`)
-          : error instanceof BybitPublicMarketMappingError
-            ? `PUBLIC_MARKET_${error.kind.toUpperCase().replaceAll("-", "_")}`
-            : "PREPARATION_FAILED_CLOSED",
+            : error instanceof BybitPublicMarketMappingError
+              ? `PUBLIC_MARKET_${error.kind.toUpperCase().replaceAll("-", "_")}`
+              : "PREPARATION_FAILED_CLOSED",
       ),
       exchangeReads,
       0,

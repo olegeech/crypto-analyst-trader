@@ -284,23 +284,37 @@ remote chat message. `prepare` remains read-only and legacy `execute` still
 requires its exact-plan approval.
 
 ```bash
-npm run mainnet:test -- trade --symbol DOGEUSDT --allocation 10 --gross-cap 10 --max-deviation-bps 10
+npm run mainnet:test -- trade --symbol DOGEUSDT --allocation 10 --gross-cap 10 --max-deviation-bps 10 --tp-percent 0.20
+# Or supply an absolute trigger price instead of a percentage:
+npm run mainnet:test -- trade --symbol DOGEUSDT --allocation 10 --gross-cap 10 --max-deviation-bps 10 --tp-price <USDT-price>
 # The command prints a command ID before collecting market evidence.
 npm run mainnet:test -- status --command-id <command-uuid>
 ```
 
-The bounded policy is Buy Limit/GTC, linear one-way, 1x, with the existing
-`+0.20%` Partial/Market/LastPrice take-profit and no stop-loss. The allocation
-and gross-entry cap are required; the gross cap excludes fees and does not cap
-total loss. The command derives and freezes price, quantity, account,
-instrument and TP from fresh evidence. It allows a valid fresh best bid below
-the old lower band, while retaining the upper boundary and account, capacity,
-permission, position, order, venue, HALT and final-admission checks. It never
-reprices, adds volume or asks for a second routine approval.
+The bounded policy is Buy Limit/GTC, linear one-way, 1x, with no stop-loss.
+Pass exactly one of `--tp-percent <percent>` or `--tp-price <price>`. A percent
+is the gross price increase above the frozen entry Limit; a price is an
+absolute trigger. The command calculates the trigger from the frozen entry
+using decimal arithmetic, rounds it up to the instrument's tick, and blocks it
+if the rounded Buy target is not above entry or is outside venue price bounds.
+The resulting exchange protection remains Partial/Market/LastPrice. The CLI
+reports the effective rounded trigger (`TP_TRIGGER`) and gross price-change
+percentage (`TP_EFFECTIVE_PERCENT`). There is no added TP percentage cap;
+current venue constraints still apply.
+
+The allocation and gross-entry cap are required; the gross cap excludes fees
+and does not cap total loss. The command derives and freezes entry price and
+quantity from fresh quote and instrument evidence, then binds the selected TP
+mode and value to the receipt, plan and CREATE payload. It allows a valid fresh
+best bid below the old lower band, while retaining the upper boundary and
+account, capacity, permission, position, order, venue, HALT and final-admission
+checks. It never reprices, adds volume or asks for a second routine approval.
 
 The saved receipt is valid for 15 minutes for submission. It is single-use and
-binds the local actor, selected account, instruction and fixed policy; the
-subsequent immutable binding ties that receipt to one derived plan and payload.
+binds the local actor, selected account, instruction, TP mode and value, and
+remaining fixed policies; the subsequent immutable binding ties that receipt
+to one derived plan and payload. Existing v1 receipts and v1/v2 plans retain
+their fixed `+0.20%` policy and hashes.
 The flow performs one preparation, one final
 admission, at most one CREATE and one immediate GET-only status read when a
 source exists; it does not wait for a fill or TP. A resting or partially filled

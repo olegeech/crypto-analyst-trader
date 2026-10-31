@@ -233,7 +233,7 @@ function statusForSavedSource(
   };
 }
 
-test("direct trade accepts the configured M1 symbols and rejects unsupported pairs", async (t) => {
+test("direct trade accepts provider-shaped USDT symbols without broadening the M1 list", async (t) => {
   const fixture = tradeFlowFixture();
   t.after(() => rmSync(fixture.root, { recursive: true, force: true }));
   let credentialLoads = 0;
@@ -256,7 +256,7 @@ test("direct trade accepts the configured M1 symbols and rejects unsupported pai
     monotonicClock: () => 100,
     prepare: async (input: { readonly symbol: unknown }) => {
       preparationCalls += 1;
-      assert.equal(input.symbol, "SOLUSDT");
+      assert.equal(input.symbol, "INJUSDT");
       return fail(
         domainError("INVALID_EVIDENCE", "offline symbol check", {
           reasonCode: "SYMBOL_PREFLIGHT_STOP",
@@ -266,10 +266,12 @@ test("direct trade accepts the configured M1 symbols and rejects unsupported pai
   };
   const supported = await runMainnetOperatorTrade(
     {
-      symbol: "SOLUSDT",
+      symbol: "INJUSDT",
       allocation: "10",
       grossNotionalCap: "10",
       maxDeviationBps: "10",
+      takeProfitMode: "percent",
+      takeProfitValue: "0.20",
     },
     dependencies,
   );
@@ -281,10 +283,12 @@ test("direct trade accepts the configured M1 symbols and rejects unsupported pai
 
   const unsupported = await runMainnetOperatorTrade(
     {
-      symbol: "XRPUSDT",
+      symbol: "XRPUSDC",
       allocation: "10",
       grossNotionalCap: "10",
       maxDeviationBps: "10",
+      takeProfitMode: "percent",
+      takeProfitValue: "0.20",
     },
     dependencies,
   );
@@ -332,6 +336,8 @@ test("trade records a pre-intent refusal once and command-ID status stays local"
       allocation: "10",
       grossNotionalCap: "10",
       maxDeviationBps: "10",
+      takeProfitMode: "percent",
+      takeProfitValue: "0.20",
     },
     {
       credentialProvider: {
@@ -491,6 +497,8 @@ test("receipt-only command status says interrupted before binding", async (t) =>
       allocation: "10",
       grossNotionalCap: "10",
       maxDeviationBps: "10",
+      takeProfitMode: "percent",
+      takeProfitValue: "0.20",
       acceptedAt: NOW,
     }),
   );
@@ -546,6 +554,8 @@ test("trade preserves unknown provider-read counts after an unexpected preparati
       allocation: "10",
       grossNotionalCap: "10",
       maxDeviationBps: "10",
+      takeProfitMode: "percent",
+      takeProfitValue: "0.20",
     },
     {
       credentialProvider: {
@@ -600,6 +610,8 @@ test("trade persists one command intent and performs one immediate status read",
       allocation: "10",
       grossNotionalCap: "10",
       maxDeviationBps: "10",
+      takeProfitMode: "percent",
+      takeProfitValue: "0.20",
     },
     {
       credentialProvider: {
@@ -688,6 +700,8 @@ test("execution uncertainty after committed intent keeps identities and status n
       allocation: "10",
       grossNotionalCap: "10",
       maxDeviationBps: "10",
+      takeProfitMode: "percent",
+      takeProfitValue: "0.20",
     },
     {
       credentialProvider: {

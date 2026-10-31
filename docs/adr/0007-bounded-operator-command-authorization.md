@@ -27,10 +27,14 @@ one internally derived plan and at most one CREATE attempt. Do not ask for a
 second routine exact-plan confirmation. The domain receipt records the local
 OS-principal hash, channel, configured account, Mainnet linear symbol, Buy side,
 allocation and gross cap, fixed price and quantity derivation policies, 1x
-leverage, existing Partial/Market/LastPrice +0.20% gross-target TP policy, and
-a 15-minute validity period beginning at receipt acceptance. A separate
-versioned binding links the receipt to the deterministic plan, source, client
-order ID and exact CREATE payload.
+leverage, an explicit take-profit input and the Partial/Market/LastPrice
+execution policy, no stop-loss, and a 15-minute validity period beginning at
+receipt acceptance. The TP input is either a gross percentage above the frozen
+entry Limit or an absolute trigger price. The deterministic plan rounds the
+Buy trigger up to the selected instrument's price tick and requires it to
+remain above entry and within venue bounds. A separate versioned binding links
+the receipt, including TP mode and value, to the deterministic plan, source,
+client order ID and exact CREATE payload.
 
 The v3 direct-command quote policy preserves the original plan's entry price,
 quantity, gross cap, account, instrument and TP. A fresh, valid bid below the
@@ -42,11 +46,13 @@ allowed. The order remains GTC after receipt expiry; expiry blocks submission
 and does not cancel a resting order.
 
 Keep legacy v1/v2 plans, hashes, exact-plan approvals, symmetric quote policy
-and recovery behavior unchanged. A legacy approval cannot authorize v3, and a
-direct-command receipt cannot authorize v1/v2. Preparation, research, imported
-artifacts and unaccepted system proposals grant no CREATE authority. A future
-system-generated proposal requires one explicit owner acceptance and remains
-out of scope.
+and recovery behavior unchanged. Legacy v1 receipts and v1/v2 plans retain the
+fixed +0.20% TP policy and their existing hashes; new direct commands store the
+selected TP mode and value in a versioned receipt. A legacy approval cannot
+authorize v3, and a direct-command receipt cannot authorize v1/v2. Preparation,
+research, imported artifacts and unaccepted system proposals grant no CREATE
+authority. A future system-generated proposal requires one explicit owner
+acceptance and remains out of scope.
 
 The trusted local principal does not authenticate remote message authorship.
 An assistant may invoke this path only for a specific direct owner instruction

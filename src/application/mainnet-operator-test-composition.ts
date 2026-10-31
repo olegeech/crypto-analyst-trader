@@ -275,13 +275,17 @@ function createPrivateCreateIssuer(): {
   };
 }
 
-function failed<T>(reasonCode: string): Result<T> {
+function failed<T>(
+  reasonCode: string,
+  details: Readonly<Record<string, string | number | boolean>> = {},
+): Result<T> {
   return fail(
     domainError(
       "INVALID_CAPABILITY",
       "operator Mainnet composition is blocked",
       {
         reasonCode,
+        ...details,
       },
     ),
   );
@@ -755,8 +759,12 @@ export async function runMainnetOperatorTestComposition(
           let fresh: MainnetOperatorTestAdmissionEvidence;
           const instrument = await new BybitMainnetReadCapabilityFacade(
             accountReader.transport,
-          ).readInstrument(symbol);
-          const quote = await publicMarkets.readOperatorQuote(symbol);
+          ).readInstrument(symbol, {
+            requireOneX: admitted.authorization.kind === "trade-command",
+          });
+          const quote = await publicMarkets.readOperatorQuote(symbol, {
+            directTrade: admitted.authorization.kind === "trade-command",
+          });
           if (manualRecoveryAttestation) {
             const parts = await exchangeAdapter.readOperatorTargetStateParts({
               instrument: symbol,
@@ -840,6 +848,15 @@ export async function runMainnetOperatorTestComposition(
             throw new OperatorEvidenceReadError(
               "FRESH_MAINNET_EVIDENCE_UNAVAILABLE",
             );
+          if (error instanceof BybitMainnetReadCapabilityError)
+            throw new OperatorEvidenceReadError(
+              error.code === "UNSUPPORTED_LEVERAGE"
+                ? "TARGET_LEVERAGE_UNSUPPORTED"
+                : error.code === "UNSUPPORTED_INSTRUMENT"
+                  ? "TARGET_INSTRUMENT_UNSUPPORTED"
+                  : "INSTRUMENT_RESPONSE_INVALID",
+              { source: "instrument", causeCode: error.code },
+            );
           const reasonCode =
             error instanceof CompactAccountEvidenceUnavailable
               ? error.reasonCode
@@ -898,7 +915,9 @@ export async function runMainnetOperatorTestComposition(
           throw new OperatorEvidenceReadError("ACCOUNT_EVIDENCE_INCOMPLETE");
         const instrument = await new BybitMainnetReadCapabilityFacade(
           fullAccountTransport,
-        ).readInstrument(symbol);
+        ).readInstrument(symbol, {
+          requireOneX: admitted.authorization.kind === "trade-command",
+        });
         const evaluatedAt = timestampFromEpochMs(
           await fullAccountTransport.readExchangeTime(),
         );
@@ -919,7 +938,10 @@ export async function runMainnetOperatorTestComposition(
                 category: "linear",
                 symbol,
               }),
-            quote: () => publicMarkets.readOperatorQuote(symbol),
+            quote: () =>
+              publicMarkets.readOperatorQuote(symbol, {
+                directTrade: admitted.authorization.kind === "trade-command",
+              }),
             state: () => exchangeAdapter.readState({ instrument: symbol }),
           },
         );
@@ -995,9 +1017,20 @@ export async function runMainnetOperatorTestComposition(
           },
         }
       : withCounts(result, exchangeReads, exchangeWrites);
-  } catch {
+  } catch (error) {
     return withCounts(
-      failed("MAINNET_OPERATOR_TEST_FAILED_CLOSED"),
+      failed(
+        error instanceof BybitMainnetReadCapabilityError
+          ? error.code === "UNSUPPORTED_LEVERAGE"
+            ? "TARGET_LEVERAGE_UNSUPPORTED"
+            : error.code === "UNSUPPORTED_INSTRUMENT"
+              ? "TARGET_INSTRUMENT_UNSUPPORTED"
+              : "INSTRUMENT_RESPONSE_INVALID"
+          : "MAINNET_OPERATOR_TEST_FAILED_CLOSED",
+        error instanceof BybitMainnetReadCapabilityError
+          ? { source: "instrument", causeCode: error.code }
+          : {},
+      ),
       exchangeReads,
       exchangeWrites,
     );

@@ -173,6 +173,8 @@ function tradeCommand(
         allocation: "10",
         grossNotionalCap: "8",
         maxDeviationBps: "10",
+        takeProfitMode: "percent",
+        takeProfitValue: "0.20",
         acceptedAt: NOW,
       }),
     );

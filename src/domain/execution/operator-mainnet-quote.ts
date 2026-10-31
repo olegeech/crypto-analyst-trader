@@ -3,10 +3,6 @@ import {
   hashCanonical,
   type PlanHash,
 } from "../identity/canonical-serialization.js";
-import {
-  MARKET_EVIDENCE_SYMBOLS,
-  type MarketEvidenceSymbol,
-} from "../market/market-evidence-bundle.js";
 import { DecimalValue, isDecimalValue } from "../shared/decimal.js";
 import { deepFreeze } from "../shared/deep-freeze.js";
 import { domainError } from "../shared/errors.js";
@@ -44,7 +40,7 @@ export interface OperatorMainnetQuote {
   readonly environment: "mainnet";
   readonly category: "linear";
   readonly origin: "https://api.bybit.com";
-  readonly symbol: MarketEvidenceSymbol;
+  readonly symbol: string;
   /** Bybit's response envelope time, not local receipt time. */
   readonly observedAt: UtcTimestamp;
   /** Exchange-time reads bracketing the ticker request. */
@@ -115,7 +111,7 @@ function positiveDecimal(value: unknown, field: string): Result<DecimalValue> {
 }
 
 function quotePayload(input: {
-  readonly symbol: MarketEvidenceSymbol;
+  readonly symbol: string;
   readonly observedAt: UtcTimestamp;
   readonly collectionStartedAt: UtcTimestamp;
   readonly collectionCompletedAt: UtcTimestamp;
@@ -162,10 +158,10 @@ export function createOperatorMainnetQuote(
     input.category !== "linear" ||
     input.origin !== "https://api.bybit.com" ||
     typeof input.symbol !== "string" ||
-    !MARKET_EVIDENCE_SYMBOLS.includes(input.symbol as MarketEvidenceSymbol)
+    !/^[A-Z0-9]{2,32}$/u.test(input.symbol)
   )
     return invalidQuote(
-      "quote source or symbol is outside the Bybit M1 linear scope",
+      "quote source or symbol is outside the Bybit linear scope",
     );
   const observedAt = parseUtcTimestamp(input.observedAt);
   const collectionStartedAt = parseUtcTimestamp(input.collectionStartedAt);
@@ -197,7 +193,7 @@ export function createOperatorMainnetQuote(
   if (bid.value.compare(ask.value) > 0)
     return invalidQuote("quote must contain a positive, non-crossed book");
   const payload = quotePayload({
-    symbol: input.symbol as MarketEvidenceSymbol,
+    symbol: input.symbol,
     observedAt: observedAt.value,
     collectionStartedAt: collectionStartedAt.value,
     collectionCompletedAt: collectionCompletedAt.value,

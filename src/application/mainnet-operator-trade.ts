@@ -4,7 +4,6 @@ import { configuredBybitAccountIdentityHash } from "../adapters/bybit-v5/account
 import { createMacOSKeychainProvider } from "../adapters/macos-keychain.js";
 import { resolveOperatorMainnetTradeCommand } from "../adapters/sqlite/operator-mainnet-test-lookup.js";
 import { openSqlitePersistence } from "../adapters/sqlite/sqlite-persistence.js";
-import { MARKET_EVIDENCE_SYMBOLS } from "../domain/market/market-evidence-bundle.js";
 import {
   createOperatorMainnetTradeCommandBinding,
   createOperatorMainnetTradeCommandReceipt,
@@ -46,6 +45,8 @@ export interface MainnetOperatorTradeInput {
   readonly allocation: unknown;
   readonly grossNotionalCap: unknown;
   readonly maxDeviationBps: unknown;
+  readonly takeProfitMode: unknown;
+  readonly takeProfitValue: unknown;
 }
 
 export interface MainnetOperatorTradeStageMetrics {
@@ -67,6 +68,7 @@ export interface MainnetOperatorTradeOutcome {
   readonly limitPrice?: string;
   readonly quantity?: string;
   readonly takeProfitTrigger?: string;
+  readonly takeProfitEffectivePercent?: string;
   readonly preparationQuoteAgeMs?: number;
   readonly admissionQuoteAgeAtReadMs?: number;
   readonly stoppedAt?:
@@ -217,16 +219,21 @@ function validTradeInput(input: unknown): input is {
     typeof input !== "object" ||
     input === null ||
     Array.isArray(input) ||
-    Reflect.ownKeys(input).length !== 4 ||
-    !["symbol", "allocation", "grossNotionalCap", "maxDeviationBps"].every(
-      (key) => Object.hasOwn(input, key),
-    )
+    Reflect.ownKeys(input).length !== 6 ||
+    ![
+      "symbol",
+      "allocation",
+      "grossNotionalCap",
+      "maxDeviationBps",
+      "takeProfitMode",
+      "takeProfitValue",
+    ].every((key) => Object.hasOwn(input, key))
   )
     return false;
   const record = input as Record<string, unknown>;
   return (
     typeof record.symbol === "string" &&
-    MARKET_EVIDENCE_SYMBOLS.some((symbol) => symbol === record.symbol) &&
+    /^[A-Z0-9]{1,26}USDT$/u.test(record.symbol) &&
     typeof record.allocation === "string" &&
     record.allocation.length > 0 &&
     record.allocation.length <= 128 &&
@@ -235,7 +242,12 @@ function validTradeInput(input: unknown): input is {
     record.grossNotionalCap.length <= 128 &&
     typeof record.maxDeviationBps === "string" &&
     record.maxDeviationBps.length > 0 &&
-    record.maxDeviationBps.length <= 128
+    record.maxDeviationBps.length <= 128 &&
+    (record.takeProfitMode === "percent" ||
+      record.takeProfitMode === "price") &&
+    typeof record.takeProfitValue === "string" &&
+    record.takeProfitValue.length > 0 &&
+    record.takeProfitValue.length <= 128
   );
 }
 
@@ -396,6 +408,8 @@ export async function runMainnetOperatorTrade(
     allocation: input.allocation,
     grossNotionalCap: input.grossNotionalCap,
     maxDeviationBps: input.maxDeviationBps,
+    takeProfitMode: input.takeProfitMode,
+    takeProfitValue: input.takeProfitValue,
     acceptedAt: acceptedAt.value,
   });
   if (!receipt.ok)
@@ -635,6 +649,8 @@ export async function runMainnetOperatorTrade(
       limitPrice: plan.value.entry.limitPrice.toString(),
       quantity: plan.value.entry.quantity.toString(),
       takeProfitTrigger: plan.value.entry.takeProfit.triggerPrice.toString(),
+      takeProfitEffectivePercent:
+        plan.value.entry.takeProfit.grossTargetPercent.toString(),
     };
     const commandInput: MainnetOperatorTestCompositionInput = {
       authorization: {

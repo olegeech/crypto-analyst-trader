@@ -181,7 +181,7 @@ test("IP-unbound remains a hashed warning and cannot become an implicit blocker"
 
 test("operator quote attribution rejects wrong symbol, scope, origin and invalid books", () => {
   for (const invalid of [
-    { symbol: "BNBUSDT" },
+    { symbol: "BNB-USDT" },
     { category: "spot" },
     { origin: "https://api-testnet.bybit.com" },
     { bid: "0" },
@@ -192,6 +192,22 @@ test("operator quote attribution rejects wrong symbol, scope, origin and invalid
   ]) {
     assert.equal(createOperatorMainnetQuote(quoteInput(invalid)).ok, false);
   }
+  assert.equal(
+    createOperatorMainnetQuote(quoteInput({ symbol: "INJUSDT" })).ok,
+    true,
+    "operator quotes accept syntactically valid symbols for targeted provider validation",
+  );
+  assert.equal(
+    validPlan({
+      symbol: "INJUSDT",
+      quote: value(
+        createOperatorMainnetQuote(quoteInput({ symbol: "INJUSDT" })),
+      ),
+      constraints: constraints({ instrument: "INJUSDT" }),
+    }).ok,
+    false,
+    "the legacy M1 plan remains restricted to its configured research universe",
+  );
 });
 
 test("operator plan rejects stale or future provider quotes and invalid deviation", () => {

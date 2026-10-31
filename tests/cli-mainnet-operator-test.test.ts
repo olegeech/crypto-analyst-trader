@@ -227,6 +227,7 @@ test("trade dispatches one local instruction without a second prompt and reports
   const terminal = streams(false);
   const commandId = "e1ad1292-7892-4f63-a872-4caabc69fdb7";
   let tradeCalls = 0;
+  let dispatchedTrade: Record<string, unknown> | undefined;
   const outcome: MainnetOperatorTradeOutcome = {
     kind: "attempted",
     commandId,
@@ -239,6 +240,7 @@ test("trade dispatches one local instruction without a second prompt and reports
     limitPrice: "100",
     quantity: "0.08",
     takeProfitTrigger: "100.2",
+    takeProfitEffectivePercent: "0.2",
     preparationQuoteAgeMs: 100,
     admissionQuoteAgeAtReadMs: 200,
     stages: {
@@ -276,6 +278,8 @@ test("trade dispatches one local instruction without a second prompt and reports
   const code = await runMainnetOperatorTestCli(
     [
       "trade",
+      "--tp-price",
+      "0.089",
       "--symbol",
       "BTCUSDT",
       "--allocation",
@@ -290,8 +294,9 @@ test("trade dispatches one local instruction without a second prompt and reports
       prompt: async () => {
         throw new Error("trade must not request a second confirmation");
       },
-      trade: async (_input, lifecycle) => {
+      trade: async (input, lifecycle) => {
         tradeCalls += 1;
+        dispatchedTrade = input as unknown as Record<string, unknown>;
         lifecycle?.onCommandIdGenerated?.(commandId);
         lifecycle?.onReceiptSaved?.({
           contentHash: outcome.receiptHash!,
@@ -302,16 +307,69 @@ test("trade dispatches one local instruction without a second prompt and reports
   );
   assert.equal(code, 0);
   assert.equal(tradeCalls, 1);
+  assert.equal(dispatchedTrade?.takeProfitMode, "price");
+  assert.equal(dispatchedTrade?.takeProfitValue, "0.089");
   assert.match(terminal.text(), new RegExp(`COMMAND_ID=${commandId}`, "u"));
   assert.match(terminal.text(), /COMMAND_ID_PERSISTENCE=SAVED/u);
   assert.match(terminal.text(), /EXECUTION_STAGE=ATTEMPTED/u);
   assert.match(terminal.text(), /QUOTE_AGE_AT_ADMISSION_MS=200/u);
   assert.match(terminal.text(), /EXCHANGE_READS_TOTAL=34/u);
   assert.match(terminal.text(), /EXCHANGE_WRITES_TOTAL=1/u);
+  assert.match(
+    terminal.text(),
+    /TAKE_PROFIT_INPUT=price:0\.089\/Partial\/Market\/LastPrice/u,
+  );
+  assert.match(terminal.text(), /TP_EFFECTIVE_PERCENT=0\.2/u);
   assert.match(terminal.text(), /EXCHANGE_GET_COUNTS_PREPARE=\{"wallet":2\}/u);
   assert.match(terminal.text(), /OPERATOR_PROMPTS=0/u);
   assert.match(terminal.text(), /KEYCHAIN_INTERACTION_TIME=UNMEASURED/u);
   assert.match(terminal.text(), /do not repeat the trade/u);
+});
+
+test("trade parser requires exactly one take-profit input", async () => {
+  const cases = [
+    [
+      "trade",
+      "--symbol",
+      "DOGEUSDT",
+      "--allocation",
+      "10",
+      "--gross-cap",
+      "10",
+      "--max-deviation-bps",
+      "10",
+    ],
+    [
+      "trade",
+      "--symbol",
+      "DOGEUSDT",
+      "--allocation",
+      "10",
+      "--gross-cap",
+      "10",
+      "--max-deviation-bps",
+      "10",
+      "--tp-percent",
+      "0.5",
+      "--tp-price",
+      "0.09",
+    ],
+  ];
+  for (const args of cases) {
+    const terminal = streams(false);
+    let tradeCalls = 0;
+    const code = await runMainnetOperatorTestCli(args, {
+      ...terminal,
+      trade: async () => {
+        tradeCalls += 1;
+        return fail(domainError("INVALID_VALUE", "parser should block"));
+      },
+    });
+    assert.equal(code, 2);
+    assert.equal(tradeCalls, 0);
+    assert.match(terminal.text(), /REASON_CODE=INVALID_REQUEST/u);
+    assert.match(terminal.text(), /EXCHANGE_WRITES=0/u);
+  }
 });
 
 test("trade CLI prints unknown exchange counts when preparation throws before reporting them", async () => {
@@ -331,6 +389,8 @@ test("trade CLI prints unknown exchange counts when preparation throws before re
   const code = await runMainnetOperatorTestCli(
     [
       "trade",
+      "--tp-percent",
+      "0.20",
       "--symbol",
       "DOGEUSDT",
       "--allocation",
@@ -378,6 +438,8 @@ test("trade CLI reports an ambiguous CREATE with active HALT as unresolved", asy
   const code = await runMainnetOperatorTestCli(
     [
       "trade",
+      "--tp-percent",
+      "0.20",
       "--symbol",
       "BTCUSDT",
       "--allocation",
@@ -483,6 +545,8 @@ test("trade parser rejects unrelated policy overrides before invoking trade", as
   const code = await runMainnetOperatorTestCli(
     [
       "trade",
+      "--tp-percent",
+      "0.20",
       "--symbol",
       "BTCUSDT",
       "--allocation",
@@ -569,6 +633,8 @@ test("direct trade quote refusal reports only the retained upper bound", async (
   const code = await runMainnetOperatorTestCli(
     [
       "trade",
+      "--tp-percent",
+      "0.20",
       "--symbol",
       "DOGEUSDT",
       "--allocation",

@@ -15,9 +15,13 @@ import {
   createOperatorMainnetTradeCommandReceipt,
   rehydrateOperatorMainnetTradeCommandBinding,
   rehydrateOperatorMainnetTradeCommandPlan,
-  rehydrateOperatorMainnetTradeCommandReceipt,
   validateOperatorMainnetTradeCommandBinding,
 } from "../src/domain/execution/operator-mainnet-trade-command.js";
+import {
+  OPERATOR_MAINNET_TRADE_COMMAND_RECEIPT_V1_SCHEMA_VERSION,
+  OPERATOR_MAINNET_TRADE_COMMAND_CHANNEL,
+  rehydrateOperatorMainnetTradeCommandReceipt,
+} from "../src/domain/execution/operator-mainnet-trade-command-receipt.js";
 import {
   encodeCanonicalArtifact,
   rehydrateArtifact,
@@ -94,9 +98,45 @@ function receipt(overrides: Record<string, unknown> = {}) {
     allocation: "10",
     grossNotionalCap: "8",
     maxDeviationBps: "10",
+    takeProfitMode: "percent",
+    takeProfitValue: "0.20",
     acceptedAt: now,
     ...overrides,
   });
+}
+
+function legacyReceiptFixture() {
+  const payload = {
+    schemaVersion: OPERATOR_MAINNET_TRADE_COMMAND_RECEIPT_V1_SCHEMA_VERSION,
+    commandId: "trade-20261031-legacy",
+    actorIdentityHash,
+    channel: OPERATOR_MAINNET_TRADE_COMMAND_CHANNEL,
+    accountIdentityHash,
+    environment: "mainnet" as const,
+    category: "linear" as const,
+    symbol: "DOGEUSDT" as const,
+    side: "Buy" as const,
+    allocation: value(DecimalValue.fromString("10")),
+    grossNotionalCap: value(DecimalValue.fromString("8")),
+    maxDeviationBps: value(DecimalValue.fromString("10")),
+    leverage: "1" as const,
+    priceDerivationPolicy: "initial-best-bid-floor-to-tick/v1" as const,
+    quantityDerivationPolicy:
+      "budget-over-limit-price-floor-to-step/v1" as const,
+    takeProfitPolicy: {
+      grossTargetPercent: value(DecimalValue.fromString("0.20")),
+      tpslMode: "Partial" as const,
+      orderType: "Market" as const,
+      triggerBy: "LastPrice" as const,
+    },
+    stopLoss: "none" as const,
+    acceptedAt: now,
+    expiresAt: "2026-10-31T10:15:00.020Z" as UtcTimestamp,
+  };
+  return {
+    ...payload,
+    contentHash: value(hashCanonical(payload)),
+  };
 }
 
 function commandPlan(receiptInput = value(receipt()), overrides = {}) {
@@ -185,6 +225,138 @@ test("receipt and v3 plan freeze one scoped command before deterministic derivat
     ),
   );
   assert.equal(receiptReplay.contentHash, commandReceipt.contentHash);
+});
+
+test("direct TP price is receipt-bound, rounded up to tick and must be above entry", () => {
+  const commandReceipt = value(
+    receipt({
+      symbol: "LINKUSDT",
+      takeProfitMode: "price",
+      takeProfitValue: "0.08888",
+    }),
+  );
+  assert.deepEqual(commandReceipt.takeProfitPolicy, {
+    mode: "price",
+    value: value(DecimalValue.fromString("0.08888")),
+    tpslMode: "Partial",
+    orderType: "Market",
+    triggerBy: "LastPrice",
+  });
+  const plan = value(
+    commandPlan(commandReceipt, {
+      quote: quote({ symbol: "LINKUSDT" }),
+      constraints: constraints({ instrument: "LINKUSDT" }),
+    }),
+  );
+  assert.equal(plan.entry.limitPrice.toString(), "0.0886");
+  assert.equal(plan.entry.takeProfit.triggerPrice.toString(), "0.0889");
+  assert.equal(
+    value(rehydrateOperatorMainnetTradeCommandPlan(plan)).contentHash,
+    plan.contentHash,
+  );
+
+  assert.equal(
+    commandPlan(
+      value(
+        receipt({
+          symbol: "LINKUSDT",
+          takeProfitMode: "price",
+          takeProfitValue: "0.0886",
+        }),
+      ),
+      {
+        quote: quote({ symbol: "LINKUSDT" }),
+        constraints: constraints({ instrument: "LINKUSDT" }),
+      },
+    ).ok,
+    false,
+    "a target that rounds to the entry cannot create a profitable TP",
+  );
+  assert.equal(
+    receipt({ takeProfitMode: "price", takeProfitValue: "0" }).ok,
+    false,
+  );
+  assert.equal(
+    commandPlan(
+      value(
+        receipt({
+          symbol: "LINKUSDT",
+          takeProfitMode: "price",
+          takeProfitValue: "1000",
+        }),
+      ),
+      {
+        quote: quote({ symbol: "LINKUSDT" }),
+        constraints: constraints({ instrument: "LINKUSDT" }),
+      },
+    ).ok,
+    false,
+    "venue max price still bounds a requested direct target",
+  );
+});
+
+test("legacy receipt v1 and v1/v2/v3 fixed-policy hashes remain replayable", () => {
+  const legacyReceipt = legacyReceiptFixture();
+  assert.equal(
+    legacyReceipt.contentHash,
+    "sha256:1e667fee2282510a9687901c1bb28c0bb0ee5921fe4eadf9f413b6b7a5aa372d",
+  );
+  const replayedReceipt = value(
+    rehydrateOperatorMainnetTradeCommandReceipt(legacyReceipt),
+  );
+  assert.equal(
+    replayedReceipt.schemaVersion,
+    "operator-mainnet-trade-command-receipt/v1",
+  );
+  assert.equal(
+    replayedReceipt.takeProfitPolicy.grossTargetPercent.toString(),
+    "0.2",
+  );
+
+  const baseInput = {
+    accountIdentityHash,
+    symbol: "DOGEUSDT",
+    nonce: legacyReceipt.commandId,
+    allocation: "10",
+    grossNotionalCap: "8",
+    maxDeviationBps: "10",
+    quote: quote(),
+    warningCodes: [],
+    constraints: constraints(),
+    preparedAt: now,
+  };
+  const legacyV1Plan = value(createOperatorMainnetTestPlan(baseInput));
+  const legacyV2Plan = value(
+    createOperatorMainnetTestPlan({
+      ...baseInput,
+      recoveryAttestationHash: `sha256:${"f".repeat(64)}`,
+    }),
+  );
+  assert.equal(
+    legacyV1Plan.contentHash,
+    "sha256:caa85ccb7bd3682dbc1e56ad6a10ccf7e582251cdd5a96d735f7a9f6fa9a7483",
+  );
+  assert.equal(
+    legacyV2Plan.contentHash,
+    "sha256:d2946a659bfac6cd4b11c99fce56a56ad3767e4a2bb1804db73ee5d7b92228ab",
+  );
+  const legacyV3Plan = value(
+    createOperatorMainnetTradeCommandPlan({
+      receipt: replayedReceipt,
+      quote: quote(),
+      warningCodes: [],
+      constraints: constraints(),
+      preparedAt: now,
+    }),
+  );
+  assert.equal(
+    legacyV3Plan.contentHash,
+    "sha256:5c65b7a86f7dee493b85277c8f93c23f1e88bb2d43ea075eac8d6b192b3709e7",
+  );
+  assert.equal(
+    value(rehydrateOperatorMainnetTradeCommandPlan(legacyV3Plan)).contentHash,
+    legacyV3Plan.contentHash,
+  );
 });
 
 test("provider plan time may precede local command acceptance under clock skew", () => {

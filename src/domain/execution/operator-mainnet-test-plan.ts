@@ -32,6 +32,8 @@ import {
 import { closedRecord } from "../planning/planning-validation.js";
 import {
   OPERATOR_MAINNET_APPROVAL_TTL_MS,
+  OPERATOR_MAINNET_TRADE_COMMAND_RECEIPT_V1_SCHEMA_VERSION,
+  operatorMainnetTradeCommandTakeProfit,
   rehydrateOperatorMainnetTradeCommandReceipt,
 } from "./operator-mainnet-trade-command-receipt.js";
 import {
@@ -159,7 +161,7 @@ export interface OperatorMainnetTestPlan {
     | typeof OPERATOR_MAINNET_TRADE_COMMAND_POLICY_VERSION;
   readonly environment: "mainnet";
   readonly accountIdentityHash: string;
-  readonly symbol: MarketEvidenceSymbol;
+  readonly symbol: string;
   readonly nonce: string;
   readonly clientOrderId: string;
   readonly quote: OperatorMainnetQuote;
@@ -285,7 +287,7 @@ function positiveDecimal(value: unknown, field: string): Result<DecimalValue> {
 
 function derivedClientOrderId(
   accountIdentityHash: string,
-  symbol: MarketEvidenceSymbol,
+  symbol: string,
   nonce: string,
 ): Result<string> {
   const digest = hashCanonical({
@@ -317,6 +319,14 @@ export function deriveOperatorMainnetTestSourceId(
 
 function canonicalizePlanInput(
   input: unknown,
+  options: {
+    readonly directCommand?: boolean;
+    readonly takeProfit?: {
+      readonly mode: "percent" | "price";
+      readonly value: DecimalValue;
+    };
+    readonly legacyDirectPolicy?: boolean;
+  } = {},
 ): Result<OperatorMainnetTestPlan> {
   const baseFields = [
     "accountIdentityHash",
@@ -371,12 +381,14 @@ function canonicalizePlanInput(
     !constraints.ok ||
     (recoveryAttestationHash !== undefined && !recoveryAttestationHash.ok) ||
     typeof input.symbol !== "string" ||
-    !MARKET_EVIDENCE_SYMBOLS.includes(input.symbol as MarketEvidenceSymbol)
+    (options.directCommand === true
+      ? !/^[A-Z0-9]{1,26}USDT$/u.test(input.symbol)
+      : !MARKET_EVIDENCE_SYMBOLS.includes(input.symbol as MarketEvidenceSymbol))
   )
     return invalidPlan(
       "plan requires a valid account, symbol, quote, constraints and explicit budget",
     );
-  const symbol = input.symbol as MarketEvidenceSymbol;
+  const symbol = input.symbol;
   if (
     !Array.isArray(input.warningCodes) ||
     input.warningCodes.length > OPERATOR_WARNING_CODES.length ||
@@ -511,18 +523,46 @@ function canonicalizePlanInput(
       ),
     );
 
-  const takeProfitMultiplier = DecimalValue.fromString("1.002");
+  const oneForTp = DecimalValue.fromString("1");
+  const legacyFixedTp = DecimalValue.fromString("0.20");
   const percentageMultiplier = DecimalValue.fromString("100");
   const deviationDivisor = DecimalValue.fromString("10000");
   if (
-    !takeProfitMultiplier.ok ||
+    !oneForTp.ok ||
+    !legacyFixedTp.ok ||
     !percentageMultiplier.ok ||
     !deviationDivisor.ok
   )
     return invalidPlan("internal exact-decimal policy constants are invalid");
-  const takeProfitPrice = limitPrice
-    .multiply(takeProfitMultiplier.value)
-    .ceilToStep(constraints.value.priceTickSize);
+  const takeProfitPercent =
+    options.takeProfit?.mode === "percent"
+      ? options.takeProfit.value
+      : legacyFixedTp.value;
+  const targetPrice =
+    options.takeProfit?.mode === "price"
+      ? options.takeProfit.value
+      : options.directCommand === true
+        ? (() => {
+            const percentFraction = takeProfitPercent.divide(
+              percentageMultiplier.value,
+              132,
+              RoundingMode.DOWN,
+            );
+            return percentFraction.ok
+              ? limitPrice.multiply(oneForTp.value.add(percentFraction.value))
+              : undefined;
+          })()
+        : (() => {
+            const legacyMultiplier = DecimalValue.fromString("1.002");
+            return legacyMultiplier.ok
+              ? limitPrice.multiply(legacyMultiplier.value)
+              : undefined;
+          })();
+  if (!targetPrice)
+    return invalidPlan("take-profit target could not be calculated exactly");
+  const takeProfitPrice = targetPrice.ceilToStep(
+    constraints.value.priceTickSize,
+  );
   if (!takeProfitPrice.ok || takeProfitPrice.value.compare(limitPrice) <= 0)
     return fail(
       domainError(
@@ -544,7 +584,13 @@ function canonicalizePlanInput(
     );
   const grossTargetFraction = takeProfitPrice.value
     .subtract(limitPrice)
-    .divide(limitPrice, 24, RoundingMode.DOWN);
+    .divide(
+      limitPrice,
+      options.directCommand === true && options.legacyDirectPolicy !== true
+        ? 132
+        : 24,
+      RoundingMode.DOWN,
+    );
   if (!grossTargetFraction.ok) return grossTargetFraction;
   const grossTargetPercent = grossTargetFraction.value.multiply(
     percentageMultiplier.value,
@@ -626,6 +672,22 @@ export function createOperatorMainnetTestPlan(
   return canonicalizePlanInput(input);
 }
 
+/** Canonical base-plan constructor used only by the versioned direct-command path. */
+export function createOperatorMainnetDirectTradeBasePlan(
+  input: unknown,
+  takeProfit: {
+    readonly mode: "percent" | "price";
+    readonly value: DecimalValue;
+    readonly legacyDirectPolicy?: boolean;
+  },
+): Result<OperatorMainnetTestPlan> {
+  return canonicalizePlanInput(input, {
+    directCommand: true,
+    takeProfit,
+    legacyDirectPolicy: takeProfit.legacyDirectPolicy === true,
+  });
+}
+
 export function rehydrateOperatorMainnetTestPlan(
   input: unknown,
 ): Result<OperatorMainnetTestPlan> {
@@ -644,21 +706,31 @@ export function rehydrateOperatorMainnetTestPlan(
     );
     const commandAcceptedAt = parseUtcTimestamp(input.commandAcceptedAt);
     const commandExpiresAt = parseUtcTimestamp(input.commandExpiresAt);
-    const replayed = canonicalizePlanInput({
-      accountIdentityHash: input.accountIdentityHash,
-      symbol: input.symbol,
-      nonce: input.nonce,
-      allocation: input.allocation,
-      grossNotionalCap: input.grossNotionalCap,
-      maxDeviationBps: input.maxDeviationBps,
-      quote: input.quote,
-      warningCodes: input.warningCodes,
-      constraints: input.constraints,
-      preparedAt: input.preparedAt,
-    });
+    if (!receipt.ok) return invalidPlan("direct-command receipt is invalid");
+    const takeProfit = operatorMainnetTradeCommandTakeProfit(receipt.value);
+    const replayed = canonicalizePlanInput(
+      {
+        accountIdentityHash: input.accountIdentityHash,
+        symbol: input.symbol,
+        nonce: input.nonce,
+        allocation: input.allocation,
+        grossNotionalCap: input.grossNotionalCap,
+        maxDeviationBps: input.maxDeviationBps,
+        quote: input.quote,
+        warningCodes: input.warningCodes,
+        constraints: input.constraints,
+        preparedAt: input.preparedAt,
+      },
+      {
+        directCommand: true,
+        takeProfit: { mode: takeProfit.mode, value: takeProfit.value },
+        legacyDirectPolicy:
+          receipt.value.schemaVersion ===
+          OPERATOR_MAINNET_TRADE_COMMAND_RECEIPT_V1_SCHEMA_VERSION,
+      },
+    );
     const contentHash = requireHash(input.contentHash, "contentHash");
     if (
-      !receipt.ok ||
       !commandId.ok ||
       !commandReceiptHash.ok ||
       !commandAcceptedAt.ok ||

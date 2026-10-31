@@ -291,6 +291,11 @@ async function prepare(options: {
                     maxOrderQty: "100000",
                     minNotionalValue: "5",
                   },
+                  leverageFilter: {
+                    minLeverage: "1",
+                    maxLeverage: "100",
+                    leverageStep: "0.01",
+                  },
                 },
               ],
               nextPageCursor: "",
@@ -558,6 +563,8 @@ test("direct command preparation persists a v3 plan through production GET mappe
     allocation: input.allocation,
     grossNotionalCap: input.grossNotionalCap,
     maxDeviationBps: input.maxDeviationBps,
+    takeProfitMode: "percent",
+    takeProfitValue: "0.20",
     acceptedAt: new Date(now).toISOString(),
   });
   assert.equal(receipt.ok, true);

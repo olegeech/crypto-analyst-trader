@@ -53,11 +53,11 @@ import {
 import { createOperatorMainnetCreateRequest } from "../application/mainnet-entry-evidence.js";
 import { promptVisible, PromptInterruptedError } from "./interactive-prompt.js";
 
-const supportedSymbols = MARKET_EVIDENCE_SYMBOLS.join("|");
+const configuredM1Symbols = MARKET_EVIDENCE_SYMBOLS.join("|");
 
 export const MAINNET_OPERATOR_TEST_USAGE = `Usage:
-  npm run mainnet:test -- prepare --symbol <${supportedSymbols}> --allocation <USDT> --gross-cap <USDT> --max-deviation-bps <bps> [--recovery-source-id <operator-mainnet-test:...> --recovery-inspection-file <path>]
-  npm run mainnet:test -- trade --symbol <${supportedSymbols}> --allocation <USDT> --gross-cap <USDT> --max-deviation-bps <bps>
+  npm run mainnet:test -- prepare --symbol <${configuredM1Symbols}> --allocation <USDT> --gross-cap <USDT> --max-deviation-bps <bps> [--recovery-source-id <operator-mainnet-test:...> --recovery-inspection-file <path>]
+  npm run mainnet:test -- trade --symbol <USDT-linear-perpetual> --allocation <USDT> --gross-cap <USDT> --max-deviation-bps <bps> (--tp-percent <percent> | --tp-price <price>)
   npm run mainnet:test -- execute --plan-hash <sha256:...>
   npm run mainnet:test -- recover --source-id <operator-mainnet-test:...> --plan-hash <sha256:...> --resolution <api|manual>
   npm run mainnet:test -- status --source-id <operator-mainnet-test:...>
@@ -107,6 +107,8 @@ type ParsedCommand =
       readonly allocation: string;
       readonly grossNotionalCap: string;
       readonly maxDeviationBps: string;
+      readonly takeProfitMode: "percent" | "price";
+      readonly takeProfitValue: string;
     }
   | { readonly command: "execute"; readonly planHash: string }
   | {
@@ -195,13 +197,16 @@ function parseArgs(argv: readonly string[]): ParsedCommand | undefined {
   }
   if (command === "trade") {
     const values = flags(rest);
+    const hasTpPercent = values?.has("--tp-percent") ?? false;
+    const hasTpPrice = values?.has("--tp-price") ?? false;
     if (
       !values ||
-      values.size !== 4 ||
+      values.size !== 5 ||
       !values.has("--symbol") ||
       !values.has("--allocation") ||
       !values.has("--gross-cap") ||
       !values.has("--max-deviation-bps") ||
+      hasTpPercent === hasTpPrice ||
       [...values.keys()].some(
         (key) =>
           ![
@@ -209,6 +214,8 @@ function parseArgs(argv: readonly string[]): ParsedCommand | undefined {
             "--allocation",
             "--gross-cap",
             "--max-deviation-bps",
+            "--tp-percent",
+            "--tp-price",
           ].includes(key),
       )
     )
@@ -219,6 +226,10 @@ function parseArgs(argv: readonly string[]): ParsedCommand | undefined {
       allocation: values.get("--allocation")!,
       grossNotionalCap: values.get("--gross-cap")!,
       maxDeviationBps: values.get("--max-deviation-bps")!,
+      takeProfitMode: hasTpPercent ? "percent" : "price",
+      takeProfitValue: values.get(
+        hasTpPercent ? "--tp-percent" : "--tp-price",
+      )!,
     };
   }
   if (command === "status") {
@@ -1479,6 +1490,8 @@ function printTradeOutcome(
   if (outcome.quantity) line(output, `QUANTITY=${outcome.quantity}`);
   if (outcome.takeProfitTrigger)
     line(output, `TP_TRIGGER=${outcome.takeProfitTrigger}`);
+  if (outcome.takeProfitEffectivePercent)
+    line(output, `TP_EFFECTIVE_PERCENT=${outcome.takeProfitEffectivePercent}`);
   if (outcome.preparationQuoteAgeMs !== undefined)
     line(output, `QUOTE_AGE_AT_PREPARE_MS=${outcome.preparationQuoteAgeMs}`);
   if (outcome.admissionQuoteAgeAtReadMs !== undefined)
@@ -1756,7 +1769,10 @@ export async function runMainnetOperatorTestCli(
     line(output, `GROSS_CAP_USDT=${parsed.grossNotionalCap}`);
     line(output, "SIDE=Buy");
     line(output, "ORDER=Limit/GTC/1x/Linear/OneWay");
-    line(output, "TAKE_PROFIT=+0.20%/Partial/Market/LastPrice");
+    line(
+      output,
+      `TAKE_PROFIT_INPUT=${parsed.takeProfitMode === "percent" ? `+${parsed.takeProfitValue}%` : `price:${parsed.takeProfitValue}`}/Partial/Market/LastPrice`,
+    );
     line(output, "STOP_LOSS=none");
     line(
       output,
@@ -1771,6 +1787,8 @@ export async function runMainnetOperatorTestCli(
           allocation: parsed.allocation,
           grossNotionalCap: parsed.grossNotionalCap,
           maxDeviationBps: parsed.maxDeviationBps,
+          takeProfitMode: parsed.takeProfitMode,
+          takeProfitValue: parsed.takeProfitValue,
         },
         {
           onCommandIdGenerated: (commandId) => {

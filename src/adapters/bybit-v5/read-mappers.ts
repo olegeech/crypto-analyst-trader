@@ -38,6 +38,11 @@ export interface BybitInstrumentInfo {
   readonly quoteCoin: "USDT";
   readonly settleCoin: "USDT";
   readonly constraints: InstrumentConstraints;
+  readonly leverageFilter?: {
+    readonly min: DecimalValue;
+    readonly max: DecimalValue;
+    readonly step: DecimalValue;
+  };
 }
 
 export interface BybitTicker {
@@ -478,10 +483,11 @@ function matchingRecord(
   response: Pick<BybitResponse, "result">,
   symbol: string,
   label: string,
+  requireOnlyRecord = false,
 ): JsonObject {
   const records = responseRecords(response, label);
   const matches = records.filter((record) => record.symbol === symbol);
-  if (matches.length !== 1) {
+  if ((requireOnlyRecord && records.length !== 1) || matches.length !== 1) {
     invalid(
       `Bybit ${label} response did not return exactly one selected-symbol record.`,
     );
@@ -568,8 +574,14 @@ export function mapAccountKeyMetadata(
 export function mapInstrumentInfo(
   response: Pick<BybitResponse, "result">,
   symbol: string,
+  options: { readonly requireOnlyRecord?: boolean } = {},
 ): BybitInstrumentInfo {
-  const item = matchingRecord(response, symbol, "instruments-info");
+  const item = matchingRecord(
+    response,
+    symbol,
+    "instruments-info",
+    options.requireOnlyRecord,
+  );
   const status = text(item, "status", "instruments-info");
   const contractType = text(item, "contractType", "instruments-info");
   const quoteCoin = text(item, "quoteCoin", "instruments-info");
@@ -608,6 +620,33 @@ export function mapInstrumentInfo(
   if (!constraintsResult.ok) {
     invalid("Bybit instrument constraints are invalid.");
   }
+  const leverageFilter =
+    item.leverageFilter === undefined
+      ? undefined
+      : (() => {
+          const filter = object(
+            item.leverageFilter,
+            "instruments-info.leverageFilter",
+          );
+          const min = positiveDecimal(
+            filter,
+            "minLeverage",
+            "instruments-info.leverageFilter",
+          );
+          const max = positiveDecimal(
+            filter,
+            "maxLeverage",
+            "instruments-info.leverageFilter",
+          );
+          const step = positiveDecimal(
+            filter,
+            "leverageStep",
+            "instruments-info.leverageFilter",
+          );
+          if (min.compare(max) > 0)
+            invalid("Bybit instrument leverage bounds are inconsistent.");
+          return Object.freeze({ min, max, step });
+        })();
   return {
     symbol,
     status: "Trading",
@@ -615,6 +654,7 @@ export function mapInstrumentInfo(
     quoteCoin: "USDT",
     settleCoin: "USDT",
     constraints: constraintsResult.value,
+    ...(leverageFilter === undefined ? {} : { leverageFilter }),
   };
 }
 
