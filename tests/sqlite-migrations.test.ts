@@ -82,8 +82,8 @@ test("fresh and reopened journals configure verified SQLite durability state", (
   assert.equal(statSync(root).isDirectory(), true);
 });
 
-test("operator Mainnet journal uses v13 history/accounting schema with empty source tables", () => {
-  assert.equal(CURRENT_SCHEMA_VERSION, 13);
+test("operator Mainnet journal uses v14 command schema with empty source tables", () => {
+  assert.equal(CURRENT_SCHEMA_VERSION, 14);
   const { path } = temporaryDatabase();
   const opened = openSqliteConnection({
     environment: "mainnet",
@@ -95,6 +95,10 @@ test("operator Mainnet journal uses v13 history/accounting schema with empty sou
   const { db } = opened.value;
   for (const table of [
     "operator_mainnet_test_sources",
+    "operator_mainnet_trade_command_receipts",
+    "operator_mainnet_trade_command_bindings",
+    "operator_mainnet_trade_command_consumptions",
+    "operator_mainnet_trade_command_outcomes",
     "operator_mainnet_test_write_intents",
     "operator_mainnet_test_attempts",
     "operator_mainnet_test_reconciliations",
@@ -137,6 +141,109 @@ test("operator Mainnet journal uses v13 history/accounting schema with empty sou
   assert.equal(intentColumns.includes("lease_epoch"), false);
   assert.deepEqual(db.prepare("PRAGMA foreign_key_check").all(), []);
   opened.value.close();
+});
+
+test("v13 migration preserves populated legacy source authorization bytes and references", () => {
+  const { path } = temporaryDatabase();
+  const db = openDatabase(path);
+  db.exec("PRAGMA foreign_keys = ON");
+  assert.equal(applyMigrations(db, MIGRATIONS.slice(0, 13)).ok, true);
+  const accountId = `sha256:${"a".repeat(64)}`;
+  const planHash = `sha256:${"b".repeat(64)}`;
+  const approvalHash = `sha256:${"c".repeat(64)}`;
+  const payloadHash = `sha256:${"d".repeat(64)}`;
+  const timestamp = "2026-10-31T12:00:00.000Z";
+  for (const [artifactId, artifactKind, artifactHash] of [
+    ["legacy-plan", "operator-mainnet-execution-test", planHash],
+    ["legacy-approval", "operator-mainnet-execution-approval", approvalHash],
+  ] as const) {
+    db.prepare(
+      `INSERT INTO artifacts
+       (artifact_id, artifact_kind, schema_version, canonical_json, canonical_hash,
+        material_hash, created_at, exchange, environment, account_id, category,
+        position_mode)
+       VALUES (?, ?, 'artifact/v1', '{"legacy":true}', ?, ?, ?,
+        'bybit', 'mainnet', ?, 'linear', 'one-way')`,
+    ).run(
+      artifactId,
+      artifactKind,
+      artifactHash,
+      artifactHash,
+      timestamp,
+      accountId,
+    );
+  }
+  db.prepare(
+    `INSERT INTO operator_mainnet_test_sources
+     (source_id, exchange, environment, account_id, category, position_mode,
+      plan_hash, plan_artifact_id, approval_hash, approval_artifact_id,
+      client_order_id, payload_json, payload_hash, created_at)
+     VALUES ('legacy-source', 'bybit', 'mainnet', ?, 'linear', 'one-way',
+      ?, 'legacy-plan', ?, 'legacy-approval', 'legacy-client-order', '{}', ?, ?)`,
+  ).run(accountId, planHash, approvalHash, payloadHash, timestamp);
+  const before = db
+    .prepare(
+      `SELECT source_id, plan_hash, plan_artifact_id, approval_hash,
+              approval_artifact_id, client_order_id, payload_json, payload_hash,
+              created_at
+       FROM operator_mainnet_test_sources WHERE source_id = 'legacy-source'`,
+    )
+    .get();
+  const artifactBytesBefore = db
+    .prepare(
+      `SELECT artifact_id, artifact_kind, schema_version, canonical_json,
+              canonical_hash, material_hash, created_at, exchange, environment,
+              account_id, category, position_mode
+       FROM artifacts ORDER BY artifact_id`,
+    )
+    .all();
+
+  assert.equal(applyMigrations(db, MIGRATIONS).ok, true);
+  const afterLegacy = db
+    .prepare(
+      `SELECT source_id, plan_hash, plan_artifact_id, approval_hash,
+              approval_artifact_id, client_order_id, payload_json, payload_hash,
+              created_at
+       FROM operator_mainnet_test_sources WHERE source_id = 'legacy-source'`,
+    )
+    .get();
+  assert.deepEqual(afterLegacy, before);
+  assert.deepEqual(
+    db
+      .prepare(
+        `SELECT artifact_id, artifact_kind, schema_version, canonical_json,
+                canonical_hash, material_hash, created_at, exchange, environment,
+                account_id, category, position_mode
+         FROM artifacts ORDER BY artifact_id`,
+      )
+      .all(),
+    artifactBytesBefore,
+  );
+  const authorization = db
+    .prepare(
+      `SELECT authorization_kind, authorization_hash, authorization_artifact_id,
+              approval_hash, approval_artifact_id
+       FROM operator_mainnet_test_sources WHERE source_id = 'legacy-source'`,
+    )
+    .get() as Record<string, unknown>;
+  assert.deepEqual(
+    { ...authorization },
+    {
+      authorization_kind: "approval",
+      authorization_hash: approvalHash,
+      authorization_artifact_id: "legacy-approval",
+      approval_hash: approvalHash,
+      approval_artifact_id: "legacy-approval",
+    },
+  );
+  assert.deepEqual(db.prepare("PRAGMA foreign_key_check").all(), []);
+  assert.equal(
+    db
+      .prepare("SELECT schema_version FROM schema_meta WHERE singleton = 1")
+      .get()?.schema_version,
+    14,
+  );
+  db.close();
 });
 
 test("v11 history migration preserves a v10 HALT and recovery grant", () => {

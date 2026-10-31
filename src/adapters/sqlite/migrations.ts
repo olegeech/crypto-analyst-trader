@@ -17,6 +17,7 @@ import { operatorMainnetRecoveryMigration } from "./migrations/010-operator-main
 import { historyIngestionMigration } from "./migrations/011-history-ingestion.js";
 import { historyAccountingAnchorsMigration } from "./migrations/012-history-accounting-anchors.js";
 import { historyAccountingReportsMigration } from "./migrations/013-history-accounting-reports.js";
+import { operatorMainnetTradeCommandMigration } from "./migrations/014-operator-mainnet-trade-command.js";
 
 export interface SqliteMigration {
   readonly version: number;
@@ -38,6 +39,7 @@ export const MIGRATIONS: readonly SqliteMigration[] = [
   historyIngestionMigration,
   historyAccountingAnchorsMigration,
   historyAccountingReportsMigration,
+  operatorMainnetTradeCommandMigration,
 ];
 
 export const CURRENT_SCHEMA_VERSION = MIGRATIONS.at(-1)?.version ?? 0;
