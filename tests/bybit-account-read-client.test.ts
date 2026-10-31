@@ -12,10 +12,18 @@ const partition: AccountEvidencePartition = {
 };
 test("only account-info may omit response time, without extra exchange-time reads", async () => {
   let timeReads = 0;
+  let responseTime: number | undefined;
   const client = new BybitAccountReadClient({
     transport: {
       get: async () => ({
-        result: { marginMode: "REGULAR_MARGIN", list: [], nextPageCursor: "" },
+        ...(responseTime === undefined ? {} : { time: responseTime }),
+        result: {
+          unifiedMarginStatus: 6,
+          marginMode: "REGULAR_MARGIN",
+          updatedTime: "100",
+          list: [],
+          nextPageCursor: "",
+        },
       }),
       readExchangeTime: async () => {
         timeReads++;
@@ -34,7 +42,36 @@ test("only account-info may omit response time, without extra exchange-time read
   assert.equal(account.coverage.status, "traversed");
   assert.equal(account.observation?.exchangeResponseTime, null);
   assert.equal(account.observation?.timeProvenance, "collection-bracket");
+  assert.equal(
+    account.responses[0]?.result.updatedTime,
+    "100",
+    "an old account-data updatedTime remains payload data, not observation time",
+  );
   assert.equal(timeReads, 0);
+  responseTime = 1700000000000;
+  const timedAccount = await client.readPartition({
+    ...partition,
+    endpoint: "account-info",
+    pass: "B",
+    category: null,
+    baseCoin: null,
+  });
+  assert.equal(
+    timedAccount.observation?.exchangeResponseTime,
+    new Date(responseTime).toISOString(),
+  );
+  assert.equal(timedAccount.observation?.timeProvenance, "response-envelope");
+  responseTime = undefined;
+  const wallet = await client.readPartition({
+    ...partition,
+    endpoint: "wallet",
+    pass: "A",
+    category: null,
+    baseCoin: null,
+  });
+  assert.equal(wallet.coverage.status, "failed");
+  assert.deepEqual(wallet.coverage.reasonCodes, ["INVALID_RESPONSE"]);
+  assert.equal(wallet.observation, null);
   const history = await client.readPartition(partition, {
     from: 1699996400000,
     to: 1700000000000,

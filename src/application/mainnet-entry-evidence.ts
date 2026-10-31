@@ -14,6 +14,11 @@ import {
   createAccountEvidenceBundle,
 } from "../domain/account/account-evidence-bundle.js";
 import {
+  accountEvidencePartitionKey,
+  deriveExpectedAccountEvidencePartitions,
+  isOptionalOperatorAuxiliaryHistoryPartition,
+} from "../domain/account/account-evidence-policy.js";
+import {
   requireTrustedCapability,
   type CapabilityObservation,
 } from "../domain/capabilities/capability.js";
@@ -1023,6 +1028,108 @@ function changedInstrumentConstraint(
   return "constraintSet";
 }
 
+function isTerminalOperatorCoverage(
+  entry: AccountEvidenceBundle["coverage"][number],
+): boolean {
+  return (
+    entry.status === "traversed" &&
+    entry.reasonCodes.length === 0 &&
+    entry.pages >= 1 &&
+    entry.startedAt !== null &&
+    entry.endedAt !== null
+  );
+}
+
+/**
+ * The operator-execution collector may intentionally omit unrelated auxiliary
+ * history. Admit that incomplete bundle only when the canonical expected
+ * partition set proves that every and only untraversed partition is one of
+ * those optional reads, with no fabricated observation or collection error.
+ */
+function approvedOperatorAuxiliaryHistoryGapCount(
+  bundle: AccountEvidenceBundle,
+): number | undefined {
+  const discovery = bundle.discovery;
+  if (
+    bundle.collectionStatus !== "incomplete" ||
+    discovery === null ||
+    bundle.diagnostics.length !== 0 ||
+    bundle.consistency.structuralComparison !== "unchanged" ||
+    bundle.consistency.reasonCodes.length !== 1 ||
+    bundle.consistency.reasonCodes[0] !== "COVERAGE_INCOMPLETE"
+  )
+    return undefined;
+
+  const expected = deriveExpectedAccountEvidencePartitions(
+    bundle.configuredM1Symbols,
+    discovery,
+  );
+  const expectedKeys = expected.map(accountEvidencePartitionKey);
+  const bundleExpectedKeys = bundle.expectedPartitions.map(
+    accountEvidencePartitionKey,
+  );
+  const coverageKeys = bundle.coverage.map((entry) =>
+    accountEvidencePartitionKey(entry.partition),
+  );
+  if (
+    expected.length === 0 ||
+    expectedKeys.length !== bundleExpectedKeys.length ||
+    expectedKeys.length !== coverageKeys.length ||
+    expectedKeys.some(
+      (key, index) =>
+        key !== bundleExpectedKeys[index] || key !== coverageKeys[index],
+    )
+  )
+    return undefined;
+
+  const observations = [
+    ...(bundle.criticalPasses.A?.observations ?? []),
+    ...(bundle.criticalPasses.B?.observations ?? []),
+    ...bundle.auxiliary.observations,
+  ];
+  const observationByKey = new Map(
+    observations.map((observation) => [
+      accountEvidencePartitionKey(observation.partition),
+      observation,
+    ]),
+  );
+  if (observationByKey.size !== observations.length) return undefined;
+
+  let gapCount = 0;
+  for (const [index, entry] of bundle.coverage.entries()) {
+    const key = expectedKeys[index];
+    if (key === undefined) return undefined;
+    const observation = observationByKey.get(key);
+    if (isTerminalOperatorCoverage(entry)) {
+      if (
+        !observation ||
+        observation.startedAt !== entry.startedAt ||
+        observation.endedAt !== entry.endedAt
+      )
+        return undefined;
+      continue;
+    }
+
+    if (
+      !isOptionalOperatorAuxiliaryHistoryPartition(entry.partition) ||
+      entry.status !== "failed" ||
+      entry.pages !== 0 ||
+      entry.rows !== 0 ||
+      entry.startedAt !== null ||
+      entry.endedAt !== null ||
+      entry.reasonCodes.length !== 1 ||
+      entry.reasonCodes[0] !== "COVERAGE_INCOMPLETE" ||
+      observation !== undefined
+    )
+      return undefined;
+    gapCount += 1;
+  }
+
+  return gapCount > 0 && observationByKey.size === expected.length - gapCount
+    ? gapCount
+    : undefined;
+}
+
 export function validateMainnetOperatorTestEvidence(
   plan: OperatorMainnetTestPlan,
   evidenceInput: MainnetOperatorTestAdmissionEvidence,
@@ -1116,13 +1223,34 @@ export function validateMainnetOperatorTestEvidence(
     );
   const hasIpWarning = readinessWarnings.includes("API_KEY_IP_UNBOUND");
   const plannedIpWarning = plan.warningCodes.includes("API_KEY_IP_UNBOUND");
+  const approvedAuxiliaryGapCount = approvedOperatorAuxiliaryHistoryGapCount(
+    account.value,
+  );
+  const allowsApprovedAuxiliaryGaps = approvedAuxiliaryGapCount !== undefined;
+  const hasAuxiliaryCoverageWarning = readinessWarnings.includes(
+    "UNRELATED_ACCOUNT_COVERAGE_INCOMPLETE",
+  );
+  const readinessCoverageMatchesAccount = allowsApprovedAuxiliaryGaps
+    ? hasAuxiliaryCoverageWarning &&
+      readiness.unrelatedCoverageGapCount === approvedAuxiliaryGapCount
+    : !hasAuxiliaryCoverageWarning && readiness.unrelatedCoverageGapCount === 0;
   if (
     readiness.environment !== "mainnet" ||
     readiness.schemaVersion !== "mainnet-execution-readiness/v1" ||
     readiness.verdict !== "READY" ||
     readiness.symbol !== plan.symbol ||
     readiness.reasonCodes.length !== 0 ||
-    readinessWarnings.some((warning) => warning !== "API_KEY_IP_UNBOUND") ||
+    readinessWarnings.some(
+      (warning) =>
+        warning !== "API_KEY_IP_UNBOUND" &&
+        !(
+          allowsApprovedAuxiliaryGaps &&
+          warning === "UNRELATED_ACCOUNT_COVERAGE_INCOMPLETE"
+        ),
+    ) ||
+    !Number.isSafeInteger(readiness.unrelatedCoverageGapCount) ||
+    readiness.unrelatedCoverageGapCount < 0 ||
+    !readinessCoverageMatchesAccount ||
     hasIpWarning !== plannedIpWarning ||
     readiness.internalBinding?.accountIdentityHash !==
       plan.accountIdentityHash ||
@@ -1130,7 +1258,8 @@ export function validateMainnetOperatorTestEvidence(
     readiness.internalBinding?.accountEvidenceHash !== accountHash.value ||
     readiness.capabilityProfile.status !== "SUPPORTED" ||
     readiness.capabilityProfile.liveProof !== "not-established" ||
-    account.value.collectionStatus !== "complete" ||
+    (account.value.collectionStatus !== "complete" &&
+      !allowsApprovedAuxiliaryGaps) ||
     binding.environment !== "mainnet" ||
     binding.origin !== "https://api.bybit.com" ||
     !binding.identityVerified ||

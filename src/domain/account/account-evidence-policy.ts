@@ -173,6 +173,19 @@ export interface AccountEvidencePartition {
   readonly baseCoin: string | null;
   readonly symbol: string | null;
 }
+/** Auxiliary order and execution history outside Linear is optional for operator admission. */
+export function isOptionalOperatorAuxiliaryHistoryPartition(
+  partition: AccountEvidencePartition,
+): boolean {
+  return (
+    partition.pass === "auxiliary" &&
+    (partition.endpoint === "order-history" ||
+      partition.endpoint === "executions") &&
+    (partition.category === "inverse" ||
+      partition.category === "option" ||
+      partition.category === "spot")
+  );
+}
 export interface AccountEvidenceDiscovery {
   readonly settlementCoins: readonly string[];
   readonly optionBaseCoins: readonly string[];

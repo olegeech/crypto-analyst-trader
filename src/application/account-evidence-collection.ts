@@ -19,6 +19,7 @@ import {
   accountEvidencePolicyHash,
   accountEvidencePartitionKey,
   deriveExpectedAccountEvidencePartitions,
+  isOptionalOperatorAuxiliaryHistoryPartition,
   type AccountEvidenceDiscovery,
   type AccountEvidencePartition,
 } from "../domain/account/account-evidence-policy.js";
@@ -72,6 +73,8 @@ export interface AccountEvidenceCollectionOptions {
   readonly runId: string;
   readonly configuredM1Symbols: readonly string[];
   readonly credentialLoader: Pick<CredentialProvider, "load">;
+  /** Operator execution still gathers all critical A/B facts but can omit optional history categories. */
+  readonly evidenceProfile?: "complete-account" | "operator-execution";
   readonly utcClock?: () => number;
   readonly monotonicClock?: () => number;
   readonly createReadPort?: (options: {
@@ -82,6 +85,7 @@ export interface AccountEvidenceCollectionOptions {
     monotonicClock: () => number;
   }) => AccountEvidenceReadPort;
 }
+
 function timestamp(value: number): UtcTimestamp {
   const parsed = timestampFromEpochMs(value);
   if (!parsed.ok) throw new BybitAccountReadError("INVALID_RESPONSE");
@@ -152,6 +156,9 @@ export async function collectAccountEvidence(
     !Array.isArray(options.configuredM1Symbols) ||
     options.configuredM1Symbols.length === 0 ||
     options.configuredM1Symbols.length > 100 ||
+    (options.evidenceProfile !== undefined &&
+      options.evidenceProfile !== "complete-account" &&
+      options.evidenceProfile !== "operator-execution") ||
     options.configuredM1Symbols.some(
       (symbol) => !requireIdentifier(symbol, "symbol").ok,
     )
@@ -551,6 +558,11 @@ export async function collectAccountEvidence(
       options.configuredM1Symbols,
       discovery,
     ).filter((p) => p.endpoint === "tiers" || p.endpoint === "order-history")) {
+      if (
+        options.evidenceProfile === "operator-execution" &&
+        isOptionalOperatorAuxiliaryHistoryPartition(p)
+      )
+        continue;
       const result = await read(p, window);
       try {
         for (const response of result.responses)
@@ -587,6 +599,11 @@ export async function collectAccountEvidence(
       (p) =>
         p.endpoint === "instrument-metadata" || p.endpoint === "executions",
     )) {
+      if (
+        options.evidenceProfile === "operator-execution" &&
+        isOptionalOperatorAuxiliaryHistoryPartition(p)
+      )
+        continue;
       const result = await read(p, window);
       try {
         for (const response of result.responses)

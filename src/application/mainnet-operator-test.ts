@@ -41,6 +41,7 @@ import {
 } from "./mainnet-entry-evidence.js";
 
 import { OperatorEvidenceReadError } from "./mainnet-operator-test-evidence.js";
+import type { MainnetInvocationMetrics } from "./mainnet-composition-helpers.js";
 
 export interface MainnetOperatorTestDependencies {
   readonly persistence: PersistencePort;
@@ -58,7 +59,7 @@ export interface MainnetOperatorTestInput {
   readonly runId: unknown;
 }
 
-export interface MainnetOperatorTestOutcome {
+export interface MainnetOperatorTestOutcome extends Partial<MainnetInvocationMetrics> {
   readonly kind: "attempted" | "recovery";
   readonly sourceId: string;
   readonly clientOrderId: string;
@@ -67,7 +68,6 @@ export interface MainnetOperatorTestOutcome {
   readonly reasonCode?: string;
   /** Production composition counts actual Mainnet HTTP requests per invocation. */
   readonly exchangeReads?: number;
-  readonly exchangeGetCounts?: string;
   readonly exchangeWrites?: number;
 }
 

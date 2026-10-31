@@ -49,6 +49,9 @@ function accountResult(
     readonly incompletePartition?: (
       partition: Record<string, unknown>,
     ) => boolean;
+    readonly incompletePartitions?: readonly ((
+      partition: Record<string, unknown>,
+    ) => boolean)[];
     readonly incompleteReasonCode?: AccountEvidenceFailureCode;
     readonly collectionStatus?: "complete" | "incomplete";
     readonly mutate?: (payload: Record<string, unknown>) => void;
@@ -77,15 +80,29 @@ function accountResult(
     expiresAt: null,
     warnings: [],
   };
-  if (options.incompletePartition) {
+  const missingScopes = [
+    ...(options.incompletePartition ? [options.incompletePartition] : []),
+    ...(options.incompletePartitions ?? []),
+  ];
+  if (missingScopes.length > 0) {
     const coverage = payload.coverage as Record<string, unknown>[];
-    const failed = coverage.find((entry) =>
-      options.incompletePartition!(entry.partition as Record<string, unknown>),
-    );
-    assert.ok(failed, "fixture must contain the requested coverage partition");
     const reasonCode = options.incompleteReasonCode ?? "TRANSPORT_FAILED";
-    failed.status = "failed";
-    failed.reasonCodes = [reasonCode];
+    let matches = 0;
+    for (const entry of coverage) {
+      if (
+        !missingScopes.some((predicate) =>
+          predicate(entry.partition as Record<string, unknown>),
+        )
+      )
+        continue;
+      matches++;
+      entry.status = "failed";
+      entry.reasonCodes = [reasonCode];
+    }
+    assert.ok(
+      matches > 0,
+      "fixture must contain requested coverage partitions",
+    );
     payload.collectionStatus = "incomplete";
     payload.diagnostics = [
       { code: reasonCode, severity: "error", scope: "coverage" },
@@ -135,12 +152,14 @@ test("valid Mainnet facts and exact target reads produce READY, SUPPORTED not LI
 });
 
 test("only attributable unrelated auxiliary gaps remain READY and visible", () => {
+  const optionalHistory = (partition: Record<string, unknown>) =>
+    partition.pass === "auxiliary" &&
+    (partition.endpoint === "order-history" ||
+      partition.endpoint === "executions") &&
+    partition.category !== "linear";
   const result = deriveMainnetExecutionReadiness({
     accountResult: accountResult({
-      incompletePartition: (partition) =>
-        partition.pass === "auxiliary" &&
-        partition.endpoint === "order-history" &&
-        partition.category === "spot",
+      incompletePartitions: [optionalHistory],
     }),
     symbol,
     instrument: validInstrument(),
@@ -150,7 +169,7 @@ test("only attributable unrelated auxiliary gaps remain READY and visible", () =
   assert.deepEqual(result.warningCodes, [
     "UNRELATED_ACCOUNT_COVERAGE_INCOMPLETE",
   ]);
-  assert.equal(result.unrelatedCoverageGapCount, 1);
+  assert.equal(result.unrelatedCoverageGapCount, 6);
 });
 
 test("required selected execution partitions and unknown coverage attribution BLOCK", () => {

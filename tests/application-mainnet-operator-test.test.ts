@@ -15,6 +15,11 @@ import {
   createAccountPositionEvidence,
   type AccountEvidenceBundle,
 } from "../src/domain/account/account-evidence-bundle.js";
+import {
+  accountEvidencePartitionKey,
+  isOptionalOperatorAuxiliaryHistoryPartition,
+  type AccountEvidencePartition,
+} from "../src/domain/account/account-evidence-policy.js";
 import { createAdapterCapabilityObservation } from "../src/domain/capabilities/capability.js";
 import {
   createOperatorMainnetQuote,
@@ -54,6 +59,7 @@ import {
 import {
   extractOperatorFeeRate,
   collectOperatorAdmissionEvidence,
+  OperatorEvidenceReadError,
 } from "../src/application/mainnet-operator-test-evidence.js";
 import { deriveMainnetExecutionReadiness } from "../src/application/mainnet-execution-readiness.js";
 import {
@@ -426,6 +432,130 @@ function freshEvidence(
     quote,
     feeRate,
   } satisfies MainnetOperatorTestFreshEvidence;
+}
+
+function withOperatorHistoryGaps(
+  fresh: MainnetOperatorTestFreshEvidence,
+  options: {
+    readonly onlyGap?: (partition: AccountEvidencePartition) => boolean;
+    readonly additionalGap?: (partition: AccountEvidencePartition) => boolean;
+    readonly invalidGap?: (partition: AccountEvidencePartition) => boolean;
+    readonly diagnostic?: boolean;
+  } = {},
+): MainnetOperatorTestFreshEvidence {
+  const { consistency, ...payload } = fresh.account;
+  assert.equal(consistency.structuralComparison, "unchanged");
+  assert.deepEqual(consistency.reasonCodes, []);
+  const skippedKeys = new Set(
+    payload.expectedPartitions
+      .filter((partition) =>
+        options.onlyGap
+          ? options.onlyGap(partition)
+          : isOptionalOperatorAuxiliaryHistoryPartition(partition) ||
+            options.additionalGap?.(partition) === true,
+      )
+      .map(accountEvidencePartitionKey),
+  );
+  assert.ok(skippedKeys.size > 0);
+  const observationsWithoutSkipped = (
+    observations: readonly {
+      readonly partition: AccountEvidencePartition;
+    }[],
+  ) =>
+    observations.filter(
+      (observation) =>
+        !skippedKeys.has(accountEvidencePartitionKey(observation.partition)),
+    );
+  const coverage = payload.coverage.map((entry) => {
+    const key = accountEvidencePartitionKey(entry.partition);
+    if (!skippedKeys.has(key)) return entry;
+    return {
+      ...entry,
+      status: "failed" as const,
+      pages: 0,
+      rows: 0,
+      startedAt: null,
+      endedAt: null,
+      reasonCodes: options.invalidGap?.(entry.partition)
+        ? (["TRANSPORT_FAILED"] as const)
+        : (["COVERAGE_INCOMPLETE"] as const),
+    };
+  });
+  const account = unwrap(
+    createAccountEvidenceBundle({
+      ...payload,
+      collectionStatus: "incomplete",
+      criticalPasses: {
+        A: payload.criticalPasses.A
+          ? {
+              ...payload.criticalPasses.A,
+              observations: observationsWithoutSkipped(
+                payload.criticalPasses.A.observations,
+              ),
+            }
+          : null,
+        B: payload.criticalPasses.B
+          ? {
+              ...payload.criticalPasses.B,
+              observations: observationsWithoutSkipped(
+                payload.criticalPasses.B.observations,
+              ),
+            }
+          : null,
+      },
+      auxiliary: {
+        ...payload.auxiliary,
+        observations: observationsWithoutSkipped(
+          payload.auxiliary.observations,
+        ),
+      },
+      coverage,
+      diagnostics: options.diagnostic
+        ? [
+            {
+              code: "COVERAGE_INCOMPLETE",
+              severity: "warning",
+              scope: "coverage",
+            },
+          ]
+        : payload.diagnostics,
+    }),
+  );
+  const accountResult = unwrap(
+    createAccountEvidenceCollectionResult({
+      kind: "account-evidence",
+      bundle: account,
+    }),
+  );
+  const readiness = deriveMainnetExecutionReadiness({
+    accountResult,
+    symbol: fresh.instrument.symbol,
+    instrument: fresh.instrument,
+    evaluatedAt: fresh.state.serverTime,
+  });
+  return { ...fresh, account, readiness };
+}
+
+function admissionReads(fresh: MainnetOperatorTestFreshEvidence) {
+  return {
+    fee: async () => ({
+      retCode: 0,
+      retMsg: "OK",
+      result: {
+        list: [
+          {
+            symbol: fresh.feeRate.symbol,
+            makerFeeRate: fresh.feeRate.makerFeeRate.toString(),
+            takerFeeRate: fresh.feeRate.takerFeeRate.toString(),
+            rpiMakerFeeRate: "",
+          },
+        ],
+      },
+      time: Date.parse(fresh.readiness.evaluatedAt),
+    }),
+    quote: async () => fresh.quote,
+    state: async () => ({ ok: true as const, value: fresh.state }),
+  };
 }
 
 function compactEvidence(
@@ -2030,6 +2160,219 @@ test("real fee-rate response with RPI passes the complete production admission v
   assert.deepEqual(result.fresh.feeRate, fresh.feeRate);
 });
 
+test("production admission accepts only canonical optional non-linear history gaps", async () => {
+  const valuePlan = plan({ nonce: "operator-auxiliary-history-fallback" });
+  const complete = freshEvidence(valuePlan);
+  const admit = (fresh: MainnetOperatorTestFreshEvidence) =>
+    collectOperatorAdmissionEvidence(
+      valuePlan,
+      {
+        account: fresh.account,
+        readiness: fresh.readiness,
+        instrument: fresh.instrument,
+      },
+      admissionReads(fresh),
+    );
+
+  const completeResult = await admit(complete);
+  assert.equal(completeResult.fresh.account.collectionStatus, "complete");
+
+  const allowed = withOperatorHistoryGaps(complete);
+  const expectedOptionalGapCount = allowed.account.expectedPartitions.filter(
+    isOptionalOperatorAuxiliaryHistoryPartition,
+  ).length;
+  assert.ok(expectedOptionalGapCount > 0);
+  assert.equal(allowed.account.collectionStatus, "incomplete");
+  assert.deepEqual(allowed.account.consistency.reasonCodes, [
+    "COVERAGE_INCOMPLETE",
+  ]);
+  assert.equal(allowed.readiness.verdict, "READY");
+  assert.ok(
+    allowed.readiness.warningCodes.includes(
+      "UNRELATED_ACCOUNT_COVERAGE_INCOMPLETE",
+    ),
+  );
+  assert.equal(
+    allowed.readiness.unrelatedCoverageGapCount,
+    expectedOptionalGapCount,
+  );
+  const allowedResult = await admit(allowed);
+  assert.equal(allowedResult.fresh.account.collectionStatus, "incomplete");
+
+  const expectBlocked = async (
+    label: string,
+    fresh: MainnetOperatorTestFreshEvidence,
+    expectedReason = "ACCOUNT_READINESS_OR_IDENTITY_BLOCKED",
+  ) => {
+    await assert.rejects(admit(fresh), (error: unknown) => {
+      assert.ok(error instanceof OperatorEvidenceReadError, label);
+      assert.equal(error.reasonCode, expectedReason, label);
+      return true;
+    });
+  };
+
+  for (const partition of complete.account.expectedPartitions.filter(
+    (candidate) => !isOptionalOperatorAuxiliaryHistoryPartition(candidate),
+  )) {
+    const key = accountEvidencePartitionKey(partition);
+    const singleGap = withOperatorHistoryGaps(complete, {
+      onlyGap: (candidate) => accountEvidencePartitionKey(candidate) === key,
+    });
+    assert.equal(
+      singleGap.account.coverage.filter((entry) => entry.status !== "traversed")
+        .length,
+      1,
+      `expected only ${key} to be missing`,
+    );
+    await expectBlocked(
+      `non-optional partition ${key} remains required`,
+      singleGap,
+    );
+  }
+  await expectBlocked("the intentional coverage warning is required", {
+    ...allowed,
+    readiness: {
+      ...allowed.readiness,
+      warningCodes: allowed.readiness.warningCodes.filter(
+        (warning) => warning !== "UNRELATED_ACCOUNT_COVERAGE_INCOMPLETE",
+      ),
+    },
+  });
+  await expectBlocked("the reported gap count must match evidence", {
+    ...allowed,
+    readiness: {
+      ...allowed.readiness,
+      unrelatedCoverageGapCount:
+        allowed.readiness.unrelatedCoverageGapCount - 1,
+    },
+  });
+  const invalidOptionalPartition = complete.account.expectedPartitions.find(
+    isOptionalOperatorAuxiliaryHistoryPartition,
+  );
+  assert.ok(invalidOptionalPartition);
+  const invalidOptionalKey = accountEvidencePartitionKey(
+    invalidOptionalPartition,
+  );
+  await expectBlocked(
+    "a failed auxiliary history read is not an intentional omission",
+    withOperatorHistoryGaps(complete, {
+      invalidGap: (partition) =>
+        accountEvidencePartitionKey(partition) === invalidOptionalKey,
+    }),
+  );
+  await expectBlocked(
+    "an extra non-history auxiliary gap is not approved",
+    withOperatorHistoryGaps(complete, {
+      additionalGap: (partition) =>
+        partition.pass === "auxiliary" && partition.endpoint === "tiers",
+    }),
+  );
+  await expectBlocked(
+    "any coverage diagnostic blocks admission",
+    withOperatorHistoryGaps(complete, { diagnostic: true }),
+  );
+
+  const { consistency, ...allowedPayload } = allowed.account;
+  assert.equal(consistency.structuralComparison, "unchanged");
+  assert.deepEqual(consistency.reasonCodes, ["COVERAGE_INCOMPLETE"]);
+  const missingOptionalIndex = allowedPayload.coverage.findIndex((entry) =>
+    isOptionalOperatorAuxiliaryHistoryPartition(entry.partition),
+  );
+  assert.ok(missingOptionalIndex >= 0);
+  const missingCoverageAccount = unwrap(
+    createAccountEvidenceBundle({
+      ...allowedPayload,
+      coverage: allowedPayload.coverage.filter(
+        (_entry, index) => index !== missingOptionalIndex,
+      ),
+    }),
+  );
+  const missingCoverageResult = unwrap(
+    createAccountEvidenceCollectionResult({
+      kind: "account-evidence",
+      bundle: missingCoverageAccount,
+    }),
+  );
+  const missingCoverage = {
+    ...allowed,
+    account: missingCoverageAccount,
+    readiness: deriveMainnetExecutionReadiness({
+      accountResult: missingCoverageResult,
+      symbol: valuePlan.symbol,
+      instrument: allowed.instrument,
+      evaluatedAt: allowed.state.serverTime,
+    }),
+  };
+  await expectBlocked(
+    "a missing expected coverage row blocks",
+    missingCoverage,
+  );
+
+  const conflictPayload = { ...allowedPayload };
+  assert.ok(conflictPayload.criticalPasses.B);
+  const conflictingAccount = unwrap(
+    createAccountEvidenceBundle({
+      ...conflictPayload,
+      criticalPasses: {
+        ...conflictPayload.criticalPasses,
+        B: {
+          ...conflictPayload.criticalPasses.B,
+          account: {
+            ...conflictPayload.criticalPasses.B.account,
+            marginMode: { state: "known", value: "PORTFOLIO_MARGIN" },
+          },
+        },
+      },
+    }),
+  );
+  const conflictResult = unwrap(
+    createAccountEvidenceCollectionResult({
+      kind: "account-evidence",
+      bundle: conflictingAccount,
+    }),
+  );
+  await expectBlocked(
+    "A/B critical conflict blocks before admission",
+    {
+      ...allowed,
+      account: conflictingAccount,
+      readiness: deriveMainnetExecutionReadiness({
+        accountResult: conflictResult,
+        symbol: valuePlan.symbol,
+        instrument: allowed.instrument,
+        evaluatedAt: allowed.state.serverTime,
+      }),
+    },
+    "CRITICAL_STATE_CHANGED",
+  );
+
+  const stale = freshEvidence(valuePlan, {
+    serverTime: at(Date.parse(NOW) + 60_003),
+    quoteObservedAt: at(Date.parse(NOW) + 59_903),
+  });
+  await expectBlocked("stale account evidence blocks admission", stale);
+
+  const forgedReadiness: MainnetOperatorTestFreshEvidence = {
+    ...complete,
+    readiness: {
+      ...complete.readiness,
+      internalBinding: {
+        ...complete.readiness.internalBinding!,
+        accountEvidenceHash: `sha256:${"f".repeat(64)}`,
+      },
+    },
+  };
+  await expectBlocked("a forged account evidence hash blocks", forgedReadiness);
+
+  const forgedBinding = freshEvidence(valuePlan, {
+    accountIdentityHash: `sha256:${"b".repeat(64)}`,
+  });
+  await expectBlocked(
+    "a forged account identity binding blocks",
+    forgedBinding,
+  );
+});
+
 test("pre-intent evidence failure permits a clean second attended run despite an abandoned expired lease", async () => {
   const harness = setup();
   const abandoned = unwrap(
@@ -2138,7 +2481,9 @@ test("admission preserves quote deviation and malformed fee diagnostics", async 
       "QUOTE_OUTSIDE_APPROVED_RANGE",
     );
   const harness = setup({ valuePlan, evidence: { ...fresh, quote } });
+  const stageStarted = performance.now();
   const execution = await harness.run();
+  const stageElapsedMs = performance.now() - stageStarted;
   assert.equal(execution.ok, false);
   if (!execution.ok)
     assert.equal(
@@ -2164,9 +2509,29 @@ test("admission preserves quote deviation and malformed fee diagnostics", async 
     );
   }
   assert.equal(harness.createObservations.length, 0);
+  assert.equal(harness.authorization.consumeCalls, 0);
   assert.equal(
     unwrap(harness.journal.findPendingOperatorMainnetTestSource()),
     undefined,
+  );
+  console.log(
+    `U2_QUOTE_DRIFT_PROFILE ${JSON.stringify({
+      baselineSha: "f107f0fc4b5ef5f0af9874fea68e754ac1fa0b20",
+      fixture: "synthetic-collected-evidence-quote-outside-approved-range",
+      commandContext: "application-admission-after-evidence-collection",
+      stage: "admission",
+      stageTimingModel:
+        "observed local duration with supplied synthetic evidence; excludes provider reads",
+      stageElapsedMs,
+      physicalGetAttempts: 0,
+      groups: { other: 0 },
+      independentStubFetchAttemptLogEntries: 0,
+      evidencePath: "provided-synthetic-evidence",
+      refusalPredicate: "QUOTE_OUTSIDE_APPROVED_RANGE",
+      exchangeWrites: 0,
+      persistedIntent: false,
+      authorizationConsumed: harness.authorization.consumeCalls,
+    })}`,
   );
   harness.persistence.close();
   const fee = validateMainnetOperatorTestEvidence(valuePlan, {

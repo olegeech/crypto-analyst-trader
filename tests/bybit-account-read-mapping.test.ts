@@ -169,6 +169,29 @@ test("account enums survive and missing wallet facts never become zero", () => {
   assert.equal(wallet.totals.equityBasis, "unestablished");
   assert.equal(Object.isFrozen(wallet.assets), true);
 });
+
+test("current UTA 5/6 regular-margin modes map without treating account updatedTime as observation time", () => {
+  for (const unifiedMarginStatus of [5, 6]) {
+    const mapped = mapAccountInfo(
+      response({
+        unifiedMarginStatus,
+        marginMode: "REGULAR_MARGIN",
+        spotHedgingStatus: "OFF",
+        updatedTime: "100",
+      }),
+    );
+    assert.deepEqual(mapped.utaStatus, {
+      state: "known",
+      value: unifiedMarginStatus,
+    });
+    assert.deepEqual(mapped.marginMode, {
+      state: "known",
+      value: "REGULAR_MARGIN",
+    });
+    assert.deepEqual(mapped.spotHedging, { state: "known", value: false });
+    assert.equal(Object.hasOwn(mapped, "updatedTime"), false);
+  }
+});
 test("collateral uses currency and keeps shared borrow separate and restrictions unknown", () => {
   const value = mapAccountCollateral(
     rows([

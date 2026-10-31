@@ -185,9 +185,16 @@ GET accounting reports `GET_COUNTS_PREFLIGHT`, `GET_COUNTS_PREPARE` and
 include pagination and retries already attempted, including failed HTTP reads;
 POSTs are excluded. No extra requests are made for measurement. Only fixed
 group names and counts are emitted, without query strings or account data.
-The operator path uses compact current evidence where it is sufficient; full
-readiness collection remains a fallback. `PREPARE_COMPACT_FALLBACK_REASON`
-identifies why preparation took that fallback, alongside `GET_COUNTS_PREPARE`.
+The operator path uses compact current evidence where that evidence is
+sufficient. If required account-info response time is absent, prepare and
+execute retain the full fallback for current account evidence: account, wallet
+and collateral A/B; all account-wide positions and open orders; discovery,
+tiers, target mode and required Linear order-history/execution evidence. To
+avoid unrelated work, the operator fallback omits only auxiliary non-Linear
+order-history and execution reads; it reports
+`ACCOUNT_COVERAGE_WARNING=UNRELATED_AUXILIARY_HISTORY_NOT_COLLECTED`. This is
+not a complete history/accounting snapshot. `PREPARE_COMPACT_FALLBACK_REASON`
+identifies why preparation took the fallback, alongside `GET_COUNTS_PREPARE`.
 These per-run diagnostics cannot establish the cause of a prior run that did
 not record them. A 10–25 GET compact operator admission is an engineering
 target, not measured performance.
