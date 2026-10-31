@@ -37,10 +37,14 @@ export const OPERATOR_MAINNET_TEST_PLAN_SCHEMA_VERSION =
   "operator-mainnet-execution-test/v1" as const;
 export const OPERATOR_MAINNET_RECOVERY_TEST_PLAN_SCHEMA_VERSION =
   "operator-mainnet-execution-test/v2" as const;
+export const OPERATOR_MAINNET_TRADE_COMMAND_PLAN_SCHEMA_VERSION =
+  "operator-mainnet-execution-test/v3" as const;
 export const OPERATOR_MAINNET_TEST_APPROVAL_SCHEMA_VERSION =
   "operator-mainnet-execution-approval/v1" as const;
 export const OPERATOR_MAINNET_TEST_POLICY_VERSION =
   "operator-mainnet-test/v1" as const;
+export const OPERATOR_MAINNET_TRADE_COMMAND_POLICY_VERSION =
+  "operator-mainnet-direct-command/v1" as const;
 export const OPERATOR_MAINNET_QUOTE_FRESHNESS_MS = 5_000 as const;
 export const OPERATOR_MAINNET_APPROVAL_TTL_MS = 900_000 as const;
 
@@ -86,6 +90,43 @@ const PLAN_V2_FIELDS = [
   ...PLAN_V1_FIELDS.slice(0, -1),
   "recoveryAttestationHash",
   "contentHash",
+] as const;
+const PLAN_V3_FIELDS = [
+  ...PLAN_V1_FIELDS.slice(0, -1),
+  "commandId",
+  "commandReceiptHash",
+  "commandAcceptedAt",
+  "commandExpiresAt",
+  "tradeCommandReceipt",
+  "contentHash",
+] as const;
+const TRADE_COMMAND_RECEIPT_FIELDS = [
+  "schemaVersion",
+  "commandId",
+  "actorIdentityHash",
+  "channel",
+  "accountIdentityHash",
+  "environment",
+  "category",
+  "symbol",
+  "side",
+  "allocation",
+  "grossNotionalCap",
+  "maxDeviationBps",
+  "leverage",
+  "priceDerivationPolicy",
+  "quantityDerivationPolicy",
+  "takeProfitPolicy",
+  "stopLoss",
+  "acceptedAt",
+  "expiresAt",
+  "contentHash",
+] as const;
+const TRADE_COMMAND_TAKE_PROFIT_FIELDS = [
+  "grossTargetPercent",
+  "tpslMode",
+  "orderType",
+  "triggerBy",
 ] as const;
 const OPERATOR_WARNING_CODES = ["API_KEY_IP_UNBOUND"] as const;
 const APPROVAL_FIELDS = [
@@ -158,8 +199,11 @@ export interface OperatorMainnetTestEntry {
 export interface OperatorMainnetTestPlan {
   readonly schemaVersion:
     | typeof OPERATOR_MAINNET_TEST_PLAN_SCHEMA_VERSION
-    | typeof OPERATOR_MAINNET_RECOVERY_TEST_PLAN_SCHEMA_VERSION;
-  readonly policyVersion: typeof OPERATOR_MAINNET_TEST_POLICY_VERSION;
+    | typeof OPERATOR_MAINNET_RECOVERY_TEST_PLAN_SCHEMA_VERSION
+    | typeof OPERATOR_MAINNET_TRADE_COMMAND_PLAN_SCHEMA_VERSION;
+  readonly policyVersion:
+    | typeof OPERATOR_MAINNET_TEST_POLICY_VERSION
+    | typeof OPERATOR_MAINNET_TRADE_COMMAND_POLICY_VERSION;
   readonly environment: "mainnet";
   readonly accountIdentityHash: string;
   readonly symbol: MarketEvidenceSymbol;
@@ -179,6 +223,11 @@ export interface OperatorMainnetTestPlan {
   readonly quoteFreshnessMs: typeof OPERATOR_MAINNET_QUOTE_FRESHNESS_MS;
   readonly approvalTtlMs: typeof OPERATOR_MAINNET_APPROVAL_TTL_MS;
   readonly recoveryAttestationHash?: PlanHash;
+  readonly commandId?: string;
+  readonly commandReceiptHash?: PlanHash;
+  readonly commandAcceptedAt?: UtcTimestamp;
+  readonly commandExpiresAt?: UtcTimestamp;
+  readonly tradeCommandReceipt?: Readonly<Record<string, unknown>>;
   readonly contentHash: PlanHash;
 }
 
@@ -279,6 +328,121 @@ function positiveDecimal(value: unknown, field: string): Result<DecimalValue> {
     );
   }
   return parsed;
+}
+
+function rehydrateEmbeddedTradeCommandReceipt(
+  input: unknown,
+): Result<Readonly<Record<string, unknown>>> {
+  if (
+    !exactRecord(input, TRADE_COMMAND_RECEIPT_FIELDS) ||
+    !exactRecord(input.takeProfitPolicy, TRADE_COMMAND_TAKE_PROFIT_FIELDS)
+  )
+    return invalidPlan("direct-command receipt is malformed");
+
+  const commandId = requireIdentifier(input.commandId, "commandId");
+  const actorIdentityHash = requireHash(
+    input.actorIdentityHash,
+    "actorIdentityHash",
+  );
+  const accountIdentityHash = requireHash(
+    input.accountIdentityHash,
+    "accountIdentityHash",
+  );
+  const symbol = input.symbol;
+  const allocation = positiveDecimal(input.allocation, "allocation");
+  const grossNotionalCap = positiveDecimal(
+    input.grossNotionalCap,
+    "grossNotionalCap",
+  );
+  const maxDeviationBps = positiveDecimal(
+    input.maxDeviationBps,
+    "maxDeviationBps",
+  );
+  const grossTargetPercent = positiveDecimal(
+    input.takeProfitPolicy.grossTargetPercent,
+    "takeProfitPolicy.grossTargetPercent",
+  );
+  const acceptedAt = parseUtcTimestamp(input.acceptedAt);
+  const expiresAt = parseUtcTimestamp(input.expiresAt);
+  const contentHash = requireHash(input.contentHash, "contentHash");
+  const deviationLimit = DecimalValue.fromString("10000");
+  const expectedExpiresAt = acceptedAt.ok
+    ? (new Date(
+        timestampToEpochMs(acceptedAt.value) + OPERATOR_MAINNET_APPROVAL_TTL_MS,
+      ).toISOString() as UtcTimestamp)
+    : undefined;
+
+  if (
+    !commandId.ok ||
+    !actorIdentityHash.ok ||
+    !accountIdentityHash.ok ||
+    !allocation.ok ||
+    !grossNotionalCap.ok ||
+    !maxDeviationBps.ok ||
+    !grossTargetPercent.ok ||
+    !acceptedAt.ok ||
+    !expiresAt.ok ||
+    !contentHash.ok ||
+    !deviationLimit.ok ||
+    maxDeviationBps.value.compare(deviationLimit.value) >= 0 ||
+    typeof symbol !== "string" ||
+    !MARKET_EVIDENCE_SYMBOLS.includes(symbol as MarketEvidenceSymbol) ||
+    input.schemaVersion !== "operator-mainnet-trade-command-receipt/v1" ||
+    input.channel !== "local-owner-cli/v1" ||
+    input.environment !== "mainnet" ||
+    input.category !== "linear" ||
+    input.side !== "Buy" ||
+    input.leverage !== "1" ||
+    input.priceDerivationPolicy !== "initial-best-bid-floor-to-tick/v1" ||
+    input.quantityDerivationPolicy !==
+      "budget-over-limit-price-floor-to-step/v1" ||
+    input.stopLoss !== "none" ||
+    input.takeProfitPolicy.tpslMode !== "Partial" ||
+    input.takeProfitPolicy.orderType !== "Market" ||
+    input.takeProfitPolicy.triggerBy !== "LastPrice" ||
+    grossTargetPercent.value.toString() !== "0.2" ||
+    expiresAt.value !== expectedExpiresAt
+  )
+    return invalidPlan("direct-command receipt is outside the fixed policy");
+
+  const payload = {
+    schemaVersion: "operator-mainnet-trade-command-receipt/v1" as const,
+    commandId: commandId.value,
+    actorIdentityHash: actorIdentityHash.value,
+    channel: "local-owner-cli/v1" as const,
+    accountIdentityHash: accountIdentityHash.value,
+    environment: "mainnet" as const,
+    category: "linear" as const,
+    symbol: symbol as MarketEvidenceSymbol,
+    side: "Buy" as const,
+    allocation: allocation.value,
+    grossNotionalCap: grossNotionalCap.value,
+    maxDeviationBps: maxDeviationBps.value,
+    leverage: "1" as const,
+    priceDerivationPolicy: "initial-best-bid-floor-to-tick/v1" as const,
+    quantityDerivationPolicy:
+      "budget-over-limit-price-floor-to-step/v1" as const,
+    takeProfitPolicy: {
+      grossTargetPercent: grossTargetPercent.value,
+      tpslMode: "Partial" as const,
+      orderType: "Market" as const,
+      triggerBy: "LastPrice" as const,
+    },
+    stopLoss: "none" as const,
+    acceptedAt: acceptedAt.value,
+    expiresAt: expiresAt.value,
+  };
+  const expectedHash = hashCanonical(payload);
+  if (!expectedHash.ok || expectedHash.value !== contentHash.value)
+    return invalidPlan("direct-command receipt hash does not match its facts");
+  const normalized = { ...payload, contentHash: contentHash.value };
+  const actualCanonical = canonicalSerialize(input);
+  const expectedCanonical = canonicalSerialize(normalized);
+  return actualCanonical.ok &&
+    expectedCanonical.ok &&
+    actualCanonical.value === expectedCanonical.value
+    ? ok(deepFreeze(normalized))
+    : invalidPlan("direct-command receipt differs from deterministic replay");
 }
 
 function quotePayload(input: {
@@ -751,6 +915,98 @@ export function rehydrateOperatorMainnetTestPlan(
   input: unknown,
 ): Result<OperatorMainnetTestPlan> {
   if (!isRecord(input)) return invalidPlan();
+  if (
+    input.schemaVersion === OPERATOR_MAINNET_TRADE_COMMAND_PLAN_SCHEMA_VERSION
+  ) {
+    if (!exactRecord(input, PLAN_V3_FIELDS)) return invalidPlan();
+    const receipt = rehydrateEmbeddedTradeCommandReceipt(
+      input.tradeCommandReceipt,
+    );
+    const commandId = requireIdentifier(input.commandId, "commandId");
+    const commandReceiptHash = requireHash(
+      input.commandReceiptHash,
+      "commandReceiptHash",
+    );
+    const commandAcceptedAt = parseUtcTimestamp(input.commandAcceptedAt);
+    const commandExpiresAt = parseUtcTimestamp(input.commandExpiresAt);
+    const replayed = canonicalizePlanInput({
+      accountIdentityHash: input.accountIdentityHash,
+      symbol: input.symbol,
+      nonce: input.nonce,
+      allocation: input.allocation,
+      grossNotionalCap: input.grossNotionalCap,
+      maxDeviationBps: input.maxDeviationBps,
+      quote: input.quote,
+      warningCodes: input.warningCodes,
+      constraints: input.constraints,
+      preparedAt: input.preparedAt,
+    });
+    const contentHash = requireHash(input.contentHash, "contentHash");
+    if (
+      !receipt.ok ||
+      !commandId.ok ||
+      !commandReceiptHash.ok ||
+      !commandAcceptedAt.ok ||
+      !commandExpiresAt.ok ||
+      !replayed.ok ||
+      !contentHash.ok ||
+      input.policyVersion !== OPERATOR_MAINNET_TRADE_COMMAND_POLICY_VERSION ||
+      input.nonce !== commandId.value ||
+      commandReceiptHash.value !== receipt.value.contentHash ||
+      commandId.value !== receipt.value.commandId ||
+      commandAcceptedAt.value !== receipt.value.acceptedAt ||
+      commandExpiresAt.value !== receipt.value.expiresAt ||
+      replayed.value.accountIdentityHash !==
+        receipt.value.accountIdentityHash ||
+      replayed.value.symbol !== receipt.value.symbol ||
+      replayed.value.allocation.compare(
+        receipt.value.allocation as DecimalValue,
+      ) !== 0 ||
+      replayed.value.grossNotionalCap.compare(
+        receipt.value.grossNotionalCap as DecimalValue,
+      ) !== 0 ||
+      replayed.value.maxDeviationBps.compare(
+        receipt.value.maxDeviationBps as DecimalValue,
+      ) !== 0 ||
+      timestampToEpochMs(replayed.value.preparedAt) <
+        timestampToEpochMs(commandAcceptedAt.value) ||
+      timestampToEpochMs(replayed.value.preparedAt) >=
+        timestampToEpochMs(commandExpiresAt.value)
+    )
+      return invalidPlan(
+        "direct-command plan differs from its receipt or validity window",
+      );
+
+    const {
+      contentHash: _legacyHash,
+      schemaVersion: _legacySchemaVersion,
+      policyVersion: _legacyPolicyVersion,
+      ...legacyPayload
+    } = replayed.value;
+    const payload = {
+      ...legacyPayload,
+      schemaVersion: OPERATOR_MAINNET_TRADE_COMMAND_PLAN_SCHEMA_VERSION,
+      policyVersion: OPERATOR_MAINNET_TRADE_COMMAND_POLICY_VERSION,
+      commandId: commandId.value,
+      commandReceiptHash: commandReceiptHash.value,
+      commandAcceptedAt: commandAcceptedAt.value,
+      commandExpiresAt: commandExpiresAt.value,
+      tradeCommandReceipt: receipt.value,
+    };
+    const expectedHash = hashCanonical(payload);
+    if (!expectedHash.ok || expectedHash.value !== contentHash.value)
+      return invalidPlan(
+        "direct-command plan identity differs from deterministic replay",
+      );
+    const expected = { ...payload, contentHash: contentHash.value };
+    const actualCanonical = canonicalSerialize(input);
+    const expectedCanonical = canonicalSerialize(expected);
+    return actualCanonical.ok &&
+      expectedCanonical.ok &&
+      actualCanonical.value === expectedCanonical.value
+      ? ok(deepFreeze(expected) as OperatorMainnetTestPlan)
+      : invalidPlan("direct-command plan differs from deterministic replay");
+  }
   const planFields =
     input.schemaVersion === OPERATOR_MAINNET_TEST_PLAN_SCHEMA_VERSION
       ? PLAN_V1_FIELDS
@@ -830,7 +1086,9 @@ export function validateOperatorMainnetQuoteForPlan(
       }),
     );
   if (
-    quote.value.bid.compare(plan.value.quoteBidRange.lower) < 0 ||
+    (plan.value.schemaVersion !==
+      OPERATOR_MAINNET_TRADE_COMMAND_PLAN_SCHEMA_VERSION &&
+      quote.value.bid.compare(plan.value.quoteBidRange.lower) < 0) ||
     quote.value.bid.compare(plan.value.quoteBidRange.upper) > 0
   )
     return fail(
@@ -880,6 +1138,12 @@ function canonicalizeApproval(
     return invalidApproval(
       "approval must bind the exact plan and follow its preparation",
     );
+  if (
+    plan.value.schemaVersion !== OPERATOR_MAINNET_TEST_PLAN_SCHEMA_VERSION &&
+    plan.value.schemaVersion !==
+      OPERATOR_MAINNET_RECOVERY_TEST_PLAN_SCHEMA_VERSION
+  )
+    return invalidApproval("legacy approval cannot authorize a direct command");
   const expiresAt = new Date(
     timestampToEpochMs(approvedAt.value) + OPERATOR_MAINNET_APPROVAL_TTL_MS,
   ).toISOString() as UtcTimestamp;
@@ -961,6 +1225,12 @@ export function validateOperatorMainnetTestApproval(
   const at = parseUtcTimestamp(now);
   if (!approval.ok || !plan.ok || !approvalHash.ok || !at.ok)
     return invalidApproval("exact approval and plan identity are required");
+  if (
+    plan.value.schemaVersion !== OPERATOR_MAINNET_TEST_PLAN_SCHEMA_VERSION &&
+    plan.value.schemaVersion !==
+      OPERATOR_MAINNET_RECOVERY_TEST_PLAN_SCHEMA_VERSION
+  )
+    return invalidApproval("legacy approval cannot authorize a direct command");
   const sourceId = deriveOperatorMainnetTestSourceId(plan.value.contentHash);
   if (
     !sourceId.ok ||

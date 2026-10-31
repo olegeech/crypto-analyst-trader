@@ -124,6 +124,12 @@ import {
   type OperatorMainnetTestPlan,
   type OperatorMainnetTestApproval,
 } from "../execution/operator-mainnet-test-plan.js";
+import {
+  rehydrateOperatorMainnetTradeCommandBinding,
+  rehydrateOperatorMainnetTradeCommandReceipt,
+  type OperatorMainnetTradeCommandBinding,
+  type OperatorMainnetTradeCommandReceipt,
+} from "../execution/operator-mainnet-trade-command.js";
 
 export const ARTIFACT_SCHEMA_VERSION = "artifact/v1" as const;
 
@@ -132,6 +138,8 @@ export type ArtifactKind =
   | "prepared-plan-approval"
   | "operator-mainnet-execution-test"
   | "operator-mainnet-execution-approval"
+  | "operator-mainnet-trade-command-receipt"
+  | "operator-mainnet-trade-command-binding"
   | "evidence-ref"
   | "instrument-constraints"
   | "strategy-config"
@@ -171,6 +179,8 @@ export type RehydratedArtifact =
   | PreparedPlanApproval
   | OperatorMainnetTestPlan
   | OperatorMainnetTestApproval
+  | OperatorMainnetTradeCommandReceipt
+  | OperatorMainnetTradeCommandBinding
   | EvidenceRef
   | InstrumentConstraints
   | StrategyConfig
@@ -1096,6 +1106,20 @@ const schemas: ReadonlyMap<ArtifactKind, Schema> = new Map([
     "operator-mainnet-execution-approval",
     { kind: "validated", validate: rehydrateOperatorMainnetTestApproval },
   ],
+  [
+    "operator-mainnet-trade-command-receipt",
+    {
+      kind: "validated",
+      validate: rehydrateOperatorMainnetTradeCommandReceipt,
+    },
+  ],
+  [
+    "operator-mainnet-trade-command-binding",
+    {
+      kind: "validated",
+      validate: rehydrateOperatorMainnetTradeCommandBinding,
+    },
+  ],
   // The constructor owns closed validation of every nested account fact and
   // rechecks derived consistency and provenance. Do not duplicate that schema.
   [
@@ -1550,6 +1574,14 @@ export function rehydrateArtifact(
   envelope: unknown,
 ): Result<OperatorMainnetTestApproval>;
 export function rehydrateArtifact(
+  artifactKind: "operator-mainnet-trade-command-receipt",
+  envelope: unknown,
+): Result<OperatorMainnetTradeCommandReceipt>;
+export function rehydrateArtifact(
+  artifactKind: "operator-mainnet-trade-command-binding",
+  envelope: unknown,
+): Result<OperatorMainnetTradeCommandBinding>;
+export function rehydrateArtifact(
   artifactKind: "account-evidence-bundle",
   envelope: unknown,
 ): Result<AccountEvidenceBundle>;
@@ -1612,6 +1644,10 @@ export function rehydrateArtifact(
       return rehydrateOperatorMainnetTestPlan(decoded.value);
     case "operator-mainnet-execution-approval":
       return rehydrateOperatorMainnetTestApproval(decoded.value);
+    case "operator-mainnet-trade-command-receipt":
+      return rehydrateOperatorMainnetTradeCommandReceipt(decoded.value);
+    case "operator-mainnet-trade-command-binding":
+      return rehydrateOperatorMainnetTradeCommandBinding(decoded.value);
     case "account-evidence-bundle":
       // Decoded decimal tags remain DecimalValue instances. The constructor
       // preserves historical binding claims; it never authenticates a new run.

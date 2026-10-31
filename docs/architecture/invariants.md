@@ -8,10 +8,14 @@ rationale and decision history.
    exposure. The only manual-evidence exception is the bounded, source-bound
    recovery in invariant 18; relevant facts that are uninspected, unclear or
    contradictory remain `UNKNOWN` and block.
-2. An exchange write requires an approved, unexpired exact plan hash. The
-   bounded Testnet and Demo capability probes treat explicit invocation as
-   their run-scoped authorization, while still hashing and revalidating every
-   exact write plan before dispatch.
+2. An exchange write requires an approved, unexpired exact plan hash, except
+   for the separately versioned #147 local direct-command path: its one
+   bounded, explicit owner instruction is bound to one deterministic v3 plan,
+   exact CREATE payload, source and client order identity. The bounded Testnet
+   and Demo capability probes treat explicit invocation as their run-scoped
+   authorization, while still hashing and revalidating every exact write plan
+   before dispatch. All account, capital, venue, ownership, HALT and no-resend
+   checks remain mandatory on every path.
 3. A strategy exclusively owns `account + symbol + side` in the MVP.
 4. Only orders with durable local ownership and matching exchange identity may
    be changed or cancelled.
@@ -38,8 +42,11 @@ rationale and decision history.
     entry authority.
 14. CI and default local tests cannot reach an exchange write endpoint.
 15. Mainnet always requires explicit configuration and cannot be the default.
-16. Preparation and execution remain separate; preparation or scheduling cannot
-    implicitly trigger a mainnet write.
+16. Preparation and execution remain separate; preparation, research, imported
+    proposals or scheduling cannot implicitly trigger a mainnet write. Only a
+    specific owner instruction dispatched through the authenticated local CLI
+    may use #147's one-command v3 authority to derive and submit one bounded
+    trade without a second routine approval.
 17. External exchange, file and process payloads are untrusted until runtime
     validation succeeds; unchecked casts do not establish domain validity.
 18. Evidence that can affect a live-ready plan is versioned, attributable,
@@ -58,14 +65,18 @@ rationale and decision history.
     remain in force, including account identity and permissions, available
     balance/margin and fee-inclusive capacity, instrument, quote and fee
     validity, capital cap, exact-plan consent, ownership and attached
-    take-profit. A separate explicit recovery authorization binds an eligible
-    account-scoped HALT/source revision to one saved exact upcoming plan; its grant is
-    single-use, cannot be reminted from the same attestation, and expires no
-    later than five minutes after UI observation or the plan expiry. A newer
-    source or HALT revision, known contradiction,
-    wrong identity or unrelated incident invalidates or blocks it. A latest,
-    source-attributed API status reconciliation with `verified-clean` releases
-    the pending-source gate independently of any unused or expired grant.
+    take-profit. On the legacy #31 entry path, exact-plan consent remains
+    required. The separate #147 v3 direct-command path binds the original
+    bounded local instruction to one derived plan; its receipt never grants
+    recovery or HALT-clearance authority. A separate explicit recovery
+    authorization binds an eligible account-scoped HALT/source revision to
+    one saved exact upcoming plan; its grant is single-use, cannot be reminted
+    from the same attestation, and expires no later than five minutes after UI
+    observation or the plan expiry. A newer source or HALT revision, known
+    contradiction, wrong identity or unrelated incident invalidates or blocks
+    it. A latest, source-attributed API status reconciliation with
+    `verified-clean` releases the pending-source gate independently of any
+    unused or expired grant.
     `UNKNOWN`, pending, missing or manual-attestation-only evidence remains
     blocking. An expired grant never authorizes CREATE, and an active HALT
     remains a separate gate. If API cleanup is not verified, the source remains
@@ -74,4 +85,4 @@ rationale and decision history.
     a later plan.
 19. Research and ML produce decision evidence only. Exchange-valid order intents
     remain the responsibility of the TypeScript planner and cannot bypass risk
-    or immutable approval.
+    or the applicable immutable approval or versioned direct-command authority.
