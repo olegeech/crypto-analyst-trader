@@ -678,6 +678,7 @@ export async function prepareMainnetOperatorTest(
         symbol: input.symbol,
         instrument,
         evaluatedAt: providerTime.value,
+        ...(tradeCommandReceipt?.ok === true ? { directTrade: true } : {}),
       });
       if (
         readiness.verdict !== "READY" ||

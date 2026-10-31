@@ -64,6 +64,7 @@ function groupedFromFetchAttempts(paths: readonly string[]) {
 
 async function prepare(options: {
   balance: string;
+  symbol?: string;
   fee?: string;
   feeReadThrows?: boolean;
   feeAge?: number;
@@ -87,6 +88,7 @@ async function prepare(options: {
 }) {
   const root = mkdtempSync(join(tmpdir(), "operator-prepare-capacity-"));
   roots.push(root);
+  const requestedSymbol = options.symbol ?? input.symbol;
   const paths: string[] = [];
   const attempts: Array<{
     readonly path: string;
@@ -110,6 +112,7 @@ async function prepare(options: {
   const result = await prepareMainnetOperatorTest(
     {
       ...input,
+      symbol: requestedSymbol,
       ...(options.recoveryAttestation
         ? {
             recoveryAttestationHash: options.recoveryAttestation.contentHash,
@@ -262,7 +265,7 @@ async function prepare(options: {
             result = {
               list: [
                 {
-                  symbol: input.symbol,
+                  symbol: requestedSymbol,
                   makerFeeRate: "0.0002",
                   takerFeeRate: options.fee ?? "0.001",
                 },
@@ -275,7 +278,7 @@ async function prepare(options: {
               category: "linear",
               list: [
                 {
-                  symbol: input.symbol,
+                  symbol: requestedSymbol,
                   status: "Trading",
                   contractType: "LinearPerpetual",
                   quoteCoin: "USDT",
@@ -306,7 +309,7 @@ async function prepare(options: {
               category: "linear",
               list: [
                 {
-                  symbol: input.symbol,
+                  symbol: requestedSymbol,
                   bid1Price: options.quoteBid ?? "0.1",
                   ask1Price: "0.1001",
                   lastPrice: options.quoteBid ?? "0.1",
@@ -324,10 +327,10 @@ async function prepare(options: {
             result = {
               category: target.searchParams.get("category"),
               list: [
-                ...(targetSymbol === input.symbol
+                ...(targetSymbol === requestedSymbol
                   ? [
                       {
-                        symbol: input.symbol,
+                        symbol: requestedSymbol,
                         positionIdx: 0,
                         side: "",
                         size: "0",
@@ -614,6 +617,64 @@ test("direct command preparation persists a v3 plan through production GET mappe
       reopened.value.close();
     }
   }
+});
+
+test("direct INJUSDT preparation succeeds on account-info no-time full fallback without writes", async () => {
+  const accountIdentity = configuredBybitAccountIdentityHash("123", "mainnet");
+  const actorIdentity = hashCanonical({ localOperatorIdentity: "test-owner" });
+  assert.equal(accountIdentity.ok, true);
+  assert.equal(actorIdentity.ok, true);
+  if (!accountIdentity.ok || !actorIdentity.ok) return;
+
+  const receipt = createOperatorMainnetTradeCommandReceipt({
+    commandId: "direct-inj-full-fallback-01",
+    actorIdentityHash: actorIdentity.value,
+    accountIdentityHash: accountIdentity.value,
+    symbol: "INJUSDT",
+    allocation: input.allocation,
+    grossNotionalCap: input.grossNotionalCap,
+    maxDeviationBps: input.maxDeviationBps,
+    takeProfitMode: "percent",
+    takeProfitValue: "0.50",
+    acceptedAt: new Date(now).toISOString(),
+  });
+  assert.equal(receipt.ok, true);
+  if (!receipt.ok) return;
+
+  const run = await prepare({
+    balance: "11",
+    symbol: "INJUSDT",
+    accountInfoNoTime: true,
+    tradeCommandReceipt: receipt.value,
+  });
+
+  assert.equal(run.result.ok, true, JSON.stringify(run.result));
+  assert.equal(run.opened, 1);
+  assert.equal(run.paths.length, run.attempts.length);
+  assert.equal(
+    run.paths.every((path) => path !== "/v5/order/create"),
+    true,
+  );
+  if (!run.result.ok) return;
+  assert.equal(run.result.value.exchangeWrites, 0);
+  assert.equal(run.result.value.exchangeEvidencePath, "compact-to-full");
+  assert.equal(
+    run.result.value.compactFallbackReason,
+    "ACCOUNT_EVIDENCE_INVALID",
+  );
+  assert.equal(run.result.value.plan.symbol, "INJUSDT");
+  assert.equal(
+    run.result.value.plan.schemaVersion,
+    "operator-mainnet-execution-test/v3",
+  );
+  const boundReceipt = run.result.value.plan.tradeCommandReceipt;
+  assert.ok(boundReceipt);
+  const boundTakeProfit = boundReceipt.takeProfitPolicy as {
+    readonly mode: string;
+    readonly value: { toString(): string };
+  };
+  assert.equal(boundTakeProfit.mode, "percent");
+  assert.equal(boundTakeProfit.value.toString(), "0.5");
 });
 
 test("U2 profiles match compact success and account-info no-time full fallback", async () => {

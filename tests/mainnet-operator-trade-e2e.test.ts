@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import test from "node:test";
+import test, { type TestContext } from "node:test";
 
 import {
   accountInfoResponse,
@@ -34,9 +34,18 @@ const NOW = Date.parse("2026-10-31T12:00:00.000Z");
 const NOW_ISO = new Date(NOW).toISOString() as UtcTimestamp;
 const RUNTIME = { nodeVersion: "22.22.3", sqliteVersion: "3.51.3" } as const;
 
-function response(result: Record<string, unknown>, time = NOW): Response {
+function response(
+  result: Record<string, unknown>,
+  time = NOW,
+  includeTime = true,
+): Response {
   return new Response(
-    JSON.stringify({ retCode: 0, retMsg: "OK", time, result }),
+    JSON.stringify({
+      retCode: 0,
+      retMsg: "OK",
+      ...(includeTime ? { time } : {}),
+      result,
+    }),
     { status: 200 },
   );
 }
@@ -104,7 +113,10 @@ function orderRows(clientOrderId: string, quantity: string, tp: string) {
   ];
 }
 
-test("U5 production path: INJUSDT .50% command keeps frozen Limit after lower bid and reconciles TP fills", async (t) => {
+async function runOperatorTradeE2e(
+  t: TestContext,
+  accountInfoNoTime: boolean,
+): Promise<void> {
   const root = mkdtempSync(join(tmpdir(), "operator-trade-e2e-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const databasePath = join(root, "mainnet.db");
@@ -187,7 +199,11 @@ test("U5 production path: INJUSDT .50% command keeps frozen Limit after lower bi
           expiredAt: "",
         });
       case "/v5/account/info":
-        return response(structuredClone(accountInfoResponse.result));
+        return response(
+          structuredClone(accountInfoResponse.result),
+          NOW,
+          !accountInfoNoTime,
+        );
       case "/v5/account/wallet-balance":
         return response(structuredClone(walletResponse.result));
       case "/v5/account/fee-rate":
@@ -371,17 +387,40 @@ test("U5 production path: INJUSDT .50% command keeps frozen Limit after lower bi
     credentialProvider,
     openPersistence,
     clock: () => NOW,
-    prepare: (prepareInput: Parameters<typeof prepareMainnetOperatorTest>[0]) =>
-      prepareMainnetOperatorTest(prepareInput, {
+    prepare: async (
+      prepareInput: Parameters<typeof prepareMainnetOperatorTest>[0],
+    ) => {
+      const prepared = await prepareMainnetOperatorTest(prepareInput, {
         credentialProvider,
         openPersistence,
         request,
         utcClock: () => NOW,
-      }),
-    execute: (
+      });
+      assert.equal(createCalls, 0, "preparation must remain GET-only");
+      assert.equal(prepared.ok && prepared.value.exchangeWrites, 0);
+      assert.equal(
+        prepared.ok && prepared.value.exchangeEvidencePath,
+        accountInfoNoTime ? "compact-to-full" : "compact",
+      );
+      return prepared;
+    },
+    execute: async (
       executeInput: Parameters<typeof runMainnetOperatorTestComposition>[0],
-    ) =>
-      runMainnetOperatorTestComposition(executeInput, compositionDependencies),
+    ) => {
+      const executed = await runMainnetOperatorTestComposition(
+        executeInput,
+        compositionDependencies,
+      );
+      assert.equal(executed.ok, true, JSON.stringify(executed));
+      if (executed.ok) {
+        assert.equal(
+          executed.value.exchangeEvidencePath,
+          accountInfoNoTime ? "compact-to-full" : "compact",
+        );
+        assert.equal(executed.value.exchangeWrites, 1);
+      }
+      return executed;
+    },
     status: getCommandStatus,
     monotonicClock: () => performance.now(),
   };
@@ -425,7 +464,7 @@ test("U5 production path: INJUSDT .50% command keeps frozen Limit after lower bi
   assert.equal(createBody!.price, "0.0753");
   assert.equal(createBody!.takeProfit, "0.0757");
   assert.match(tradeText, /^TP_EFFECTIVE_PERCENT=0\.531208499335989/mu);
-  assert.equal(tickerReads, 4);
+  assert.equal(tickerReads, accountInfoNoTime ? 3 : 4);
   const readsAfterTrade = attempts.filter(
     ({ method }) => method === "GET",
   ).length;
@@ -512,4 +551,10 @@ test("U5 production path: INJUSDT .50% command keeps frozen Limit after lower bi
     attempts.some(({ path }) => path === "/v5/order/create"),
     true,
   );
-});
+}
+
+test("U5 production path: INJUSDT .50% command keeps frozen Limit after lower bid and reconciles TP fills", async (t) =>
+  runOperatorTradeE2e(t, false));
+
+test("U5 production path: INJUSDT .50% full-fallback command keeps frozen Limit and reconciles TP fills", async (t) =>
+  runOperatorTradeE2e(t, true));

@@ -128,13 +128,15 @@ or an incident HALT.
 
 Only the explicit local `mainnet:test trade` path may mint a direct-command
 receipt. Its durable receipt binds the local OS-principal hash, configured
-Mainnet account hash, supported symbol, Buy side, supplied allocation and gross
-cap, fixed 1x Buy Limit/GTC policy, attached `+0.20%` Partial/Market/LastPrice
-TP, and a 15-minute local submission window. It contains no credential or raw
-account identifier. The versioned v3 plan and one binding fix the derived
-price, quantity, account and exact CREATE payload; the original instruction
-does not authorize repricing, extra volume, cancellation, recovery or HALT
-clearance.
+Mainnet account hash, requested symbol (which must later match fresh eligible
+Bybit instrument evidence), Buy side, supplied allocation and gross cap,
+selected take-profit mode and value, fixed 1x Buy Limit/GTC policy, and a
+15-minute local submission window. The v3 receipt contains no credential or
+raw account identifier. Existing v1 receipts and v1/v2 legacy plans retain
+their historical fixed `+0.20%` take-profit semantics and hashes. The versioned
+v3 plan and one binding fix the derived price, quantity, account and exact
+CREATE payload; the original instruction does not authorize repricing, extra
+volume, cancellation, recovery or HALT clearance.
 
 This boundary records the local process principal, not authorship of remote
 chat content. An assistant may invoke it only for a specific direct owner

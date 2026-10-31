@@ -928,6 +928,9 @@ export async function runMainnetOperatorTestComposition(
           symbol,
           instrument,
           evaluatedAt: evaluatedAt.value,
+          ...(admitted.authorization.kind === "trade-command"
+            ? { directTrade: true }
+            : {}),
         });
         const { fresh, ages } = await collectOperatorAdmissionEvidence(
           admitted.plan,

@@ -54,10 +54,14 @@ function accountResult(
     ) => boolean)[];
     readonly incompleteReasonCode?: AccountEvidenceFailureCode;
     readonly collectionStatus?: "complete" | "incomplete";
+    readonly configuredSymbols?: readonly string[];
     readonly mutate?: (payload: Record<string, unknown>) => void;
   } = {},
 ): AccountEvidenceCollectionResult {
-  const payload = fixture() as unknown as Record<string, unknown>;
+  const payload = fixture(options.configuredSymbols) as unknown as Record<
+    string,
+    unknown
+  >;
   const environment = options.environment ?? "mainnet";
   payload.accountBinding = {
     ...(payload.accountBinding as Record<string, unknown>),
@@ -149,6 +153,85 @@ test("valid Mainnet facts and exact target reads produce READY, SUPPORTED not LI
   assert.equal(result.accountEvidenceAgeMs, 0);
   assert.ok(result.internalBinding?.accountIdentityHash.startsWith("sha256:"));
   assert.ok(result.internalBinding?.accountEvidenceHash.startsWith("sha256:"));
+});
+
+test("only receipt-bound direct trade readiness admits a configured non-M1 symbol", () => {
+  const directAccount = accountResult({ configuredSymbols: ["INJUSDT"] });
+  const directInstrument = validInstrument("INJUSDT");
+  const legacy = deriveMainnetExecutionReadiness({
+    accountResult: directAccount,
+    symbol: "INJUSDT",
+    instrument: directInstrument,
+    evaluatedAt,
+  });
+  assert.deepEqual(legacy.reasonCodes, ["INVALID_REQUEST"]);
+
+  const direct = deriveMainnetExecutionReadiness({
+    accountResult: directAccount,
+    symbol: "INJUSDT",
+    instrument: directInstrument,
+    evaluatedAt,
+    directTrade: true,
+  });
+  assert.equal(direct.verdict, "READY");
+  assert.deepEqual(direct.reasonCodes, []);
+
+  const mismatchedInstrument = deriveMainnetExecutionReadiness({
+    accountResult: directAccount,
+    symbol: "INJUSDT",
+    instrument: validInstrument("LINKUSDT"),
+    evaluatedAt,
+    directTrade: true,
+  });
+  assert.equal(mismatchedInstrument.verdict, "BLOCKED");
+  assert.ok(
+    mismatchedInstrument.reasonCodes.includes("INSTRUMENT_SYMBOL_MISMATCH"),
+  );
+
+  const unsupportedInstrument = deriveMainnetExecutionReadiness({
+    accountResult: directAccount,
+    symbol: "INJUSDT",
+    instrument: validInstrument("INJUSDT", { status: "PendingOpen" }),
+    evaluatedAt,
+    directTrade: true,
+  });
+  assert.equal(unsupportedInstrument.verdict, "BLOCKED");
+  assert.ok(
+    unsupportedInstrument.reasonCodes.includes("INSTRUMENT_UNSUPPORTED"),
+  );
+
+  const unconfiguredTarget = deriveMainnetExecutionReadiness({
+    accountResult: accountResult(),
+    symbol: "INJUSDT",
+    instrument: directInstrument,
+    evaluatedAt,
+    directTrade: true,
+  });
+  assert.equal(unconfiguredTarget.verdict, "BLOCKED");
+  assert.ok(
+    unconfiguredTarget.reasonCodes.includes("TARGET_SYMBOL_UNCONFIGURED"),
+  );
+
+  const incompleteTargetCoverage = deriveMainnetExecutionReadiness({
+    accountResult: accountResult({
+      configuredSymbols: ["INJUSDT"],
+      incompletePartition: (partition) =>
+        partition.pass === "A" &&
+        partition.endpoint === "positions" &&
+        partition.category === "linear" &&
+        partition.settleCoin === "USDT",
+    }),
+    symbol: "INJUSDT",
+    instrument: directInstrument,
+    evaluatedAt,
+    directTrade: true,
+  });
+  assert.equal(incompleteTargetCoverage.verdict, "BLOCKED");
+  assert.ok(
+    incompleteTargetCoverage.reasonCodes.includes(
+      "REQUIRED_PARTITION_INCOMPLETE",
+    ),
+  );
 });
 
 test("only attributable unrelated auxiliary gaps remain READY and visible", () => {

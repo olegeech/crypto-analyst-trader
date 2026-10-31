@@ -86,7 +86,7 @@ export function execution(
     extraFees: { state: "unavailable", reason: "not-returned" },
   };
 }
-export function fixture() {
+export function fixture(configuredM1Symbols: readonly string[] = ["BTCUSDT"]) {
   const start = "2026-10-02T12:00:00.000Z",
     cutoff = "2026-10-02T12:00:01.000Z",
     end = "2026-10-02T12:00:02.000Z";
@@ -101,7 +101,7 @@ export function fixture() {
     separateInverseWallet: false,
   };
   const expectedPartitions = [
-    ...deriveExpectedAccountEvidencePartitions(["BTCUSDT"], discovery),
+    ...deriveExpectedAccountEvidencePartitions(configuredM1Symbols, discovery),
   ];
   const observations = expectedPartitions.map((partition) => ({
     partition,
@@ -162,7 +162,10 @@ export function fixture() {
     })),
     positions: [],
     orders: [],
-    modeProbes: [{ symbol: "BTCUSDT", positionIndices: [0] }],
+    modeProbes: configuredM1Symbols.map((symbol) => ({
+      symbol,
+      positionIndices: [0],
+    })),
     observations: observations.filter((obs) => obs.partition.pass === label),
   });
   const rowCount = (endpoint: string) =>
@@ -216,7 +219,7 @@ export function fixture() {
       selectionClock: "provider-native",
     },
     collectionStatus: "complete",
-    configuredM1Symbols: ["BTCUSDT"],
+    configuredM1Symbols: [...configuredM1Symbols],
     discovery,
     criticalPasses: { A: pass("A"), B: pass("B") },
     auxiliary: {

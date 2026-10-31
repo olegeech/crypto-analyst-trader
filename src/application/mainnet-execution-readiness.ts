@@ -102,6 +102,8 @@ export interface MainnetExecutionReadinessInput {
   readonly symbol: string;
   readonly instrument: BybitInstrumentInfo | null;
   readonly evaluatedAt: UtcTimestamp;
+  /** Only the receipt-bound v3 direct trade path may opt out of the M1 symbol list. */
+  readonly directTrade?: true;
 }
 
 const mainnetOrigin = BYBIT_MAINNET_ORIGIN;
@@ -479,14 +481,16 @@ export function deriveMainnetExecutionReadiness(
 ): MainnetExecutionReadiness {
   const reasons = new Set<MainnetExecutionReadinessReason>();
   const warnings = new Set<MainnetExecutionReadinessWarning>();
-  if (
-    !closedPlainRecord(input, [
-      "accountResult",
-      "symbol",
-      "instrument",
-      "evaluatedAt",
-    ])
-  ) {
+  const readinessKeys = [
+    "accountResult",
+    "symbol",
+    "instrument",
+    "evaluatedAt",
+    ...(isRecord(input) && Object.hasOwn(input, "directTrade")
+      ? ["directTrade"]
+      : []),
+  ];
+  if (!closedPlainRecord(input, readinessKeys)) {
     return result({
       symbol: "unknown",
       evaluatedAt: INVALID_TIMESTAMP,
@@ -497,7 +501,14 @@ export function deriveMainnetExecutionReadiness(
 
   const symbol = requireIdentifier(input.symbol, "symbol");
   const evaluatedAt = parseUtcTimestamp(input.evaluatedAt);
-  if (!symbol.ok || !isPlanningSymbol(symbol.value) || !evaluatedAt.ok) {
+  const directTrade = input.directTrade === true;
+  if (
+    (!directTrade && Object.hasOwn(input, "directTrade")) ||
+    !symbol.ok ||
+    (!isPlanningSymbol(symbol.value) &&
+      !(directTrade && /^[A-Z0-9]{1,26}USDT$/u.test(symbol.value))) ||
+    !evaluatedAt.ok
+  ) {
     reasons.add("INVALID_REQUEST");
     return result({
       symbol: symbol.ok ? symbol.value : "unknown",
