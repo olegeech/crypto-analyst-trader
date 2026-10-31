@@ -1,11 +1,11 @@
 import type { PlanHash } from "../domain/identity/canonical-serialization.js";
 import type { UtcTimestamp } from "../domain/shared/time.js";
 
-export interface OperatorMainnetTestCreateAuthorizationBinding {
+interface OperatorMainnetTestCreateAuthorizationBindingBase {
+  readonly kind: "approval" | "trade-command";
   readonly operation: "CREATE";
   readonly environment: "mainnet";
   readonly planHash: PlanHash;
-  readonly approvalHash: PlanHash;
   readonly sourceId: string;
   readonly accountIdentityHash: string;
   readonly symbol: string;
@@ -14,6 +14,22 @@ export interface OperatorMainnetTestCreateAuthorizationBinding {
   readonly runId: string;
   readonly expiresAt: UtcTimestamp;
 }
+
+export type OperatorMainnetTestCreateAuthorizationBinding =
+  | (OperatorMainnetTestCreateAuthorizationBindingBase & {
+      readonly kind: "approval";
+      readonly approvalHash: PlanHash;
+      readonly commandId?: never;
+      readonly receiptHash?: never;
+      readonly commandBindingHash?: never;
+    })
+  | (OperatorMainnetTestCreateAuthorizationBindingBase & {
+      readonly kind: "trade-command";
+      readonly approvalHash?: never;
+      readonly commandId: string;
+      readonly receiptHash: PlanHash;
+      readonly commandBindingHash: PlanHash;
+    });
 
 /** Opaque by object identity. A serialized lookalike is never a capability. */
 export type OperatorMainnetTestCreateCapability = object;

@@ -2,6 +2,7 @@ import { userInfo } from "node:os";
 import { hashCanonical } from "../domain/identity/canonical-serialization.js";
 import { domainError } from "../domain/shared/errors.js";
 import { fail, ok, type Result } from "../domain/shared/result.js";
+import type { PlanHash } from "../domain/identity/canonical-serialization.js";
 
 /** OS-derived local operator identity, never an artifact/CLI self-claim. */
 export function localOperatorIdentity(): Result<string> {
@@ -15,4 +16,11 @@ export function localOperatorIdentity(): Result<string> {
   } catch {
     return fail(domainError("INVALID_VALUE", "Operator identity unavailable"));
   }
+}
+
+/** Canonical actor hash bound into issue #147 receipts; contains no raw OS data. */
+export function localOperatorIdentityHash(): Result<PlanHash> {
+  const identity = localOperatorIdentity();
+  if (!identity.ok) return identity;
+  return hashCanonical({ localOperatorIdentity: identity.value });
 }

@@ -24,6 +24,7 @@ import {
 import { BybitPublicMarketMappingError } from "../adapters/bybit-v5/public-market-mappers.js";
 import { openSqlitePersistence } from "../adapters/sqlite/sqlite-persistence.js";
 import type { AccountEvidenceCollectionResult } from "../domain/account/account-evidence-bundle.js";
+import { localOperatorIdentityHash } from "./local-operator.js";
 import {
   canonicalSerialize,
   type PlanHash,
@@ -34,6 +35,12 @@ import {
   validateOperatorMainnetTestApproval,
   type OperatorMainnetTestPlan,
 } from "../domain/execution/operator-mainnet-test-plan.js";
+import {
+  rehydrateOperatorMainnetTradeCommandBinding,
+  rehydrateOperatorMainnetTradeCommandPlan,
+  rehydrateOperatorMainnetTradeCommandReceipt,
+  validateOperatorMainnetTradeCommandBinding,
+} from "../domain/execution/operator-mainnet-trade-command.js";
 import type { OperatorMainnetRecoveryAttestation } from "../domain/execution/operator-mainnet-recovery.js";
 import { domainError } from "../domain/shared/errors.js";
 import { fail, type Result } from "../domain/shared/result.js";
@@ -55,7 +62,9 @@ import type {
   OperatorMainnetTestAuthorizationPort,
 } from "../ports/operator-mainnet-test-authorization.js";
 import type {
+  LegacyMainnetOperatorTestInput,
   MainnetOperatorTestInput,
+  MainnetOperatorTestCompositionInput,
   MainnetOperatorTestOutcome,
 } from "./mainnet-operator-test.js";
 import { executeMainnetOperatorTest } from "./mainnet-operator-test.js";
@@ -120,17 +129,62 @@ function createPrivateCreateIssuer(): {
         binding.environment !== "mainnet"
       )
         return undefined;
+      const expectedFields =
+        binding.kind === "approval"
+          ? [
+              "kind",
+              "operation",
+              "environment",
+              "planHash",
+              "approvalHash",
+              "sourceId",
+              "accountIdentityHash",
+              "symbol",
+              "clientOrderId",
+              "exactPayloadHash",
+              "runId",
+              "expiresAt",
+            ]
+          : [
+              "kind",
+              "operation",
+              "environment",
+              "planHash",
+              "commandId",
+              "receiptHash",
+              "commandBindingHash",
+              "sourceId",
+              "accountIdentityHash",
+              "symbol",
+              "clientOrderId",
+              "exactPayloadHash",
+              "runId",
+              "expiresAt",
+            ];
+      if (
+        Reflect.ownKeys(binding).length !== expectedFields.length ||
+        expectedFields.some((key) => !Object.hasOwn(binding, key))
+      )
+        return undefined;
       const hashes = [
         requireHash(binding.planHash, "planHash"),
-        requireHash(binding.approvalHash, "approvalHash"),
         requireHash(binding.exactPayloadHash, "exactPayloadHash"),
         requireHash(binding.accountIdentityHash, "accountIdentityHash"),
+        ...(binding.kind === "approval"
+          ? [requireHash(binding.approvalHash, "approvalHash")]
+          : [
+              requireHash(binding.receiptHash, "receiptHash"),
+              requireHash(binding.commandBindingHash, "commandBindingHash"),
+            ]),
       ];
       const identifiers = [
         requireIdentifier(binding.sourceId, "sourceId"),
         requireIdentifier(binding.symbol, "symbol"),
         requireIdentifier(binding.clientOrderId, "clientOrderId"),
         requireIdentifier(binding.runId, "runId"),
+        ...(binding.kind === "trade-command"
+          ? [requireIdentifier(binding.commandId, "commandId")]
+          : []),
       ];
       const expiry = parseUtcTimestamp(binding.expiresAt);
       if (
@@ -239,22 +293,86 @@ function providerTime(
   return parsed.ok ? parsed.value : undefined;
 }
 
-function inputIdentity(input: MainnetOperatorTestInput) {
-  const approval = rehydrateOperatorMainnetTestApproval(input.approval);
-  const hash = requireHash(input.approvalHash, "approvalHash");
-  const runId = requireIdentifier(input.runId, "runId");
+function inputIdentity(input: MainnetOperatorTestCompositionInput) {
+  let normalized: MainnetOperatorTestInput;
   if (
-    !approval.ok ||
-    !hash.ok ||
-    !runId.ok ||
-    approval.value.contentHash !== hash.value
+    typeof input === "object" &&
+    input !== null &&
+    !Array.isArray(input) &&
+    Object.hasOwn(input, "authorization")
+  ) {
+    normalized = input as MainnetOperatorTestInput;
+  } else {
+    const legacy = input as LegacyMainnetOperatorTestInput;
+    const approval = rehydrateOperatorMainnetTestApproval(legacy.approval);
+    const hash = requireHash(legacy.approvalHash, "approvalHash");
+    const runId = requireIdentifier(legacy.runId, "runId");
+    if (
+      !approval.ok ||
+      !hash.ok ||
+      !runId.ok ||
+      approval.value.contentHash !== hash.value
+    )
+      return undefined;
+    normalized = {
+      authorization: {
+        kind: "approval",
+        approval: approval.value,
+        approvalHash: hash.value,
+      },
+      runId: runId.value,
+    };
+  }
+  const runId = requireIdentifier(normalized.runId, "runId");
+  if (!runId.ok) return undefined;
+  if (normalized.authorization.kind === "approval") {
+    const approval = rehydrateOperatorMainnetTestApproval(
+      normalized.authorization.approval,
+    );
+    const hash = requireHash(
+      normalized.authorization.approvalHash,
+      "approvalHash",
+    );
+    if (!approval.ok || !hash.ok || approval.value.contentHash !== hash.value)
+      return undefined;
+    const plan = rehydrateOperatorMainnetTestPlan(
+      approval.value.replayInputs.plan,
+    );
+    if (!plan.ok) return undefined;
+    return {
+      input: normalized,
+      authorization: normalized.authorization,
+      plan: plan.value,
+      runId: runId.value,
+    };
+  }
+  const receipt = rehydrateOperatorMainnetTradeCommandReceipt(
+    normalized.authorization.receipt,
+  );
+  const binding = rehydrateOperatorMainnetTradeCommandBinding(
+    normalized.authorization.binding,
+  );
+  const plan = rehydrateOperatorMainnetTradeCommandPlan(normalized.plan);
+  if (
+    !receipt.ok ||
+    !binding.ok ||
+    !plan.ok ||
+    plan.value.contentHash !== binding.value.planHash ||
+    binding.value.commandId !== receipt.value.commandId ||
+    binding.value.receiptHash !== receipt.value.contentHash ||
+    plan.value.commandReceiptHash !== receipt.value.contentHash
   )
     return undefined;
-  const plan = rehydrateOperatorMainnetTestPlan(
-    approval.value.replayInputs.plan,
-  );
-  if (!plan.ok) return undefined;
-  return { approval: approval.value, plan: plan.value, runId: runId.value };
+  return {
+    input: normalized,
+    authorization: {
+      kind: "trade-command" as const,
+      receipt: receipt.value,
+      binding: binding.value,
+    },
+    plan: plan.value as unknown as OperatorMainnetTestPlan,
+    runId: runId.value,
+  };
 }
 
 type ValidatedAdmission = Extract<
@@ -264,7 +382,7 @@ type ValidatedAdmission = Extract<
 
 /** Private production composition: real Keychain, GET-only evidence, and one durable CREATE dispatch. */
 export async function runMainnetOperatorTestComposition(
-  input: MainnetOperatorTestInput,
+  input: MainnetOperatorTestCompositionInput,
 ): Promise<Result<MainnetOperatorTestOutcome>> {
   const getCounts = createMainnetGetCounts();
   const stageStarted = performance.now();
@@ -293,7 +411,12 @@ export async function runMainnetOperatorTestComposition(
   };
   const withCounts = <T>(result: Result<T>, reads: number, writes: number) =>
     withMainnetInvocationMetrics(result, reads, writes, metricsFor(reads));
-  const normalized = inputIdentity(input);
+  let normalized: ReturnType<typeof inputIdentity>;
+  try {
+    normalized = inputIdentity(input);
+  } catch {
+    normalized = undefined;
+  }
   if (!normalized)
     return withCounts(
       failed("APPROVAL_OR_PLAN_INVALID"),
@@ -301,6 +424,18 @@ export async function runMainnetOperatorTestComposition(
       exchangeWrites,
     );
   const admitted = normalized;
+  if (admitted.authorization.kind === "trade-command") {
+    const localActor = localOperatorIdentityHash();
+    if (
+      !localActor.ok ||
+      localActor.value !== admitted.authorization.receipt.actorIdentityHash
+    )
+      return withCounts(
+        failed("LOCAL_OPERATOR_IDENTITY_MISMATCH"),
+        exchangeReads,
+        exchangeWrites,
+      );
+  }
   const wall = Date.now;
   const monotonic = () => performance.now();
   const localClock = {
@@ -403,9 +538,18 @@ export async function runMainnetOperatorTestComposition(
         binding.sourceId,
       );
       if (!halt.ok || !source.ok || !source.value) return false;
+      const authorityMatches =
+        binding.kind === "approval"
+          ? source.value.authorization.kind === "approval" &&
+            source.value.authorization.hash === binding.approvalHash
+          : source.value.authorization.kind === "trade-command" &&
+            source.value.authorization.commandId === binding.commandId &&
+            source.value.authorization.receiptHash === binding.receiptHash &&
+            source.value.authorization.hash === binding.commandBindingHash;
       return Boolean(
         !halt.value.active &&
         !halt.value.reconciliationRequired &&
+        authorityMatches &&
         source.value.intent.operation === "CREATE" &&
         source.value.intent.runId === binding.runId &&
         source.value.source.payloadHash === binding.exactPayloadHash &&
@@ -441,16 +585,24 @@ export async function runMainnetOperatorTestComposition(
         active.ages,
         elapsed,
       );
-      const approvalStillValid = validateOperatorMainnetTestApproval(
-        admitted.approval,
-        admitted.plan,
-        admitted.approval.contentHash,
-        now,
-      );
+      const authorityStillValid =
+        admitted.authorization.kind === "approval"
+          ? validateOperatorMainnetTestApproval(
+              admitted.authorization.approval,
+              admitted.plan,
+              admitted.authorization.approvalHash,
+              now,
+            )
+          : validateOperatorMainnetTradeCommandBinding(
+              admitted.authorization.receipt,
+              admitted.authorization.binding,
+              now,
+              binding.exactPayloadHash,
+            );
       return (
         evidenceStillValid.ok &&
         fresh.ok &&
-        approvalStillValid.ok &&
+        authorityStillValid.ok &&
         issuer.hasClaimedTransportGrant(binding.exactPayloadHash, now) &&
         sourceIsCurrent()
       );
@@ -784,7 +936,7 @@ export async function runMainnetOperatorTestComposition(
       consume: issuer.authorization.consume,
     };
 
-    const result = await executeMainnetOperatorTest(input, {
+    const result = await executeMainnetOperatorTest(admitted.input, {
       persistence: sqlite,
       journal: operatorJournal,
       exchange,
@@ -792,6 +944,7 @@ export async function runMainnetOperatorTestComposition(
       authorization,
       localClock,
       monotonicClock: monotonic,
+      localActorIdentityHash: localOperatorIdentityHash,
     });
     return result.ok
       ? {

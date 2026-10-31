@@ -27,6 +27,11 @@ import {
   createOperatorMainnetTestPlan,
   deriveOperatorMainnetTestSourceId,
 } from "../src/domain/execution/operator-mainnet-test-plan.js";
+import {
+  createOperatorMainnetTradeCommandBinding,
+  createOperatorMainnetTradeCommandPlan,
+  createOperatorMainnetTradeCommandReceipt,
+} from "../src/domain/execution/operator-mainnet-trade-command.js";
 import { createOperatorMainnetRecoveryAttestation } from "../src/domain/execution/operator-mainnet-recovery.js";
 import { recoverMainnetOperatorTest } from "../src/application/mainnet-operator-test-recovery.js";
 import {
@@ -102,6 +107,12 @@ function at(ms: number): UtcTimestamp {
 
 function decimal(value: string): DecimalValue {
   return unwrap(DecimalValue.fromString(value));
+}
+
+function testLocalActorIdentityHash(): PlanHash {
+  return unwrap(
+    hashCanonical({ localOperatorIdentity: "local-operator:test-owner" }),
+  );
 }
 
 function scope(accountId = ACCOUNT): PersistenceScope {
@@ -741,6 +752,10 @@ function setupWithPersistence(
     authorization,
     localClock: { now: () => clock.now },
     monotonicClock: () => 10,
+    localActorIdentityHash: () => ({
+      ok: true as const,
+      value: testLocalActorIdentityHash(),
+    }),
     exchange: {
       async createOrder(request) {
         const sourceId = unwrap(
@@ -771,8 +786,11 @@ function setupWithPersistence(
     },
   };
   const input = {
-    approval: valueApproval,
-    approvalHash: valueApproval.contentHash,
+    authorization: {
+      kind: "approval" as const,
+      approval: valueApproval,
+      approvalHash: valueApproval.contentHash,
+    },
     runId: "operator-run-01",
   };
   return {
@@ -790,6 +808,294 @@ function setupWithPersistence(
     run: () => executeMainnetOperatorTest(input, dependencies),
   };
 }
+
+function setupDirectCommand(
+  options: {
+    readonly nonce?: string;
+    readonly preparedAt?: UtcTimestamp;
+    readonly acceptedAt?: UtcTimestamp;
+    readonly persist?: "none" | "receipt-only" | "receipt-and-binding";
+    readonly payloadHashMismatch?: boolean;
+    readonly forgeInputBinding?: boolean;
+    readonly wrongActorIdentity?: boolean;
+    readonly activeHalt?: boolean;
+    readonly pendingSource?: boolean;
+  } = {},
+) {
+  const legacyHarness = setup({
+    valuePlan: plan({
+      nonce: `direct-base-${options.nonce ?? "success"}`,
+      ...(options.preparedAt === undefined
+        ? {}
+        : { preparedAt: options.preparedAt }),
+    }),
+  });
+  const commandId = `command-${options.nonce ?? "success"}`;
+  const actorIdentityHash = options.wrongActorIdentity
+    ? unwrap(hashCanonical({ localOperatorIdentity: "local-operator:other" }))
+    : testLocalActorIdentityHash();
+  const acceptedAt = options.acceptedAt ?? NOW;
+  const receipt = unwrap(
+    createOperatorMainnetTradeCommandReceipt({
+      commandId,
+      actorIdentityHash,
+      accountIdentityHash: legacyHarness.valuePlan.accountIdentityHash,
+      symbol: legacyHarness.valuePlan.symbol,
+      allocation: "10",
+      grossNotionalCap: "8",
+      maxDeviationBps: "10",
+      acceptedAt,
+    }),
+  );
+  const directPlan = unwrap(
+    createOperatorMainnetTradeCommandPlan({
+      receipt,
+      quote: legacyHarness.valuePlan.quote,
+      warningCodes: legacyHarness.valuePlan.warningCodes,
+      constraints: legacyHarness.valuePlan.constraints,
+      preparedAt: legacyHarness.valuePlan.preparedAt,
+    }),
+  );
+  const directPlanForApplication =
+    directPlan as unknown as OperatorMainnetTestPlan;
+  const create = unwrap(
+    createOperatorMainnetCreateRequest(directPlanForApplication),
+  );
+  const payloadHash = options.payloadHashMismatch
+    ? unwrap(hashCanonical({ not: create.payloadHash }))
+    : create.payloadHash;
+  const binding = unwrap(
+    createOperatorMainnetTradeCommandBinding({
+      receipt,
+      plan: directPlan,
+      createPayloadHash: payloadHash,
+      boundAt: directPlan.preparedAt,
+    }),
+  );
+  const persist = options.persist ?? "receipt-and-binding";
+  if (persist !== "none")
+    unwrap(
+      legacyHarness.journal.persistOperatorMainnetTradeCommandReceipt({
+        receipt,
+        recordedAt: NOW,
+      }),
+    );
+  if (persist === "receipt-and-binding")
+    unwrap(
+      legacyHarness.journal.bindOperatorMainnetTradeCommand({
+        binding,
+        boundAt: binding.boundAt,
+      }),
+    );
+
+  const suppliedBinding = options.forgeInputBinding
+    ? ({
+        ...binding,
+        createPayloadHash: `sha256:${"f".repeat(64)}` as PlanHash,
+      } as unknown)
+    : binding;
+  const input = {
+    authorization: {
+      kind: "trade-command" as const,
+      receipt,
+      binding: suppliedBinding,
+    },
+    plan: directPlan,
+    runId: commandId,
+  };
+  let createCalls = 0;
+  let evidenceCalls = 0;
+  let pendingChecks = 0;
+  let recoveryGrantChecks = 0;
+  const journal = new Proxy(legacyHarness.journal, {
+    get(target, key) {
+      if (key === "findPendingOperatorMainnetTestSource")
+        return () => {
+          pendingChecks += 1;
+          return options.pendingSource
+            ? ({
+                ok: true,
+                value: { sourceId: "operator-mainnet-test:prior-command" },
+              } as never)
+            : target.findPendingOperatorMainnetTestSource();
+        };
+      if (key === "findOperatorMainnetRecoveryGrant")
+        return (
+          ...args: Parameters<typeof target.findOperatorMainnetRecoveryGrant>
+        ) => {
+          recoveryGrantChecks += 1;
+          return target.findOperatorMainnetRecoveryGrant(...args);
+        };
+      const value = Reflect.get(target, key, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+  if (options.activeHalt) {
+    const lease = unwrap(
+      legacyHarness.persistence.acquireLease({
+        scope: legacyHarness.persistence.scope,
+        ownerRunId: "direct-command-halt-fixture",
+        now: NOW,
+        ttlMs: 60_000,
+      }),
+    );
+    unwrap(
+      legacyHarness.persistence.raiseHalt(
+        lease,
+        "operator test active HALT fixture",
+        NOW,
+      ),
+    );
+  }
+  const dependencies: MainnetOperatorTestDependencies = {
+    ...legacyHarness.dependencies,
+    journal,
+    evidence: {
+      collect: async () => {
+        evidenceCalls += 1;
+        return freshEvidence(directPlanForApplication);
+      },
+    },
+    exchange: {
+      async createOrder(request) {
+        createCalls += 1;
+        const sourceId = unwrap(
+          deriveOperatorMainnetTestSourceId(directPlan.contentHash),
+        );
+        const source = unwrap(journal.readOperatorMainnetTestSource(sourceId));
+        assert.equal(source?.intent.operation, "CREATE");
+        assert.equal(source?.source.authorization.kind, "trade-command");
+        assert.equal(
+          source?.source.payloadJson,
+          JSON.stringify(mapCreateOrderRequest(request)),
+        );
+        return {
+          ok: true as const,
+          value: {
+            clientOrderId: directPlan.clientOrderId,
+            exchangeOrderId: "test-command-order-1",
+            acknowledgedAt: NOW,
+            status: "accepted" as const,
+          },
+        };
+      },
+    },
+  };
+  return {
+    ...legacyHarness,
+    directPlan,
+    receipt,
+    binding,
+    input,
+    dependencies,
+    createCalls: () => createCalls,
+    evidenceCalls: () => evidenceCalls,
+    pendingChecks: () => pendingChecks,
+    recoveryGrantChecks: () => recoveryGrantChecks,
+    run: () => executeMainnetOperatorTest(input, dependencies),
+  };
+}
+
+test("direct command dispatches one CREATE through the shared application path", async () => {
+  const harness = setupDirectCommand({ nonce: "positive" });
+  const result = unwrap(await harness.run());
+  assert.equal(result.kind, "attempted");
+  assert.equal(result.attemptOutcome, "accepted");
+  assert.equal(harness.createCalls(), 1);
+  assert.equal(harness.authorization.consumeCalls, 1);
+  const sourceId = unwrap(
+    deriveOperatorMainnetTestSourceId(harness.directPlan.contentHash),
+  );
+  const snapshot = unwrap(
+    harness.journal.readOperatorMainnetTestSource(sourceId),
+  );
+  assert.equal(snapshot?.authorization.kind, "trade-command");
+  assert.equal(snapshot?.intent.commandId, harness.receipt.commandId);
+  assert.equal(
+    snapshot?.intent.commandReceiptHash,
+    harness.receipt.contentHash,
+  );
+  assert.equal(snapshot?.intent.canonicalJson.includes("approvalHash"), false);
+  const replay = unwrap(await harness.run());
+  assert.equal(replay.kind, "recovery");
+  assert.equal(harness.createCalls(), 1);
+  harness.persistence.close();
+});
+
+test("direct command fails closed for forged, expired, unsaved, halted and payload-mismatched authority", async () => {
+  const expiredNow = at(Date.parse(NOW) - 900_001);
+  const expiredPrepared = at(Date.parse(NOW) - 100);
+  const cases = [
+    {
+      label: "forged binding",
+      options: { nonce: "forged", forgeInputBinding: true },
+    },
+    {
+      label: "wrong local operator",
+      options: { nonce: "wrong-actor", wrongActorIdentity: true },
+    },
+    {
+      label: "expired receipt",
+      options: {
+        nonce: "expired",
+        preparedAt: expiredPrepared,
+        acceptedAt: expiredNow,
+      },
+    },
+    {
+      label: "missing saved receipt",
+      options: { nonce: "unsaved", persist: "none" as const },
+    },
+    {
+      label: "missing saved binding",
+      options: { nonce: "receipt-only", persist: "receipt-only" as const },
+    },
+    { label: "active HALT", options: { nonce: "halted", activeHalt: true } },
+    {
+      label: "CREATE payload mismatch",
+      options: { nonce: "payload-mismatch", payloadHashMismatch: true },
+    },
+  ] as const;
+
+  for (const { label, options } of cases) {
+    const harness = setupDirectCommand(options);
+    const result = await harness.run();
+    assert.equal(result.ok, false, label);
+    assert.equal(harness.createCalls(), 0, label);
+    assert.equal(harness.authorization.consumeCalls, 0, label);
+    assert.equal(
+      unwrap(
+        harness.journal.readOperatorMainnetTestSource(
+          unwrap(
+            deriveOperatorMainnetTestSourceId(harness.directPlan.contentHash),
+          ),
+        ),
+      ),
+      undefined,
+      label,
+    );
+    harness.persistence.close();
+  }
+});
+
+test("direct command cannot use pending-source recovery authority", async () => {
+  const harness = setupDirectCommand({
+    nonce: "no-recovery",
+    pendingSource: true,
+  });
+  const result = await harness.run();
+  assert.equal(result.ok, false);
+  if (!result.ok)
+    assert.equal(
+      result.error.details?.reasonCode,
+      "UNRESOLVED_SAME_ACCOUNT_SOURCE_EXISTS",
+    );
+  assert.equal(harness.recoveryGrantChecks(), 0);
+  assert.equal(harness.pendingChecks(), 1);
+  assert.equal(harness.createCalls(), 0);
+  assert.equal(harness.authorization.consumeCalls, 0);
+  harness.persistence.close();
+});
 
 test("one durable exact CREATE intent exists before the only exchange dispatch", async () => {
   const harness = setup();
@@ -1821,9 +2127,12 @@ test("persistence scope mismatch, approval expiry, stale quote and HALT all bloc
   const expiredApproval = approval(expiredPlan, expiredAt);
   const expiredResult = await executeMainnetOperatorTest(
     {
-      ...expiredHarness.input,
-      approval: expiredApproval,
-      approvalHash: expiredApproval.contentHash,
+      authorization: {
+        kind: "approval",
+        approval: expiredApproval,
+        approvalHash: expiredApproval.contentHash,
+      },
+      runId: expiredHarness.input.runId,
     },
     expiredHarness.dependencies,
   );
@@ -2432,8 +2741,11 @@ test("pre-intent evidence failure permits a clean second attended run despite an
   );
   const second = await executeMainnetOperatorTest(
     {
-      approval: secondApproval,
-      approvalHash: secondApproval.contentHash,
+      authorization: {
+        kind: "approval",
+        approval: secondApproval,
+        approvalHash: secondApproval.contentHash,
+      },
       runId: "second-attended-run",
     },
     dependencies,
