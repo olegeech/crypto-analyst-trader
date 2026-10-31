@@ -12,6 +12,11 @@ import {
   deriveOperatorMainnetTestSourceId,
   type OperatorMainnetTestPlan,
 } from "../src/domain/execution/operator-mainnet-test-plan.js";
+import {
+  createOperatorMainnetTradeCommandBinding,
+  createOperatorMainnetTradeCommandPlan,
+  createOperatorMainnetTradeCommandReceipt,
+} from "../src/domain/execution/operator-mainnet-trade-command.js";
 import { createInstrumentConstraints } from "../src/domain/market/instrument-constraints.js";
 import type { PlanHash } from "../src/domain/identity/canonical-serialization.js";
 import {
@@ -112,6 +117,38 @@ const approved = unwrap(
     consent: true,
     approvedAt: NOW,
   }),
+);
+const directReceipt = unwrap(
+  createOperatorMainnetTradeCommandReceipt({
+    commandId: "e1ad1292-7892-4f63-a872-4caabc69fdb9",
+    actorIdentityHash: accountId,
+    accountIdentityHash: accountId,
+    symbol: "BTCUSDT",
+    allocation: "10",
+    grossNotionalCap: "8",
+    maxDeviationBps: "10",
+    acceptedAt: NOW,
+  }),
+);
+const directPlan = unwrap(
+  createOperatorMainnetTradeCommandPlan({
+    receipt: directReceipt,
+    quote: plan.quote,
+    warningCodes: plan.warningCodes,
+    constraints: plan.constraints,
+    preparedAt: NOW,
+  }),
+);
+const directBinding = unwrap(
+  createOperatorMainnetTradeCommandBinding({
+    receipt: directReceipt,
+    plan: directPlan,
+    createPayloadHash: `sha256:${"b".repeat(64)}`,
+    boundAt: NOW,
+  }),
+);
+const directSourceId = unwrap(
+  deriveOperatorMainnetTestSourceId(directPlan.contentHash),
 );
 
 function nativeFilledChild(overrides: Record<string, unknown> = {}) {
@@ -292,34 +329,59 @@ function harness(
     readonly expiredLease?: boolean;
     readonly now?: UtcTimestamp;
     readonly incidentHalt?: boolean;
+    readonly directCommand?: boolean;
   } = {},
 ) {
-  let snapshot: OperatorMainnetTestSnapshot = {
-    source: {
-      sourceId,
-      scope,
-      planHash: plan.contentHash,
-      planArtifactId: `operator-mainnet-test:${plan.contentHash}`,
-      authorization: {
-        kind: "approval",
+  const activePlan = options.directCommand ? directPlan : plan;
+  const activeSourceId = options.directCommand ? directSourceId : sourceId;
+  const sourceAuthorization = options.directCommand
+    ? {
+        kind: "trade-command" as const,
+        hash: directBinding.contentHash,
+        artifactId: "operator-mainnet-trade-command-binding:fixture",
+        commandId: directReceipt.commandId,
+        receiptHash: directReceipt.contentHash,
+        receiptArtifactId: "operator-mainnet-trade-command-receipt:fixture",
+      }
+    : {
+        kind: "approval" as const,
         hash: approved.contentHash,
         artifactId: `operator-mainnet-test-approval:${approved.contentHash}`,
-      },
-      clientOrderId: plan.clientOrderId,
+      };
+  const snapshotAuthorization = options.directCommand
+    ? {
+        kind: "trade-command" as const,
+        hash: directBinding.contentHash,
+        artifactId: "operator-mainnet-trade-command-binding:fixture",
+        commandId: directReceipt.commandId,
+        receiptHash: directReceipt.contentHash,
+        receiptArtifactId: "operator-mainnet-trade-command-receipt:fixture",
+        receipt: directReceipt,
+        binding: directBinding,
+      }
+    : {
+        kind: "approval" as const,
+        hash: approved.contentHash,
+        artifactId: `operator-mainnet-test-approval:${approved.contentHash}`,
+        approval: approved,
+      };
+  let snapshot = {
+    source: {
+      sourceId: activeSourceId,
+      scope,
+      planHash: activePlan.contentHash,
+      planArtifactId: `operator-mainnet-test:${activePlan.contentHash}`,
+      authorization: sourceAuthorization,
+      clientOrderId: activePlan.clientOrderId,
       payloadJson: "{}",
       payloadHash: hash(`sha256:${"b".repeat(64)}`),
       createdAt: NOW,
     },
-    plan,
-    authorization: {
-      kind: "approval",
-      hash: approved.contentHash,
-      artifactId: `operator-mainnet-test-approval:${approved.contentHash}`,
-      approval: approved,
-    },
+    plan: activePlan as unknown as OperatorMainnetTestPlan,
+    authorization: snapshotAuthorization,
     intent: {
       writeIntentId: "intent-1",
-      sourceId,
+      sourceId: activeSourceId,
       operation: "CREATE",
       runId: "operator-run-1",
       canonicalJson: "{}",
@@ -343,9 +405,9 @@ function harness(
       revision: 1,
       reason: "awaiting operator status",
       raisedAt: NOW,
-      reconciliationRequired: true,
+      reconciliationRequired: options.incidentHalt !== false,
     },
-  };
+  } as unknown as OperatorMainnetTestSnapshot;
   const lease = {
     scope,
     ownerRunId: "operator-run-1",
@@ -403,7 +465,7 @@ function harness(
       return ok(record);
     },
     raiseHalt: (haltSourceId: string, reason: string, at: UtcTimestamp) => {
-      assert.equal(haltSourceId, sourceId);
+      assert.equal(haltSourceId, activeSourceId);
       if (!snapshot.halt.active) {
         snapshot = {
           ...snapshot,
@@ -437,7 +499,7 @@ function harness(
     ) =>
       runMainnetOperatorTestStatus(
         {
-          sourceId,
+          sourceId: activeSourceId,
           ...(manualAction === undefined
             ? {}
             : { manualAction, actor: "test-operator" }),
@@ -552,6 +614,33 @@ test("zero entry fill with an open GTC parent is NOT_EXERCISED and cleanup pendi
   assert.equal(result.lifecycleOutcome, "NOT_EXERCISED");
   assert.equal(result.cleanupStatus, "pending");
   assert.equal(result.latestSnapshot.reconciliations.length, 1);
+});
+
+test("legacy accepted CREATE without a visible parent stays UNKNOWN and raises HALT", async () => {
+  const h = harness(ok(observation({})), { incidentHalt: false });
+  const result = unwrap(await h.run());
+  assert.equal(result.lifecycleOutcome, "UNKNOWN");
+  assert.equal(result.cleanupStatus, "verified-clean");
+  assert.equal(result.halt.active, true);
+});
+
+test("direct-command accepted CREATE without a visible parent remains pending without HALT", async () => {
+  const h = harness(ok(observation({})), {
+    incidentHalt: false,
+    directCommand: true,
+  });
+  const result = unwrap(await h.run());
+  const reconciliation = result.latestSnapshot.reconciliations.at(-1);
+  assert.ok(reconciliation);
+  const evidence = JSON.parse(reconciliation.canonicalJson) as {
+    readonly evidence?: Readonly<Record<string, unknown>>;
+  };
+  assert.equal(result.lifecycleOutcome, "PARTIAL_EVIDENCE");
+  assert.equal(result.cleanupStatus, "pending");
+  assert.deepEqual(result.reasons, []);
+  assert.equal(evidence.evidence?.pendingReason, "ACCEPTED_PARENT_NOT_VISIBLE");
+  assert.equal(result.halt.active, false);
+  assert.equal(result.halt.reconciliationRequired, false);
 });
 
 test("fresh REST proof of an unchanged GTC entry remains pending after ten minutes", async () => {

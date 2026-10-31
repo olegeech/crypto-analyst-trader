@@ -17,11 +17,18 @@ import { changedAccountCriticalGroups } from "../domain/account/account-evidence
 import type { AccountEvidenceCollectionResult } from "../domain/account/account-evidence-bundle.js";
 import {
   createOperatorMainnetTestPlan,
+  type OperatorMainnetQuote,
   type OperatorMainnetTestPlan,
 } from "../domain/execution/operator-mainnet-test-plan.js";
+import {
+  createOperatorMainnetTradeCommandPlan,
+  rehydrateOperatorMainnetTradeCommandReceipt,
+} from "../domain/execution/operator-mainnet-trade-command.js";
 import { rehydrateOperatorMainnetRecoveryAttestation } from "../domain/execution/operator-mainnet-recovery.js";
 import { domainError } from "../domain/shared/errors.js";
 import { fail, ok, type Result } from "../domain/shared/result.js";
+import type { InstrumentConstraints } from "../domain/market/instrument-constraints.js";
+import { DecimalValue } from "../domain/shared/decimal.js";
 import {
   parseUtcTimestamp,
   timestampFromEpochMs,
@@ -58,12 +65,14 @@ import {
   type MainnetEvidencePath,
   type MainnetInvocationMetrics,
 } from "./mainnet-composition-helpers.js";
+import { mainnetOperatorTestPersistenceScope } from "./mainnet-operator-test-scope.js";
 
 export interface MainnetOperatorTestPrepareInput {
   readonly symbol: unknown;
   readonly allocation: unknown;
   readonly grossNotionalCap: unknown;
   readonly maxDeviationBps: unknown;
+  readonly tradeCommandReceipt?: unknown;
   readonly recoveryAttestationHash?: unknown;
   readonly recoveryAttestation?: unknown;
 }
@@ -76,16 +85,6 @@ export interface MainnetOperatorTestPreparation extends Omit<
   readonly exchangeReads: number;
   readonly exchangeWrites: 0;
   readonly exchangeStage: "prepare";
-}
-
-function scopeFor(accountId: string) {
-  return {
-    exchange: "bybit" as const,
-    environment: "mainnet" as const,
-    accountId,
-    category: "linear" as const,
-    positionMode: "one-way" as const,
-  };
 }
 
 function failed(
@@ -183,12 +182,38 @@ export async function prepareMainnetOperatorTest(
       metricsFor(reads),
     );
   let exchangeReads = 0;
+  const inputKeys =
+    typeof input === "object" && input !== null && !Array.isArray(input)
+      ? Reflect.ownKeys(input)
+      : [];
+  const baseInputKeys = [
+    "symbol",
+    "allocation",
+    "grossNotionalCap",
+    "maxDeviationBps",
+  ];
+  const validInputShape =
+    (inputKeys.length === baseInputKeys.length &&
+      baseInputKeys.every((key) => inputKeys.includes(key))) ||
+    (inputKeys.length === baseInputKeys.length + 1 &&
+      [...baseInputKeys, "tradeCommandReceipt"].every((key) =>
+        inputKeys.includes(key),
+      )) ||
+    (inputKeys.length === baseInputKeys.length + 2 &&
+      [
+        ...baseInputKeys,
+        "recoveryAttestationHash",
+        "recoveryAttestation",
+      ].every((key) => inputKeys.includes(key)));
+  const hasTradeCommandReceipt =
+    typeof input === "object" &&
+    input !== null &&
+    Object.hasOwn(input, "tradeCommandReceipt");
   if (
     typeof input !== "object" ||
     input === null ||
     Array.isArray(input) ||
-    (Reflect.ownKeys(input).length !== 4 &&
-      Reflect.ownKeys(input).length !== 6) ||
+    !validInputShape ||
     !Object.hasOwn(input, "symbol") ||
     !Object.hasOwn(input, "allocation") ||
     !Object.hasOwn(input, "grossNotionalCap") ||
@@ -202,6 +227,97 @@ export async function prepareMainnetOperatorTest(
     )
   )
     return withCounts(failed("INVALID_INPUT"), exchangeReads, 0);
+
+  const tradeCommandReceipt = hasTradeCommandReceipt
+    ? rehydrateOperatorMainnetTradeCommandReceipt(input.tradeCommandReceipt)
+    : undefined;
+  if (
+    (tradeCommandReceipt !== undefined && !tradeCommandReceipt.ok) ||
+    (hasTradeCommandReceipt &&
+      (Object.hasOwn(input, "recoveryAttestation") ||
+        Object.hasOwn(input, "recoveryAttestationHash")))
+  )
+    return withCounts(
+      failed("TRADE_COMMAND_RECEIPT_INVALID"),
+      exchangeReads,
+      0,
+    );
+
+  if (tradeCommandReceipt?.ok) {
+    const allocation = DecimalValue.fromString(input.allocation as string);
+    const grossNotionalCap = DecimalValue.fromString(
+      input.grossNotionalCap as string,
+    );
+    const maxDeviationBps = DecimalValue.fromString(
+      input.maxDeviationBps as string,
+    );
+    if (
+      !allocation.ok ||
+      !grossNotionalCap.ok ||
+      !maxDeviationBps.ok ||
+      tradeCommandReceipt.value.symbol !== input.symbol ||
+      tradeCommandReceipt.value.allocation.compare(allocation.value) !== 0 ||
+      tradeCommandReceipt.value.grossNotionalCap.compare(
+        grossNotionalCap.value,
+      ) !== 0 ||
+      tradeCommandReceipt.value.maxDeviationBps.compare(
+        maxDeviationBps.value,
+      ) !== 0
+    )
+      return withCounts(
+        failed("TRADE_COMMAND_INSTRUCTION_MISMATCH"),
+        exchangeReads,
+        0,
+      );
+  }
+
+  const makePlan = (planInput: {
+    readonly accountIdentityHash: string;
+    readonly quote: OperatorMainnetQuote;
+    readonly warningCodes: readonly "API_KEY_IP_UNBOUND"[];
+    readonly constraints: InstrumentConstraints;
+    readonly preparedAt: UtcTimestamp;
+  }): Result<OperatorMainnetTestPlan> => {
+    if (tradeCommandReceipt?.ok) {
+      const localNow = timestampFromEpochMs(wall());
+      if (!localNow.ok) return localNow;
+      if (
+        timestampToEpochMs(localNow.value) >=
+        timestampToEpochMs(tradeCommandReceipt.value.expiresAt)
+      )
+        return failed("TRADE_COMMAND_EXPIRED");
+      if (
+        tradeCommandReceipt.value.accountIdentityHash !==
+        planInput.accountIdentityHash
+      )
+        return failed("TRADE_COMMAND_ACCOUNT_MISMATCH");
+      const directPlan = createOperatorMainnetTradeCommandPlan({
+        receipt: tradeCommandReceipt.value,
+        quote: planInput.quote,
+        warningCodes: planInput.warningCodes,
+        constraints: planInput.constraints,
+        preparedAt: planInput.preparedAt,
+      });
+      return directPlan.ok
+        ? ok(directPlan.value as unknown as OperatorMainnetTestPlan)
+        : directPlan;
+    }
+    return createOperatorMainnetTestPlan({
+      accountIdentityHash: planInput.accountIdentityHash,
+      symbol: input.symbol as string,
+      nonce: randomUUID(),
+      allocation: input.allocation as string,
+      grossNotionalCap: input.grossNotionalCap as string,
+      maxDeviationBps: input.maxDeviationBps as string,
+      quote: planInput.quote,
+      warningCodes: planInput.warningCodes,
+      constraints: planInput.constraints,
+      preparedAt: planInput.preparedAt,
+      ...(recoveryAttestationHash?.ok
+        ? { recoveryAttestationHash: recoveryAttestationHash.value }
+        : {}),
+    });
+  };
 
   const recoveryAttestation = Object.hasOwn(input, "recoveryAttestation")
     ? rehydrateOperatorMainnetRecoveryAttestation(input.recoveryAttestation)
@@ -337,20 +453,12 @@ export async function prepareMainnetOperatorTest(
     const quote = await publicMarkets.readOperatorQuote(input.symbol);
     // Exact venue rounding and both entry/exit fees own affordability. Do this
     // before the comparatively expensive target-state reads or persistence.
-    const candidate = createOperatorMainnetTestPlan({
+    const candidate = makePlan({
       accountIdentityHash: accountCheck.value.accountIdentityHash,
-      symbol: input.symbol,
-      nonce: randomUUID(),
-      allocation: input.allocation,
-      grossNotionalCap: input.grossNotionalCap,
-      maxDeviationBps: input.maxDeviationBps,
       quote,
       warningCodes: accountCheck.value.credentialPosture.warnings,
       constraints: instrument.constraints,
       preparedAt: quote.observedAt,
-      ...(recoveryAttestationHash?.ok
-        ? { recoveryAttestationHash: recoveryAttestationHash.value }
-        : {}),
     });
     if (!candidate.ok) return withCounts(candidate, exchangeReads, 0);
     const earlyFeeAge =
@@ -584,20 +692,12 @@ export async function prepareMainnetOperatorTest(
         exchangeReads,
         0,
       );
-    const plan = createOperatorMainnetTestPlan({
+    const plan = makePlan({
       accountIdentityHash,
-      symbol: input.symbol,
-      nonce: randomUUID(),
-      allocation: input.allocation,
-      grossNotionalCap: input.grossNotionalCap,
-      maxDeviationBps: input.maxDeviationBps,
       quote,
       warningCodes,
       constraints: instrument.constraints,
       preparedAt: providerTime.value,
-      ...(recoveryAttestationHash?.ok
-        ? { recoveryAttestationHash: recoveryAttestationHash.value }
-        : {}),
     });
     if (!plan.ok) return withCounts(plan, exchangeReads, 0);
     // Recheck fresh fee/balance evidence at the shared persistence boundary,
@@ -692,7 +792,9 @@ export async function prepareMainnetOperatorTest(
     const persistence = (dependencies.openPersistence ?? openSqlitePersistence)(
       {
         environment: "mainnet",
-        scope: scopeFor(plan.value.accountIdentityHash),
+        scope: mainnetOperatorTestPersistenceScope(
+          plan.value.accountIdentityHash,
+        ),
         clock: { now: () => providerTime.value },
       },
     );

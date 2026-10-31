@@ -1,0 +1,507 @@
+import assert from "node:assert/strict";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import test from "node:test";
+
+import {
+  accountInfoResponse,
+  collateralResponse,
+  tierResponse,
+  walletResponse,
+} from "./fixtures/bybit-account/read-fixtures.js";
+import { openSqlitePersistence } from "../src/adapters/sqlite/sqlite-persistence.js";
+import { configuredBybitAccountIdentityHash } from "../src/adapters/bybit-v5/account-key-mapper.js";
+import {
+  resolveOperatorMainnetSource,
+  resolveOperatorMainnetTradeCommand,
+} from "../src/adapters/sqlite/operator-mainnet-test-lookup.js";
+import { runMainnetOperatorTestComposition } from "../src/application/mainnet-operator-test-composition.js";
+import { prepareMainnetOperatorTest } from "../src/application/mainnet-operator-test-preparation-composition.js";
+import { runMainnetOperatorTestStatusComposition } from "../src/application/mainnet-operator-test-status-composition.js";
+import {
+  readMainnetOperatorTradeCommandStatus,
+  runMainnetOperatorTrade,
+} from "../src/application/mainnet-operator-trade.js";
+import { runMainnetOperatorTestCli } from "../src/cli/mainnet-operator-test.js";
+import { mainnetOperatorTestPersistenceScope } from "../src/application/mainnet-operator-test-scope.js";
+import type { SqlitePersistenceOptions } from "../src/adapters/sqlite/sqlite-persistence.js";
+import type { UtcTimestamp } from "../src/domain/shared/time.js";
+import type { MainnetOperatorTestStatusResult } from "../src/application/mainnet-operator-test-status.js";
+import type { Result } from "../src/domain/shared/result.js";
+
+const NOW = Date.parse("2026-10-31T12:00:00.000Z");
+const NOW_ISO = new Date(NOW).toISOString() as UtcTimestamp;
+const RUNTIME = { nodeVersion: "22.22.3", sqliteVersion: "3.51.3" } as const;
+
+function response(result: Record<string, unknown>, time = NOW): Response {
+  return new Response(
+    JSON.stringify({ retCode: 0, retMsg: "OK", time, result }),
+    { status: 200 },
+  );
+}
+
+function providerTimeResult() {
+  return {
+    timeSecond: String(Math.floor(NOW / 1_000)),
+    timeNano: String(BigInt(NOW) * 1_000_000n),
+  };
+}
+
+function orderRows(clientOrderId: string, quantity: string, tp: string) {
+  return [
+    {
+      orderId: "entry-order-1",
+      orderLinkId: clientOrderId,
+      parentOrderLinkId: "",
+      symbol: "DOGEUSDT",
+      side: "Buy",
+      orderType: "Limit",
+      timeInForce: "GTC",
+      qty: quantity,
+      cumExecQty: quantity,
+      leavesQty: "0",
+      orderStatus: "Filled",
+      price: "0.0753",
+      avgPrice: "0.0753",
+      takeProfit: tp,
+      stopLoss: "0",
+      stopOrderType: "",
+      tpslMode: "Partial",
+      triggerBy: "",
+      tpTriggerBy: "LastPrice",
+      reduceOnly: false,
+      positionIdx: 0,
+      createdTime: String(NOW - 1_000),
+      updatedTime: String(NOW),
+    },
+    {
+      orderId: "tp-order-1",
+      orderLinkId: "",
+      parentOrderLinkId: clientOrderId,
+      symbol: "DOGEUSDT",
+      side: "Sell",
+      orderType: "Market",
+      timeInForce: "IOC",
+      qty: quantity,
+      cumExecQty: quantity,
+      leavesQty: "0",
+      orderStatus: "Filled",
+      price: "0.0755",
+      avgPrice: "0.0755",
+      triggerPrice: tp,
+      takeProfit: "0",
+      stopLoss: "0",
+      stopOrderType: "PartialTakeProfit",
+      tpslMode: "Partial",
+      triggerBy: "LastPrice",
+      tpTriggerBy: "",
+      reduceOnly: true,
+      positionIdx: 0,
+      createdTime: String(NOW - 500),
+      updatedTime: String(NOW),
+    },
+  ];
+}
+
+test("U5 production path: CLI trade keeps frozen Limit after lower bid and reconciles TP fills", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "operator-trade-e2e-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const databasePath = join(root, "mainnet.db");
+  const clock = { now: () => NOW_ISO };
+  const openPersistence = (options: SqlitePersistenceOptions) =>
+    openSqlitePersistence({
+      ...options,
+      databasePath,
+      runtime: RUNTIME,
+      clock,
+    });
+  const credentials = {
+    apiKey: "synthetic-key",
+    apiSecret: "synthetic-secret",
+    accountId: "123",
+  };
+  const credentialProvider = { load: async () => credentials };
+  const attempts: Array<{ method: string; path: string }> = [];
+  let tickerReads = 0;
+  let createCalls = 0;
+  let createBody: Record<string, unknown> | undefined;
+  let created = false;
+  let createdClientOrderId = "";
+  let createdQuantity = "";
+  let createdTakeProfit = "";
+
+  const request: typeof fetch = async (input, init) => {
+    const url =
+      typeof input === "string"
+        ? input
+        : input instanceof URL
+          ? input.toString()
+          : input.url;
+    const target = new URL(url);
+    const method = (
+      init?.method ?? (input instanceof Request ? input.method : "GET")
+    ).toUpperCase();
+    attempts.push({ method, path: target.pathname });
+    if (method === "POST") {
+      assert.equal(target.origin, "https://api.bybit.com");
+      assert.equal(target.pathname, "/v5/order/create");
+      createCalls += 1;
+      const rawBody = init?.body;
+      assert.equal(typeof rawBody, "string");
+      createBody = JSON.parse(rawBody as string) as Record<string, unknown>;
+      assert.equal(createBody.category, "linear");
+      assert.equal(createBody.symbol, "DOGEUSDT");
+      assert.equal(createBody.side, "Buy");
+      assert.equal(createBody.orderType, "Limit");
+      assert.equal(createBody.timeInForce, "GTC");
+      assert.equal(createBody.price, "0.0753");
+      assert.equal(createBody.tpOrderType, "Market");
+      assert.equal(createBody.tpslMode, "Partial");
+      assert.equal(createBody.tpTriggerBy, "LastPrice");
+      assert.equal(createBody.reduceOnly, false);
+      createdClientOrderId = String(createBody.orderLinkId);
+      createdQuantity = String(createBody.qty);
+      createdTakeProfit = String(createBody.takeProfit);
+      created = true;
+      return response({
+        orderId: "entry-order-1",
+        orderLinkId: createdClientOrderId,
+      });
+    }
+    assert.equal(method, "GET", `unexpected provider method ${method}`);
+
+    switch (target.pathname) {
+      case "/v5/market/time":
+        return response(providerTimeResult());
+      case "/v5/user/query-api":
+        return response({
+          userID: 123,
+          readOnly: 0,
+          permissions: {
+            ContractTrade: ["Order", "Position"],
+            Spot: [],
+            Wallet: [],
+          },
+          ips: ["127.0.0.1"],
+          expiredAt: "",
+        });
+      case "/v5/account/info":
+        return response(structuredClone(accountInfoResponse.result));
+      case "/v5/account/wallet-balance":
+        return response(structuredClone(walletResponse.result));
+      case "/v5/account/fee-rate":
+        return response({
+          list: [
+            {
+              symbol: "DOGEUSDT",
+              makerFeeRate: "0.0002",
+              takerFeeRate: "0.001",
+              rpiMakerFeeRate: "",
+            },
+          ],
+        });
+      case "/v5/market/instruments-info": {
+        if (target.searchParams.get("category") === "option")
+          return response({ category: "option", list: [], nextPageCursor: "" });
+        return response({
+          category: "linear",
+          list: [
+            {
+              symbol: "DOGEUSDT",
+              status: "Trading",
+              contractType: "LinearPerpetual",
+              quoteCoin: "USDT",
+              settleCoin: "USDT",
+              priceFilter: {
+                tickSize: "0.0001",
+                minPrice: "0.0001",
+                maxPrice: "1000",
+              },
+              lotSizeFilter: {
+                qtyStep: "1",
+                minOrderQty: "1",
+                maxOrderQty: "1000000",
+                minNotionalValue: "5",
+              },
+            },
+          ],
+          nextPageCursor: "",
+        });
+      }
+      case "/v5/market/tickers": {
+        tickerReads += 1;
+        const bid = tickerReads === 1 ? "0.07537" : "0.07529";
+        const ask = tickerReads === 1 ? "0.07538" : "0.0753";
+        return response({
+          category: "linear",
+          list: [
+            {
+              symbol: "DOGEUSDT",
+              bid1Price: bid,
+              ask1Price: ask,
+              lastPrice: bid,
+            },
+          ],
+        });
+      }
+      case "/v5/account/collateral-info":
+        return response(structuredClone(collateralResponse.result));
+      case "/v5/spot-margin-trade/collateral":
+        return response(structuredClone(tierResponse.result));
+      case "/v5/market/option-base-coins":
+        return response({ list: [{ baseCoin: "ETH", hasSymbol: 0 }] });
+      case "/v5/position/list":
+        return response({
+          category: target.searchParams.get("category"),
+          list:
+            target.searchParams.get("symbol") === "DOGEUSDT"
+              ? [
+                  {
+                    symbol: "DOGEUSDT",
+                    positionIdx: 0,
+                    side: "",
+                    size: "0",
+                    leverage: "1",
+                  },
+                ]
+              : [],
+          nextPageCursor: "",
+        });
+      case "/v5/order/realtime":
+      case "/v5/order/history": {
+        const rows =
+          created && target.searchParams.get("symbol") === "DOGEUSDT"
+            ? orderRows(
+                createdClientOrderId,
+                createdQuantity,
+                createdTakeProfit,
+              )
+            : [];
+        const orderLinkId = target.searchParams.get("orderLinkId");
+        return response({
+          category: target.searchParams.get("category"),
+          list:
+            orderLinkId === null
+              ? rows
+              : rows.filter((row) => row.orderLinkId === orderLinkId),
+          nextPageCursor: "",
+        });
+      }
+      case "/v5/execution/list": {
+        const orderId = target.searchParams.get("orderId");
+        const fills = !created
+          ? []
+          : orderId === "tp-order-1"
+            ? [
+                {
+                  execId: "tp-exec-1",
+                  orderId: "tp-order-1",
+                  orderLinkId: "",
+                  symbol: "DOGEUSDT",
+                  side: "Sell",
+                  execQty: createdQuantity,
+                  execPrice: "0.0755",
+                  execTime: String(NOW),
+                  execFee: "0.0001",
+                  feeCurrency: "USDT",
+                },
+              ]
+            : [
+                {
+                  execId: "entry-exec-1",
+                  orderId: "entry-order-1",
+                  orderLinkId: createdClientOrderId,
+                  symbol: "DOGEUSDT",
+                  side: "Buy",
+                  execQty: createdQuantity,
+                  execPrice: "0.0753",
+                  execTime: String(NOW - 500),
+                  execFee: "0.0001",
+                  feeCurrency: "USDT",
+                },
+              ];
+        return response({
+          category: target.searchParams.get("category"),
+          list: fills,
+          nextPageCursor: "",
+        });
+      }
+      default:
+        throw new Error(
+          `unmatched synthetic provider endpoint ${target.pathname}`,
+        );
+    }
+  };
+
+  const compositionDependencies = {
+    credentialProvider,
+    openPersistence,
+    request,
+    wallClock: () => NOW,
+  };
+  const statusDependencies = {
+    ...compositionDependencies,
+    resolveSource: (sourceId: unknown) =>
+      resolveOperatorMainnetSource(sourceId, { databasePath, clock }),
+  };
+  const getCommandStatus = (
+    statusInput: Parameters<typeof runMainnetOperatorTestStatusComposition>[0],
+  ): Promise<Result<MainnetOperatorTestStatusResult>> =>
+    runMainnetOperatorTestStatusComposition(
+      statusInput,
+      statusDependencies,
+    ) as Promise<Result<MainnetOperatorTestStatusResult>>;
+  const tradeStatus = (commandId: unknown) =>
+    readMainnetOperatorTradeCommandStatus(commandId, {
+      resolveCommand: (id, options) =>
+        resolveOperatorMainnetTradeCommand(id, {
+          ...options,
+          databasePath,
+          clock,
+        }),
+      status: getCommandStatus,
+    });
+  const tradeDependencies = {
+    credentialProvider,
+    openPersistence,
+    clock: () => NOW,
+    prepare: (prepareInput: Parameters<typeof prepareMainnetOperatorTest>[0]) =>
+      prepareMainnetOperatorTest(prepareInput, {
+        credentialProvider,
+        openPersistence,
+        request,
+        utcClock: () => NOW,
+      }),
+    execute: (
+      executeInput: Parameters<typeof runMainnetOperatorTestComposition>[0],
+    ) =>
+      runMainnetOperatorTestComposition(executeInput, compositionDependencies),
+    status: getCommandStatus,
+    monotonicClock: () => performance.now(),
+  };
+
+  const tradeOutput: string[] = [];
+  const tradeCode = await runMainnetOperatorTestCli(
+    [
+      "trade",
+      "--symbol",
+      "DOGEUSDT",
+      "--allocation",
+      "10",
+      "--gross-cap",
+      "10",
+      "--max-deviation-bps",
+      "10",
+    ],
+    {
+      trade: (input, callbacks) =>
+        runMainnetOperatorTrade(input, {
+          ...tradeDependencies,
+          ...callbacks,
+        }),
+      output: {
+        isTTY: false,
+        write: (chunk: string | Uint8Array) => {
+          tradeOutput.push(String(chunk));
+          return true;
+        },
+      } as NodeJS.WritableStream & { readonly isTTY: boolean },
+    },
+  );
+  const tradeText = tradeOutput.join("");
+  assert.equal(tradeCode, 0, tradeText);
+  assert.match(tradeText, /CREATE_OUTCOME=accepted/u);
+  assert.match(tradeText, /LIFECYCLE_OUTCOME=TP_LIFECYCLE_PASS/u);
+  assert.equal(createCalls, 1);
+  assert.ok(createBody);
+  assert.equal(createBody!.price, "0.0753");
+  assert.equal(createBody!.takeProfit, "0.0755");
+  assert.equal(tickerReads, 4);
+  const readsAfterTrade = attempts.filter(
+    ({ method }) => method === "GET",
+  ).length;
+  assert.equal(
+    readsAfterTrade,
+    Number(tradeText.match(/^EXCHANGE_READS_TOTAL=(\d+)$/mu)?.[1]),
+    "trade output must report actual GET attempts across prepare, execute, and immediate status",
+  );
+  assert.ok(
+    attempts.some(
+      ({ method, path }) => method === "POST" && path === "/v5/order/create",
+    ),
+  );
+  assert.equal(attempts.filter(({ method }) => method === "POST").length, 1);
+
+  const commandId = tradeText.match(/^COMMAND_ID=([\w-]+)$/mu)?.[1];
+  assert.ok(commandId, tradeText);
+  const commandStatusOutput: string[] = [];
+  const statusCode = await runMainnetOperatorTestCli(
+    ["status", "--command-id", commandId!],
+    {
+      tradeStatus,
+      output: {
+        isTTY: false,
+        write: (chunk: string | Uint8Array) => {
+          commandStatusOutput.push(String(chunk));
+          return true;
+        },
+      } as NodeJS.WritableStream & { readonly isTTY: boolean },
+    },
+  );
+  const statusText = commandStatusOutput.join("");
+  assert.equal(statusCode, 0, statusText);
+  assert.match(statusText, /COMMAND_STATUS=INTENT_PRESENT/u);
+  assert.match(statusText, /LIFECYCLE_OUTCOME=TP_LIFECYCLE_PASS/u);
+  assert.match(statusText, /CLEANUP_STATUS=verified-clean/u);
+  assert.match(statusText, /ENTRY_REMAINDER_QUANTITY=0/u);
+  assert.equal(
+    attempts.filter(({ method }) => method === "GET").length - readsAfterTrade,
+    Number(statusText.match(/^EXCHANGE_READS=(\d+)$/mu)?.[1]),
+    "command status must report actual GET attempts",
+  );
+  assert.equal(createCalls, 1, "status must not dispatch another CREATE");
+  assert.equal(
+    attempts.filter(({ method }) => method === "POST").length,
+    1,
+    "the entire command-id status path must remain GET-only",
+  );
+
+  const identity = configuredBybitAccountIdentityHash("123", "mainnet");
+  assert.equal(identity.ok, true);
+  if (identity.ok) {
+    const scope = mainnetOperatorTestPersistenceScope(identity.value);
+    const reopened = openPersistence({ environment: "mainnet", scope });
+    assert.equal(reopened.ok, true);
+    if (reopened.ok) {
+      try {
+        const journal = reopened.value.operatorMainnetTest;
+        assert.ok(journal);
+        const command = journal.readOperatorMainnetTradeCommand(commandId!);
+        assert.equal(command.ok, true);
+        assert.equal(command.ok && command.value?.source !== undefined, true);
+        assert.equal(command.ok && command.value?.outcomes.length, 0);
+        const latestReconciliation =
+          command.ok && command.value?.source
+            ? command.value.source.reconciliations.at(-1)
+            : undefined;
+        assert.equal(
+          latestReconciliation?.lifecycleOutcome,
+          "TP_LIFECYCLE_PASS",
+        );
+        assert.equal(latestReconciliation?.cleanupStatus, "verified-clean");
+      } finally {
+        reopened.value.close();
+      }
+    }
+  }
+  assert.ok(created, "the synthetic CREATE acknowledgement was reached");
+  assert.ok(createBody, "the captured immutable CREATE payload exists");
+  assert.match(String(createBody?.orderLinkId), /^omt-[a-f0-9]{32}$/u);
+  assert.equal(createdTakeProfit, "0.0755");
+  assert.equal(createdQuantity, String(createBody?.qty));
+  assert.equal(
+    attempts.some(({ path }) => path === "/v5/order/create"),
+    true,
+  );
+});

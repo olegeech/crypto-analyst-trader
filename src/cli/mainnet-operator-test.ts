@@ -4,6 +4,7 @@ import {
 } from "../application/mainnet-composition-helpers.js";
 import { readFileSync } from "node:fs";
 import { ACCOUNT_CRITICAL_GROUPS } from "../domain/account/account-evidence-consistency.js";
+import { MARKET_EVIDENCE_SYMBOLS } from "../domain/market/market-evidence-bundle.js";
 import { randomUUID } from "node:crypto";
 import { userInfo } from "node:os";
 import process from "node:process";
@@ -16,6 +17,7 @@ import type { PersistenceScope } from "../ports/persistence.js";
 import {
   createOperatorMainnetTestApproval,
   deriveOperatorMainnetTestSourceId,
+  OPERATOR_MAINNET_TRADE_COMMAND_PLAN_SCHEMA_VERSION,
   type OperatorMainnetTestPlan,
 } from "../domain/execution/operator-mainnet-test-plan.js";
 import {
@@ -37,6 +39,12 @@ import {
 } from "../adapters/sqlite/operator-mainnet-test-lookup.js";
 import { openSqlitePersistence } from "../adapters/sqlite/sqlite-persistence.js";
 import { runMainnetOperatorTestStatusComposition } from "../application/mainnet-operator-test-status-composition.js";
+import {
+  readMainnetOperatorTradeCommandStatus,
+  runMainnetOperatorTrade,
+  type MainnetOperatorTradeCommandStatus,
+  type MainnetOperatorTradeOutcome,
+} from "../application/mainnet-operator-trade.js";
 import { prepareMainnetOperatorTest } from "../application/mainnet-operator-test-preparation-composition.js";
 import {
   persistManualOperatorRecoveryAttestation,
@@ -45,11 +53,15 @@ import {
 import { createOperatorMainnetCreateRequest } from "../application/mainnet-entry-evidence.js";
 import { promptVisible, PromptInterruptedError } from "./interactive-prompt.js";
 
+const supportedSymbols = MARKET_EVIDENCE_SYMBOLS.join("|");
+
 export const MAINNET_OPERATOR_TEST_USAGE = `Usage:
-  npm run mainnet:test -- prepare --symbol <BTCUSDT|ETHUSDT|XRPUSDT|DOGEUSDT> --allocation <USDT> --gross-cap <USDT> --max-deviation-bps <bps> [--recovery-source-id <operator-mainnet-test:...> --recovery-inspection-file <path>]
+  npm run mainnet:test -- prepare --symbol <${supportedSymbols}> --allocation <USDT> --gross-cap <USDT> --max-deviation-bps <bps> [--recovery-source-id <operator-mainnet-test:...> --recovery-inspection-file <path>]
+  npm run mainnet:test -- trade --symbol <${supportedSymbols}> --allocation <USDT> --gross-cap <USDT> --max-deviation-bps <bps>
   npm run mainnet:test -- execute --plan-hash <sha256:...>
   npm run mainnet:test -- recover --source-id <operator-mainnet-test:...> --plan-hash <sha256:...> --resolution <api|manual>
-  npm run mainnet:test -- status --source-id <operator-mainnet-test:...>`;
+  npm run mainnet:test -- status --source-id <operator-mainnet-test:...>
+  npm run mainnet:test -- status --command-id <uuid>`;
 
 type InputStream = NodeJS.ReadableStream & { readonly isTTY?: boolean };
 type OutputStream = NodeJS.WritableStream & { readonly isTTY?: boolean };
@@ -72,6 +84,8 @@ export interface MainnetOperatorTestCliDependencies {
     readonly runId: unknown;
   }) => Promise<unknown>;
   readonly status?: typeof runMainnetOperatorTestStatusComposition;
+  readonly trade?: typeof runMainnetOperatorTrade;
+  readonly tradeStatus?: typeof readMainnetOperatorTradeCommandStatus;
   readonly prompt?: typeof promptVisible;
   readonly clock?: () => number;
   readonly actor?: () => string;
@@ -87,6 +101,13 @@ type ParsedCommand =
       readonly recoverySourceId?: string;
       readonly recoveryInspectionFile?: string;
     }
+  | {
+      readonly command: "trade";
+      readonly symbol: string;
+      readonly allocation: string;
+      readonly grossNotionalCap: string;
+      readonly maxDeviationBps: string;
+    }
   | { readonly command: "execute"; readonly planHash: string }
   | {
       readonly command: "recover";
@@ -94,7 +115,8 @@ type ParsedCommand =
       readonly planHash: string;
       readonly resolution: "api-resolved" | "manual-attested";
     }
-  | { readonly command: "status"; readonly sourceId: string };
+  | { readonly command: "status"; readonly sourceId: string }
+  | { readonly command: "trade-status"; readonly commandId: string };
 
 function safe(value: string): string {
   return value
@@ -171,11 +193,45 @@ function parseArgs(argv: readonly string[]): ParsedCommand | undefined {
       return undefined;
     return { command, planHash: values.get("--plan-hash")! };
   }
+  if (command === "trade") {
+    const values = flags(rest);
+    if (
+      !values ||
+      values.size !== 4 ||
+      !values.has("--symbol") ||
+      !values.has("--allocation") ||
+      !values.has("--gross-cap") ||
+      !values.has("--max-deviation-bps") ||
+      [...values.keys()].some(
+        (key) =>
+          ![
+            "--symbol",
+            "--allocation",
+            "--gross-cap",
+            "--max-deviation-bps",
+          ].includes(key),
+      )
+    )
+      return undefined;
+    return {
+      command,
+      symbol: values.get("--symbol")!,
+      allocation: values.get("--allocation")!,
+      grossNotionalCap: values.get("--gross-cap")!,
+      maxDeviationBps: values.get("--max-deviation-bps")!,
+    };
+  }
   if (command === "status") {
     const values = flags(rest);
-    if (!values || values.size !== 1 || !values.has("--source-id"))
-      return undefined;
-    return { command, sourceId: values.get("--source-id")! };
+    if (!values || values.size !== 1) return undefined;
+    if (values.has("--source-id"))
+      return { command, sourceId: values.get("--source-id")! };
+    if (values.has("--command-id"))
+      return {
+        command: "trade-status",
+        commandId: values.get("--command-id")!,
+      };
+    return undefined;
   }
   if (command === "recover") {
     const values = flags(rest);
@@ -927,6 +983,7 @@ function printOperatorFailureDiagnostic(
   reasonCode: string,
   details: Record<string, unknown> | undefined,
   notStarted: boolean,
+  nextActionOverride?: string,
 ): void {
   const diagnostic = operatorFailureDiagnostic(reasonCode, details, notStarted);
   line(output, `EXPLANATION=${diagnostic.explanation}`);
@@ -1004,7 +1061,41 @@ function printOperatorFailureDiagnostic(
     groups
   )
     line(output, `CRITICAL_CHANGED_GROUPS=${groups}`);
-  line(output, `NEXT_ACTION=${diagnostic.nextAction}`);
+  line(output, `NEXT_ACTION=${nextActionOverride ?? diagnostic.nextAction}`);
+}
+
+function printTradeRefusalDiagnostic(
+  output: OutputStream,
+  reasonCode: string,
+  details: Record<string, unknown> | undefined,
+): void {
+  const nextAction =
+    "Resolve the reported condition; this command will not resume. A new trade requires a new explicit instruction.";
+  if (reasonCode === "AVAILABLE_MARGIN_OR_FEE_RESERVE_INSUFFICIENT") {
+    printOperatorCapacityDiagnostic(
+      output,
+      operatorCapacityDiagnostic({
+        error: { details: { reasonCode, ...(details ?? {}) } },
+      }),
+    );
+    line(output, `NEXT_ACTION=${nextAction}`);
+    return;
+  }
+  if (reasonCode === "QUOTE_OUTSIDE_APPROVED_RANGE") {
+    const bid = safeDecimalDetail(details, "quoteBid");
+    const upper = safeDecimalDetail(details, "approvedBidUpper");
+    line(
+      output,
+      "EXPLANATION=The fresh best bid exceeds the upper price bound from this trade instruction.",
+    );
+    line(
+      output,
+      `WHY=${bid && upper ? `Fresh bid ${bid} is above the instruction's upper bound ${upper}.` : "The fresh quote no longer satisfies the instruction's retained upper price bound."}`,
+    );
+    line(output, `NEXT_ACTION=${nextAction}`);
+    return;
+  }
+  printOperatorFailureDiagnostic(output, reasonCode, details, true, nextAction);
 }
 
 function printStatusResult(output: OutputStream, result: unknown): number {
@@ -1049,7 +1140,14 @@ function printStatusResult(output: OutputStream, result: unknown): number {
         readonly source: {
           readonly clientOrderId: string;
           readonly planHash?: string;
-          readonly approvalHash?: string;
+          readonly authorization:
+            | { readonly kind: "approval"; readonly hash: string }
+            | {
+                readonly kind: "trade-command";
+                readonly hash: string;
+                readonly commandId: string;
+                readonly receiptHash: string;
+              };
           readonly payloadHash?: string;
         };
         readonly attempt?: {
@@ -1110,10 +1208,15 @@ function printStatusResult(output: OutputStream, result: unknown): number {
     output,
     `PLAN_HASH=${value.latestSnapshot.source.planHash ?? value.latestSnapshot.plan.contentHash ?? "unknown"}`,
   );
-  line(
-    output,
-    `APPROVAL_HASH=${value.latestSnapshot.source.approvalHash ?? "unknown"}`,
-  );
+  const authorization = value.latestSnapshot.source.authorization;
+  line(output, `AUTHORIZATION_KIND=${authorization.kind}`);
+  if (authorization.kind === "approval") {
+    line(output, `APPROVAL_HASH=${authorization.hash}`);
+  } else {
+    line(output, `COMMAND_BINDING_HASH=${authorization.hash}`);
+    line(output, `COMMAND_ID=${authorization.commandId}`);
+    line(output, `RECEIPT_HASH=${authorization.receiptHash}`);
+  }
   line(
     output,
     `PAYLOAD_HASH=${value.latestSnapshot.source.payloadHash ?? "unknown"}`,
@@ -1134,6 +1237,11 @@ function printStatusResult(output: OutputStream, result: unknown): number {
   line(output, `HALT_ACTIVE=${value.halt.active ? "yes" : "no"}`);
   line(output, `HALT_REVISION=${value.halt.revision}`);
   line(output, `REASONS=${value.reasons.join(",") || "NONE"}`);
+  if (evidenceIdentifier(evidence?.pendingReason))
+    line(
+      output,
+      `PENDING_REASON=${evidenceIdentifier(evidence?.pendingReason)}`,
+    );
   const tpChildren = Array.isArray(evidence?.tpChildren)
     ? evidence.tpChildren
     : [];
@@ -1198,6 +1306,14 @@ function printStatusResult(output: OutputStream, result: unknown): number {
       "NEXT_ACTION=no manual cleanup is indicated by fresh status evidence",
     );
   } else if (
+    evidenceIdentifier(evidence?.pendingReason) ===
+    "ACCEPTED_PARENT_NOT_VISIBLE"
+  ) {
+    line(
+      output,
+      `NEXT_ACTION=Bybit acknowledged CREATE but this read did not find the parent order; inspect Bybit using CLIENT_ORDER_ID=${value.latestSnapshot.source.clientOrderId}, then rerun status --source-id ${value.sourceId}; do not repeat the trade instruction`,
+    );
+  } else if (
     value.lifecycleOutcome === "UNKNOWN" ||
     value.cleanupStatus === "unknown"
   ) {
@@ -1249,6 +1365,215 @@ function hasDurableIntent(
   } finally {
     persistence.value.close();
   }
+}
+
+function printTradeStageMetrics(
+  output: OutputStream,
+  stage: "PREPARE" | "EXECUTE" | "STATUS",
+  metrics: MainnetOperatorTradeOutcome["stages"]["prepare"],
+): void {
+  line(output, `EXCHANGE_READS_${stage}=${countText(metrics?.exchangeReads)}`);
+  line(
+    output,
+    `EXCHANGE_WRITES_${stage}=${countText(metrics?.exchangeWrites)}`,
+  );
+  line(
+    output,
+    `EXCHANGE_STAGE_ELAPSED_MS_${stage}=${countText(metrics?.exchangeStageElapsedMs)}`,
+  );
+  const getCounts = safeMainnetGetCounts(metrics?.exchangeGetCounts);
+  if (getCounts !== undefined)
+    line(output, `EXCHANGE_GET_COUNTS_${stage}=${getCounts}`);
+}
+
+function printTradeCommandStatus(
+  output: OutputStream,
+  result: Result<MainnetOperatorTradeCommandStatus>,
+): number {
+  if (!result.ok) {
+    line(output, "COMMAND_STATUS=UNKNOWN");
+    line(output, `REASON_CODE=${mapErrorCode(result)}`);
+    line(output, `EXCHANGE_READS=${resultCount(result, "exchangeReads")}`);
+    line(output, "EXCHANGE_WRITES=0");
+    line(
+      output,
+      "NEXT_ACTION=inspect the saved command locally; if a source or intent may exist, inspect Bybit before issuing another instruction",
+    );
+    return 5;
+  }
+  const value = result.value;
+  line(output, `COMMAND_ID=${value.commandId}`);
+  line(
+    output,
+    `COMMAND_STATUS=${value.kind.toUpperCase().replaceAll("-", "_")}`,
+  );
+  line(output, `EXCHANGE_READS=${countText(value.exchangeReads)}`);
+  line(output, "EXCHANGE_WRITES=0");
+  if (value.receiptHash) line(output, `RECEIPT_HASH=${value.receiptHash}`);
+  if (value.planHash) line(output, `PLAN_HASH=${value.planHash}`);
+  if (value.sourceId) line(output, `SOURCE_ID=${value.sourceId}`);
+  if (value.clientOrderId)
+    line(output, `CLIENT_ORDER_ID=${value.clientOrderId}`);
+  if (value.reasonCode) line(output, `REASON_CODE=${value.reasonCode}`);
+  if (value.statusFailureCode)
+    line(output, `STATUS_FAILURE_CODE=${value.statusFailureCode}`);
+  if (value.sourceStatus) {
+    return printStatusResult(output, ok(value.sourceStatus));
+  }
+  if (value.kind === "intent-present") {
+    line(
+      output,
+      `NEXT_ACTION=inspect Bybit using CLIENT_ORDER_ID=${value.clientOrderId ?? "unknown"}; rerun mainnet:test status --source-id ${value.sourceId ?? "unknown"}; do not repeat the trade instruction`,
+    );
+    return 5;
+  }
+  if (value.kind === "pre-intent-refused") {
+    printTradeRefusalDiagnostic(
+      output,
+      value.reasonCode ?? "OPERATION_FAILED",
+      value.diagnosticDetails,
+    );
+    return 4;
+  }
+  if (value.kind === "not-found") {
+    line(
+      output,
+      "NEXT_ACTION=verify the command ID and local database selection",
+    );
+    return 4;
+  }
+  if (value.kind.startsWith("interrupted")) {
+    line(
+      output,
+      "NEXT_ACTION=this command will not resume; inspect local command state and Bybit if any intent may exist",
+    );
+    return 5;
+  }
+  line(
+    output,
+    "NEXT_ACTION=inspect the source and Bybit UI before taking any further action",
+  );
+  return 5;
+}
+
+function printTradeOutcome(
+  output: OutputStream,
+  outcome: MainnetOperatorTradeOutcome,
+  commandIdentityAlreadyPrinted = false,
+): number {
+  if (!commandIdentityAlreadyPrinted) {
+    line(output, `COMMAND_ID=${outcome.commandId}`);
+    line(
+      output,
+      `COMMAND_ID_PERSISTENCE=${outcome.receiptSaved ? "SAVED" : "UNSAVED"}`,
+    );
+    if (outcome.receiptHash)
+      line(output, `RECEIPT_HASH=${outcome.receiptHash}`);
+  }
+  if (outcome.planHash) line(output, `PLAN_HASH=${outcome.planHash}`);
+  if (outcome.payloadHash) line(output, `PAYLOAD_HASH=${outcome.payloadHash}`);
+  if (outcome.sourceId) line(output, `SOURCE_ID=${outcome.sourceId}`);
+  if (outcome.clientOrderId)
+    line(output, `CLIENT_ORDER_ID=${outcome.clientOrderId}`);
+  if (outcome.limitPrice) line(output, `LIMIT_PRICE=${outcome.limitPrice}`);
+  if (outcome.quantity) line(output, `QUANTITY=${outcome.quantity}`);
+  if (outcome.takeProfitTrigger)
+    line(output, `TP_TRIGGER=${outcome.takeProfitTrigger}`);
+  if (outcome.preparationQuoteAgeMs !== undefined)
+    line(output, `QUOTE_AGE_AT_PREPARE_MS=${outcome.preparationQuoteAgeMs}`);
+  if (outcome.admissionQuoteAgeAtReadMs !== undefined)
+    line(
+      output,
+      `QUOTE_AGE_AT_ADMISSION_MS=${outcome.admissionQuoteAgeAtReadMs}`,
+    );
+  line(output, `EXECUTION_STAGE=${outcome.kind.toUpperCase()}`);
+  if (outcome.stoppedAt) line(output, `STOPPED_AT=${outcome.stoppedAt}`);
+  if (outcome.reasonCode) line(output, `REASON_CODE=${outcome.reasonCode}`);
+  if (outcome.execution?.attemptOutcome)
+    line(output, `CREATE_OUTCOME=${outcome.execution.attemptOutcome}`);
+  if (outcome.execution?.attemptJournaled !== undefined)
+    line(
+      output,
+      `ATTEMPT_JOURNALED=${outcome.execution.attemptJournaled ? "YES" : "NO"}`,
+    );
+  if (outcome.immediateStatus) {
+    line(
+      output,
+      `LIFECYCLE_OUTCOME=${outcome.immediateStatus.lifecycleOutcome}`,
+    );
+    line(output, `CLEANUP_STATUS=${outcome.immediateStatus.cleanupStatus}`);
+    line(
+      output,
+      `HALT=${outcome.immediateStatus.halt.active || outcome.immediateStatus.halt.reconciliationRequired ? "ACTIVE" : "CLEAR"}`,
+    );
+  }
+  if (outcome.executionStatusFailureCode)
+    line(
+      output,
+      `EXECUTION_FAILURE_CODE=${outcome.executionStatusFailureCode}`,
+    );
+  if (outcome.immediateStatusFailureCode)
+    line(output, `STATUS_FAILURE_CODE=${outcome.immediateStatusFailureCode}`);
+  printTradeStageMetrics(output, "PREPARE", outcome.stages.prepare);
+  printTradeStageMetrics(output, "EXECUTE", outcome.stages.execute);
+  printTradeStageMetrics(output, "STATUS", outcome.stages.status);
+  line(output, `EXCHANGE_READS_TOTAL=${countText(outcome.exchangeReads)}`);
+  line(output, `EXCHANGE_WRITES_TOTAL=${countText(outcome.exchangeWrites)}`);
+  line(output, `TOTAL_ELAPSED_MS=${countText(outcome.elapsedMs)}`);
+  line(output, "OPERATOR_PROMPTS=0");
+  line(output, "OPERATOR_PROMPT_WAIT_MS=0");
+  line(output, "KEYCHAIN_INTERACTION_TIME=UNMEASURED");
+  if (outcome.kind === "blocked") {
+    line(output, "EXECUTION_NOT_STARTED=YES");
+    printTradeRefusalDiagnostic(
+      output,
+      outcome.reasonCode ?? "OPERATION_FAILED",
+      outcome.diagnosticDetails,
+    );
+    return 4;
+  }
+  if (outcome.kind === "unknown" || outcome.kind === "recovery") {
+    line(
+      output,
+      `NEXT_ACTION=run mainnet:test status --command-id ${outcome.commandId}; inspect Bybit orders, fills and position before any new instruction; never resend this command`,
+    );
+    return 5;
+  }
+  if (
+    outcome.execution?.attemptOutcome === "ambiguous" ||
+    outcome.immediateStatus?.halt.active ||
+    outcome.immediateStatus?.halt.reconciliationRequired
+  ) {
+    line(
+      output,
+      "NEXT_ACTION=the CREATE result is ambiguous or an incident HALT remains active; inspect Bybit orders, fills and position using CLIENT_ORDER_ID; run GET-only status if needed; do not repeat the trade instruction or clear HALT",
+    );
+    return 5;
+  }
+  if (outcome.execution?.attemptOutcome === "rejected") {
+    line(
+      output,
+      "NEXT_ACTION=review the recorded exchange rejection; do not repeat automatically",
+    );
+    return 4;
+  }
+  if (
+    outcome.immediateStatus?.lifecycleOutcome === "UNKNOWN" ||
+    outcome.immediateStatusFailureCode
+  ) {
+    line(
+      output,
+      `NEXT_ACTION=run mainnet:test status --command-id ${outcome.commandId}; inspect Bybit if status remains unknown; do not repeat the trade`,
+    );
+    return 5;
+  }
+  line(
+    output,
+    outcome.immediateStatus?.cleanupStatus === "verified-clean"
+      ? "NEXT_ACTION=no cleanup is indicated by the latest status evidence"
+      : `NEXT_ACTION=the GTC order may remain open or partially filled; run mainnet:test status --command-id ${outcome.commandId} later or inspect Bybit; do not repeat the trade`,
+  );
+  return 0;
 }
 
 export async function runMainnetOperatorTestCli(
@@ -1424,6 +1749,91 @@ export async function runMainnetOperatorTestCli(
     }
   }
 
+  if (parsed.command === "trade") {
+    line(output, "STAGE=ONE_INSTRUCTION_BOUNDED_TRADE");
+    line(output, `SYMBOL=${parsed.symbol}`);
+    line(output, `ALLOCATION_USDT=${parsed.allocation}`);
+    line(output, `GROSS_CAP_USDT=${parsed.grossNotionalCap}`);
+    line(output, "SIDE=Buy");
+    line(output, "ORDER=Limit/GTC/1x/Linear/OneWay");
+    line(output, "TAKE_PROFIT=+0.20%/Partial/Market/LastPrice");
+    line(output, "STOP_LOSS=none");
+    line(
+      output,
+      "AUTHORIZATION=one explicit local instruction; no second prompt",
+    );
+    let commandIdPrinted = false;
+    let result: Awaited<ReturnType<typeof runMainnetOperatorTrade>>;
+    try {
+      result = await (dependencies.trade ?? runMainnetOperatorTrade)(
+        {
+          symbol: parsed.symbol,
+          allocation: parsed.allocation,
+          grossNotionalCap: parsed.grossNotionalCap,
+          maxDeviationBps: parsed.maxDeviationBps,
+        },
+        {
+          onCommandIdGenerated: (commandId) => {
+            commandIdPrinted = true;
+            line(output, `COMMAND_ID=${commandId}`);
+            line(output, "COMMAND_ID_PERSISTENCE=UNSAVED");
+          },
+          onReceiptSaved: (receipt) => {
+            line(output, "COMMAND_ID_PERSISTENCE=SAVED");
+            line(output, `RECEIPT_HASH=${receipt.contentHash}`);
+          },
+        },
+      );
+    } catch {
+      line(output, "EXECUTION_NOT_STARTED=UNKNOWN");
+      line(output, "REASON_CODE=TRADE_RESULT_UNKNOWN");
+      line(output, "EXCHANGE_READS=UNKNOWN");
+      line(output, "EXCHANGE_WRITES=UNKNOWN");
+      line(
+        output,
+        "NEXT_ACTION=inspect local command status and Bybit before another instruction; do not retry automatically",
+      );
+      return 5;
+    }
+    if (!result.ok) {
+      if (!commandIdPrinted) line(output, "COMMAND_ID=NOT_GENERATED");
+      line(output, "VERDICT=BLOCKED");
+      line(output, `REASON_CODE=${mapErrorCode(result)}`);
+      line(output, "EXECUTION_NOT_STARTED=YES");
+      line(output, `EXCHANGE_READS=${resultCount(result, "exchangeReads")}`);
+      line(output, `EXCHANGE_WRITES=${resultCount(result, "exchangeWrites")}`);
+      const errorRecord = evidenceRecord(evidenceRecord(result)?.error);
+      printOperatorFailureDiagnostic(
+        output,
+        mapErrorCode(result),
+        evidenceRecord(errorRecord?.details),
+        true,
+      );
+      return 4;
+    }
+    const outcome = result.value;
+    return printTradeOutcome(output, outcome, commandIdPrinted);
+  }
+
+  if (parsed.command === "trade-status") {
+    line(output, "STAGE=LOCAL_COMMAND_LOOKUP_THEN_READ_ONLY_STATUS");
+    let result: Awaited<
+      ReturnType<typeof readMainnetOperatorTradeCommandStatus>
+    >;
+    try {
+      result = await (
+        dependencies.tradeStatus ?? readMainnetOperatorTradeCommandStatus
+      )(parsed.commandId);
+    } catch {
+      line(output, "COMMAND_STATUS=UNKNOWN");
+      line(output, "REASON_CODE=COMMAND_STATUS_FAILED_CLOSED");
+      line(output, "EXCHANGE_READS=UNKNOWN");
+      line(output, "EXCHANGE_WRITES=0");
+      return 5;
+    }
+    return printTradeCommandStatus(output, result);
+  }
+
   if (parsed.command === "recover") {
     if (!input.isTTY || !output.isTTY) {
       line(output, "VERDICT=DECLINED");
@@ -1459,6 +1869,20 @@ export async function runMainnetOperatorTestCli(
     }
     const snapshot = source.value.snapshot;
     const savedPlan = plan.value.plan;
+    if (
+      savedPlan.schemaVersion ===
+      OPERATOR_MAINNET_TRADE_COMMAND_PLAN_SCHEMA_VERSION
+    ) {
+      line(output, "VERDICT=BLOCKED");
+      line(output, "REASON_CODE=DIRECT_COMMAND_PLAN_NOT_ELIGIBLE");
+      line(output, "EXCHANGE_READS=0");
+      line(output, "EXCHANGE_WRITES=0");
+      line(
+        output,
+        "NEXT_ACTION=direct trade commands cannot authorize recovery; use a separately prepared legacy recovery plan",
+      );
+      return 4;
+    }
     if (
       source.value.scope.accountId !== plan.value.scope.accountId ||
       source.value.scope.exchange !== plan.value.scope.exchange ||
@@ -1677,6 +2101,19 @@ export async function runMainnetOperatorTestCli(
       return 4;
     }
     const { scope, plan } = resolved.value;
+    if (
+      plan.schemaVersion === OPERATOR_MAINNET_TRADE_COMMAND_PLAN_SCHEMA_VERSION
+    ) {
+      line(output, "VERDICT=BLOCKED");
+      line(output, "REASON_CODE=DIRECT_COMMAND_PLAN_NOT_ELIGIBLE");
+      line(output, "EXCHANGE_READS=0");
+      line(output, "EXCHANGE_WRITES=0");
+      line(
+        output,
+        "NEXT_ACTION=use mainnet:test status --command-id for this single-use trade; a new recovery requires its separate authorized legacy workflow",
+      );
+      return 4;
+    }
     const sourceIdResult = deriveOperatorMainnetTestSourceId(plan.contentHash);
     if (!sourceIdResult.ok) {
       line(output, "VERDICT=BLOCKED");

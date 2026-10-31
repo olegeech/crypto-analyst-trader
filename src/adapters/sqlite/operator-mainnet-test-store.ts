@@ -13,6 +13,7 @@ import {
 } from "../../domain/identity/canonical-serialization.js";
 import {
   deriveOperatorMainnetTestSourceId,
+  OPERATOR_MAINNET_TRADE_COMMAND_PLAN_SCHEMA_VERSION,
   rehydrateOperatorMainnetTestApproval,
   rehydrateOperatorMainnetTestPlan,
   validateOperatorMainnetTestApproval,
@@ -78,6 +79,7 @@ import type {
   PersistOperatorMainnetTradeCommandReceiptRequest,
   RecordOperatorMainnetTestAttemptRequest,
 } from "../../ports/operator-mainnet-test-persistence.js";
+import { OPERATOR_MAINNET_TRADE_COMMAND_DIAGNOSTIC_FIELDS } from "../../ports/operator-mainnet-test-persistence.js";
 import type { HaltState, PersistenceScope } from "../../ports/persistence.js";
 import type { SqliteConnection } from "./connection.js";
 import {
@@ -139,17 +141,9 @@ const TRADE_COMMAND_OUTCOME_STAGES = [
   "binding",
   "admission",
 ] as const;
-const TRADE_COMMAND_DIAGNOSTIC_KEYS = new Set([
-  "reason",
-  "symbol",
-  "availableBalance",
-  "requiredAmount",
-  "shortfall",
-  "quoteBid",
-  "quoteAsk",
-  "quoteAgeMs",
-  "stage",
-]);
+const TRADE_COMMAND_DIAGNOSTIC_KEYS = new Set<string>(
+  OPERATOR_MAINNET_TRADE_COMMAND_DIAGNOSTIC_FIELDS,
+);
 
 function isTradeCommandOutcomeStage(
   value: unknown,
@@ -1584,6 +1578,16 @@ export class SqliteOperatorMainnetTestStore implements OperatorMainnetTestPersis
             domainError(
               "PERSISTENCE_CONFLICT",
               "recovery plan must be a different saved plan for this exact account",
+            ),
+          );
+        if (
+          plan.value.schemaVersion ===
+          OPERATOR_MAINNET_TRADE_COMMAND_PLAN_SCHEMA_VERSION
+        )
+          return fail(
+            domainError(
+              "PERSISTENCE_CONFLICT",
+              "direct trade-command plans cannot authorize recovery grants",
             ),
           );
         const pending = this.pendingSourceRows(database);
@@ -3323,6 +3327,9 @@ export class SqliteOperatorMainnetTestStore implements OperatorMainnetTestPersis
   ): Result<OperatorMainnetTestSnapshot> {
     const runId = requireIdentifier(request.runId, "runId");
     const at = parseUtcTimestamp(request.preparedAt);
+    const authorizationAt = parseUtcTimestamp(
+      request.tradeCommand.authorizationAt,
+    );
     const receipt = rehydrateOperatorMainnetTradeCommandReceipt(
       request.tradeCommand.receipt,
     );
@@ -3333,6 +3340,7 @@ export class SqliteOperatorMainnetTestStore implements OperatorMainnetTestPersis
     if (
       !runId.ok ||
       !at.ok ||
+      !authorizationAt.ok ||
       !receipt.ok ||
       !binding.ok ||
       !plan.ok ||
@@ -3351,7 +3359,7 @@ export class SqliteOperatorMainnetTestStore implements OperatorMainnetTestPersis
     const currentBinding = validateOperatorMainnetTradeCommandBinding(
       receipt.value,
       binding.value,
-      at.value,
+      authorizationAt.value,
       request.payloadHash,
     );
     if (!currentBinding.ok) return currentBinding;

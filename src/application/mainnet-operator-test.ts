@@ -120,6 +120,7 @@ export interface MainnetOperatorTestOutcome extends Partial<MainnetInvocationMet
   readonly attemptOutcome?: OperatorMainnetTestAttemptOutcome;
   readonly attemptJournaled: boolean;
   readonly reasonCode?: string;
+  readonly admissionQuoteAgeAtReadMs?: number;
   /** Production composition counts actual Mainnet HTTP requests per invocation. */
   readonly exchangeReads?: number;
   readonly exchangeWrites?: number;
@@ -292,7 +293,8 @@ function validateAuthorizationInput(
 function currentAuthorizationValid(
   authorization: ValidatedAuthorization,
   plan: OperatorMainnetTestPlan,
-  now: UtcTimestamp,
+  providerNow: UtcTimestamp,
+  localNow: UtcTimestamp,
   payloadHash?: PlanHash,
 ): Result<void> {
   if (authorization.kind === "approval") {
@@ -300,14 +302,14 @@ function currentAuthorizationValid(
       authorization.approval,
       plan,
       authorization.approvalHash,
-      now,
+      providerNow,
     );
     return valid.ok ? ok(undefined) : fail(valid.error);
   }
   const valid = validateOperatorMainnetTradeCommandBinding(
     authorization.receipt,
     authorization.binding,
-    now,
+    localNow,
     payloadHash,
   );
   if (!valid.ok) return fail(valid.error);
@@ -434,6 +436,7 @@ function recovery(
   reasonCode: string,
   attemptOutcome?: OperatorMainnetTestAttemptOutcome,
   attemptJournaled = false,
+  admissionQuoteAgeAtReadMs?: number,
 ): MainnetOperatorTestOutcome {
   return Object.freeze({
     kind: "recovery",
@@ -441,6 +444,9 @@ function recovery(
     clientOrderId,
     ...(attemptOutcome === undefined ? {} : { attemptOutcome }),
     attemptJournaled,
+    ...(admissionQuoteAgeAtReadMs === undefined
+      ? {}
+      : { admissionQuoteAgeAtReadMs }),
     reasonCode,
   });
 }
@@ -558,6 +564,13 @@ export async function executeMainnetOperatorTest(
         : undefined;
   const providerTime = parseUtcTimestamp(evidenceTime);
   if (!providerTime.ok) return blocked("PROVIDER_TIME_INVALID");
+  let currentLocalTime: Result<UtcTimestamp>;
+  try {
+    currentLocalTime = parseUtcTimestamp(dependencies.localClock.now());
+  } catch {
+    return blocked("LOCAL_TIME_INVALID");
+  }
+  if (!currentLocalTime.ok) return blocked("LOCAL_TIME_INVALID");
   const create = createOperatorMainnetCreateRequest(plan);
   if (!create.ok) return create;
   const exactPayload = payloadFor(create.value.request);
@@ -576,6 +589,7 @@ export async function executeMainnetOperatorTest(
     authorization,
     plan,
     providerTime.value,
+    currentLocalTime.value,
     approvedPayloadHash.value as PlanHash,
   );
   if (!currentAuthorization.ok) return currentAuthorization;
@@ -629,6 +643,18 @@ export async function executeMainnetOperatorTest(
   if (typeof capability !== "object" || capability === null)
     return blocked("CREATE_AUTHORIZATION_UNAVAILABLE");
 
+  let tradeCommandAuthorizationAt: UtcTimestamp | undefined;
+  if (authorization.kind === "trade-command") {
+    let authorizationAt: Result<UtcTimestamp>;
+    try {
+      authorizationAt = parseUtcTimestamp(dependencies.localClock.now());
+    } catch {
+      return blocked("LOCAL_TIME_RECHECK_UNAVAILABLE");
+    }
+    if (!authorizationAt.ok) return blocked("LOCAL_TIME_RECHECK_UNAVAILABLE");
+    tradeCommandAuthorizationAt = authorizationAt.value;
+  }
+
   const prepared =
     authorization.kind === "approval"
       ? dependencies.journal.prepareCreateIntent({
@@ -648,6 +674,7 @@ export async function executeMainnetOperatorTest(
           tradeCommand: {
             receipt: authorization.receipt,
             binding: authorization.binding,
+            authorizationAt: tradeCommandAuthorizationAt!,
           },
           payloadJson: create.value.payloadJson,
           payloadHash: approvedPayloadHash.value as PlanHash,
@@ -673,7 +700,16 @@ export async function executeMainnetOperatorTest(
   const rejectAfterIntent = (
     reasonCode: string,
   ): Result<MainnetOperatorTestOutcome> => {
-    return ok(recovery(sourceId.value, plan.clientOrderId, reasonCode));
+    return ok(
+      recovery(
+        sourceId.value,
+        plan.clientOrderId,
+        reasonCode,
+        undefined,
+        false,
+        evidence.value.quoteAgeAtReadMs,
+      ),
+    );
   };
 
   const elapsed = elapsedNow();
@@ -684,10 +720,19 @@ export async function executeMainnetOperatorTest(
   );
   if (!currentProviderTime.ok)
     return rejectAfterIntent("PROVIDER_TIME_RECHECK_UNAVAILABLE");
+  let currentLocalNow: Result<UtcTimestamp>;
+  try {
+    currentLocalNow = parseUtcTimestamp(dependencies.localClock.now());
+  } catch {
+    return rejectAfterIntent("LOCAL_TIME_RECHECK_UNAVAILABLE");
+  }
+  if (!currentLocalNow.ok)
+    return rejectAfterIntent("LOCAL_TIME_RECHECK_UNAVAILABLE");
   const authorizationStillValid = currentAuthorizationValid(
     authorization,
     plan,
     currentProviderTime.value,
+    currentLocalNow.value,
     approvedPayloadHash.value as PlanHash,
   );
   const freshEnough = revalidateMainnetOperatorEvidenceAge(
@@ -720,7 +765,9 @@ export async function executeMainnetOperatorTest(
     !dependencies.authorization.consume(
       capability,
       binding,
-      currentProviderTime.value,
+      authorization.kind === "approval"
+        ? currentProviderTime.value
+        : currentLocalNow.value,
     )
   )
     return rejectAfterIntent("CREATE_CAPABILITY_INVALID_OR_CONSUMED");
@@ -784,6 +831,7 @@ export async function executeMainnetOperatorTest(
       clientOrderId: plan.clientOrderId,
       attemptOutcome: classified.outcome,
       attemptJournaled: true,
+      admissionQuoteAgeAtReadMs: evidence.value.quoteAgeAtReadMs,
       ...(classified.providerReasonCode === undefined
         ? {}
         : { reasonCode: classified.providerReasonCode }),

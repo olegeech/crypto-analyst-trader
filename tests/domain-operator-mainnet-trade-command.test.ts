@@ -187,6 +187,28 @@ test("receipt and v3 plan freeze one scoped command before deterministic derivat
   assert.equal(receiptReplay.contentHash, commandReceipt.contentHash);
 });
 
+test("provider plan time may precede local command acceptance under clock skew", () => {
+  const commandReceipt = value(receipt());
+  const plan = commandPlan(commandReceipt, {
+    quote: quote({
+      observedAt: "2026-10-31T09:59:59.980Z",
+      collectionStartedAt: "2026-10-31T09:59:59.970Z",
+      collectionCompletedAt: "2026-10-31T09:59:59.990Z",
+    }),
+    preparedAt: "2026-10-31T10:00:00.000Z",
+  });
+
+  assert.equal(plan.ok, true);
+  if (!plan.ok) return;
+  assert.ok(plan.value.preparedAt < commandReceipt.acceptedAt);
+  const replayed = rehydrateOperatorMainnetTradeCommandPlan(plan.value);
+  assert.equal(
+    replayed.ok,
+    true,
+    replayed.ok ? undefined : JSON.stringify(replayed.error),
+  );
+});
+
 test("receipt, plan and binding reject unknown, malformed, expired and mismatched authority", () => {
   const commandReceipt = value(receipt());
   const plan = value(commandPlan(commandReceipt));

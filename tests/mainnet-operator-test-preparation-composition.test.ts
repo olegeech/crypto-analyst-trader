@@ -5,6 +5,11 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openSqlitePersistence } from "../src/adapters/sqlite/sqlite-persistence.js";
+import { configuredBybitAccountIdentityHash } from "../src/adapters/bybit-v5/account-key-mapper.js";
+import {
+  createOperatorMainnetTradeCommandReceipt,
+  type OperatorMainnetTradeCommandReceipt,
+} from "../src/domain/execution/operator-mainnet-trade-command.js";
 import {
   createOperatorMainnetRecoveryAttestation,
   type OperatorMainnetRecoveryAttestation,
@@ -72,6 +77,8 @@ async function prepare(options: {
   accountInfoStatus?: 5 | 6;
   accountInfoNoTime?: boolean;
   accountInfoUpdatedTime?: string;
+  tradeCommandReceipt?: OperatorMainnetTradeCommandReceipt;
+  quoteBid?: string;
   stageCostPerAttemptMs?: number;
   failPositionRead?: boolean;
   failOpenOrdersRead?: boolean;
@@ -109,6 +116,9 @@ async function prepare(options: {
             recoveryAttestation: options.recoveryAttestation,
           }
         : {}),
+      ...(options.tradeCommandReceipt === undefined
+        ? {}
+        : { tradeCommandReceipt: options.tradeCommandReceipt }),
     },
     {
       utcClock: () => now,
@@ -292,9 +302,9 @@ async function prepare(options: {
               list: [
                 {
                   symbol: input.symbol,
-                  bid1Price: "0.1",
+                  bid1Price: options.quoteBid ?? "0.1",
                   ask1Price: "0.1001",
-                  lastPrice: "0.1",
+                  lastPrice: options.quoteBid ?? "0.1",
                 },
               ],
             };
@@ -531,6 +541,72 @@ test("prepare with sufficient fresh funds reaches persistence through production
   }
   assert.equal(run.paths.filter((p) => p === "/v5/account/fee-rate").length, 1);
   assert.equal(run.paths.includes("/v5/order/history"), false);
+});
+
+test("direct command preparation persists a v3 plan through production GET mappers", async () => {
+  const accountIdentity = configuredBybitAccountIdentityHash("123", "mainnet");
+  const actorIdentity = hashCanonical({ localOperatorIdentity: "test-owner" });
+  assert.equal(accountIdentity.ok, true);
+  assert.equal(actorIdentity.ok, true);
+  if (!accountIdentity.ok || !actorIdentity.ok) return;
+
+  const receipt = createOperatorMainnetTradeCommandReceipt({
+    commandId: "direct-preparation-01",
+    actorIdentityHash: actorIdentity.value,
+    accountIdentityHash: accountIdentity.value,
+    symbol: input.symbol,
+    allocation: input.allocation,
+    grossNotionalCap: input.grossNotionalCap,
+    maxDeviationBps: input.maxDeviationBps,
+    acceptedAt: new Date(now).toISOString(),
+  });
+  assert.equal(receipt.ok, true);
+  if (!receipt.ok) return;
+
+  const run = await prepare({
+    balance: "11",
+    tradeCommandReceipt: receipt.value,
+    quoteBid: "0.07529",
+  });
+  assert.equal(run.result.ok, true, JSON.stringify(run.result));
+  assert.equal(run.opened, 1);
+  assert.equal(run.paths.length, 17);
+  assert.deepEqual(
+    JSON.parse(run.result.ok ? run.result.value.exchangeGetCounts! : "{}"),
+    groupedFromFetchAttempts(run.paths),
+  );
+  if (!run.result.ok) return;
+
+  const plan = run.result.value.plan;
+  assert.equal(plan.schemaVersion, "operator-mainnet-execution-test/v3");
+  assert.equal(plan.policyVersion, "operator-mainnet-direct-command/v1");
+  assert.equal(plan.commandId, receipt.value.commandId);
+  assert.equal(plan.commandReceiptHash, receipt.value.contentHash);
+  assert.equal(plan.entry.limitPrice.toString(), "0.0752");
+
+  const reopened = openSqlitePersistence({
+    environment: "mainnet",
+    rootDirectory: run.root,
+    scope: {
+      exchange: "bybit",
+      environment: "mainnet",
+      accountId: plan.accountIdentityHash,
+      category: "linear",
+      positionMode: "one-way",
+    },
+    runtime: { nodeVersion: "22.22.3", sqliteVersion: "3.51.3" },
+  });
+  assert.equal(reopened.ok, true);
+  if (reopened.ok) {
+    try {
+      assert.deepEqual(
+        reopened.value.operatorMainnetTest?.readPreparedPlan(plan.contentHash),
+        { ok: true, value: plan },
+      );
+    } finally {
+      reopened.value.close();
+    }
+  }
 });
 
 test("U2 profiles match compact success and account-info no-time full fallback", async () => {

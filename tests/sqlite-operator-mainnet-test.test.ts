@@ -1761,7 +1761,11 @@ test("direct trade-command evidence binds once and consumes atomically without a
   const request = {
     runId: "trade-command-run-01",
     plan: command.plan,
-    tradeCommand: { receipt: command.receipt, binding: command.binding },
+    tradeCommand: {
+      receipt: command.receipt,
+      binding: command.binding,
+      authorizationAt: NOW,
+    },
     payloadJson: command.payloadJson,
     payloadHash: command.payloadHash,
     preparedAt: NOW,
@@ -1902,6 +1906,126 @@ test("direct trade-command evidence binds once and consumes atomically without a
   reopened.close();
 });
 
+test("direct trade-command plans cannot create legacy recovery grants", () => {
+  const fixture = setup();
+  const original = value(prepare(fixture));
+  const command = tradeCommand("direct-plan-cannot-recover");
+  saveRecoveryPlan(fixture, command.plan as unknown as OperatorMainnetTestPlan);
+  const haltBefore = value(fixture.execution.readHalt());
+
+  const grant = fixture.store.createOperatorMainnetRecoveryGrant({
+    sourceId: original.source.sourceId,
+    planHash: command.plan.contentHash,
+    resolution: {
+      kind: "manual-attested",
+      attestationHash: `sha256:${"c".repeat(64)}` as PlanHash,
+    },
+    actor: "operator-01",
+    consent: true,
+    issuedAt: fixture.clock.value,
+  });
+
+  assert.equal(grant.ok, false);
+  if (!grant.ok) {
+    assert.equal(grant.error.code, "PERSISTENCE_CONFLICT");
+    assert.match(
+      grant.error.message,
+      /direct trade-command plans cannot authorize recovery grants/u,
+    );
+  }
+  assert.deepEqual(value(fixture.execution.readHalt()), haltBefore);
+  assert.equal(
+    fixture.connection.db
+      .prepare("SELECT COUNT(*) AS count FROM operator_mainnet_recovery_grants")
+      .get()?.count,
+    0,
+  );
+  fixture.connection.close();
+});
+
+test("direct intent expiry uses local authorization time, not provider event time", () => {
+  const validFixture = setup();
+  const validCommand = tradeCommand("trade-command-local-expiry-valid");
+  value(
+    validFixture.store.persistOperatorMainnetTradeCommandReceipt({
+      receipt: validCommand.receipt,
+      recordedAt: NOW,
+    }),
+  );
+  value(
+    validFixture.store.bindOperatorMainnetTradeCommand({
+      binding: validCommand.binding,
+      boundAt: NOW,
+    }),
+  );
+  const providerAfterExpiry = new Date(
+    Date.parse(validCommand.receipt.expiresAt) + 1_000,
+  ).toISOString() as UtcTimestamp;
+  const localBeforeExpiry = new Date(
+    Date.parse(validCommand.receipt.expiresAt) - 1,
+  ).toISOString() as UtcTimestamp;
+  const accepted = value(
+    validFixture.store.prepareCreateIntent({
+      runId: "trade-command-run-01",
+      plan: validCommand.plan,
+      tradeCommand: {
+        receipt: validCommand.receipt,
+        binding: validCommand.binding,
+        authorizationAt: localBeforeExpiry,
+      },
+      payloadJson: validCommand.payloadJson,
+      payloadHash: validCommand.payloadHash,
+      preparedAt: providerAfterExpiry,
+    }),
+  );
+  assert.equal(accepted.intent.preparedAt, providerAfterExpiry);
+  assert.equal(accepted.authorization.kind, "trade-command");
+  validFixture.connection.close();
+
+  const expiredFixture = setup();
+  const expiredCommand = tradeCommand("trade-command-local-expiry-blocked");
+  value(
+    expiredFixture.store.persistOperatorMainnetTradeCommandReceipt({
+      receipt: expiredCommand.receipt,
+      recordedAt: NOW,
+    }),
+  );
+  value(
+    expiredFixture.store.bindOperatorMainnetTradeCommand({
+      binding: expiredCommand.binding,
+      boundAt: NOW,
+    }),
+  );
+  const providerBeforeExpiry = new Date(
+    Date.parse(expiredCommand.receipt.expiresAt) - 1_000,
+  ).toISOString() as UtcTimestamp;
+  const rejected = expiredFixture.store.prepareCreateIntent({
+    runId: "trade-command-run-01",
+    plan: expiredCommand.plan,
+    tradeCommand: {
+      receipt: expiredCommand.receipt,
+      binding: expiredCommand.binding,
+      authorizationAt: expiredCommand.receipt.expiresAt,
+    },
+    payloadJson: expiredCommand.payloadJson,
+    payloadHash: expiredCommand.payloadHash,
+    preparedAt: providerBeforeExpiry,
+  });
+  assert.equal(rejected.ok, false);
+  for (const table of [
+    "operator_mainnet_test_sources",
+    "operator_mainnet_test_write_intents",
+    "operator_mainnet_trade_command_consumptions",
+  ])
+    assert.equal(
+      expiredFixture.connection.db
+        .prepare(`SELECT COUNT(*) AS count FROM ${table}`)
+        .get()?.count,
+      0,
+    );
+  expiredFixture.connection.close();
+});
+
 test("direct trade-command outcomes are safe, append-only and prevent later binding", () => {
   const fixture = setup();
   const command = tradeCommand();
@@ -1983,7 +2107,11 @@ test("direct trade-command outcomes are safe, append-only and prevent later bind
     fixture.store.prepareCreateIntent({
       runId: "trade-command-run-01",
       plan: command.plan,
-      tradeCommand: { receipt: command.receipt, binding: command.binding },
+      tradeCommand: {
+        receipt: command.receipt,
+        binding: command.binding,
+        authorizationAt: NOW,
+      },
       payloadJson: command.payloadJson,
       payloadHash: command.payloadHash,
       preparedAt: NOW,
@@ -2018,7 +2146,11 @@ test("direct-command status rejects consumption and intent cross-link corruption
     fixture.store.prepareCreateIntent({
       runId: "trade-command-run-01",
       plan: command.plan,
-      tradeCommand: { receipt: command.receipt, binding: command.binding },
+      tradeCommand: {
+        receipt: command.receipt,
+        binding: command.binding,
+        authorizationAt: NOW,
+      },
       payloadJson: command.payloadJson,
       payloadHash: command.payloadHash,
       preparedAt: NOW,

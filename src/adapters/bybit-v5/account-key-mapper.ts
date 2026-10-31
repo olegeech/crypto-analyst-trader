@@ -1,4 +1,7 @@
-import { hashCanonical } from "../../domain/identity/canonical-serialization.js";
+import {
+  hashCanonical,
+  type PlanHash,
+} from "../../domain/identity/canonical-serialization.js";
 import {
   createAccountBinding,
   createAccountCredentialPosture,
@@ -16,6 +19,8 @@ import {
   BybitAccountReadError,
   type AccountReadResponse,
 } from "./account-read-transport.js";
+import { domainError } from "../../domain/shared/errors.js";
+import { fail, type Result } from "../../domain/shared/result.js";
 
 function invalid(): never {
   throw new BybitAccountReadError("INVALID_RESPONSE");
@@ -48,6 +53,26 @@ function expiry(value: unknown): UtcTimestamp | null {
   const parsed = parseUtcTimestamp(value);
   if (!parsed.ok) invalid();
   return Date.parse(parsed.value) === 0 ? null : parsed.value;
+}
+
+/** Same identity derivation used by authenticated account reads, before market collection. */
+export function configuredBybitAccountIdentityHash(
+  accountId: unknown,
+  environment: AccountEvidenceEnvironment,
+): Result<PlanHash> {
+  const normalizedAccountId = uid(accountId);
+  if (!Object.hasOwn(ACCOUNT_READ_ORIGINS, environment) || !normalizedAccountId)
+    return fail(
+      domainError(
+        "INVALID_VALUE",
+        "configured Bybit account identity is invalid",
+      ),
+    );
+  return hashCanonical({
+    exchange: "bybit",
+    environment,
+    userID: normalizedAccountId,
+  });
 }
 
 /** Called only on the successful authenticated query-api response; never emits raw UID/key/IPs. */
@@ -115,11 +140,7 @@ export function mapAccountReadIdentity(
     warnings: ipBound ? [] : ["API_KEY_IP_UNBOUND"],
   });
   if (!posture.ok) invalid();
-  const identity = hashCanonical({
-    exchange: "bybit",
-    environment,
-    userID: actual,
-  });
+  const identity = configuredBybitAccountIdentityHash(actual, environment);
   if (!identity.ok) invalid();
   const binding = createAccountBinding({
     exchange: "bybit",

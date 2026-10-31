@@ -56,7 +56,6 @@ import type {
   CredentialProvider,
   ExchangeCredentials,
 } from "../ports/credential-provider.js";
-import type { PersistenceScope } from "../ports/persistence.js";
 import type {
   OperatorMainnetTestCreateAuthorizationBinding,
   OperatorMainnetTestAuthorizationPort,
@@ -86,6 +85,7 @@ import {
   type MainnetEvidencePath,
   type MainnetInvocationMetrics,
 } from "./mainnet-composition-helpers.js";
+import { mainnetOperatorTestPersistenceScope } from "./mainnet-operator-test-scope.js";
 
 import {
   collectCompactOperatorAccountEvidence,
@@ -108,13 +108,25 @@ interface PrivateCreateGrant {
   dispatched: boolean;
 }
 
+/** Direct-command expiry is local-authority time; legacy approvals retain provider time. */
+export function authorizationTimeForCreate(
+  kind: "approval" | "trade-command",
+  localNow: UtcTimestamp | undefined,
+  providerNow: UtcTimestamp | undefined,
+): UtcTimestamp | undefined {
+  return kind === "trade-command" ? localNow : providerNow;
+}
+
 /** Private to this composition: identity, exact binding, expiry and one-use state are process-local. */
 function createPrivateCreateIssuer(): {
   readonly authorization: OperatorMainnetTestAuthorizationPort;
-  claimForTransport(payloadHash: string, providerNow: UtcTimestamp): boolean;
+  claimForTransport(
+    payloadHash: string,
+    authorizationNow: UtcTimestamp,
+  ): boolean;
   hasClaimedTransportGrant(
     payloadHash: string,
-    providerNow: UtcTimestamp,
+    authorizationNow: UtcTimestamp,
   ): boolean;
   markDispatched(): void;
 } {
@@ -228,8 +240,8 @@ function createPrivateCreateIssuer(): {
   };
   return {
     authorization,
-    claimForTransport(payloadHash, providerNow) {
-      const parsed = parseUtcTimestamp(providerNow);
+    claimForTransport(payloadHash, authorizationNow) {
+      const parsed = parseUtcTimestamp(authorizationNow);
       if (
         !activeGrant ||
         !parsed.ok ||
@@ -244,8 +256,8 @@ function createPrivateCreateIssuer(): {
       activeGrant.claimed = true;
       return true;
     },
-    hasClaimedTransportGrant(payloadHash, providerNow) {
-      const parsed = parseUtcTimestamp(providerNow);
+    hasClaimedTransportGrant(payloadHash, authorizationNow) {
+      const parsed = parseUtcTimestamp(authorizationNow);
       return Boolean(
         activeGrant &&
         parsed.ok &&
@@ -273,16 +285,6 @@ function failed<T>(reasonCode: string): Result<T> {
       },
     ),
   );
-}
-
-function scopeFor(plan: OperatorMainnetTestPlan): PersistenceScope {
-  return {
-    exchange: "bybit",
-    environment: "mainnet",
-    accountId: plan.accountIdentityHash,
-    category: "linear",
-    positionMode: "one-way",
-  };
 }
 
 function providerTime(
@@ -380,18 +382,29 @@ type ValidatedAdmission = Extract<
   { readonly ok: true }
 >["value"];
 
-/** Private production composition: real Keychain, GET-only evidence, and one durable CREATE dispatch. */
+export interface MainnetOperatorTestCompositionDependencies {
+  readonly credentialProvider?: Pick<CredentialProvider, "load">;
+  readonly openPersistence?: typeof openSqlitePersistence;
+  readonly request?: typeof fetch;
+  readonly wallClock?: () => number;
+  readonly monotonicClock?: () => number;
+}
+
+/** Production composition defaults to the real Keychain, SQLite store, and fetch transport. */
 export async function runMainnetOperatorTestComposition(
   input: MainnetOperatorTestCompositionInput,
+  dependencies: MainnetOperatorTestCompositionDependencies = {},
 ): Promise<Result<MainnetOperatorTestOutcome>> {
   const getCounts = createMainnetGetCounts();
-  const stageStarted = performance.now();
+  const wall = dependencies.wallClock ?? Date.now;
+  const monotonic = dependencies.monotonicClock ?? (() => performance.now());
+  const stageStarted = monotonic();
   let exchangeReads = 0;
   let exchangeWrites = 0;
   let evidencePath: MainnetEvidencePath = "none";
   let compactFallbackReason: string | undefined;
   const metricsFor = (reads: number): MainnetInvocationMetrics => {
-    const elapsed = performance.now() - stageStarted;
+    const elapsed = monotonic() - stageStarted;
     return createMainnetInvocationMetrics({
       stage: "execute",
       exchangeReads: reads,
@@ -436,8 +449,6 @@ export async function runMainnetOperatorTestComposition(
         exchangeWrites,
       );
   }
-  const wall = Date.now;
-  const monotonic = () => performance.now();
   const localClock = {
     now: () => {
       const parsed = timestampFromEpochMs(wall());
@@ -445,9 +456,11 @@ export async function runMainnetOperatorTestComposition(
       return parsed.value;
     },
   };
-  const persistence = openSqlitePersistence({
+  const persistence = (dependencies.openPersistence ?? openSqlitePersistence)({
     environment: "mainnet",
-    scope: scopeFor(admitted.plan),
+    scope: mainnetOperatorTestPersistenceScope(
+      admitted.plan.accountIdentityHash,
+    ),
     clock: localClock,
   });
   if (!persistence.ok)
@@ -479,7 +492,8 @@ export async function runMainnetOperatorTestComposition(
         );
       manualRecoveryAttestation = savedAttestation.value;
     }
-    const credentialProvider = createMacOSKeychainProvider();
+    const credentialProvider =
+      dependencies.credentialProvider ?? createMacOSKeychainProvider();
     let credentialSnapshot: Readonly<ExchangeCredentials> | undefined;
     const credentialLoader: Pick<CredentialProvider, "load"> = {
       load: async (environment: CredentialEnvironment) => {
@@ -502,7 +516,7 @@ export async function runMainnetOperatorTestComposition(
         getCounts.record(url, init);
       } else if (method === "POST") exchangeWrites += 1;
       else throw new Error("operator composition permits GET and CREATE only");
-      return fetch(url, init);
+      return (dependencies.request ?? fetch)(url, init);
     };
     const loadedCredentials = await credentialLoader.load("mainnet");
     const accountReader = createCompactOperatorAccountReader({
@@ -573,9 +587,16 @@ export async function runMainnetOperatorTestComposition(
         return false;
       if (!transport) return false;
       const offset = await transport.getServerTimeOffset();
-      const now = providerTime(wall, offset);
+      const providerNow = providerTime(wall, offset);
+      const localNow = timestampFromEpochMs(wall());
       const elapsed = monotonic() - active.evidenceAtMonotonic;
-      if (!now || !Number.isFinite(elapsed) || elapsed < 0) return false;
+      if (
+        !providerNow ||
+        !localNow.ok ||
+        !Number.isFinite(elapsed) ||
+        elapsed < 0
+      )
+        return false;
       const evidenceStillValid = validateMainnetOperatorTestEvidence(
         admitted.plan,
         active.evidence,
@@ -585,25 +606,34 @@ export async function runMainnetOperatorTestComposition(
         active.ages,
         elapsed,
       );
+      const authorizationNow = authorizationTimeForCreate(
+        admitted.authorization.kind,
+        localNow.value,
+        providerNow,
+      );
+      if (!authorizationNow) return false;
       const authorityStillValid =
         admitted.authorization.kind === "approval"
           ? validateOperatorMainnetTestApproval(
               admitted.authorization.approval,
               admitted.plan,
               admitted.authorization.approvalHash,
-              now,
+              authorizationNow,
             )
           : validateOperatorMainnetTradeCommandBinding(
               admitted.authorization.receipt,
               admitted.authorization.binding,
-              now,
+              authorizationNow,
               binding.exactPayloadHash,
             );
       return (
         evidenceStillValid.ok &&
         fresh.ok &&
         authorityStillValid.ok &&
-        issuer.hasClaimedTransportGrant(binding.exactPayloadHash, now) &&
+        issuer.hasClaimedTransportGrant(
+          binding.exactPayloadHash,
+          authorizationNow,
+        ) &&
         sourceIsCurrent()
       );
     }
@@ -913,11 +943,19 @@ export async function runMainnetOperatorTestComposition(
         const payloadHash = `sha256:${createHash("sha256")
           .update(body, "utf8")
           .digest("hex")}`;
-        const offset = await privateTransport.getServerTimeOffset();
-        const now = providerTime(wall, offset);
+        const localNow = timestampFromEpochMs(wall());
+        const providerNow =
+          admitted.authorization.kind === "approval"
+            ? providerTime(wall, await privateTransport.getServerTimeOffset())
+            : undefined;
+        const authorizationNow = authorizationTimeForCreate(
+          admitted.authorization.kind,
+          localNow.ok ? localNow.value : undefined,
+          providerNow,
+        );
         if (
-          !now ||
-          !issuer.claimForTransport(payloadHash, now) ||
+          !authorizationNow ||
+          !issuer.claimForTransport(payloadHash, authorizationNow) ||
           !sourceIsCurrent()
         )
           throw new Error(

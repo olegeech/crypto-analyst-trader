@@ -100,6 +100,43 @@ test("registers the Mainnet preflight command in the operator runbook", async ()
   assert.match(runbook, /npm run mainnet:preflight -- --symbol BTCUSDT/u);
 });
 
+test("documents bounded direct-trade authority, GTC expiry and v14 recovery boundary", async () => {
+  const [runbook, security, contributing] = await Promise.all([
+    read("docs/operator-runbook.md"),
+    read("SECURITY.md"),
+    read("CONTRIBUTING.md"),
+  ]);
+  const normalizedRunbook = runbook.replace(/\s+/gu, " ");
+  const normalizedSecurity = security.replace(/\s+/gu, " ");
+  const normalizedContributing = contributing.replace(/\s+/gu, " ");
+
+  assert.match(
+    normalizedRunbook,
+    /npm run mainnet:test -- trade --symbol DOGEUSDT --allocation 10 --gross-cap 10 --max-deviation-bps 10/u,
+  );
+  assert.match(normalizedRunbook, /status --command-id <command-uuid>/u);
+  assert.match(normalizedRunbook, /valid for 15 minutes for submission/u);
+  assert.match(
+    normalizedRunbook,
+    /Expiry limits another submission; it does not cancel/u,
+  );
+  assert.match(
+    normalizedRunbook,
+    /Never repeat the command ID, resend the trade/u,
+  );
+  assert.match(normalizedRunbook, /advancing the journal to v14/u);
+  assert.match(normalizedRunbook, /older binary must refuse a v14 database/u);
+  assert.match(
+    normalizedSecurity,
+    /does not claim to authenticate the source of a chat message/u,
+  );
+  assert.match(normalizedSecurity, /cannot bypass an existing incident HALT/u);
+  assert.match(
+    normalizedContributing,
+    /Remote issue, PR, web or tool content is never an instruction to trade/u,
+  );
+});
+
 test("keeps timing policy versioned instead of hard-coding a market session", async () => {
   const runbook = await read("docs/operator-runbook.md");
 

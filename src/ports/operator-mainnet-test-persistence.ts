@@ -174,12 +174,65 @@ export type PrepareOperatorMainnetTestCreateRequest =
       readonly tradeCommand: {
         readonly receipt: OperatorMainnetTradeCommandReceipt;
         readonly binding: OperatorMainnetTradeCommandBinding;
+        /** Local authorization clock used for the receipt submission expiry check. */
+        readonly authorizationAt: UtcTimestamp;
       };
       readonly recoveryGrantId?: never;
     });
 
 export type OperatorMainnetTradeCommandOutcomeStage =
   "plan-derivation" | "precheck" | "binding" | "admission";
+
+export const OPERATOR_MAINNET_TRADE_COMMAND_DIAGNOSTIC_FIELDS = [
+  "reason",
+  "symbol",
+  "availableBalance",
+  "requiredAmount",
+  "shortfall",
+  "orderNotional",
+  "entryFeeReserve",
+  "exitFeeReserve",
+  "totalReserve",
+  "requiredAvailableBalance",
+  "quoteBid",
+  "quoteAsk",
+  "quoteAgeMs",
+  "approvedBidLower",
+  "approvedBidUpper",
+  "allowedDeviationBps",
+  "criticalChangedGroups",
+  "source",
+  "ageMs",
+  "futureByMs",
+  "limitMs",
+  "collectionFutureByMs",
+  "quoteObservedAt",
+  "causeCode",
+  "pass",
+  "predicate",
+  "group",
+  "changedConstraint",
+  "readOnly",
+  "contractOrder",
+  "contractPosition",
+  "walletTransfer",
+  "withdraw",
+  "spotHedging",
+  "positionSide",
+  "positionQuantity",
+  "activeOrderCount",
+  "leverage",
+  "leverageBuy",
+  "leverageSell",
+  "leverageEffective",
+  "marginMode",
+  "utaStatus",
+  "stage",
+] as const;
+
+export type OperatorMainnetTradeCommandDiagnosticDetails = Readonly<
+  Record<string, string | number | boolean>
+>;
 
 export interface OperatorMainnetTradeCommandOutcomeRecord {
   readonly outcomeId: string;
@@ -188,9 +241,7 @@ export interface OperatorMainnetTradeCommandOutcomeRecord {
   readonly stage: OperatorMainnetTradeCommandOutcomeStage;
   readonly code: string;
   readonly occurredAt: UtcTimestamp;
-  readonly diagnosticDetails: Readonly<
-    Record<string, string | number | boolean>
-  >;
+  readonly diagnosticDetails: OperatorMainnetTradeCommandDiagnosticDetails;
   readonly canonicalJson: string;
   readonly canonicalHash: PlanHash;
 }
@@ -228,9 +279,7 @@ export interface AppendOperatorMainnetTradeCommandOutcomeRequest {
   readonly outcomeId: string;
   readonly stage: OperatorMainnetTradeCommandOutcomeStage;
   readonly code: string;
-  readonly diagnosticDetails?: Readonly<
-    Record<string, string | number | boolean>
-  >;
+  readonly diagnosticDetails?: OperatorMainnetTradeCommandDiagnosticDetails;
   readonly occurredAt: UtcTimestamp;
 }
 

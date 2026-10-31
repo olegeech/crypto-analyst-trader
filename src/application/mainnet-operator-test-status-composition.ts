@@ -24,7 +24,10 @@ import { fail, type Result } from "../domain/shared/result.js";
 import { timestampFromEpochMs } from "../domain/shared/time.js";
 import type { ExchangeOrderObservation } from "../domain/execution/exchange-order.js";
 import type { ExchangeOrderLookup } from "../ports/exchange-execution.js";
-import type { ExchangeCredentials } from "../ports/credential-provider.js";
+import type {
+  CredentialProvider,
+  ExchangeCredentials,
+} from "../ports/credential-provider.js";
 import {
   runMainnetOperatorTestStatus,
   type MainnetOperatorTestChildFills,
@@ -442,19 +445,35 @@ export class ReadOnlyOperatorStatusExchange {
   }
 }
 
-/** Resolve the source from private SQLite, then expose only GET reads and append-only local evidence. */
-export async function runMainnetOperatorTestStatusComposition(input: {
+export interface MainnetOperatorTestStatusCompositionInput {
   readonly sourceId: unknown;
   readonly manualAction?:
     "entry-remainder-cancelled" | "position-closed" | "other";
   readonly actor?: unknown;
-}) {
+}
+
+export interface MainnetOperatorTestStatusCompositionDependencies {
+  readonly credentialProvider?: Pick<CredentialProvider, "load">;
+  readonly openPersistence?: typeof openSqlitePersistence;
+  readonly request?: typeof fetch;
+  readonly resolveSource?: typeof resolveOperatorMainnetSource;
+  readonly wallClock?: () => number;
+  readonly monotonicClock?: () => number;
+}
+
+/** Resolve the source from private SQLite, then expose only GET reads and append-only local evidence. */
+export async function runMainnetOperatorTestStatusComposition(
+  input: MainnetOperatorTestStatusCompositionInput,
+  dependencies: MainnetOperatorTestStatusCompositionDependencies = {},
+) {
   const getCounts = createMainnetGetCounts();
-  const stageStarted = performance.now();
+  const wall = dependencies.wallClock ?? Date.now;
+  const monotonic = dependencies.monotonicClock ?? (() => performance.now());
+  const stageStarted = monotonic();
   let exchangeReads = 0;
   let statusExchange: ReadOnlyOperatorStatusExchange | undefined;
   const metricsFor = (reads: number): MainnetInvocationMetrics => {
-    const elapsed = performance.now() - stageStarted;
+    const elapsed = monotonic() - stageStarted;
     return createMainnetInvocationMetrics({
       stage: "status",
       exchangeReads: reads,
@@ -467,7 +486,9 @@ export async function runMainnetOperatorTestStatusComposition(input: {
   };
   const withCounts = <T>(result: Result<T>, reads: number) =>
     withMainnetInvocationMetrics(result, reads, 0, metricsFor(reads));
-  const resolved = resolveOperatorMainnetSource(input.sourceId);
+  const resolved = (dependencies.resolveSource ?? resolveOperatorMainnetSource)(
+    input.sourceId,
+  );
   if (!resolved.ok) return withCounts(resolved, exchangeReads);
   if (!resolved.value)
     return withCounts(
@@ -476,8 +497,6 @@ export async function runMainnetOperatorTestStatusComposition(input: {
       ),
       exchangeReads,
     );
-  const wall = Date.now;
-  const monotonic = () => performance.now();
   const localClock = {
     now: () => {
       const timestamp = timestampFromEpochMs(wall());
@@ -485,7 +504,7 @@ export async function runMainnetOperatorTestStatusComposition(input: {
       return timestamp.value;
     },
   };
-  const persistence = openSqlitePersistence({
+  const persistence = (dependencies.openPersistence ?? openSqlitePersistence)({
     environment: "mainnet",
     scope: resolved.value.scope,
     clock: localClock,
@@ -498,7 +517,8 @@ export async function runMainnetOperatorTestStatusComposition(input: {
         failClosed("OPERATOR_JOURNAL_UNAVAILABLE"),
         exchangeReads,
       );
-    const provider = createMacOSKeychainProvider();
+    const provider =
+      dependencies.credentialProvider ?? createMacOSKeychainProvider();
     const credentials = snapshotExchangeCredentials(
       await provider.load("mainnet"),
     );
@@ -517,7 +537,7 @@ export async function runMainnetOperatorTestStatusComposition(input: {
       if (method !== "GET") throw new Error("status permits GET only");
       exchangeReads += 1;
       getCounts.record(url, init);
-      return fetch(url, init);
+      return (dependencies.request ?? fetch)(url, init);
     };
     const identityTransport = new BybitAccountReadTransport({
       environment: "mainnet",

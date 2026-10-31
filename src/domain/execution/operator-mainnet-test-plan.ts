@@ -30,9 +30,26 @@ import {
   requireIdentifier,
 } from "../shared/validation.js";
 import { closedRecord } from "../planning/planning-validation.js";
+import {
+  OPERATOR_MAINNET_APPROVAL_TTL_MS,
+  rehydrateOperatorMainnetTradeCommandReceipt,
+} from "./operator-mainnet-trade-command-receipt.js";
+import {
+  OPERATOR_MAINNET_QUOTE_FRESHNESS_MS,
+  rehydrateOperatorMainnetQuote,
+  type OperatorMainnetQuote,
+} from "./operator-mainnet-quote.js";
 
-export const OPERATOR_MAINNET_QUOTE_SCHEMA_VERSION =
-  "bybit-linear-operator-quote/v1" as const;
+export {
+  OPERATOR_MAINNET_QUOTE_FRESHNESS_MS,
+  OPERATOR_MAINNET_QUOTE_SCHEMA_VERSION,
+  createOperatorMainnetQuote,
+  rehydrateOperatorMainnetQuote,
+} from "./operator-mainnet-quote.js";
+export type { OperatorMainnetQuote } from "./operator-mainnet-quote.js";
+
+export { OPERATOR_MAINNET_APPROVAL_TTL_MS } from "./operator-mainnet-trade-command-receipt.js";
+
 export const OPERATOR_MAINNET_TEST_PLAN_SCHEMA_VERSION =
   "operator-mainnet-execution-test/v1" as const;
 export const OPERATOR_MAINNET_RECOVERY_TEST_PLAN_SCHEMA_VERSION =
@@ -45,24 +62,6 @@ export const OPERATOR_MAINNET_TEST_POLICY_VERSION =
   "operator-mainnet-test/v1" as const;
 export const OPERATOR_MAINNET_TRADE_COMMAND_POLICY_VERSION =
   "operator-mainnet-direct-command/v1" as const;
-export const OPERATOR_MAINNET_QUOTE_FRESHNESS_MS = 5_000 as const;
-export const OPERATOR_MAINNET_APPROVAL_TTL_MS = 900_000 as const;
-
-const QUOTE_FIELDS = [
-  "schemaVersion",
-  "exchange",
-  "environment",
-  "category",
-  "origin",
-  "symbol",
-  "observedAt",
-  "collectionStartedAt",
-  "collectionCompletedAt",
-  "bid",
-  "ask",
-  "last",
-  "contentHash",
-] as const;
 const PLAN_V1_FIELDS = [
   "schemaVersion",
   "policyVersion",
@@ -100,34 +99,6 @@ const PLAN_V3_FIELDS = [
   "tradeCommandReceipt",
   "contentHash",
 ] as const;
-const TRADE_COMMAND_RECEIPT_FIELDS = [
-  "schemaVersion",
-  "commandId",
-  "actorIdentityHash",
-  "channel",
-  "accountIdentityHash",
-  "environment",
-  "category",
-  "symbol",
-  "side",
-  "allocation",
-  "grossNotionalCap",
-  "maxDeviationBps",
-  "leverage",
-  "priceDerivationPolicy",
-  "quantityDerivationPolicy",
-  "takeProfitPolicy",
-  "stopLoss",
-  "acceptedAt",
-  "expiresAt",
-  "contentHash",
-] as const;
-const TRADE_COMMAND_TAKE_PROFIT_FIELDS = [
-  "grossTargetPercent",
-  "tpslMode",
-  "orderType",
-  "triggerBy",
-] as const;
 const OPERATOR_WARNING_CODES = ["API_KEY_IP_UNBOUND"] as const;
 const APPROVAL_FIELDS = [
   "schemaVersion",
@@ -156,24 +127,6 @@ const CONSTRAINT_FIELDS = [
   "maxPrice",
   "maxLimitQuantity",
 ] as const;
-
-export interface OperatorMainnetQuote {
-  readonly schemaVersion: typeof OPERATOR_MAINNET_QUOTE_SCHEMA_VERSION;
-  readonly exchange: "bybit";
-  readonly environment: "mainnet";
-  readonly category: "linear";
-  readonly origin: "https://api.bybit.com";
-  readonly symbol: MarketEvidenceSymbol;
-  /** Bybit's response envelope time, not local receipt time. */
-  readonly observedAt: UtcTimestamp;
-  /** Exchange-time reads bracketing the ticker request. */
-  readonly collectionStartedAt: UtcTimestamp;
-  readonly collectionCompletedAt: UtcTimestamp;
-  readonly bid: DecimalValue;
-  readonly ask: DecimalValue;
-  readonly last: DecimalValue;
-  readonly contentHash: PlanHash;
-}
 
 export interface OperatorMainnetQuoteBidRange {
   readonly lower: DecimalValue;
@@ -328,244 +281,6 @@ function positiveDecimal(value: unknown, field: string): Result<DecimalValue> {
     );
   }
   return parsed;
-}
-
-function rehydrateEmbeddedTradeCommandReceipt(
-  input: unknown,
-): Result<Readonly<Record<string, unknown>>> {
-  if (
-    !exactRecord(input, TRADE_COMMAND_RECEIPT_FIELDS) ||
-    !exactRecord(input.takeProfitPolicy, TRADE_COMMAND_TAKE_PROFIT_FIELDS)
-  )
-    return invalidPlan("direct-command receipt is malformed");
-
-  const commandId = requireIdentifier(input.commandId, "commandId");
-  const actorIdentityHash = requireHash(
-    input.actorIdentityHash,
-    "actorIdentityHash",
-  );
-  const accountIdentityHash = requireHash(
-    input.accountIdentityHash,
-    "accountIdentityHash",
-  );
-  const symbol = input.symbol;
-  const allocation = positiveDecimal(input.allocation, "allocation");
-  const grossNotionalCap = positiveDecimal(
-    input.grossNotionalCap,
-    "grossNotionalCap",
-  );
-  const maxDeviationBps = positiveDecimal(
-    input.maxDeviationBps,
-    "maxDeviationBps",
-  );
-  const grossTargetPercent = positiveDecimal(
-    input.takeProfitPolicy.grossTargetPercent,
-    "takeProfitPolicy.grossTargetPercent",
-  );
-  const acceptedAt = parseUtcTimestamp(input.acceptedAt);
-  const expiresAt = parseUtcTimestamp(input.expiresAt);
-  const contentHash = requireHash(input.contentHash, "contentHash");
-  const deviationLimit = DecimalValue.fromString("10000");
-  const expectedExpiresAt = acceptedAt.ok
-    ? (new Date(
-        timestampToEpochMs(acceptedAt.value) + OPERATOR_MAINNET_APPROVAL_TTL_MS,
-      ).toISOString() as UtcTimestamp)
-    : undefined;
-
-  if (
-    !commandId.ok ||
-    !actorIdentityHash.ok ||
-    !accountIdentityHash.ok ||
-    !allocation.ok ||
-    !grossNotionalCap.ok ||
-    !maxDeviationBps.ok ||
-    !grossTargetPercent.ok ||
-    !acceptedAt.ok ||
-    !expiresAt.ok ||
-    !contentHash.ok ||
-    !deviationLimit.ok ||
-    maxDeviationBps.value.compare(deviationLimit.value) >= 0 ||
-    typeof symbol !== "string" ||
-    !MARKET_EVIDENCE_SYMBOLS.includes(symbol as MarketEvidenceSymbol) ||
-    input.schemaVersion !== "operator-mainnet-trade-command-receipt/v1" ||
-    input.channel !== "local-owner-cli/v1" ||
-    input.environment !== "mainnet" ||
-    input.category !== "linear" ||
-    input.side !== "Buy" ||
-    input.leverage !== "1" ||
-    input.priceDerivationPolicy !== "initial-best-bid-floor-to-tick/v1" ||
-    input.quantityDerivationPolicy !==
-      "budget-over-limit-price-floor-to-step/v1" ||
-    input.stopLoss !== "none" ||
-    input.takeProfitPolicy.tpslMode !== "Partial" ||
-    input.takeProfitPolicy.orderType !== "Market" ||
-    input.takeProfitPolicy.triggerBy !== "LastPrice" ||
-    grossTargetPercent.value.toString() !== "0.2" ||
-    expiresAt.value !== expectedExpiresAt
-  )
-    return invalidPlan("direct-command receipt is outside the fixed policy");
-
-  const payload = {
-    schemaVersion: "operator-mainnet-trade-command-receipt/v1" as const,
-    commandId: commandId.value,
-    actorIdentityHash: actorIdentityHash.value,
-    channel: "local-owner-cli/v1" as const,
-    accountIdentityHash: accountIdentityHash.value,
-    environment: "mainnet" as const,
-    category: "linear" as const,
-    symbol: symbol as MarketEvidenceSymbol,
-    side: "Buy" as const,
-    allocation: allocation.value,
-    grossNotionalCap: grossNotionalCap.value,
-    maxDeviationBps: maxDeviationBps.value,
-    leverage: "1" as const,
-    priceDerivationPolicy: "initial-best-bid-floor-to-tick/v1" as const,
-    quantityDerivationPolicy:
-      "budget-over-limit-price-floor-to-step/v1" as const,
-    takeProfitPolicy: {
-      grossTargetPercent: grossTargetPercent.value,
-      tpslMode: "Partial" as const,
-      orderType: "Market" as const,
-      triggerBy: "LastPrice" as const,
-    },
-    stopLoss: "none" as const,
-    acceptedAt: acceptedAt.value,
-    expiresAt: expiresAt.value,
-  };
-  const expectedHash = hashCanonical(payload);
-  if (!expectedHash.ok || expectedHash.value !== contentHash.value)
-    return invalidPlan("direct-command receipt hash does not match its facts");
-  const normalized = { ...payload, contentHash: contentHash.value };
-  const actualCanonical = canonicalSerialize(input);
-  const expectedCanonical = canonicalSerialize(normalized);
-  return actualCanonical.ok &&
-    expectedCanonical.ok &&
-    actualCanonical.value === expectedCanonical.value
-    ? ok(deepFreeze(normalized))
-    : invalidPlan("direct-command receipt differs from deterministic replay");
-}
-
-function quotePayload(input: {
-  readonly symbol: MarketEvidenceSymbol;
-  readonly observedAt: UtcTimestamp;
-  readonly collectionStartedAt: UtcTimestamp;
-  readonly collectionCompletedAt: UtcTimestamp;
-  readonly bid: DecimalValue;
-  readonly ask: DecimalValue;
-  readonly last: DecimalValue;
-}) {
-  return {
-    schemaVersion: OPERATOR_MAINNET_QUOTE_SCHEMA_VERSION,
-    exchange: "bybit" as const,
-    environment: "mainnet" as const,
-    category: "linear" as const,
-    origin: "https://api.bybit.com" as const,
-    symbol: input.symbol,
-    observedAt: input.observedAt,
-    collectionStartedAt: input.collectionStartedAt,
-    collectionCompletedAt: input.collectionCompletedAt,
-    bid: input.bid,
-    ask: input.ask,
-    last: input.last,
-  };
-}
-
-export function createOperatorMainnetQuote(
-  input: unknown,
-): Result<OperatorMainnetQuote> {
-  const inputFields = [
-    "symbol",
-    "exchange",
-    "environment",
-    "category",
-    "origin",
-    "observedAt",
-    "collectionStartedAt",
-    "collectionCompletedAt",
-    "bid",
-    "ask",
-    "last",
-  ] as const;
-  if (!exactRecord(input, inputFields)) return invalidQuote();
-  if (
-    input.exchange !== "bybit" ||
-    input.environment !== "mainnet" ||
-    input.category !== "linear" ||
-    input.origin !== "https://api.bybit.com" ||
-    typeof input.symbol !== "string" ||
-    !MARKET_EVIDENCE_SYMBOLS.includes(input.symbol as MarketEvidenceSymbol)
-  )
-    return invalidQuote(
-      "quote source or symbol is outside the Bybit M1 linear scope",
-    );
-  const observedAt = parseUtcTimestamp(input.observedAt);
-  const collectionStartedAt = parseUtcTimestamp(input.collectionStartedAt);
-  const collectionCompletedAt = parseUtcTimestamp(input.collectionCompletedAt);
-  const bid = positiveDecimal(input.bid, "bid");
-  const ask = positiveDecimal(input.ask, "ask");
-  const last = positiveDecimal(input.last, "last");
-  if (
-    !observedAt.ok ||
-    !collectionStartedAt.ok ||
-    !collectionCompletedAt.ok ||
-    !bid.ok ||
-    !ask.ok ||
-    !last.ok
-  )
-    return invalidQuote("quote contains malformed provider facts");
-  const startedMs = timestampToEpochMs(collectionStartedAt.value);
-  const completedMs = timestampToEpochMs(collectionCompletedAt.value);
-  const observedMs = timestampToEpochMs(observedAt.value);
-  if (
-    startedMs > completedMs ||
-    completedMs - startedMs > OPERATOR_MAINNET_QUOTE_FRESHNESS_MS ||
-    observedMs < startedMs ||
-    observedMs > completedMs
-  )
-    return invalidQuote(
-      "provider time is not coherent with quote collection bounds",
-    );
-  if (bid.value.compare(ask.value) > 0)
-    return invalidQuote("quote must contain a positive, non-crossed book");
-  const payload = quotePayload({
-    symbol: input.symbol as MarketEvidenceSymbol,
-    observedAt: observedAt.value,
-    collectionStartedAt: collectionStartedAt.value,
-    collectionCompletedAt: collectionCompletedAt.value,
-    bid: bid.value,
-    ask: ask.value,
-    last: last.value,
-  });
-  const contentHash = hashCanonical(payload);
-  if (!contentHash.ok) return contentHash;
-  return ok(deepFreeze({ ...payload, contentHash: contentHash.value }));
-}
-
-export function rehydrateOperatorMainnetQuote(
-  input: unknown,
-): Result<OperatorMainnetQuote> {
-  if (!exactRecord(input, QUOTE_FIELDS)) return invalidQuote();
-  const parsed = createOperatorMainnetQuote({
-    symbol: input.symbol,
-    exchange: input.exchange,
-    environment: input.environment,
-    category: input.category,
-    origin: input.origin,
-    observedAt: input.observedAt,
-    collectionStartedAt: input.collectionStartedAt,
-    collectionCompletedAt: input.collectionCompletedAt,
-    bid: input.bid,
-    ask: input.ask,
-    last: input.last,
-  });
-  const hash = requireHash(input.contentHash, "contentHash");
-  if (!parsed.ok || !hash.ok || parsed.value.contentHash !== hash.value)
-    return invalidQuote("quote identity does not match its provider facts");
-  const actual = canonicalSerialize(input);
-  const expected = canonicalSerialize(parsed.value);
-  return actual.ok && expected.ok && actual.value === expected.value
-    ? parsed
-    : invalidQuote("quote differs from deterministic replay");
 }
 
 function derivedClientOrderId(
@@ -919,7 +634,7 @@ export function rehydrateOperatorMainnetTestPlan(
     input.schemaVersion === OPERATOR_MAINNET_TRADE_COMMAND_PLAN_SCHEMA_VERSION
   ) {
     if (!exactRecord(input, PLAN_V3_FIELDS)) return invalidPlan();
-    const receipt = rehydrateEmbeddedTradeCommandReceipt(
+    const receipt = rehydrateOperatorMainnetTradeCommandReceipt(
       input.tradeCommandReceipt,
     );
     const commandId = requireIdentifier(input.commandId, "commandId");
@@ -968,8 +683,6 @@ export function rehydrateOperatorMainnetTestPlan(
       replayed.value.maxDeviationBps.compare(
         receipt.value.maxDeviationBps as DecimalValue,
       ) !== 0 ||
-      timestampToEpochMs(replayed.value.preparedAt) <
-        timestampToEpochMs(commandAcceptedAt.value) ||
       timestampToEpochMs(replayed.value.preparedAt) >=
         timestampToEpochMs(commandExpiresAt.value)
     )
@@ -983,6 +696,9 @@ export function rehydrateOperatorMainnetTestPlan(
       policyVersion: _legacyPolicyVersion,
       ...legacyPayload
     } = replayed.value;
+    void _legacyHash;
+    void _legacySchemaVersion;
+    void _legacyPolicyVersion;
     const payload = {
       ...legacyPayload,
       schemaVersion: OPERATOR_MAINNET_TRADE_COMMAND_PLAN_SCHEMA_VERSION,
@@ -1004,7 +720,7 @@ export function rehydrateOperatorMainnetTestPlan(
     return actualCanonical.ok &&
       expectedCanonical.ok &&
       actualCanonical.value === expectedCanonical.value
-      ? ok(deepFreeze(expected) as OperatorMainnetTestPlan)
+      ? ok(deepFreeze(expected) as unknown as OperatorMainnetTestPlan)
       : invalidPlan("direct-command plan differs from deterministic replay");
   }
   const planFields =
