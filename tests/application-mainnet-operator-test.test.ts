@@ -264,7 +264,7 @@ function freshEvidence(
   valuePlan: OperatorMainnetTestPlan,
   overrides: EvidenceOverrides = {},
 ) {
-  const accountInput = accountFixture() as unknown as {
+  const accountInput = accountFixture([valuePlan.symbol]) as unknown as {
     accountBinding: Record<string, unknown>;
     credentialPosture: Record<string, unknown>;
     criticalPasses: {
@@ -331,6 +331,7 @@ function freshEvidence(
     symbol: valuePlan.symbol,
     instrument,
     evaluatedAt: serverTime,
+    ...("commandId" in valuePlan ? { directTrade: true as const } : {}),
   });
   const marketHash = unwrap(
     hashCanonical({ market: serverTime, symbol: valuePlan.symbol }),
@@ -357,9 +358,9 @@ function freshEvidence(
         positionMode: "one-way",
       },
       asOf: serverTime,
-      bid: "100",
-      ask: "100.1",
-      last: "100",
+      bid: valuePlan.quote.bid.toString(),
+      ask: valuePlan.quote.ask.toString(),
+      last: valuePlan.quote.last.toString(),
       constraints: valuePlan.constraints,
       evidence: [marketRef],
     }),
@@ -402,9 +403,9 @@ function freshEvidence(
       observedAt: quoteObservedAt,
       collectionStartedAt: at(Date.parse(quoteObservedAt) - 10),
       collectionCompletedAt: at(Date.parse(quoteObservedAt) + 10),
-      bid: "100",
-      ask: "100.1",
-      last: "100",
+      bid: valuePlan.quote.bid.toString(),
+      ask: valuePlan.quote.ask.toString(),
+      last: valuePlan.quote.last.toString(),
     }),
   );
   const feeRate = unwrap(
@@ -809,9 +810,100 @@ function setupWithPersistence(
   };
 }
 
+function directCommandArtifacts(options: {
+  readonly nonce: string;
+  readonly symbol: string;
+  readonly accountIdentityHash: string;
+  readonly actorIdentityHash?: PlanHash;
+  readonly preparedAt: UtcTimestamp;
+  readonly acceptedAt: UtcTimestamp;
+}) {
+  const commandId = `command-${options.nonce}`;
+  const receipt = unwrap(
+    createOperatorMainnetTradeCommandReceipt({
+      commandId,
+      actorIdentityHash:
+        options.actorIdentityHash ?? testLocalActorIdentityHash(),
+      accountIdentityHash: options.accountIdentityHash,
+      symbol: options.symbol,
+      allocation: "10",
+      grossNotionalCap: "8",
+      maxDeviationBps: "10",
+      takeProfitMode: "percent",
+      takeProfitValue: "0.20",
+      acceptedAt: options.acceptedAt,
+    }),
+  );
+  const directQuote =
+    options.symbol === "BTCUSDT"
+      ? plan({
+          preparedAt: options.preparedAt,
+          accountIdentityHash: options.accountIdentityHash,
+        }).quote
+      : unwrap(
+          createOperatorMainnetQuote({
+            symbol: options.symbol,
+            exchange: "bybit",
+            environment: "mainnet",
+            category: "linear",
+            origin: "https://api.bybit.com",
+            observedAt: at(Date.parse(options.preparedAt) - 10),
+            collectionStartedAt: at(Date.parse(options.preparedAt) - 20),
+            collectionCompletedAt: at(Date.parse(options.preparedAt) - 5),
+            bid: options.symbol === "NEARUSDT" ? "4.38" : "7.237",
+            ask: options.symbol === "NEARUSDT" ? "4.381" : "7.238",
+            last: options.symbol === "NEARUSDT" ? "4.38" : "7.237",
+          }),
+        );
+  const directConstraints =
+    options.symbol === "BTCUSDT"
+      ? plan({
+          preparedAt: options.preparedAt,
+          accountIdentityHash: options.accountIdentityHash,
+        }).constraints
+      : unwrap(
+          createInstrumentConstraints({
+            instrument: options.symbol,
+            version: "bybit-linear-instrument/v1",
+            priceTickSize: "0.001",
+            quantityStep: "0.1",
+            minQuantity: "0.1",
+            minNotional: "5",
+            minPrice: "0.001",
+            maxPrice: "1000000",
+            maxLimitQuantity: "100000",
+          }),
+        );
+  const directPlan = unwrap(
+    createOperatorMainnetTradeCommandPlan({
+      receipt,
+      quote: directQuote,
+      warningCodes: [],
+      constraints: directConstraints,
+      preparedAt: options.preparedAt,
+    }),
+  );
+  const create = unwrap(
+    createOperatorMainnetCreateRequest(
+      directPlan as unknown as OperatorMainnetTestPlan,
+    ),
+  );
+  const binding = unwrap(
+    createOperatorMainnetTradeCommandBinding({
+      receipt,
+      plan: directPlan,
+      createPayloadHash: create.payloadHash,
+      boundAt: directPlan.preparedAt,
+    }),
+  );
+  return { receipt, directPlan, create, binding };
+}
+
 function setupDirectCommand(
   options: {
     readonly nonce?: string;
+    readonly symbol?: string;
+    readonly availableBalance?: string;
     readonly preparedAt?: UtcTimestamp;
     readonly acceptedAt?: UtcTimestamp;
     readonly persist?: "none" | "receipt-only" | "receipt-and-binding";
@@ -830,48 +922,35 @@ function setupDirectCommand(
         : { preparedAt: options.preparedAt }),
     }),
   });
-  const commandId = `command-${options.nonce ?? "success"}`;
-  const actorIdentityHash = options.wrongActorIdentity
-    ? unwrap(hashCanonical({ localOperatorIdentity: "local-operator:other" }))
-    : testLocalActorIdentityHash();
+  const symbol = options.symbol ?? legacyHarness.valuePlan.symbol;
   const acceptedAt = options.acceptedAt ?? NOW;
-  const receipt = unwrap(
-    createOperatorMainnetTradeCommandReceipt({
-      commandId,
-      actorIdentityHash,
-      accountIdentityHash: legacyHarness.valuePlan.accountIdentityHash,
-      symbol: legacyHarness.valuePlan.symbol,
-      allocation: "10",
-      grossNotionalCap: "8",
-      maxDeviationBps: "10",
-      takeProfitMode: "percent",
-      takeProfitValue: "0.20",
-      acceptedAt,
-    }),
-  );
-  const directPlan = unwrap(
-    createOperatorMainnetTradeCommandPlan({
-      receipt,
-      quote: legacyHarness.valuePlan.quote,
-      warningCodes: legacyHarness.valuePlan.warningCodes,
-      constraints: legacyHarness.valuePlan.constraints,
-      preparedAt: legacyHarness.valuePlan.preparedAt,
-    }),
-  );
+  const commandId = `command-${options.nonce ?? "success"}`;
+  const artifacts = directCommandArtifacts({
+    nonce: options.nonce ?? "success",
+    symbol,
+    accountIdentityHash: legacyHarness.valuePlan.accountIdentityHash,
+    ...(options.wrongActorIdentity
+      ? {
+          actorIdentityHash: unwrap(
+            hashCanonical({ localOperatorIdentity: "local-operator:other" }),
+          ),
+        }
+      : {}),
+    preparedAt: legacyHarness.valuePlan.preparedAt,
+    acceptedAt,
+  });
+  const { receipt, directPlan, create } = artifacts;
   const directPlanForApplication =
     directPlan as unknown as OperatorMainnetTestPlan;
-  const create = unwrap(
-    createOperatorMainnetCreateRequest(directPlanForApplication),
-  );
   const payloadHash = options.payloadHashMismatch
     ? unwrap(hashCanonical({ not: create.payloadHash }))
     : create.payloadHash;
   const binding = unwrap(
     createOperatorMainnetTradeCommandBinding({
-      receipt,
-      plan: directPlan,
+      receipt: artifacts.receipt,
+      plan: artifacts.directPlan,
       createPayloadHash: payloadHash,
-      boundAt: directPlan.preparedAt,
+      boundAt: artifacts.directPlan.preparedAt,
     }),
   );
   const persist = options.persist ?? "receipt-and-binding";
@@ -912,14 +991,14 @@ function setupDirectCommand(
   const journal = new Proxy(legacyHarness.journal, {
     get(target, key) {
       if (key === "findPendingOperatorMainnetTestSource")
-        return () => {
+        return (symbol?: string) => {
           pendingChecks += 1;
           return options.pendingSource
             ? ({
                 ok: true,
                 value: { sourceId: "operator-mainnet-test:prior-command" },
               } as never)
-            : target.findPendingOperatorMainnetTestSource();
+            : target.findPendingOperatorMainnetTestSource(symbol);
         };
       if (key === "findOperatorMainnetRecoveryGrant")
         return (
@@ -955,7 +1034,11 @@ function setupDirectCommand(
     evidence: {
       collect: async () => {
         evidenceCalls += 1;
-        return freshEvidence(directPlanForApplication);
+        return freshEvidence(directPlanForApplication, {
+          ...(options.availableBalance === undefined
+            ? {}
+            : { availableBalance: options.availableBalance }),
+        });
       },
     },
     exchange: {
@@ -1090,10 +1173,142 @@ test("direct command cannot use pending-source recovery authority", async () => 
   if (!result.ok)
     assert.equal(
       result.error.details?.reasonCode,
-      "UNRESOLVED_SAME_ACCOUNT_SOURCE_EXISTS",
+      "UNRESOLVED_SAME_SYMBOL_SOURCE_EXISTS",
     );
   assert.equal(harness.recoveryGrantChecks(), 0);
   assert.equal(harness.pendingChecks(), 1);
+  assert.equal(harness.createCalls(), 0);
+  assert.equal(harness.authorization.consumeCalls, 0);
+  harness.persistence.close();
+});
+
+test("direct NEAR command can create while a known INJ source remains pending", async () => {
+  const harness = setupDirectCommand({
+    nonce: "near-while-inj-pending",
+    symbol: "NEARUSDT",
+  });
+  const priorPreparedAt = at(Date.parse(NOW) - 1_000);
+  const prior = directCommandArtifacts({
+    nonce: "accepted-inj-source",
+    symbol: "INJUSDT",
+    accountIdentityHash: harness.directPlan.accountIdentityHash,
+    preparedAt: priorPreparedAt,
+    acceptedAt: priorPreparedAt,
+  });
+  unwrap(
+    harness.journal.persistOperatorMainnetTradeCommandReceipt({
+      receipt: prior.receipt,
+      recordedAt: priorPreparedAt,
+    }),
+  );
+  unwrap(
+    harness.journal.bindOperatorMainnetTradeCommand({
+      binding: prior.binding,
+      boundAt: prior.binding.boundAt,
+    }),
+  );
+  const injSource = unwrap(
+    harness.journal.prepareCreateIntent({
+      runId: "prior-inj-run",
+      plan: prior.directPlan,
+      tradeCommand: {
+        receipt: prior.receipt,
+        binding: prior.binding,
+        authorizationAt: priorPreparedAt,
+      },
+      payloadJson: prior.create.payloadJson,
+      payloadHash: prior.create.payloadHash as PlanHash,
+      preparedAt: priorPreparedAt,
+    }),
+  );
+  unwrap(
+    harness.journal.recordAttempt({
+      runId: "prior-inj-run",
+      sourceId: injSource.source.sourceId,
+      attemptId: "prior-inj-attempt",
+      outcome: "accepted",
+      exchangeOrderId: "inj-entry-order",
+      recordedAt: at(Date.parse(NOW) - 500),
+    }),
+  );
+  unwrap(
+    harness.journal.appendReconciliation({
+      sourceId: injSource.source.sourceId,
+      lifecycleOutcome: "PARTIAL_EVIDENCE",
+      cleanupStatus: "pending",
+      evidence: { entryFillQuantity: "1.3", activeTakeProfitQuantity: "1.3" },
+      observedAt: at(Date.parse(NOW) - 400),
+    }),
+  );
+
+  const result = unwrap(await harness.run());
+  assert.equal(result.kind, "attempted");
+  assert.equal(result.attemptOutcome, "accepted");
+  assert.equal(harness.createCalls(), 1);
+  const injAfter = unwrap(
+    harness.journal.readOperatorMainnetTestSource(injSource.source.sourceId),
+  );
+  assert.equal(injAfter?.source.sourceId, injSource.source.sourceId);
+  assert.equal(injAfter?.attempt?.exchangeOrderId, "inj-entry-order");
+  assert.equal(injAfter?.reconciliations.at(-1)?.cleanupStatus, "pending");
+  const nearSourceId = unwrap(
+    deriveOperatorMainnetTestSourceId(harness.directPlan.contentHash),
+  );
+  assert.equal(
+    unwrap(harness.journal.readOperatorMainnetTestSource(nearSourceId))?.plan
+      .symbol,
+    "NEARUSDT",
+  );
+  harness.persistence.close();
+});
+
+test("direct NEAR command still blocks when available margin cannot fund it", async () => {
+  const harness = setupDirectCommand({
+    nonce: "near-insufficient-with-inj-pending",
+    symbol: "NEARUSDT",
+    availableBalance: "0.01",
+  });
+  const prior = directCommandArtifacts({
+    nonce: "insufficient-inj-source",
+    symbol: "INJUSDT",
+    accountIdentityHash: harness.directPlan.accountIdentityHash,
+    preparedAt: at(Date.parse(NOW) - 1_000),
+    acceptedAt: at(Date.parse(NOW) - 1_000),
+  });
+  unwrap(
+    harness.journal.persistOperatorMainnetTradeCommandReceipt({
+      receipt: prior.receipt,
+      recordedAt: prior.receipt.acceptedAt,
+    }),
+  );
+  unwrap(
+    harness.journal.bindOperatorMainnetTradeCommand({
+      binding: prior.binding,
+      boundAt: prior.binding.boundAt,
+    }),
+  );
+  unwrap(
+    harness.journal.prepareCreateIntent({
+      runId: "prior-inj-run",
+      plan: prior.directPlan,
+      tradeCommand: {
+        receipt: prior.receipt,
+        binding: prior.binding,
+        authorizationAt: prior.receipt.acceptedAt,
+      },
+      payloadJson: prior.create.payloadJson,
+      payloadHash: prior.create.payloadHash as PlanHash,
+      preparedAt: at(Date.parse(NOW) - 1_000),
+    }),
+  );
+
+  const result = await harness.run();
+  assert.equal(result.ok, false);
+  if (!result.ok)
+    assert.equal(
+      result.error.details?.reasonCode,
+      "AVAILABLE_MARGIN_OR_FEE_RESERVE_INSUFFICIENT",
+    );
   assert.equal(harness.createCalls(), 0);
   assert.equal(harness.authorization.consumeCalls, 0);
   harness.persistence.close();

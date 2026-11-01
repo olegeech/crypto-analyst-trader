@@ -3072,9 +3072,9 @@ export class SqliteOperatorMainnetTestStore implements OperatorMainnetTestPersis
     return encoded.ok ? ok(encoded.value.json) : encoded;
   }
 
-  private pendingSourceRows(
+  private pendingSourceSnapshots(
     database = this.db,
-  ): Result<readonly OperatorMainnetTestSourceRecord[]> {
+  ): Result<readonly OperatorMainnetTestSnapshot[]> {
     const rows = database
       .prepare(
         `SELECT s.* FROM operator_mainnet_test_sources s
@@ -3084,7 +3084,7 @@ export class SqliteOperatorMainnetTestStore implements OperatorMainnetTestPersis
          ORDER BY s.created_at, s.source_id`,
       )
       .all(...scopeValues(this.scope)) as SqliteRow[];
-    const pending: OperatorMainnetTestSourceRecord[] = [];
+    const pending: OperatorMainnetTestSnapshot[] = [];
     for (const row of rows) {
       // Validate the complete persisted source and its canonical reconciliation
       // rows before trusting cleanup status to release the account gate.
@@ -3107,20 +3107,35 @@ export class SqliteOperatorMainnetTestStore implements OperatorMainnetTestPersis
           )
           .get(latestGrant.value.grantId) as SqliteRow | undefined;
         if (!consumed) {
-          pending.push(snapshot.value.source);
+          pending.push(snapshot.value);
           continue;
         }
       }
-      pending.push(snapshot.value.source);
+      pending.push(snapshot.value);
     }
     return ok(pending);
   }
 
+  private pendingSourceRows(
+    database = this.db,
+  ): Result<readonly OperatorMainnetTestSourceRecord[]> {
+    const snapshots = this.pendingSourceSnapshots(database);
+    return snapshots.ok
+      ? ok(snapshots.value.map((snapshot) => snapshot.source))
+      : snapshots;
+  }
+
   private pendingSourceRow(
     database = this.db,
+    symbol?: string,
   ): Result<OperatorMainnetTestSourceRecord | undefined> {
-    const pending = this.pendingSourceRows(database);
-    return pending.ok ? ok(pending.value[0]) : pending;
+    const pending = this.pendingSourceSnapshots(database);
+    if (!pending.ok) return pending;
+    return ok(
+      pending.value.find(
+        (snapshot) => symbol === undefined || snapshot.plan.symbol === symbol,
+      )?.source,
+    );
   }
 
   readOperatorMainnetTestSource(
@@ -3136,13 +3151,13 @@ export class SqliteOperatorMainnetTestStore implements OperatorMainnetTestPersis
     }
   }
 
-  findPendingOperatorMainnetTestSource(): Result<
-    OperatorMainnetTestSourceRecord | undefined
-  > {
+  findPendingOperatorMainnetTestSource(
+    symbol?: string,
+  ): Result<OperatorMainnetTestSourceRecord | undefined> {
     if (!validScope(this.scope)) return invalid();
     return runInTransaction(
       this.db,
-      (database) => this.pendingSourceRow(database),
+      (database) => this.pendingSourceRow(database, symbol),
       "PERSISTENCE_INTEGRITY",
     );
   }
@@ -3500,15 +3515,29 @@ export class SqliteOperatorMainnetTestStore implements OperatorMainnetTestPersis
               "HALT blocks a new operator Mainnet CREATE; inspect saved event and source/intent evidence before explicit recovery",
             ),
           );
-        const pending = this.pendingSourceRow(database);
+        const pending = this.pendingSourceSnapshots(database);
         if (!pending.ok) return pending;
-        if (pending.value)
-          return fail(
-            domainError(
-              "UNRESOLVED_STATE",
-              "an earlier operator Mainnet source requires reconciliation",
-            ),
-          );
+        for (const snapshot of pending.value) {
+          const reasonCode =
+            snapshot.plan.symbol === plan.value.symbol
+              ? "UNRESOLVED_SAME_SYMBOL_SOURCE_EXISTS"
+              : snapshot.attempt === undefined ||
+                  snapshot.attempt.outcome === "ambiguous"
+                ? "ACCOUNT_CREATE_OUTCOME_UNKNOWN"
+                : snapshot.attempt.outcome === "accepted" &&
+                    timestampToEpochMs(snapshot.attempt.recordedAt) >=
+                      timestampToEpochMs(at.value)
+                  ? "ACCOUNT_CAPACITY_EVIDENCE_PRECEDES_OTHER_CREATE"
+                  : undefined;
+          if (reasonCode !== undefined)
+            return fail(
+              domainError(
+                "UNRESOLVED_STATE",
+                "another operator Mainnet source is not safe to ignore for this direct CREATE",
+                { reasonCode, symbol: plan.value.symbol },
+              ),
+            );
+        }
         if (this.sourceRow(sourceId.value, database))
           return fail(
             domainError(

@@ -394,9 +394,9 @@ export interface OperatorMainnetTestPersistencePort {
   readOperatorMainnetTestSource(
     sourceId: string,
   ): Result<OperatorMainnetTestSnapshot | undefined>;
-  findPendingOperatorMainnetTestSource(): Result<
-    OperatorMainnetTestSourceRecord | undefined
-  >;
+  findPendingOperatorMainnetTestSource(
+    symbol?: string,
+  ): Result<OperatorMainnetTestSourceRecord | undefined>;
   prepareCreateIntent(
     request: PrepareOperatorMainnetTestCreateRequest,
   ): Result<OperatorMainnetTestSnapshot>;

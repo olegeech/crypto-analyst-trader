@@ -545,14 +545,21 @@ export async function executeMainnetOperatorTest(
 
   const initial = haltIsClear(dependencies.persistence);
   if (!initial.ok) return initial;
-  const pending = dependencies.journal.findPendingOperatorMainnetTestSource();
+  const directCommand = authorization.kind === "trade-command";
+  const pending = dependencies.journal.findPendingOperatorMainnetTestSource(
+    directCommand ? plan.symbol : undefined,
+  );
   if (!pending.ok) return pending;
   if (
     pending.value &&
     (recoveryGrant === undefined ||
       pending.value.sourceId !== recoveryGrant.sourceId)
   )
-    return blocked("UNRESOLVED_SAME_ACCOUNT_SOURCE_EXISTS");
+    return blocked(
+      directCommand
+        ? "UNRESOLVED_SAME_SYMBOL_SOURCE_EXISTS"
+        : "UNRESOLVED_SAME_ACCOUNT_SOURCE_EXISTS",
+    );
 
   let fresh: Awaited<ReturnType<MainnetOperatorTestEvidencePort["collect"]>>;
   try {

@@ -16,6 +16,7 @@ import {
   deriveOperatorMainnetTestSourceId,
   type OperatorMainnetTestPlan,
 } from "../src/domain/execution/operator-mainnet-test-plan.js";
+import { createOperatorMainnetCreateRequest } from "../src/application/mainnet-entry-evidence.js";
 import {
   createOperatorMainnetTradeCommandBinding,
   createOperatorMainnetTradeCommandPlan,
@@ -60,11 +61,18 @@ function plan(
   nonce = "operator-test-01",
   recoveryAttestationHash?: PlanHash,
   preparedAt: UtcTimestamp = NOW,
+  symbol = "DOGEUSDT",
 ) {
   const preparedAtMs = Date.parse(preparedAt);
+  const market =
+    symbol === "ETHUSDT"
+      ? { bid: "2500", ask: "2500.1", tick: "0.1", step: "0.001" }
+      : symbol === "BTCUSDT"
+        ? { bid: "68000", ask: "68001", tick: "0.1", step: "0.001" }
+        : { bid: "0.08869", ask: "0.08870", tick: "0.0001", step: "0.1" };
   const quote = value(
     createOperatorMainnetQuote({
-      symbol: "DOGEUSDT",
+      symbol,
       exchange: "bybit",
       environment: "mainnet",
       category: "linear",
@@ -72,28 +80,28 @@ function plan(
       observedAt: new Date(preparedAtMs - 10).toISOString(),
       collectionStartedAt: new Date(preparedAtMs - 20).toISOString(),
       collectionCompletedAt: new Date(preparedAtMs - 5).toISOString(),
-      bid: "0.08869",
-      ask: "0.08870",
-      last: "0.08869",
+      bid: market.bid,
+      ask: market.ask,
+      last: market.bid,
     }),
   );
   const constraints = value(
     createInstrumentConstraints({
-      instrument: "DOGEUSDT",
+      instrument: symbol,
       version: "bybit-v5:public-instrument/v2",
-      priceTickSize: "0.0001",
-      quantityStep: "0.1",
-      minQuantity: "1",
+      priceTickSize: market.tick,
+      quantityStep: market.step,
+      minQuantity: market.step,
       minNotional: "5",
-      minPrice: "0.0001",
-      maxPrice: "100",
+      minPrice: market.tick,
+      maxPrice: symbol === "DOGEUSDT" ? "100" : "1000000",
       maxLimitQuantity: "100000",
     }),
   );
   return value(
     createOperatorMainnetTestPlan({
       accountIdentityHash: ACCOUNT,
-      symbol: "DOGEUSDT",
+      symbol,
       nonce,
       allocation: "10",
       grossNotionalCap: "8",
@@ -161,7 +169,19 @@ function tradeCommand(
   > extends Result<infer T>
     ? T
     : never,
+  symbol = "DOGEUSDT",
+  preparedAt: UtcTimestamp = NOW,
 ) {
+  const defaultBid =
+    symbol === "NEARUSDT" ? "4.38" : symbol === "INJUSDT" ? "7.237" : bid;
+  const ask =
+    symbol === "NEARUSDT"
+      ? "4.381"
+      : symbol === "INJUSDT"
+        ? "7.238"
+        : bid === "0.08869"
+          ? "0.08870"
+          : (Number(bid) + 0.00001).toFixed(8).replace(/0+$/u, "");
   const receipt =
     savedReceipt ??
     value(
@@ -169,19 +189,19 @@ function tradeCommand(
         commandId,
         actorIdentityHash: `sha256:${"b".repeat(64)}`,
         accountIdentityHash: ACCOUNT,
-        symbol: "DOGEUSDT",
+        symbol,
         allocation: "10",
         grossNotionalCap: "8",
         maxDeviationBps: "10",
         takeProfitMode: "percent",
         takeProfitValue: "0.20",
-        acceptedAt: NOW,
+        acceptedAt: preparedAt,
       }),
     );
-  const preparedAtMs = Date.parse(NOW);
+  const preparedAtMs = Date.parse(preparedAt);
   const quote = value(
     createOperatorMainnetQuote({
-      symbol: "DOGEUSDT",
+      symbol: receipt.symbol,
       exchange: "bybit",
       environment: "mainnet",
       category: "linear",
@@ -189,21 +209,21 @@ function tradeCommand(
       observedAt: new Date(preparedAtMs - 10).toISOString(),
       collectionStartedAt: new Date(preparedAtMs - 20).toISOString(),
       collectionCompletedAt: new Date(preparedAtMs - 5).toISOString(),
-      bid,
-      ask: "0.08870",
-      last: bid,
+      bid: defaultBid,
+      ask,
+      last: defaultBid,
     }),
   );
   const constraints = value(
     createInstrumentConstraints({
-      instrument: "DOGEUSDT",
+      instrument: receipt.symbol,
       version: "bybit-v5:public-instrument/v2",
-      priceTickSize: "0.0001",
-      quantityStep: "0.1",
-      minQuantity: "1",
+      priceTickSize: receipt.symbol === "DOGEUSDT" ? "0.0001" : "0.001",
+      quantityStep: receipt.symbol === "DOGEUSDT" ? "0.1" : "0.1",
+      minQuantity: "0.1",
       minNotional: "5",
-      minPrice: "0.0001",
-      maxPrice: "100",
+      minPrice: receipt.symbol === "DOGEUSDT" ? "0.0001" : "0.001",
+      maxPrice: receipt.symbol === "DOGEUSDT" ? "100" : "1000000",
       maxLimitQuantity: "100000",
     }),
   );
@@ -213,7 +233,7 @@ function tradeCommand(
       quote,
       warningCodes: [],
       constraints,
-      preparedAt: NOW,
+      preparedAt,
     }),
   );
   const payloadJson = exactPayload(commandPlan);
@@ -223,7 +243,7 @@ function tradeCommand(
       receipt,
       plan: commandPlan,
       createPayloadHash: payloadHashValue,
-      boundAt: NOW,
+      boundAt: preparedAt,
     }),
   );
   return {
@@ -233,6 +253,71 @@ function tradeCommand(
     payloadJson,
     payloadHash: payloadHashValue,
   };
+}
+
+function saveDirectCommand(
+  fixture: ReturnType<typeof setup>,
+  command: ReturnType<typeof tradeCommand>,
+) {
+  value(
+    fixture.store.persistOperatorMainnetTradeCommandReceipt({
+      receipt: command.receipt,
+      recordedAt: command.receipt.acceptedAt,
+    }),
+  );
+  value(
+    fixture.store.bindOperatorMainnetTradeCommand({
+      binding: command.binding,
+      boundAt: command.binding.boundAt,
+    }),
+  );
+}
+
+function directIntentRequest(
+  command: ReturnType<typeof tradeCommand>,
+  preparedAt: UtcTimestamp = command.plan.preparedAt,
+) {
+  return {
+    runId: command.receipt.commandId,
+    plan: command.plan,
+    tradeCommand: {
+      receipt: command.receipt,
+      binding: command.binding,
+      authorizationAt: command.receipt.acceptedAt,
+    },
+    payloadJson: command.payloadJson,
+    payloadHash: command.payloadHash,
+    preparedAt,
+  } as const;
+}
+
+function prepareDirectIntent(
+  fixture: ReturnType<typeof setup>,
+  command: ReturnType<typeof tradeCommand>,
+  preparedAt: UtcTimestamp = command.plan.preparedAt,
+) {
+  saveDirectCommand(fixture, command);
+  return value(
+    fixture.store.prepareCreateIntent(directIntentRequest(command, preparedAt)),
+  );
+}
+
+function recordAcceptedAttempt(
+  fixture: ReturnType<typeof setup>,
+  command: ReturnType<typeof tradeCommand>,
+  sourceId: string,
+  recordedAt: UtcTimestamp,
+) {
+  return value(
+    fixture.store.recordAttempt({
+      runId: command.receipt.commandId,
+      sourceId,
+      attemptId: `${command.receipt.commandId}-attempt`,
+      outcome: "accepted",
+      exchangeOrderId: `${command.receipt.commandId}-order`,
+      recordedAt,
+    }),
+  );
 }
 
 function payloadHash(payload: string): PlanHash {
@@ -1906,6 +1991,226 @@ test("direct trade-command evidence binds once and consumes atomically without a
   );
   assert.deepEqual(reopened.db.prepare("PRAGMA foreign_key_check").all(), []);
   reopened.close();
+});
+
+test("direct cross-symbol intent accepts an older INJ source and keeps both command statuses independent", () => {
+  const fixture = setup();
+  const injPreparedAt = timestamp("2026-10-22T10:00:56.000Z");
+  const injAttemptAt = timestamp("2026-10-22T10:00:58.000Z");
+  const inj = tradeCommand(
+    "accepted-inj-pending-tp",
+    "7.237",
+    undefined,
+    "INJUSDT",
+    injPreparedAt,
+  );
+  const injIntent = prepareDirectIntent(fixture, inj);
+  const acceptedInj = recordAcceptedAttempt(
+    fixture,
+    inj,
+    injIntent.source.sourceId,
+    injAttemptAt,
+  );
+  value(
+    fixture.store.appendReconciliation({
+      sourceId: injIntent.source.sourceId,
+      lifecycleOutcome: "PARTIAL_EVIDENCE",
+      cleanupStatus: "pending",
+      evidence: { positionQuantity: "1.3", activeTakeProfitQuantity: "1.3" },
+      observedAt: timestamp("2026-10-22T10:00:58.500Z"),
+    }),
+  );
+
+  const nearPreparedAt = timestamp("2026-10-22T10:00:59.000Z");
+  const nearIntentAt = timestamp("2026-10-22T10:00:59.200Z");
+  const near = tradeCommand(
+    "near-with-older-inj",
+    "4.38",
+    undefined,
+    "NEARUSDT",
+    nearPreparedAt,
+  );
+  const nearIntent = prepareDirectIntent(fixture, near, nearIntentAt);
+  assert.equal(nearIntent.plan.symbol, "NEARUSDT");
+  const acceptedNear = recordAcceptedAttempt(
+    fixture,
+    near,
+    nearIntent.source.sourceId,
+    timestamp("2026-10-22T10:00:59.400Z"),
+  );
+
+  const injStatus = value(
+    fixture.store.readOperatorMainnetTradeCommand(inj.receipt.commandId),
+  );
+  const nearStatus = value(
+    fixture.store.readOperatorMainnetTradeCommand(near.receipt.commandId),
+  );
+  assert.equal(injStatus?.source?.plan.symbol, "INJUSDT");
+  assert.equal(
+    injStatus?.source?.attempt?.exchangeOrderId,
+    acceptedInj.attempt?.exchangeOrderId,
+  );
+  assert.equal(
+    injStatus?.source?.reconciliations.at(-1)?.cleanupStatus,
+    "pending",
+  );
+  assert.equal(nearStatus?.source?.plan.symbol, "NEARUSDT");
+  assert.equal(
+    nearStatus?.source?.attempt?.exchangeOrderId,
+    acceptedNear.attempt?.exchangeOrderId,
+  );
+  assert.notEqual(injIntent.source.sourceId, nearIntent.source.sourceId);
+  fixture.connection.close();
+});
+
+test("direct CREATE intent atomically blocks same-symbol sources, in-progress writes and newer accepted attempts", () => {
+  const sameSymbolFixture = setup();
+  const firstDoge = tradeCommand(
+    "same-symbol-first",
+    "0.08869",
+    undefined,
+    "DOGEUSDT",
+    timestamp("2026-10-22T10:00:58.000Z"),
+  );
+  const firstDogeIntent = prepareDirectIntent(sameSymbolFixture, firstDoge);
+  recordAcceptedAttempt(
+    sameSymbolFixture,
+    firstDoge,
+    firstDogeIntent.source.sourceId,
+    timestamp("2026-10-22T10:00:59.000Z"),
+  );
+  const secondDoge = tradeCommand("same-symbol-second");
+  saveDirectCommand(sameSymbolFixture, secondDoge);
+  const sameSymbolResult = sameSymbolFixture.store.prepareCreateIntent(
+    directIntentRequest(secondDoge),
+  );
+  assert.equal(sameSymbolResult.ok, false);
+  if (!sameSymbolResult.ok) {
+    assert.equal(sameSymbolResult.error.code, "UNRESOLVED_STATE");
+    assert.equal(
+      sameSymbolResult.error.details?.reasonCode,
+      "UNRESOLVED_SAME_SYMBOL_SOURCE_EXISTS",
+    );
+  }
+  sameSymbolFixture.connection.close();
+
+  const inProgressFixture = setup();
+  const inProgressInj = tradeCommand(
+    "cross-symbol-in-progress",
+    "7.237",
+    undefined,
+    "INJUSDT",
+    timestamp("2026-10-22T10:00:58.000Z"),
+  );
+  prepareDirectIntent(inProgressFixture, inProgressInj);
+  const inProgressNear = tradeCommand(
+    "near-after-in-progress",
+    "4.38",
+    undefined,
+    "NEARUSDT",
+    timestamp("2026-10-22T10:00:59.000Z"),
+  );
+  saveDirectCommand(inProgressFixture, inProgressNear);
+  const inProgressResult = inProgressFixture.store.prepareCreateIntent(
+    directIntentRequest(inProgressNear, timestamp("2026-10-22T10:00:59.100Z")),
+  );
+  assert.equal(inProgressResult.ok, false);
+  if (!inProgressResult.ok)
+    assert.equal(
+      inProgressResult.error.details?.reasonCode,
+      "ACCOUNT_CREATE_OUTCOME_UNKNOWN",
+    );
+  inProgressFixture.connection.close();
+
+  const staleFixture = setup();
+  const laterInj = tradeCommand(
+    "cross-symbol-later-inj",
+    "7.237",
+    undefined,
+    "INJUSDT",
+    timestamp("2026-10-22T10:00:57.000Z"),
+  );
+  const laterInjIntent = prepareDirectIntent(staleFixture, laterInj);
+  recordAcceptedAttempt(
+    staleFixture,
+    laterInj,
+    laterInjIntent.source.sourceId,
+    timestamp("2026-10-22T10:00:59.500Z"),
+  );
+  const staleNear = tradeCommand(
+    "near-with-stale-capacity-evidence",
+    "4.38",
+    undefined,
+    "NEARUSDT",
+    timestamp("2026-10-22T10:00:59.000Z"),
+  );
+  saveDirectCommand(staleFixture, staleNear);
+  const staleResult = staleFixture.store.prepareCreateIntent(
+    directIntentRequest(staleNear, timestamp("2026-10-22T10:00:59.500Z")),
+  );
+  assert.equal(staleResult.ok, false);
+  if (!staleResult.ok)
+    assert.equal(
+      staleResult.error.details?.reasonCode,
+      "ACCOUNT_CAPACITY_EVIDENCE_PRECEDES_OTHER_CREATE",
+    );
+  staleFixture.connection.close();
+});
+
+test("legacy approved CREATE remains account-wide while another symbol source is pending", () => {
+  const fixture = setup();
+  const inj = tradeCommand(
+    "legacy-global-inj-source",
+    "7.237",
+    undefined,
+    "INJUSDT",
+    timestamp("2026-10-22T10:00:58.000Z"),
+  );
+  prepareDirectIntent(fixture, inj);
+  const ethPlan = plan("legacy-eth-blocked-by-inj", undefined, NOW, "ETHUSDT");
+  const ethCreate = value(createOperatorMainnetCreateRequest(ethPlan));
+  const legacyResult = fixture.store.prepareCreateIntent({
+    runId: "legacy-eth-after-inj",
+    plan: ethPlan,
+    approval: approval(ethPlan),
+    payloadJson: ethCreate.payloadJson,
+    payloadHash: ethCreate.payloadHash as PlanHash,
+    preparedAt: NOW,
+  });
+  assert.equal(legacyResult.ok, false);
+  if (!legacyResult.ok)
+    assert.equal(legacyResult.error.code, "UNRESOLVED_STATE");
+  assert.equal(
+    value(fixture.store.findPendingOperatorMainnetTestSource())?.sourceId,
+    value(deriveOperatorMainnetTestSourceId(inj.plan.contentHash)),
+  );
+  fixture.connection.close();
+});
+
+test("symbol-filtered pending lookup validates other-symbol persisted evidence before ignoring it", () => {
+  const fixture = setup();
+  const inj = tradeCommand(
+    "corrupt-inj-before-near-filter",
+    "7.237",
+    undefined,
+    "INJUSDT",
+  );
+  const created = prepareDirectIntent(fixture, inj);
+  const corruptIntent = value(
+    canonicalSerialize({ invalid: "not an operator CREATE intent" }),
+  );
+  fixture.connection.db
+    .prepare(
+      `UPDATE operator_mainnet_test_write_intents
+       SET canonical_json = ?, canonical_hash = ? WHERE source_id = ?`,
+    )
+    .run(corruptIntent, payloadHash(corruptIntent), created.source.sourceId);
+
+  const filtered =
+    fixture.store.findPendingOperatorMainnetTestSource("NEARUSDT");
+  assert.equal(filtered.ok, false);
+  if (!filtered.ok) assert.equal(filtered.error.code, "PERSISTENCE_INTEGRITY");
+  fixture.connection.close();
 });
 
 test("direct trade-command plans cannot create legacy recovery grants", () => {

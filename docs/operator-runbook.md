@@ -340,13 +340,22 @@ GTC may remain active after receipt expiry. Expiry limits another submission;
 it does not cancel or change the order. Do not issue a replacement instruction
 just because the order has not filled.
 
+Direct v3 trades retain a same-symbol pending-source block. A pending source for
+another symbol may coexist only when it has a known accepted CREATE attempt and
+the new account-capacity evidence is strictly newer than that attempt. An
+unattempted or ambiguous CREATE, an attempt at or after the evidence timestamp,
+or an active account HALT blocks every symbol. The SQLite intent transaction
+validates every persisted source before applying this rule. Legacy approved
+execution and recovery keep their account-wide pending-source gate.
+
 If refused before intent, `status --command-id` reads the saved local refusal
 without a Bybit request. If intent exists, status resolves the source and
 performs GET-only reconciliation. After an ambiguous result or crash, inspect
 the printed client order ID, orders, fills and position in Bybit UI, then rerun
 status. Never repeat the command ID, resend the trade or edit SQLite. A new
-trade requires a new direct instruction and still passes account-wide
-pending-source and incident-HALT gates. This command grants no cancel,
+trade requires a new direct instruction and still passes account-wide capacity,
+ownership, venue and incident-HALT gates plus the pending-source rules above.
+This command grants no cancel,
 recovery or HALT-clearance authority; use the separate [#25 recovery
 procedure](#manual-attestation-recovery-for-an-unavailable-read-25) when its
 conditions apply.
