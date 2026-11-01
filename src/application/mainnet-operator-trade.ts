@@ -18,7 +18,10 @@ import {
 import { createOperatorMainnetCreateRequest } from "./mainnet-entry-evidence.js";
 import type { OperatorMainnetTestPlan } from "../domain/execution/operator-mainnet-test-plan.js";
 import { localOperatorIdentityHash } from "./local-operator.js";
-import { prepareMainnetOperatorTest } from "./mainnet-operator-test-preparation-composition.js";
+import {
+  prepareMainnetOperatorTest,
+  type MainnetOperatorTestPreparation,
+} from "./mainnet-operator-test-preparation-composition.js";
 import { runMainnetOperatorTestComposition } from "./mainnet-operator-test-composition.js";
 import type {
   MainnetOperatorTestCompositionInput,
@@ -122,6 +125,7 @@ export interface MainnetOperatorTradeDependencies {
   readonly prepare?: typeof prepareMainnetOperatorTest;
   readonly execute?: (
     input: MainnetOperatorTestCompositionInput,
+    preparedDirectTradeAdmission?: MainnetOperatorTestPreparation["directTradeAdmission"],
   ) => Promise<Result<MainnetOperatorTestOutcome>>;
   readonly status?: (input: {
     readonly sourceId: unknown;
@@ -1102,6 +1106,7 @@ export async function runMainnetOperatorTrade(
               return credentials;
             },
           },
+          stageMonotonicClock: monotonic,
         },
       );
     } catch {
@@ -1230,11 +1235,19 @@ export async function runMainnetOperatorTrade(
       plan: plan.value,
       runId: `operator-trade-${commandId}`,
     };
+    const preparedDirectTradeAdmission =
+      prepared.value.directTradeAdmission?.planHash === plan.value.contentHash
+        ? prepared.value.directTradeAdmission
+        : undefined;
     let executed: Result<MainnetOperatorTestOutcome>;
     try {
-      executed = await (
-        dependencies.execute ?? runMainnetOperatorTestComposition
-      )(commandInput);
+      executed = dependencies.execute
+        ? await dependencies.execute(commandInput, preparedDirectTradeAdmission)
+        : await runMainnetOperatorTestComposition(commandInput, {
+            preparedDirectTradeAdmission,
+            wallClock: clock,
+            monotonicClock: monotonic,
+          });
     } catch {
       executed = fail(
         domainError(

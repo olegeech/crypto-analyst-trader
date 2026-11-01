@@ -117,6 +117,8 @@ async function runOperatorTradeE2e(
   t: TestContext,
   accountInfoNoTime: boolean,
   initialTargetLeverage = "1",
+  walletAmountDrift = false,
+  staleAccountHandoff = false,
 ): Promise<void> {
   const root = mkdtempSync(join(tmpdir(), "operator-trade-e2e-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -137,6 +139,7 @@ async function runOperatorTradeE2e(
   const credentialProvider = { load: async () => credentials };
   const attempts: Array<{ method: string; path: string }> = [];
   let tickerReads = 0;
+  let walletReads = 0;
   let createCalls = 0;
   let createBody: Record<string, unknown> | undefined;
   let created = false;
@@ -218,7 +221,17 @@ async function runOperatorTradeE2e(
           !accountInfoNoTime,
         );
       case "/v5/account/wallet-balance":
-        return response(structuredClone(walletResponse.result));
+        walletReads += 1;
+        {
+          const result = structuredClone(walletResponse.result);
+          if (walletAmountDrift && walletReads === 1) {
+            const account = (result.list as Record<string, unknown>[])[0]!;
+            account.totalAvailableBalance = "90";
+            const coins = account.coin as Record<string, unknown>[];
+            coins[0]!.walletBalance = "90";
+          }
+          return response(result);
+        }
       case "/v5/account/fee-rate":
         return response({
           list: [
@@ -411,26 +424,60 @@ async function runOperatorTradeE2e(
         utcClock: () => NOW,
       });
       assert.equal(createCalls, 0, "preparation must remain GET-only");
+      assert.equal(prepared.ok, true, JSON.stringify(prepared));
       assert.equal(prepared.ok && prepared.value.exchangeWrites, 0);
-      assert.equal(
-        prepared.ok && prepared.value.exchangeEvidencePath,
-        accountInfoNoTime ? "compact-to-full" : "compact",
-      );
+      assert.equal(prepared.ok && prepared.value.exchangeEvidencePath, "full");
       return prepared;
     },
     execute: async (
       executeInput: Parameters<typeof runMainnetOperatorTestComposition>[0],
+      preparedDirectTradeAdmission: NonNullable<
+        Parameters<typeof runMainnetOperatorTestComposition>[1]
+      >["preparedDirectTradeAdmission"],
     ) => {
-      const executed = await runMainnetOperatorTestComposition(
-        executeInput,
-        compositionDependencies,
-      );
+      const handoff =
+        staleAccountHandoff && preparedDirectTradeAdmission
+          ? {
+              ...preparedDirectTradeAdmission,
+              capturedAtMonotonic: performance.now() - 301_000,
+            }
+          : preparedDirectTradeAdmission;
+      const executed = await runMainnetOperatorTestComposition(executeInput, {
+        ...compositionDependencies,
+        preparedDirectTradeAdmission: handoff,
+      });
+      if (staleAccountHandoff) {
+        assert.equal(executed.ok, false, JSON.stringify(executed));
+        if (!executed.ok) {
+          assert.equal(
+            executed.error.details?.reasonCode,
+            "MAINNET_EVIDENCE_STALE",
+          );
+          assert.equal(executed.error.details?.source, "account");
+        }
+        assert.equal(
+          createCalls,
+          0,
+          "stale account proof must stop before CREATE",
+        );
+        assert.equal(
+          walletReads,
+          2,
+          "stale account proof must not restart the full A/B scan",
+        );
+        return executed;
+      }
       assert.equal(executed.ok, true, JSON.stringify(executed));
       if (executed.ok) {
+        assert.equal(executed.value.exchangeEvidencePath, "full");
         assert.equal(
-          executed.value.exchangeEvidencePath,
-          accountInfoNoTime ? "compact-to-full" : "compact",
+          executed.value.exchangeReads,
+          1,
+          "fresh v3 evidence is handed forward without a second account collection",
         );
+        assert.deepEqual(JSON.parse(executed.value.exchangeGetCounts ?? "{}"), {
+          time: 1,
+        });
         assert.equal(executed.value.exchangeWrites, 1);
       }
       return executed;
@@ -470,6 +517,16 @@ async function runOperatorTradeE2e(
     },
   );
   const tradeText = tradeOutput.join("");
+  if (staleAccountHandoff) {
+    assert.equal(createCalls, 0);
+    assert.equal(
+      attempts.filter(
+        ({ method, path }) => method === "POST" && path === "/v5/order/create",
+      ).length,
+      0,
+    );
+    return;
+  }
   assert.equal(tradeCode, 0, tradeText);
   assert.match(tradeText, /CREATE_OUTCOME=accepted/u);
   assert.match(tradeText, /LIFECYCLE_OUTCOME=TP_LIFECYCLE_PASS/u);
@@ -486,7 +543,7 @@ async function runOperatorTradeE2e(
   assert.equal(createBody!.price, "0.0753");
   assert.equal(createBody!.takeProfit, "0.0757");
   assert.match(tradeText, /^TP_EFFECTIVE_PERCENT=0\.531208499335989/mu);
-  assert.equal(tickerReads, accountInfoNoTime ? 3 : 4);
+  assert.equal(tickerReads, 3);
   const readsAfterTrade = attempts.filter(
     ({ method }) => method === "GET",
   ).length;
@@ -509,6 +566,13 @@ async function runOperatorTradeE2e(
   );
   const createPostIndex = attempts.findIndex(
     ({ path }) => path === "/v5/order/create",
+  );
+  const preCreateGets = attempts
+    .slice(0, createPostIndex)
+    .filter(({ method }) => method === "GET").length;
+  assert.ok(
+    preCreateGets < 116,
+    `v3 must use fewer than the 116 GETs observed before CREATE in the duplicated admission flow; got ${preCreateGets}`,
   );
   if (initialTargetLeverage !== "1")
     assert.ok(leveragePostIndex >= 0 && leveragePostIndex < createPostIndex);
@@ -597,3 +661,9 @@ test("U5 production path: INJUSDT .50% full-fallback command keeps frozen Limit 
 
 test("U5 production path: non-1x flat INJUSDT is set once to 1x before one +0.50% CREATE", async (t) =>
   runOperatorTradeE2e(t, false, "2"));
+
+test("v3 hands one full account proof forward when only numeric wallet assets change between A/B", async (t) =>
+  runOperatorTradeE2e(t, false, "1", true));
+
+test("v3 blocks stale account proof before intent without restarting the full scan", async (t) =>
+  runOperatorTradeE2e(t, false, "1", false, true));

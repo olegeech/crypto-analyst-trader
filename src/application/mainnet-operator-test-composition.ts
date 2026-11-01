@@ -66,6 +66,7 @@ import type {
   MainnetOperatorTestCompositionInput,
   MainnetOperatorTestOutcome,
 } from "./mainnet-operator-test.js";
+import type { MainnetOperatorTestPreparation } from "./mainnet-operator-test-preparation-composition.js";
 import { executeMainnetOperatorTest } from "./mainnet-operator-test.js";
 import { collectAccountEvidence } from "./account-evidence-collection.js";
 import {
@@ -76,6 +77,7 @@ import {
   type MainnetOperatorTestEvidencePort,
   type MainnetOperatorTestAdmissionEvidence,
 } from "./mainnet-entry-evidence.js";
+import { PROVISIONAL_M1_MAX_ACCOUNT_EVIDENCE_AGE_MS } from "./policies/provisional-m1.js";
 import { deriveMainnetExecutionReadiness } from "./mainnet-execution-readiness.js";
 import {
   createMainnetGetCounts,
@@ -392,6 +394,7 @@ export interface MainnetOperatorTestCompositionDependencies {
   readonly request?: typeof fetch;
   readonly wallClock?: () => number;
   readonly monotonicClock?: () => number;
+  readonly preparedDirectTradeAdmission?: MainnetOperatorTestPreparation["directTradeAdmission"];
 }
 
 /** Production composition defaults to the real Keychain, SQLite store, and fetch transport. */
@@ -590,12 +593,14 @@ export async function runMainnetOperatorTestComposition(
       )
         return false;
       if (!transport) return false;
-      const offset = await transport.getServerTimeOffset();
-      const providerNow = providerTime(wall, offset);
+      const providerNow =
+        admitted.authorization.kind === "approval"
+          ? providerTime(wall, await transport.getServerTimeOffset())
+          : undefined;
       const localNow = timestampFromEpochMs(wall());
       const elapsed = monotonic() - active.evidenceAtMonotonic;
       if (
-        !providerNow ||
+        (admitted.authorization.kind === "approval" && !providerNow) ||
         !localNow.ok ||
         !Number.isFinite(elapsed) ||
         elapsed < 0
@@ -691,6 +696,166 @@ export async function runMainnetOperatorTestComposition(
       collect: async (symbol) => {
         if (symbol !== admitted.plan.symbol)
           throw new Error("operator source symbol mismatch");
+        if (admitted.authorization.kind === "trade-command") {
+          evidencePath = "full";
+          const handoff = dependencies.preparedDirectTradeAdmission;
+          if (!handoff || handoff.planHash !== admitted.plan.contentHash)
+            throw new OperatorEvidenceReadError(
+              "PREPARED_DIRECT_TRADE_EVIDENCE_UNAVAILABLE",
+              { source: "account" },
+            );
+          let fresh: MainnetOperatorTestAdmissionEvidence = handoff.evidence;
+          let validated = validateMainnetOperatorTestEvidence(
+            admitted.plan,
+            fresh,
+          );
+          let staleSource: unknown =
+            !validated.ok &&
+            validated.error.details?.reasonCode === "MAINNET_EVIDENCE_STALE"
+              ? validated.error.details.source
+              : undefined;
+          const evidenceElapsed = monotonic() - handoff.capturedAtMonotonic;
+          if (!Number.isFinite(evidenceElapsed) || evidenceElapsed < 0)
+            throw new OperatorEvidenceReadError("MONOTONIC_CLOCK_INVALID");
+          if (validated.ok && staleSource === undefined) {
+            const ages = validated.value;
+            if (
+              ages.accountAgeAtReadMs + evidenceElapsed >
+              PROVISIONAL_M1_MAX_ACCOUNT_EVIDENCE_AGE_MS
+            )
+              staleSource = "account";
+            else if (
+              ages.quoteAgeAtReadMs + evidenceElapsed >
+              admitted.plan.quoteFreshnessMs
+            )
+              staleSource = "quote";
+            else if (
+              ages.feeRateAgeAtReadMs + evidenceElapsed >
+              PROVISIONAL_M1_MAX_ACCOUNT_EVIDENCE_AGE_MS
+            )
+              staleSource = "fee";
+          }
+          let refreshedAtMonotonic = handoff.capturedAtMonotonic;
+          if (staleSource !== undefined) {
+            if (staleSource === "account")
+              // The full A/B proof carries account-wide current commitments,
+              // borrow facts, collateral, and permissions. Existing compact
+              // reads cannot refresh that complete proof; fail before intent
+              // rather than restart the account-wide sweep or accept a partial
+              // account refresh as equivalent.
+              throw new OperatorEvidenceReadError("MAINNET_EVIDENCE_STALE", {
+                source: "account",
+              });
+            try {
+              if (staleSource === "quote") {
+                fresh = {
+                  ...fresh,
+                  quote: await publicMarkets.readOperatorQuote(symbol, {
+                    directTrade: true,
+                  }),
+                };
+              } else if (staleSource === "fee") {
+                const feeResponse = await accountReader.transport.get(
+                  ACCOUNT_FEE_RATE_PATH,
+                  { category: "linear", symbol },
+                );
+                const feeRate = extractOperatorFeeRate(feeResponse, symbol);
+                if (!feeRate.ok)
+                  throw new OperatorEvidenceReadError(
+                    "FEE_RATE_RESPONSE_INVALID",
+                    {
+                      source: "fee",
+                    },
+                  );
+                fresh = { ...fresh, feeRate: feeRate.value };
+              } else if (staleSource === "target-state") {
+                // The current state read also supplies a fresh Bybit time anchor.
+              } else if (staleSource === "instrument") {
+                fresh = {
+                  ...fresh,
+                  instrument: await new BybitMainnetReadCapabilityFacade(
+                    accountReader.transport,
+                  ).readInstrument(symbol, { requireOneX: true }),
+                };
+              } else {
+                // The one-shot path never restarts the account-wide A/B sweep.
+                throw new OperatorEvidenceReadError("MAINNET_EVIDENCE_STALE", {
+                  source: "account",
+                });
+              }
+              if (
+                staleSource === "quote" ||
+                staleSource === "fee" ||
+                staleSource === "instrument" ||
+                staleSource === "target-state"
+              ) {
+                const state = await exchangeAdapter.readState({
+                  instrument: symbol,
+                });
+                if (!state.ok)
+                  throw new OperatorEvidenceReadError(
+                    "TARGET_STATE_READ_FAILED",
+                    {
+                      source: "target-state",
+                    },
+                  );
+                fresh = { ...fresh, state: state.value };
+              }
+              refreshedAtMonotonic = monotonic();
+              if (!Number.isFinite(refreshedAtMonotonic))
+                throw new OperatorEvidenceReadError("MONOTONIC_CLOCK_INVALID");
+            } catch (error) {
+              if (error instanceof OperatorEvidenceReadError) throw error;
+              throw new OperatorEvidenceReadError(
+                "TARGETED_EVIDENCE_REFRESH_FAILED",
+                {
+                  source:
+                    staleSource === "fee" ||
+                    staleSource === "quote" ||
+                    staleSource === "instrument" ||
+                    staleSource === "target-state"
+                      ? staleSource
+                      : "account",
+                },
+              );
+            }
+            validated = validateMainnetOperatorTestEvidence(
+              admitted.plan,
+              fresh,
+            );
+          }
+          if (!validated.ok) {
+            const code = validated.error.details?.reasonCode;
+            throw new OperatorEvidenceReadError(
+              typeof code === "string"
+                ? code
+                : "FRESH_MAINNET_EVIDENCE_INVALID",
+              validated.error.details ?? {},
+            );
+          }
+          const evidenceAtMonotonic = refreshedAtMonotonic;
+          const finalElapsed = monotonic() - evidenceAtMonotonic;
+          if (!Number.isFinite(finalElapsed) || finalElapsed < 0)
+            throw new OperatorEvidenceReadError("MONOTONIC_CLOCK_INVALID");
+          const ageCheck = revalidateMainnetOperatorEvidenceAge(
+            admitted.plan,
+            validated.value,
+            finalElapsed,
+          );
+          if (!ageCheck.ok) {
+            const code = ageCheck.error.details?.reasonCode;
+            throw new OperatorEvidenceReadError(
+              typeof code === "string" ? code : "MAINNET_EVIDENCE_EXPIRED",
+              { source: "account" },
+            );
+          }
+          latestAdmission = {
+            evidence: fresh,
+            evidenceAtMonotonic,
+            ages: validated.value,
+          };
+          return fresh;
+        }
         evidencePath = "compact";
         try {
           compactAccount = await collectCompactOperatorAccountEvidence(
@@ -759,12 +924,8 @@ export async function runMainnetOperatorTestComposition(
           let fresh: MainnetOperatorTestAdmissionEvidence;
           const instrument = await new BybitMainnetReadCapabilityFacade(
             accountReader.transport,
-          ).readInstrument(symbol, {
-            requireOneX: admitted.authorization.kind === "trade-command",
-          });
-          const quote = await publicMarkets.readOperatorQuote(symbol, {
-            directTrade: admitted.authorization.kind === "trade-command",
-          });
+          ).readInstrument(symbol);
+          const quote = await publicMarkets.readOperatorQuote(symbol);
           if (manualRecoveryAttestation) {
             const parts = await exchangeAdapter.readOperatorTargetStateParts({
               instrument: symbol,
@@ -915,9 +1076,7 @@ export async function runMainnetOperatorTestComposition(
           throw new OperatorEvidenceReadError("ACCOUNT_EVIDENCE_INCOMPLETE");
         const instrument = await new BybitMainnetReadCapabilityFacade(
           fullAccountTransport,
-        ).readInstrument(symbol, {
-          requireOneX: admitted.authorization.kind === "trade-command",
-        });
+        ).readInstrument(symbol);
         const evaluatedAt = timestampFromEpochMs(
           await fullAccountTransport.readExchangeTime(),
         );
@@ -928,9 +1087,6 @@ export async function runMainnetOperatorTestComposition(
           symbol,
           instrument,
           evaluatedAt: evaluatedAt.value,
-          ...(admitted.authorization.kind === "trade-command"
-            ? { directTrade: true }
-            : {}),
         });
         const { fresh, ages } = await collectOperatorAdmissionEvidence(
           admitted.plan,
@@ -941,10 +1097,7 @@ export async function runMainnetOperatorTestComposition(
                 category: "linear",
                 symbol,
               }),
-            quote: () =>
-              publicMarkets.readOperatorQuote(symbol, {
-                directTrade: admitted.authorization.kind === "trade-command",
-              }),
+            quote: () => publicMarkets.readOperatorQuote(symbol),
             state: () => exchangeAdapter.readState({ instrument: symbol }),
           },
         );

@@ -50,14 +50,17 @@ import { deriveMainnetExecutionReadiness } from "./mainnet-execution-readiness.j
 import {
   collectCompactOperatorAccountEvidence,
   createCompactOperatorAccountReader,
+  readCompactOperatorAccountIdentity,
   extractOperatorFeeRate,
   CompactAccountEvidenceUnavailable,
 } from "./mainnet-operator-test-evidence.js";
 import {
   calculateOperatorMainnetTestCapacity,
   calculateOperatorMainnetTestCapacityFromAvailableBalance,
+  validateMainnetOperatorTestEvidence,
   validateCompactOperatorAccountForPlan,
   validateCompactOperatorPreparationEvidence,
+  type MainnetOperatorTestFreshEvidence,
 } from "./mainnet-entry-evidence.js";
 import { PROVISIONAL_M1_MAX_ACCOUNT_EVIDENCE_AGE_MS } from "./policies/provisional-m1.js";
 import {
@@ -88,6 +91,12 @@ export interface MainnetOperatorTestPreparation extends Omit<
   readonly exchangeReads: number;
   readonly exchangeWrites: 0;
   readonly exchangeStage: "prepare";
+  /** Same-process only; attached non-enumerably and consumed by direct v3 execution. */
+  readonly directTradeAdmission?: Readonly<{
+    readonly planHash: string;
+    readonly evidence: MainnetOperatorTestFreshEvidence;
+    readonly capturedAtMonotonic: number;
+  }>;
 }
 
 function failed(
@@ -395,6 +404,193 @@ export async function prepareMainnetOperatorTest(
   };
   try {
     const loaded = await credentialLoader.load("mainnet");
+    if (tradeCommandReceipt?.ok) {
+      // Freeze the exact direct-command terms before the account-wide A/B scan.
+      // The identity query is the only account fact needed to bind that plan.
+      evidencePath = "full";
+      const compactReader = createCompactOperatorAccountReader({
+        credentials: loaded,
+        request,
+        utcClock: wall,
+        monotonicClock: monotonic,
+      });
+      accountTransport = compactReader.transport;
+      const identity = await readCompactOperatorAccountIdentity(
+        compactReader.reader,
+        loaded,
+      );
+      if (
+        identity.accountBinding.accountIdentityHash !==
+        tradeCommandReceipt.value.accountIdentityHash
+      )
+        return withCounts(
+          failed("TRADE_COMMAND_ACCOUNT_MISMATCH"),
+          exchangeReads,
+          0,
+        );
+      const initialInstrument = await new BybitMainnetReadCapabilityFacade(
+        compactReader.transport,
+      ).readInstrument(input.symbol, { requireOneX: true });
+      const publicMarkets = new BybitPublicMarketClient({
+        transport: new BybitPublicTransport({ request }),
+      });
+      const initialQuote = await publicMarkets.readOperatorQuote(input.symbol, {
+        directTrade: true,
+      });
+      const plan = makePlan({
+        accountIdentityHash: identity.accountBinding.accountIdentityHash,
+        quote: initialQuote,
+        warningCodes: identity.credentialPosture.warnings,
+        constraints: initialInstrument.constraints,
+        preparedAt: initialQuote.observedAt,
+      });
+      if (!plan.ok) return withCounts(plan, exchangeReads, 0);
+
+      let fullAccountTransport: BybitAccountReadTransport | undefined;
+      accountResult = await collectAccountEvidence({
+        environment: "mainnet",
+        runId,
+        configuredM1Symbols: [input.symbol],
+        credentialLoader,
+        evidenceProfile: "operator-execution",
+        utcClock: wall,
+        monotonicClock: monotonic,
+        identityEvidence: identity,
+        createReadPort: (options) => {
+          fullAccountTransport = new BybitAccountReadTransport({
+            environment: "mainnet",
+            credentials: options.credentials,
+            budget: options.budget,
+            request,
+            clock: options.utcClock,
+            monotonicClock: options.monotonicClock,
+          });
+          return new BybitAccountReadClient({
+            transport: fullAccountTransport,
+            utcClock: options.utcClock,
+          });
+        },
+      });
+      if (accountResult.kind !== "account-evidence" || !fullAccountTransport)
+        return withCounts(
+          failed("ACCOUNT_EVIDENCE_INCOMPLETE"),
+          exchangeReads,
+          0,
+        );
+
+      const instrument = await new BybitMainnetReadCapabilityFacade(
+        fullAccountTransport,
+      ).readInstrument(input.symbol, { requireOneX: true });
+      const fee = await readPreparationFee(fullAccountTransport, input.symbol);
+      if (!fee.ok) return withCounts(fee, exchangeReads, 0);
+      const quote = await publicMarkets.readOperatorQuote(input.symbol, {
+        directTrade: true,
+      });
+      const exchange = new BybitMainnetExecutionAdapter({
+        transport: new BybitPrivateTransport({
+          environment: "mainnet",
+          credentials: loaded,
+          request,
+          clock: wall,
+        }),
+      });
+      const state = await exchange.readState({ instrument: input.symbol });
+      if (!state.ok)
+        return withCounts(failed("TARGET_STATE_READ_FAILED"), exchangeReads, 0);
+      const readiness = deriveMainnetExecutionReadiness({
+        accountResult,
+        symbol: input.symbol,
+        instrument,
+        evaluatedAt: state.value.serverTime,
+        directTrade: true,
+      });
+      if (
+        readiness.verdict !== "READY" ||
+        readiness.internalBinding?.accountIdentityHash !==
+          accountResult.bundle.accountBinding.accountIdentityHash
+      )
+        return withCounts(
+          readiness.reasonCodes.includes("CRITICAL_STATE_CHANGED")
+            ? failed("CRITICAL_STATE_CHANGED", {
+                criticalChangedGroups:
+                  changedAccountCriticalGroups(accountResult.bundle).join(
+                    ",",
+                  ) || "UNESTABLISHED",
+              })
+            : failed(
+                `READINESS_${readiness.reasonCodes.join("_") || "BLOCKED"}`,
+                { source: "account" },
+              ),
+          exchangeReads,
+          0,
+        );
+
+      const fresh: MainnetOperatorTestFreshEvidence = {
+        account: accountResult.bundle,
+        readiness,
+        state: state.value,
+        instrument,
+        quote,
+        feeRate: fee.value,
+      };
+      const validated = validateMainnetOperatorTestEvidence(plan.value, fresh);
+      if (!validated.ok) {
+        const reasonCode = validated.error.details?.reasonCode;
+        return withCounts(
+          failed(
+            typeof reasonCode === "string"
+              ? reasonCode
+              : "FRESH_MAINNET_EVIDENCE_INVALID",
+            validated.error.details ?? {},
+          ),
+          exchangeReads,
+          0,
+        );
+      }
+      const capturedAtMonotonic = stageClock();
+      if (!Number.isFinite(capturedAtMonotonic) || capturedAtMonotonic < 0)
+        return withCounts(failed("MONOTONIC_CLOCK_INVALID"), exchangeReads, 0);
+      const persistence = (
+        dependencies.openPersistence ?? openSqlitePersistence
+      )({
+        environment: "mainnet",
+        scope: mainnetOperatorTestPersistenceScope(
+          plan.value.accountIdentityHash,
+        ),
+        clock: { now: () => state.value.serverTime },
+      });
+      if (!persistence.ok) return withCounts(persistence, exchangeReads, 0);
+      try {
+        const journal = persistence.value.operatorMainnetTest;
+        if (!journal)
+          return withCounts(
+            failed("OPERATOR_PLAN_STORE_UNAVAILABLE"),
+            exchangeReads,
+            0,
+          );
+        const stored = journal.persistPreparedPlan(plan.value);
+        if (!stored.ok) return withCounts(stored, exchangeReads, 0);
+        const prepared: MainnetOperatorTestPreparation = {
+          plan: plan.value,
+          exchangeReads,
+          exchangeWrites: 0,
+          ...metricsFor(exchangeReads),
+        };
+        Object.defineProperty(prepared, "directTradeAdmission", {
+          configurable: false,
+          enumerable: false,
+          value: Object.freeze({
+            planHash: plan.value.contentHash,
+            evidence: fresh,
+            capturedAtMonotonic,
+          }),
+          writable: false,
+        });
+        return ok(prepared);
+      } finally {
+        persistence.value.close();
+      }
+    }
     const compactReader = createCompactOperatorAccountReader({
       credentials: loaded,
       request,
@@ -450,15 +646,11 @@ export async function prepareMainnetOperatorTest(
       );
     const instrument = await new BybitMainnetReadCapabilityFacade(
       compactReader.transport,
-    ).readInstrument(input.symbol, {
-      requireOneX: tradeCommandReceipt?.ok === true,
-    });
+    ).readInstrument(input.symbol);
     const publicMarkets = new BybitPublicMarketClient({
       transport: new BybitPublicTransport({ request }),
     });
-    const quote = await publicMarkets.readOperatorQuote(input.symbol, {
-      directTrade: tradeCommandReceipt?.ok === true,
-    });
+    const quote = await publicMarkets.readOperatorQuote(input.symbol);
     // Exact venue rounding and both entry/exit fees own affordability. Do this
     // before the comparatively expensive target-state reads or persistence.
     const candidate = makePlan({

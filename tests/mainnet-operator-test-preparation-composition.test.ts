@@ -580,7 +580,7 @@ test("direct command preparation persists a v3 plan through production GET mappe
   });
   assert.equal(run.result.ok, true, JSON.stringify(run.result));
   assert.equal(run.opened, 1);
-  assert.equal(run.paths.length, 17);
+  assert.equal(run.paths.length, 58);
   assert.deepEqual(
     JSON.parse(run.result.ok ? run.result.value.exchangeGetCounts! : "{}"),
     groupedFromFetchAttempts(run.paths),
@@ -657,11 +657,8 @@ test("direct INJUSDT preparation succeeds on account-info no-time full fallback 
   );
   if (!run.result.ok) return;
   assert.equal(run.result.value.exchangeWrites, 0);
-  assert.equal(run.result.value.exchangeEvidencePath, "compact-to-full");
-  assert.equal(
-    run.result.value.compactFallbackReason,
-    "ACCOUNT_EVIDENCE_INVALID",
-  );
+  assert.equal(run.result.value.exchangeEvidencePath, "full");
+  assert.equal(run.result.value.compactFallbackReason, undefined);
   assert.equal(run.result.value.plan.symbol, "INJUSDT");
   assert.equal(
     run.result.value.plan.schemaVersion,

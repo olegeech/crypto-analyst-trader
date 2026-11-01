@@ -1,4 +1,7 @@
-import { changedAccountCriticalGroups } from "../domain/account/account-evidence-consistency.js";
+import {
+  accountCriticalDifferenceIsOnlyNumericAssetMovement,
+  changedAccountCriticalGroups,
+} from "../domain/account/account-evidence-consistency.js";
 import { createHash } from "node:crypto";
 
 import {
@@ -26,6 +29,7 @@ import {
   validateOperatorMainnetQuoteForPlan,
   rehydrateOperatorMainnetQuote,
   OPERATOR_MAINNET_QUOTE_FRESHNESS_MS,
+  OPERATOR_MAINNET_TRADE_COMMAND_PLAN_SCHEMA_VERSION,
   type OperatorMainnetQuote,
   type OperatorMainnetTestPlan,
 } from "../domain/execution/operator-mainnet-test-plan.js";
@@ -302,6 +306,7 @@ function unprovenWalletBalance(pass: "A" | "B"): Result<DecimalValue> {
 
 function currentAvailableBalance(
   account: AccountEvidenceBundle,
+  allowLatestBalance: boolean,
 ): Result<DecimalValue> {
   const passA = account.criticalPasses.A;
   const passB = account.criticalPasses.B;
@@ -311,7 +316,7 @@ function currentAvailableBalance(
   const availableB = knownUsd(passB.totals.totalAvailableBalance);
   if (availableA === undefined) return unprovenWalletBalance("A");
   if (availableB === undefined) return unprovenWalletBalance("B");
-  if (availableA.compare(availableB) !== 0)
+  if (!allowLatestBalance && availableA.compare(availableB) !== 0)
     return blocked(
       "AVAILABLE_BALANCE_SNAPSHOTS_DIFFER",
       "valid wallet A and B available-balance snapshots differ",
@@ -321,7 +326,7 @@ function currentAvailableBalance(
         predicate: "totalAvailableBalance",
       },
     );
-  return ok(availableA);
+  return ok(allowLatestBalance ? availableB : availableA);
 }
 
 function validateCurrentCommitments(
@@ -389,8 +394,12 @@ export function calculateOperatorMainnetTestCapacity(
   plan: OperatorMainnetTestPlan,
   account: AccountEvidenceBundle,
   feeRate: OperatorMainnetFeeRateEvidence,
+  options: { readonly useLatestAvailableBalance?: boolean } = {},
 ): Result<OperatorMainnetTestCapacity> {
-  const availableBalance = currentAvailableBalance(account);
+  const availableBalance = currentAvailableBalance(
+    account,
+    options.useLatestAvailableBalance === true,
+  );
   if (!availableBalance.ok) return availableBalance;
   const commitments = validateCurrentCommitments(account);
   if (!commitments.ok) return commitments;
@@ -1048,15 +1057,27 @@ function isTerminalOperatorCoverage(
  */
 function approvedOperatorAuxiliaryHistoryGapCount(
   bundle: AccountEvidenceBundle,
+  allowNumericAssetMovement = false,
 ): number | undefined {
   const discovery = bundle.discovery;
+  const allowsNumericMovement =
+    allowNumericAssetMovement &&
+    bundle.consistency.structuralComparison === "changed" &&
+    accountCriticalDifferenceIsOnlyNumericAssetMovement(bundle);
+  const allowedConsistencyReasons = allowsNumericMovement
+    ? ["COVERAGE_INCOMPLETE", "CRITICAL_STATE_CHANGED"]
+    : ["COVERAGE_INCOMPLETE"];
   if (
     bundle.collectionStatus !== "incomplete" ||
     discovery === null ||
     bundle.diagnostics.length !== 0 ||
-    bundle.consistency.structuralComparison !== "unchanged" ||
-    bundle.consistency.reasonCodes.length !== 1 ||
-    bundle.consistency.reasonCodes[0] !== "COVERAGE_INCOMPLETE"
+    (bundle.consistency.structuralComparison !== "unchanged" &&
+      !allowsNumericMovement) ||
+    bundle.consistency.reasonCodes.length !==
+      allowedConsistencyReasons.length ||
+    allowedConsistencyReasons.some(
+      (reason, index) => bundle.consistency.reasonCodes[index] !== reason,
+    )
   )
     return undefined;
 
@@ -1211,7 +1232,13 @@ export function validateMainnetOperatorTestEvidence(
     !Array.isArray(readiness.providerReasonCodes)
   )
     return blocked("FRESH_MAINNET_EVIDENCE_INVALID");
-  if (readiness.reasonCodes.includes("CRITICAL_STATE_CHANGED"))
+  const v3WalletMovementOnly =
+    plan.schemaVersion === OPERATOR_MAINNET_TRADE_COMMAND_PLAN_SCHEMA_VERSION &&
+    accountCriticalDifferenceIsOnlyNumericAssetMovement(account.value);
+  if (
+    readiness.reasonCodes.includes("CRITICAL_STATE_CHANGED") &&
+    !v3WalletMovementOnly
+  )
     return blocked(
       "CRITICAL_STATE_CHANGED",
       "account critical state changed between observations",
@@ -1225,6 +1252,7 @@ export function validateMainnetOperatorTestEvidence(
   const plannedIpWarning = plan.warningCodes.includes("API_KEY_IP_UNBOUND");
   const approvedAuxiliaryGapCount = approvedOperatorAuxiliaryHistoryGapCount(
     account.value,
+    plan.schemaVersion === OPERATOR_MAINNET_TRADE_COMMAND_PLAN_SCHEMA_VERSION,
   );
   const allowsApprovedAuxiliaryGaps = approvedAuxiliaryGapCount !== undefined;
   const hasAuxiliaryCoverageWarning = readinessWarnings.includes(
@@ -1423,6 +1451,13 @@ export function validateMainnetOperatorTestEvidence(
     plan,
     account.value,
     feeRate.value,
+    {
+      useLatestAvailableBalance:
+        plan.schemaVersion ===
+          OPERATOR_MAINNET_TRADE_COMMAND_PLAN_SCHEMA_VERSION &&
+        (account.value.consistency.structuralComparison === "unchanged" ||
+          v3WalletMovementOnly),
+    },
   );
   if (!capacity.ok) return capacity;
   return ok({

@@ -221,6 +221,10 @@ export class CompactAccountEvidenceUnavailable extends Error {
   }
 }
 
+export type CompactOperatorAccountIdentity = ReturnType<
+  typeof mapAccountReadIdentity
+>;
+
 export function createCompactOperatorAccountReader(options: {
   readonly credentials: ExchangeCredentials;
   readonly request: typeof fetch;
@@ -293,21 +297,12 @@ async function compactPartitionSample(
 export async function collectCompactOperatorAccountEvidence(
   reader: AccountEvidenceReadPort,
   credentials: ExchangeCredentials,
+  verifiedIdentity?: CompactOperatorAccountIdentity,
 ): Promise<MainnetOperatorTestCompactAccountEvidence> {
   try {
-    const identity = await reader.readIdentity();
-    const identityAt =
-      identity.time === undefined
-        ? timestampFromEpochMs(await reader.readExchangeTime())
-        : timestampFromEpochMs(identity.time);
-    if (!identityAt.ok)
-      throw new CompactAccountEvidenceUnavailable("ACCOUNT_EVIDENCE_INVALID");
-    const verified = mapAccountReadIdentity(
-      identity,
-      credentials.accountId,
-      "mainnet",
-      identityAt.value,
-    );
+    const verified =
+      verifiedIdentity ??
+      (await readCompactOperatorAccountIdentity(reader, credentials));
 
     const accountA = await compactPartitionSample(reader, "account-info", "A");
     const accountB = await compactPartitionSample(reader, "account-info", "B");
@@ -358,6 +353,37 @@ export async function collectCompactOperatorAccountEvidence(
             typeof error.reasonCode === "string"
           ? error.reasonCode
           : "ACCOUNT_EVIDENCE_INVALID",
+    );
+  }
+}
+
+/** Reads the authenticated identity once so v3 can freeze its plan before account/venue state. */
+export async function readCompactOperatorAccountIdentity(
+  reader: AccountEvidenceReadPort,
+  credentials: ExchangeCredentials,
+): Promise<CompactOperatorAccountIdentity> {
+  try {
+    const identity = await reader.readIdentity();
+    const identityAt =
+      identity.time === undefined
+        ? timestampFromEpochMs(await reader.readExchangeTime())
+        : timestampFromEpochMs(identity.time);
+    if (!identityAt.ok)
+      throw new CompactAccountEvidenceUnavailable("ACCOUNT_EVIDENCE_INVALID");
+    return mapAccountReadIdentity(
+      identity,
+      credentials.accountId,
+      "mainnet",
+      identityAt.value,
+    );
+  } catch (error) {
+    if (error instanceof CompactAccountEvidenceUnavailable) throw error;
+    throw new CompactAccountEvidenceUnavailable(
+      error instanceof Error &&
+        "code" in error &&
+        typeof error.code === "string"
+        ? error.code
+        : "ACCOUNT_EVIDENCE_INVALID",
     );
   }
 }

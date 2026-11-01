@@ -4,6 +4,7 @@ import {
   type AccountEvidenceBundle,
   type AccountEvidenceCollectionResult,
 } from "../domain/account/account-evidence-bundle.js";
+import { accountCriticalDifferenceIsOnlyNumericAssetMovement } from "../domain/account/account-evidence-consistency.js";
 import {
   accountEvidencePartitionKey,
   type AccountEvidencePartition,
@@ -196,11 +197,16 @@ function attributableUnrelatedGap(
 function pushMappedConsistencyReasons(
   reasons: Set<MainnetExecutionReadinessReason>,
   bundle: AccountEvidenceBundle,
+  allowWalletBalanceMovement: boolean,
 ): void {
   for (const code of bundle.consistency.reasonCodes) {
     switch (code) {
       case "CRITICAL_STATE_CHANGED":
-        reasons.add("CRITICAL_STATE_CHANGED");
+        if (
+          !allowWalletBalanceMovement ||
+          !accountCriticalDifferenceIsOnlyNumericAssetMovement(bundle)
+        )
+          reasons.add("CRITICAL_STATE_CHANGED");
         break;
       case "CONTRADICTORY_OBSERVATION":
         reasons.add("ACCOUNT_EVIDENCE_CONTRADICTORY");
@@ -359,6 +365,7 @@ function checkAccountFacts(
   evaluatedAt: UtcTimestamp,
   reasons: Set<MainnetExecutionReadinessReason>,
   warnings: Set<MainnetExecutionReadinessWarning>,
+  allowWalletBalanceMovement: boolean,
 ): void {
   const { A, B } = bundle.criticalPasses;
   if (A === null || B === null) {
@@ -366,9 +373,13 @@ function checkAccountFacts(
     return;
   }
 
-  if (bundle.consistency.structuralComparison === "changed")
-    reasons.add("CRITICAL_STATE_CHANGED");
-  else if (bundle.consistency.structuralComparison !== "unchanged")
+  if (bundle.consistency.structuralComparison === "changed") {
+    if (
+      !allowWalletBalanceMovement ||
+      !accountCriticalDifferenceIsOnlyNumericAssetMovement(bundle)
+    )
+      reasons.add("CRITICAL_STATE_CHANGED");
+  } else if (bundle.consistency.structuralComparison !== "unchanged")
     reasons.add("CRITICAL_STATE_UNPROVEN");
 
   for (const pass of [A, B]) {
@@ -611,8 +622,17 @@ export function deriveMainnetExecutionReadiness(
   );
   checkCoverageDiagnostics(bundle, symbol.value, reasons);
   checkDiscovery(bundle, reasons);
-  checkAccountFacts(bundle, symbol.value, evaluatedAt.value, reasons, warnings);
-  pushMappedConsistencyReasons(reasons, bundle);
+  const allowWalletBalanceMovement =
+    directTrade && accountCriticalDifferenceIsOnlyNumericAssetMovement(bundle);
+  checkAccountFacts(
+    bundle,
+    symbol.value,
+    evaluatedAt.value,
+    reasons,
+    warnings,
+    allowWalletBalanceMovement,
+  );
+  pushMappedConsistencyReasons(reasons, bundle, allowWalletBalanceMovement);
 
   return result({
     symbol: symbol.value,

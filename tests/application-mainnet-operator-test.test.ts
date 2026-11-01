@@ -1447,6 +1447,134 @@ test("incomplete current positions and orders identify the account pass and pred
   }
 });
 
+test("v3 capacity uses the latest known account balance and still blocks insufficient or unknown current funds", () => {
+  const basePlan = plan({ nonce: "v3-latest-capacity" });
+  const receipt = unwrap(
+    createOperatorMainnetTradeCommandReceipt({
+      commandId: "v3-latest-capacity-command",
+      actorIdentityHash: testLocalActorIdentityHash(),
+      accountIdentityHash: basePlan.accountIdentityHash,
+      symbol: basePlan.symbol,
+      allocation: "10",
+      grossNotionalCap: "8",
+      maxDeviationBps: "10",
+      takeProfitMode: "percent",
+      takeProfitValue: "0.20",
+      acceptedAt: NOW,
+    }),
+  );
+  const v3Plan = unwrap(
+    createOperatorMainnetTradeCommandPlan({
+      receipt,
+      quote: basePlan.quote,
+      warningCodes: basePlan.warningCodes,
+      constraints: basePlan.constraints,
+      preparedAt: basePlan.preparedAt,
+    }),
+  );
+  const evidence = freshEvidence(v3Plan as unknown as OperatorMainnetTestPlan);
+  const passA = evidence.account.criticalPasses.A;
+  const passB = evidence.account.criticalPasses.B;
+  assert.ok(passA);
+  assert.ok(passB);
+
+  const withSnapshots = (
+    availableA: string,
+    availableB: string | "unknown",
+  ) => {
+    const amountFact = (
+      fact: typeof passA.totals.totalAvailableBalance,
+      amount: string,
+    ) => ({ ...fact, value: decimal(amount) });
+    const asset = (
+      row: (typeof passA.assets)[number],
+      walletBalance: string,
+    ) => ({
+      ...row,
+      walletBalance: {
+        ...row.walletBalance,
+        value: decimal(walletBalance),
+      },
+    });
+    const nextA = {
+      ...passA,
+      totals: {
+        ...passA.totals,
+        totalAvailableBalance: amountFact(
+          passA.totals.totalAvailableBalance,
+          availableA,
+        ),
+      },
+      assets: passA.assets.map((row, index) =>
+        index === 0 ? asset(row, "49") : row,
+      ),
+    };
+    const nextB = {
+      ...passB,
+      totals: {
+        ...passB.totals,
+        totalAvailableBalance:
+          availableB === "unknown"
+            ? {
+                state: "unavailable" as const,
+                reason: "not-returned" as const,
+                unit: "USD" as const,
+              }
+            : amountFact(passB.totals.totalAvailableBalance, availableB),
+      },
+      assets: passB.assets.map((row, index) =>
+        index === 0 ? asset(row, "50") : row,
+      ),
+    };
+    return {
+      ...evidence.account,
+      criticalPasses: {
+        ...evidence.account.criticalPasses,
+        A: nextA,
+        B: nextB,
+      },
+    } as AccountEvidenceBundle;
+  };
+
+  const sufficient = calculateOperatorMainnetTestCapacity(
+    v3Plan as unknown as OperatorMainnetTestPlan,
+    withSnapshots("0", "100"),
+    evidence.feeRate,
+    { useLatestAvailableBalance: true },
+  );
+  assert.equal(sufficient.ok, true);
+  if (sufficient.ok)
+    assert.equal(sufficient.value.availableBalance.toString(), "100");
+
+  const insufficient = calculateOperatorMainnetTestCapacity(
+    v3Plan as unknown as OperatorMainnetTestPlan,
+    withSnapshots("100", "0"),
+    evidence.feeRate,
+    { useLatestAvailableBalance: true },
+  );
+  assert.equal(insufficient.ok, false);
+  if (!insufficient.ok) {
+    assert.equal(
+      insufficient.error.details?.reasonCode,
+      "AVAILABLE_MARGIN_OR_FEE_RESERVE_INSUFFICIENT",
+    );
+    assert.equal(insufficient.error.details?.availableBalance, "0");
+  }
+
+  const unknown = calculateOperatorMainnetTestCapacity(
+    v3Plan as unknown as OperatorMainnetTestPlan,
+    withSnapshots("100", "unknown"),
+    evidence.feeRate,
+    { useLatestAvailableBalance: true },
+  );
+  assert.equal(unknown.ok, false);
+  if (!unknown.ok)
+    assert.equal(
+      unknown.error.details?.reasonCode,
+      "WALLET_B_BALANCE_UNPROVEN",
+    );
+});
+
 test("compact admission blocks a non-flat target position without durable intent", async () => {
   const valuePlan = plan({ nonce: "compact-target-state-changed" });
   const evidence = compactEvidence(valuePlan);
