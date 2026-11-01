@@ -2129,6 +2129,109 @@ test("direct trade-command outcomes are safe, append-only and prevent later bind
   fixture.connection.close();
 });
 
+test("direct trade-command bind gate accepts only proven leverage prechecks", () => {
+  const refusedFixture = setup();
+  const refused = tradeCommand("trade-command-leverage-refused");
+  value(
+    refusedFixture.store.persistOperatorMainnetTradeCommandReceipt({
+      receipt: refused.receipt,
+      recordedAt: NOW,
+    }),
+  );
+  value(
+    refusedFixture.store.appendOperatorMainnetTradeCommandOutcome({
+      commandId: refused.receipt.commandId,
+      outcomeId: "trade-command-leverage-refused-outcome",
+      stage: "precheck",
+      code: "TARGET_SYMBOL_POSITION_PRESENT",
+      diagnosticDetails: {
+        symbol: "DOGEUSDT",
+        positionPresent: true,
+        activeOrderCount: 0,
+        activeOrdersPresent: false,
+        leverageConfiguration: "not-attempted",
+      },
+      occurredAt: NOW,
+    }),
+  );
+  assert.equal(
+    refusedFixture.store.bindOperatorMainnetTradeCommand({
+      binding: refused.binding,
+      boundAt: NOW,
+    }).ok,
+    false,
+    "a position refusal must never create a binding or reach CREATE",
+  );
+  assert.equal(
+    refusedFixture.connection.db
+      .prepare(
+        "SELECT COUNT(*) AS count FROM operator_mainnet_trade_command_bindings",
+      )
+      .get()?.count,
+    0,
+  );
+  refusedFixture.connection.close();
+
+  const verifiedFixture = setup();
+  const verified = tradeCommand("trade-command-leverage-verified");
+  value(
+    verifiedFixture.store.persistOperatorMainnetTradeCommandReceipt({
+      receipt: verified.receipt,
+      recordedAt: NOW,
+    }),
+  );
+  value(
+    verifiedFixture.store.appendOperatorMainnetTradeCommandOutcome({
+      commandId: verified.receipt.commandId,
+      outcomeId: "trade-command-leverage-attempted-outcome",
+      stage: "precheck",
+      code: "LEVERAGE_CONFIG_ATTEMPTED",
+      diagnosticDetails: {
+        symbol: "DOGEUSDT",
+        positionPresent: false,
+        activeOrderCount: 0,
+        activeOrdersPresent: false,
+        leverageConfiguration: "uncertain",
+        leverageConfigOutcome: "attempted",
+      },
+      occurredAt: NOW,
+    }),
+  );
+  value(
+    verifiedFixture.store.appendOperatorMainnetTradeCommandOutcome({
+      commandId: verified.receipt.commandId,
+      outcomeId: "trade-command-leverage-verified-outcome",
+      stage: "precheck",
+      code: "LEVERAGE_CONFIG_VERIFIED",
+      diagnosticDetails: {
+        symbol: "DOGEUSDT",
+        positionPresent: false,
+        activeOrderCount: 0,
+        activeOrdersPresent: false,
+        leverageConfiguration: "confirmed-1x",
+        leverageConfigOutcome: "verified",
+      },
+      occurredAt: NOW,
+    }),
+  );
+  value(
+    verifiedFixture.store.bindOperatorMainnetTradeCommand({
+      binding: verified.binding,
+      boundAt: NOW,
+    }),
+  );
+  assert.equal(
+    verifiedFixture.connection.db
+      .prepare(
+        "SELECT COUNT(*) AS count FROM operator_mainnet_trade_command_bindings",
+      )
+      .get()?.count,
+    1,
+    "only an append-only verified leverage sequence may bind the plan",
+  );
+  verifiedFixture.connection.close();
+});
+
 test("direct-command status rejects consumption and intent cross-link corruption", () => {
   const fixture = setup();
   const command = tradeCommand();

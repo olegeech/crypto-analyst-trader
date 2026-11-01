@@ -1082,6 +1082,60 @@ function printTradeRefusalDiagnostic(
 ): void {
   const nextAction =
     "Resolve the reported condition; this command will not resume. A new trade requires a new explicit instruction.";
+  if (
+    reasonCode.startsWith("TARGET_SYMBOL_") ||
+    reasonCode.startsWith("TARGET_POSITION_EVIDENCE_") ||
+    reasonCode.startsWith("TARGET_ORDERS_EVIDENCE_") ||
+    reasonCode === "TARGET_STATE_EVIDENCE_UNPROVEN" ||
+    reasonCode === "TARGET_PROVIDER_TIME_UNPROVEN"
+  ) {
+    const symbol =
+      typeof details?.symbol === "string" &&
+      /^[A-Z0-9]{1,26}USDT$/u.test(details.symbol)
+        ? details.symbol
+        : undefined;
+    const positionPresent = details?.positionPresent;
+    const activeOrderCount = safeCountDetail(details, "activeOrderCount");
+    line(
+      output,
+      "EXPLANATION=The requested symbol must be flat and have no active orders before leverage configuration.",
+    );
+    line(
+      output,
+      `WHY=${[
+        symbol ? `symbol=${symbol}` : undefined,
+        typeof positionPresent === "boolean"
+          ? `position_present=${positionPresent ? "yes" : "no"}`
+          : undefined,
+        activeOrderCount === undefined
+          ? undefined
+          : `active_orders=${activeOrderCount}`,
+        "the missing or conflicting target-state fact is not treated as safe",
+      ]
+        .filter((value): value is string => value !== undefined)
+        .join(", ")}`,
+    );
+    line(
+      output,
+      `NEXT_ACTION=${nextAction} Inspect only the target symbol's leverage, position and orders in Bybit.`,
+    );
+    return;
+  }
+  if (reasonCode.startsWith("LEVERAGE_CONFIG_")) {
+    line(
+      output,
+      "EXPLANATION=The one-time 1x leverage configuration could not be safely completed or recorded.",
+    );
+    line(
+      output,
+      `WHY=${reasonCode}. The command will not repeat the leverage write or create an order.`,
+    );
+    line(
+      output,
+      `NEXT_ACTION=${nextAction} Inspect the target symbol's leverage, position and orders in Bybit before a new instruction.`,
+    );
+    return;
+  }
   if (reasonCode === "AVAILABLE_MARGIN_OR_FEE_RESERVE_INSUFFICIENT") {
     printOperatorCapacityDiagnostic(
       output,
@@ -1380,7 +1434,7 @@ function hasDurableIntent(
 
 function printTradeStageMetrics(
   output: OutputStream,
-  stage: "PREPARE" | "EXECUTE" | "STATUS",
+  stage: "PREPARE" | "LEVERAGE_CONFIG" | "EXECUTE" | "STATUS",
   metrics: MainnetOperatorTradeOutcome["stages"]["prepare"],
 ): void {
   line(output, `EXCHANGE_READS_${stage}=${countText(metrics?.exchangeReads)}`);
@@ -1426,6 +1480,11 @@ function printTradeCommandStatus(
   if (value.clientOrderId)
     line(output, `CLIENT_ORDER_ID=${value.clientOrderId}`);
   if (value.reasonCode) line(output, `REASON_CODE=${value.reasonCode}`);
+  if (value.leverageConfiguration)
+    line(
+      output,
+      `LEVERAGE_CONFIG_STATUS=${value.leverageConfiguration.toUpperCase().replaceAll("-", "_")}`,
+    );
   if (value.statusFailureCode)
     line(output, `STATUS_FAILURE_CODE=${value.statusFailureCode}`);
   if (value.sourceStatus) {
@@ -1443,6 +1502,22 @@ function printTradeCommandStatus(
       output,
       value.reasonCode ?? "OPERATION_FAILED",
       value.diagnosticDetails,
+    );
+    return 4;
+  }
+  if (value.kind === "leverage-config-uncertain") {
+    line(output, "LEVERAGE_CONFIG_OUTCOME=UNCERTAIN");
+    line(
+      output,
+      "NEXT_ACTION=inspect the target symbol's leverage, position and active orders in Bybit; do not repeat this command or issue another leverage write",
+    );
+    return 5;
+  }
+  if (value.kind === "leverage-configured-no-create") {
+    line(output, "CREATE_ATTEMPTS=0");
+    line(
+      output,
+      "NEXT_ACTION=1x leverage was confirmed and no CREATE intent exists; inspect the local refusal reason, then issue a new trade instruction only if still intended",
     );
     return 4;
   }
@@ -1502,6 +1577,15 @@ function printTradeOutcome(
   line(output, `EXECUTION_STAGE=${outcome.kind.toUpperCase()}`);
   if (outcome.stoppedAt) line(output, `STOPPED_AT=${outcome.stoppedAt}`);
   if (outcome.reasonCode) line(output, `REASON_CODE=${outcome.reasonCode}`);
+  if (outcome.leverageConfiguration)
+    line(
+      output,
+      `LEVERAGE_CONFIG_STATUS=${outcome.leverageConfiguration.toUpperCase().replaceAll("-", "_")}`,
+    );
+  line(
+    output,
+    `LEVERAGE_CONFIG_WRITE_ATTEMPTS=${countText(outcome.stages.leverageConfig?.exchangeWrites)}`,
+  );
   if (outcome.execution?.attemptOutcome)
     line(output, `CREATE_OUTCOME=${outcome.execution.attemptOutcome}`);
   if (outcome.execution?.attemptJournaled !== undefined)
@@ -1528,16 +1612,25 @@ function printTradeOutcome(
   if (outcome.immediateStatusFailureCode)
     line(output, `STATUS_FAILURE_CODE=${outcome.immediateStatusFailureCode}`);
   printTradeStageMetrics(output, "PREPARE", outcome.stages.prepare);
+  printTradeStageMetrics(
+    output,
+    "LEVERAGE_CONFIG",
+    outcome.stages.leverageConfig,
+  );
   printTradeStageMetrics(output, "EXECUTE", outcome.stages.execute);
   printTradeStageMetrics(output, "STATUS", outcome.stages.status);
   line(output, `EXCHANGE_READS_TOTAL=${countText(outcome.exchangeReads)}`);
   line(output, `EXCHANGE_WRITES_TOTAL=${countText(outcome.exchangeWrites)}`);
+  line(
+    output,
+    `CREATE_WRITE_ATTEMPTS=${countText(outcome.stages.execute?.exchangeWrites)}`,
+  );
   line(output, `TOTAL_ELAPSED_MS=${countText(outcome.elapsedMs)}`);
   line(output, "OPERATOR_PROMPTS=0");
   line(output, "OPERATOR_PROMPT_WAIT_MS=0");
   line(output, "KEYCHAIN_INTERACTION_TIME=UNMEASURED");
   if (outcome.kind === "blocked") {
-    line(output, "EXECUTION_NOT_STARTED=YES");
+    line(output, "CREATE_NOT_STARTED=YES");
     printTradeRefusalDiagnostic(
       output,
       outcome.reasonCode ?? "OPERATION_FAILED",

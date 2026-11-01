@@ -310,6 +310,24 @@ best bid below the old lower band, while retaining the upper boundary and
 account, capacity, permission, position, order, venue, HALT and final-admission
 checks. It never reprices, adds volume or asks for a second routine approval.
 
+Before preparation, the direct command reads only the requested symbol's
+current one-way position, active orders and leverage. A non-flat position, any
+active target order, or missing/ambiguous target evidence blocks before a
+leverage write. If the symbol is flat, has no active orders and is already 1x,
+no leverage write is sent. Otherwise this explicit trade instruction may set
+that requested USDT-linear symbol to 1x once; the command records the attempt
+before the POST and verifies 1x plus flat/orderless target state with fresh
+GETs before continuing. This is separate from CREATE and does not create a
+trade source or CREATE intent. `LEVERAGE_CONFIG_WRITE_ATTEMPTS` and
+`EXCHANGE_WRITES_LEVERAGE_CONFIG` report this write separately from
+`CREATE_WRITE_ATTEMPTS` and `EXCHANGE_WRITES_EXECUTE`; aggregate counts include
+both. If the setter response is rejected, times out, or its readback is
+uncertain, the command never repeats the leverage POST and does not CREATE.
+Command-ID status remains local and distinguishes `ALREADY_1X`, a confirmed
+1x configuration with no CREATE, and an uncertain configuration. In an
+uncertain case, inspect the target symbol's leverage, position and active
+orders in Bybit before any new instruction.
+
 The saved receipt is valid for 15 minutes for submission. It is single-use and
 binds the local actor, selected account, instruction, TP mode and value, and
 remaining fixed policies; the subsequent immutable binding ties that receipt

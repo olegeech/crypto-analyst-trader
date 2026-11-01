@@ -156,6 +156,28 @@ function isTradeCommandOutcomeStage(
   );
 }
 
+/** Only a completed safe target-leverage precheck may precede a v3 binding/CREATE. */
+function tradeCommandPreIntentOutcomesPermitCreate(
+  database: DatabaseSync,
+  commandId: string,
+): boolean {
+  const rows = database
+    .prepare(
+      `SELECT stage, code FROM operator_mainnet_trade_command_outcomes
+       WHERE command_id = ? ORDER BY revision`,
+    )
+    .all(commandId) as SqliteRow[];
+  if (rows.length === 0) return true;
+  if (rows.some((row) => row.stage !== "precheck")) return false;
+  const codes = rows.map((row) => row.code);
+  return (
+    (codes.length === 1 && codes[0] === "LEVERAGE_CONFIG_ALREADY_1X") ||
+    (codes.length === 2 &&
+      codes[0] === "LEVERAGE_CONFIG_ATTEMPTED" &&
+      codes[1] === "LEVERAGE_CONFIG_VERIFIED")
+  );
+}
+
 function normalizeTradeCommandDiagnostics(
   input: unknown,
 ): Result<Readonly<Record<string, string | number | boolean>>> {
@@ -662,17 +684,16 @@ export class SqliteOperatorMainnetTestStore implements OperatorMainnetTestPersis
                 ),
               );
         }
-        const priorOutcome = database
-          .prepare(
-            `SELECT 1 AS present FROM operator_mainnet_trade_command_outcomes
-             WHERE command_id = ? LIMIT 1`,
+        if (
+          !tradeCommandPreIntentOutcomesPermitCreate(
+            database,
+            binding.value.commandId,
           )
-          .get(binding.value.commandId);
-        if (priorOutcome)
+        )
           return fail(
             domainError(
               "PERSISTENCE_CONFLICT",
-              "a trade-command with a saved pre-intent outcome cannot be rebound",
+              "a trade-command has a blocking pre-intent outcome and cannot be bound",
             ),
           );
         const receiptStored = insertArtifact(
@@ -3445,17 +3466,15 @@ export class SqliteOperatorMainnetTestStore implements OperatorMainnetTestPersis
             ),
           );
         if (
-          database
-            .prepare(
-              `SELECT 1 AS present FROM operator_mainnet_trade_command_outcomes
-               WHERE command_id = ? LIMIT 1`,
-            )
-            .get(receipt.value.commandId)
+          !tradeCommandPreIntentOutcomesPermitCreate(
+            database,
+            receipt.value.commandId,
+          )
         )
           return fail(
             domainError(
               "PERSISTENCE_CONFLICT",
-              "a trade-command with a pre-intent outcome cannot create an intent",
+              "a trade-command has a blocking pre-intent outcome and cannot create an intent",
             ),
           );
         if (

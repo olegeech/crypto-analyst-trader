@@ -527,7 +527,19 @@ export async function executeMainnetOperatorTest(
       command.value.binding?.contentHash !== authorization.binding.contentHash
     )
       return blocked("TRADE_COMMAND_AUTHORITY_NOT_PERSISTED");
-    if (command.value.outcomes.length > 0 || command.value.consumption)
+    const preIntentLeverageProof = command.value.outcomes.map(
+      ({ stage, code }) => `${stage}:${code}`,
+    );
+    const leveragePrecheckComplete =
+      (preIntentLeverageProof.length === 1 &&
+        preIntentLeverageProof[0] === "precheck:LEVERAGE_CONFIG_ALREADY_1X") ||
+      (preIntentLeverageProof.length === 2 &&
+        preIntentLeverageProof[0] === "precheck:LEVERAGE_CONFIG_ATTEMPTED" &&
+        preIntentLeverageProof[1] === "precheck:LEVERAGE_CONFIG_VERIFIED");
+    if (
+      (command.value.outcomes.length > 0 && !leveragePrecheckComplete) ||
+      command.value.consumption
+    )
       return blocked("TRADE_COMMAND_ALREADY_ATTEMPTED_NO_RESEND");
   }
 

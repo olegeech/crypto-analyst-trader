@@ -116,6 +116,7 @@ function orderRows(clientOrderId: string, quantity: string, tp: string) {
 async function runOperatorTradeE2e(
   t: TestContext,
   accountInfoNoTime: boolean,
+  initialTargetLeverage = "1",
 ): Promise<void> {
   const root = mkdtempSync(join(tmpdir(), "operator-trade-e2e-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -142,6 +143,8 @@ async function runOperatorTradeE2e(
   let createdClientOrderId = "";
   let createdQuantity = "";
   let createdTakeProfit = "";
+  let targetLeverage = initialTargetLeverage;
+  let leverageSetCalls = 0;
 
   const request: typeof fetch = async (input, init) => {
     const url =
@@ -157,11 +160,21 @@ async function runOperatorTradeE2e(
     attempts.push({ method, path: target.pathname });
     if (method === "POST") {
       assert.equal(target.origin, "https://api.bybit.com");
-      assert.equal(target.pathname, "/v5/order/create");
-      createCalls += 1;
       const rawBody = init?.body;
       assert.equal(typeof rawBody, "string");
-      createBody = JSON.parse(rawBody as string) as Record<string, unknown>;
+      const body = JSON.parse(rawBody as string) as Record<string, unknown>;
+      if (target.pathname === "/v5/position/set-leverage") {
+        leverageSetCalls += 1;
+        assert.equal(body.category, "linear");
+        assert.equal(body.symbol, "INJUSDT");
+        assert.equal(body.buyLeverage, "1");
+        assert.equal(body.sellLeverage, "1");
+        targetLeverage = "1";
+        return response({});
+      }
+      assert.equal(target.pathname, "/v5/order/create");
+      createCalls += 1;
+      createBody = body;
       assert.equal(createBody.category, "linear");
       assert.equal(createBody.symbol, "INJUSDT");
       assert.equal(createBody.side, "Buy");
@@ -283,7 +296,7 @@ async function runOperatorTradeE2e(
                     positionIdx: 0,
                     side: "",
                     size: "0",
-                    leverage: "1",
+                    leverage: targetLeverage,
                   },
                 ]
               : [],
@@ -386,6 +399,7 @@ async function runOperatorTradeE2e(
   const tradeDependencies = {
     credentialProvider,
     openPersistence,
+    request,
     clock: () => NOW,
     prepare: async (
       prepareInput: Parameters<typeof prepareMainnetOperatorTest>[0],
@@ -459,6 +473,14 @@ async function runOperatorTradeE2e(
   assert.equal(tradeCode, 0, tradeText);
   assert.match(tradeText, /CREATE_OUTCOME=accepted/u);
   assert.match(tradeText, /LIFECYCLE_OUTCOME=TP_LIFECYCLE_PASS/u);
+  assert.match(
+    tradeText,
+    new RegExp(
+      `LEVERAGE_CONFIG_STATUS=${initialTargetLeverage === "1" ? "ALREADY_1X" : "CONFIRMED_1X"}`,
+      "u",
+    ),
+  );
+  assert.equal(leverageSetCalls, initialTargetLeverage === "1" ? 0 : 1);
   assert.equal(createCalls, 1);
   assert.ok(createBody);
   assert.equal(createBody!.price, "0.0753");
@@ -478,7 +500,18 @@ async function runOperatorTradeE2e(
       ({ method, path }) => method === "POST" && path === "/v5/order/create",
     ),
   );
-  assert.equal(attempts.filter(({ method }) => method === "POST").length, 1);
+  assert.equal(
+    attempts.filter(({ method }) => method === "POST").length,
+    initialTargetLeverage === "1" ? 1 : 2,
+  );
+  const leveragePostIndex = attempts.findIndex(
+    ({ path }) => path === "/v5/position/set-leverage",
+  );
+  const createPostIndex = attempts.findIndex(
+    ({ path }) => path === "/v5/order/create",
+  );
+  if (initialTargetLeverage !== "1")
+    assert.ok(leveragePostIndex >= 0 && leveragePostIndex < createPostIndex);
 
   const commandId = tradeText.match(/^COMMAND_ID=([\w-]+)$/mu)?.[1];
   assert.ok(commandId, tradeText);
@@ -510,7 +543,7 @@ async function runOperatorTradeE2e(
   assert.equal(createCalls, 1, "status must not dispatch another CREATE");
   assert.equal(
     attempts.filter(({ method }) => method === "POST").length,
-    1,
+    initialTargetLeverage === "1" ? 1 : 2,
     "the entire command-id status path must remain GET-only",
   );
 
@@ -527,7 +560,10 @@ async function runOperatorTradeE2e(
         const command = journal.readOperatorMainnetTradeCommand(commandId!);
         assert.equal(command.ok, true);
         assert.equal(command.ok && command.value?.source !== undefined, true);
-        assert.equal(command.ok && command.value?.outcomes.length, 0);
+        assert.equal(
+          command.ok && command.value?.outcomes.length,
+          initialTargetLeverage === "1" ? 1 : 2,
+        );
         const latestReconciliation =
           command.ok && command.value?.source
             ? command.value.source.reconciliations.at(-1)
@@ -558,3 +594,6 @@ test("U5 production path: INJUSDT .50% command keeps frozen Limit after lower bi
 
 test("U5 production path: INJUSDT .50% full-fallback command keeps frozen Limit and reconciles TP fills", async (t) =>
   runOperatorTradeE2e(t, true));
+
+test("U5 production path: non-1x flat INJUSDT is set once to 1x before one +0.50% CREATE", async (t) =>
+  runOperatorTradeE2e(t, false, "2"));
