@@ -64,7 +64,8 @@ function tradeTargetStateRequestFixture(
       | "timeout"
       | "timeout-applied"
       | "invalid-response"
-      | "unclassified";
+      | "unclassified"
+      | "success-stale-readback";
   } = {},
 ) {
   const symbol = options.symbol ?? "DOGEUSDT";
@@ -140,7 +141,11 @@ function tradeTargetStateRequestFixture(
               (options.positionSide && options.positionSide !== "flat"
                 ? "1"
                 : "0"),
-            leverage,
+            leverage:
+              options.setBehavior === "success-stale-readback" &&
+              positionReads >= 3
+                ? (options.leverage ?? "2")
+                : leverage,
           },
         ],
       });
@@ -179,7 +184,8 @@ function tradeTargetStateRequestFixture(
         });
       if (
         options.setBehavior === "success" ||
-        options.setBehavior === "timeout-applied"
+        options.setBehavior === "timeout-applied" ||
+        options.setBehavior === "success-stale-readback"
       )
         leverage = String(body?.buyLeverage ?? "");
       if (
@@ -471,6 +477,15 @@ test("direct trade accepts provider-shaped USDT symbols without broadening the M
 test("target position, active orders and incomplete target evidence block before leverage setting", async (t) => {
   const scenarios = [
     {
+      name: "position and active order are both present",
+      options: {
+        leverage: "1",
+        positionSide: "long" as const,
+        activeOrder: true,
+      },
+      reasonCode: "TARGET_SYMBOL_POSITION_AND_ORDERS_PRESENT",
+    },
+    {
       name: "existing position",
       options: { leverage: "2", positionSide: "long" as const },
       reasonCode: "TARGET_SYMBOL_POSITION_PRESENT",
@@ -483,6 +498,16 @@ test("target position, active orders and incomplete target evidence block before
     {
       name: "missing position evidence",
       options: { leverage: "2", missingPosition: true },
+      reasonCode: "TARGET_POSITION_EVIDENCE_UNPROVEN",
+    },
+    {
+      name: "zero target leverage",
+      options: { leverage: "0" },
+      reasonCode: "TARGET_POSITION_EVIDENCE_UNPROVEN",
+    },
+    {
+      name: "malformed target leverage",
+      options: { leverage: "not-a-number" },
       reasonCode: "TARGET_POSITION_EVIDENCE_UNPROVEN",
     },
     {
@@ -657,6 +682,16 @@ test("leverage setter rejection, timeout and unknown readback never retry or CRE
       expectedConfiguration: "uncertain",
       expectedReason: "LEVERAGE_CONFIG_UNCERTAIN",
     },
+    {
+      name: "successful setter response followed by stale 2x target readback",
+      options: {
+        leverage: "2",
+        setBehavior: "success-stale-readback" as const,
+      },
+      expectedStatus: "leverage-config-uncertain",
+      expectedConfiguration: "uncertain",
+      expectedReason: "LEVERAGE_CONFIG_READBACK_CONFLICT",
+    },
   ] as const;
 
   for (const scenario of scenarios) {
@@ -708,7 +743,18 @@ test("leverage setter rejection, timeout and unknown readback never retry or CRE
       assert.equal(result.ok, true);
       if (!result.ok) throw new Error("trade returned a top-level failure");
       assert.equal(result.value.kind, "blocked");
-      assert.equal(result.value.reasonCode, scenario.expectedReason);
+      assert.equal(
+        result.value.reasonCode,
+        scenario.expectedReason,
+        JSON.stringify({
+          reasonCode: result.value.reasonCode,
+          diagnostics: result.value.diagnosticDetails,
+          calls: fixture.target.calls.map(({ method, path }) => ({
+            method,
+            path,
+          })),
+        }),
+      );
       assert.equal(
         result.value.leverageConfiguration,
         scenario.expectedConfiguration,
@@ -763,7 +809,12 @@ test("leverage setter rejection, timeout and unknown readback never retry or CRE
         status.value.leverageConfiguration,
         scenario.expectedConfiguration,
       );
-      assert.equal(status.value.reasonCode, scenario.expectedReason);
+      assert.equal(
+        status.value.reasonCode,
+        scenario.expectedStatus === "leverage-config-uncertain"
+          ? "LEVERAGE_CONFIG_UNCERTAIN"
+          : scenario.expectedReason,
+      );
       assert.equal(status.value.exchangeReads, 0);
     });
   }
