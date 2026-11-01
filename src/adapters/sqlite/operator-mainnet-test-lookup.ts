@@ -2,6 +2,7 @@ import { openSqliteConnection } from "./connection.js";
 import { SqliteOperatorMainnetTestStore } from "./operator-mainnet-test-store.js";
 import type { PersistenceScope } from "../../ports/persistence.js";
 import type { OperatorMainnetTestSnapshot } from "../../ports/operator-mainnet-test-persistence.js";
+import type { OperatorMainnetTradeCommandSnapshot } from "../../ports/operator-mainnet-test-persistence.js";
 import type { OperatorMainnetTestPlan } from "../../domain/execution/operator-mainnet-test-plan.js";
 import type { PlanHash } from "../../domain/identity/canonical-serialization.js";
 import type { Clock } from "../../domain/shared/time.js";
@@ -26,6 +27,11 @@ export interface ResolvedOperatorMainnetPlan {
 export interface ResolvedOperatorMainnetSource {
   readonly scope: PersistenceScope;
   readonly snapshot: OperatorMainnetTestSnapshot;
+}
+
+export interface ResolvedOperatorMainnetTradeCommand {
+  readonly scope: PersistenceScope;
+  readonly snapshot: OperatorMainnetTradeCommandSnapshot;
 }
 
 function open(options: OperatorMainnetTestLookupOptions) {
@@ -129,6 +135,50 @@ export function resolveOperatorMainnetSource(
   } catch {
     return fail(
       domainError("PERSISTENCE_INTEGRITY", "operator source lookup failed"),
+    );
+  } finally {
+    connection.value.close();
+  }
+}
+
+/** Resolve a direct-command receipt/status aggregate by its local command ID. */
+export function resolveOperatorMainnetTradeCommand(
+  commandIdInput: unknown,
+  options: OperatorMainnetTestLookupOptions = {},
+): Result<ResolvedOperatorMainnetTradeCommand | undefined> {
+  const commandId = requireIdentifier(commandIdInput, "commandId");
+  if (!commandId.ok) return commandId;
+  const connection = open(options);
+  if (!connection.ok) return connection;
+  try {
+    const row = connection.value.db
+      .prepare(
+        `SELECT account_id FROM operator_mainnet_trade_command_receipts
+         WHERE command_id = ? AND exchange = 'bybit' AND environment = 'mainnet'
+           AND category = 'linear' AND position_mode = 'one-way'`,
+      )
+      .get(commandId.value) as { account_id?: unknown } | undefined;
+    if (row === undefined) return ok(undefined);
+    if (
+      typeof row.account_id !== "string" ||
+      !requireHash(row.account_id, "accountId").ok
+    )
+      return fail(
+        domainError("PERSISTENCE_INTEGRITY", "direct-command scope is invalid"),
+      );
+    const scope = scopeFor(row.account_id);
+    const journal = new SqliteOperatorMainnetTestStore(connection.value, scope);
+    const snapshot = journal.readOperatorMainnetTradeCommand(commandId.value);
+    if (!snapshot.ok) return snapshot;
+    return snapshot.value
+      ? ok({ scope, snapshot: snapshot.value })
+      : ok(undefined);
+  } catch {
+    return fail(
+      domainError(
+        "PERSISTENCE_INTEGRITY",
+        "direct-command status lookup failed",
+      ),
     );
   } finally {
     connection.value.close();

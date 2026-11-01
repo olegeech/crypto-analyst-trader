@@ -489,8 +489,23 @@ function classify(
       ? snapshot.attempt?.outcome === "rejected" &&
         observation.parentLookupComplete
       : parent.filledQuantity.isZero());
+  const acceptedParentNotVisible =
+    snapshot.authorization.kind === "trade-command" &&
+    reasons.size === 0 &&
+    snapshot.attempt?.outcome === "accepted" &&
+    parent === undefined &&
+    entry !== undefined &&
+    entry.quantity.isZero() &&
+    flat &&
+    !activeChild &&
+    relatedOpenOrders.length === 0 &&
+    !manualPositionClose &&
+    !unclassifiedManualAction;
   if (reasons.size === 0 && hasProvenZeroEntryFills) {
     lifecycleOutcome = "NOT_EXERCISED";
+  } else if (acceptedParentNotVisible) {
+    lifecycleOutcome = "PARTIAL_EVIDENCE";
+    cleanupStatus = "pending";
   } else if (reasons.size === 0 && manualPositionClose) {
     lifecycleOutcome = "MANUAL_CLEANUP";
   } else if (reasons.size === 0 && unclassifiedManualAction) {
@@ -525,6 +540,9 @@ function classify(
       schemaVersion: "operator-mainnet-test-status-evidence/v1",
       observedAt: observation.observedAt,
       exchangeReads: observation.exchangeReads,
+      ...(acceptedParentNotVisible
+        ? { pendingReason: "ACCEPTED_PARENT_NOT_VISIBLE" }
+        : {}),
       parent: parent
         ? {
             exchangeOrderId: parent.exchangeOrderId,

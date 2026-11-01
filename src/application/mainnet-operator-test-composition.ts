@@ -24,6 +24,7 @@ import {
 import { BybitPublicMarketMappingError } from "../adapters/bybit-v5/public-market-mappers.js";
 import { openSqlitePersistence } from "../adapters/sqlite/sqlite-persistence.js";
 import type { AccountEvidenceCollectionResult } from "../domain/account/account-evidence-bundle.js";
+import { localOperatorIdentityHash } from "./local-operator.js";
 import {
   canonicalSerialize,
   type PlanHash,
@@ -34,6 +35,12 @@ import {
   validateOperatorMainnetTestApproval,
   type OperatorMainnetTestPlan,
 } from "../domain/execution/operator-mainnet-test-plan.js";
+import {
+  rehydrateOperatorMainnetTradeCommandBinding,
+  rehydrateOperatorMainnetTradeCommandPlan,
+  rehydrateOperatorMainnetTradeCommandReceipt,
+  validateOperatorMainnetTradeCommandBinding,
+} from "../domain/execution/operator-mainnet-trade-command.js";
 import type { OperatorMainnetRecoveryAttestation } from "../domain/execution/operator-mainnet-recovery.js";
 import { domainError } from "../domain/shared/errors.js";
 import { fail, type Result } from "../domain/shared/result.js";
@@ -49,15 +56,17 @@ import type {
   CredentialProvider,
   ExchangeCredentials,
 } from "../ports/credential-provider.js";
-import type { PersistenceScope } from "../ports/persistence.js";
 import type {
   OperatorMainnetTestCreateAuthorizationBinding,
   OperatorMainnetTestAuthorizationPort,
 } from "../ports/operator-mainnet-test-authorization.js";
 import type {
+  LegacyMainnetOperatorTestInput,
   MainnetOperatorTestInput,
+  MainnetOperatorTestCompositionInput,
   MainnetOperatorTestOutcome,
 } from "./mainnet-operator-test.js";
+import type { MainnetOperatorTestPreparation } from "./mainnet-operator-test-preparation-composition.js";
 import { executeMainnetOperatorTest } from "./mainnet-operator-test.js";
 import { collectAccountEvidence } from "./account-evidence-collection.js";
 import {
@@ -65,9 +74,13 @@ import {
   revalidateMainnetOperatorEvidenceAge,
   validateMainnetOperatorTestEvidence,
   validateCompactOperatorAccountForPlan,
+  deriveDirectTradeProviderTimeAnchor,
+  OPERATOR_MAINNET_DIRECT_ACCOUNT_SCHEMA_VERSION,
   type MainnetOperatorTestEvidencePort,
   type MainnetOperatorTestAdmissionEvidence,
+  type MainnetOperatorTestDirectFreshEvidence,
 } from "./mainnet-entry-evidence.js";
+import { PROVISIONAL_M1_MAX_ACCOUNT_EVIDENCE_AGE_MS } from "./policies/provisional-m1.js";
 import { deriveMainnetExecutionReadiness } from "./mainnet-execution-readiness.js";
 import {
   createMainnetGetCounts,
@@ -77,12 +90,14 @@ import {
   type MainnetEvidencePath,
   type MainnetInvocationMetrics,
 } from "./mainnet-composition-helpers.js";
+import { mainnetOperatorTestPersistenceScope } from "./mainnet-operator-test-scope.js";
 
 import {
   collectCompactOperatorAccountEvidence,
   createCompactOperatorAccountReader,
   collectOperatorAdmissionEvidence,
   extractOperatorFeeRate,
+  refreshDirectTradeAccountEvidence,
   CompactAccountEvidenceUnavailable,
   OperatorEvidenceReadError,
 } from "./mainnet-operator-test-evidence.js";
@@ -99,13 +114,25 @@ interface PrivateCreateGrant {
   dispatched: boolean;
 }
 
+/** Direct-command expiry is local-authority time; legacy approvals retain provider time. */
+export function authorizationTimeForCreate(
+  kind: "approval" | "trade-command",
+  localNow: UtcTimestamp | undefined,
+  providerNow: UtcTimestamp | undefined,
+): UtcTimestamp | undefined {
+  return kind === "trade-command" ? localNow : providerNow;
+}
+
 /** Private to this composition: identity, exact binding, expiry and one-use state are process-local. */
 function createPrivateCreateIssuer(): {
   readonly authorization: OperatorMainnetTestAuthorizationPort;
-  claimForTransport(payloadHash: string, providerNow: UtcTimestamp): boolean;
+  claimForTransport(
+    payloadHash: string,
+    authorizationNow: UtcTimestamp,
+  ): boolean;
   hasClaimedTransportGrant(
     payloadHash: string,
-    providerNow: UtcTimestamp,
+    authorizationNow: UtcTimestamp,
   ): boolean;
   markDispatched(): void;
 } {
@@ -120,17 +147,62 @@ function createPrivateCreateIssuer(): {
         binding.environment !== "mainnet"
       )
         return undefined;
+      const expectedFields =
+        binding.kind === "approval"
+          ? [
+              "kind",
+              "operation",
+              "environment",
+              "planHash",
+              "approvalHash",
+              "sourceId",
+              "accountIdentityHash",
+              "symbol",
+              "clientOrderId",
+              "exactPayloadHash",
+              "runId",
+              "expiresAt",
+            ]
+          : [
+              "kind",
+              "operation",
+              "environment",
+              "planHash",
+              "commandId",
+              "receiptHash",
+              "commandBindingHash",
+              "sourceId",
+              "accountIdentityHash",
+              "symbol",
+              "clientOrderId",
+              "exactPayloadHash",
+              "runId",
+              "expiresAt",
+            ];
+      if (
+        Reflect.ownKeys(binding).length !== expectedFields.length ||
+        expectedFields.some((key) => !Object.hasOwn(binding, key))
+      )
+        return undefined;
       const hashes = [
         requireHash(binding.planHash, "planHash"),
-        requireHash(binding.approvalHash, "approvalHash"),
         requireHash(binding.exactPayloadHash, "exactPayloadHash"),
         requireHash(binding.accountIdentityHash, "accountIdentityHash"),
+        ...(binding.kind === "approval"
+          ? [requireHash(binding.approvalHash, "approvalHash")]
+          : [
+              requireHash(binding.receiptHash, "receiptHash"),
+              requireHash(binding.commandBindingHash, "commandBindingHash"),
+            ]),
       ];
       const identifiers = [
         requireIdentifier(binding.sourceId, "sourceId"),
         requireIdentifier(binding.symbol, "symbol"),
         requireIdentifier(binding.clientOrderId, "clientOrderId"),
         requireIdentifier(binding.runId, "runId"),
+        ...(binding.kind === "trade-command"
+          ? [requireIdentifier(binding.commandId, "commandId")]
+          : []),
       ];
       const expiry = parseUtcTimestamp(binding.expiresAt);
       if (
@@ -174,8 +246,8 @@ function createPrivateCreateIssuer(): {
   };
   return {
     authorization,
-    claimForTransport(payloadHash, providerNow) {
-      const parsed = parseUtcTimestamp(providerNow);
+    claimForTransport(payloadHash, authorizationNow) {
+      const parsed = parseUtcTimestamp(authorizationNow);
       if (
         !activeGrant ||
         !parsed.ok ||
@@ -190,8 +262,8 @@ function createPrivateCreateIssuer(): {
       activeGrant.claimed = true;
       return true;
     },
-    hasClaimedTransportGrant(payloadHash, providerNow) {
-      const parsed = parseUtcTimestamp(providerNow);
+    hasClaimedTransportGrant(payloadHash, authorizationNow) {
+      const parsed = parseUtcTimestamp(authorizationNow);
       return Boolean(
         activeGrant &&
         parsed.ok &&
@@ -209,26 +281,20 @@ function createPrivateCreateIssuer(): {
   };
 }
 
-function failed<T>(reasonCode: string): Result<T> {
+function failed<T>(
+  reasonCode: string,
+  details: Readonly<Record<string, string | number | boolean>> = {},
+): Result<T> {
   return fail(
     domainError(
       "INVALID_CAPABILITY",
       "operator Mainnet composition is blocked",
       {
         reasonCode,
+        ...details,
       },
     ),
   );
-}
-
-function scopeFor(plan: OperatorMainnetTestPlan): PersistenceScope {
-  return {
-    exchange: "bybit",
-    environment: "mainnet",
-    accountId: plan.accountIdentityHash,
-    category: "linear",
-    positionMode: "one-way",
-  };
 }
 
 function providerTime(
@@ -239,22 +305,86 @@ function providerTime(
   return parsed.ok ? parsed.value : undefined;
 }
 
-function inputIdentity(input: MainnetOperatorTestInput) {
-  const approval = rehydrateOperatorMainnetTestApproval(input.approval);
-  const hash = requireHash(input.approvalHash, "approvalHash");
-  const runId = requireIdentifier(input.runId, "runId");
+function inputIdentity(input: MainnetOperatorTestCompositionInput) {
+  let normalized: MainnetOperatorTestInput;
   if (
-    !approval.ok ||
-    !hash.ok ||
-    !runId.ok ||
-    approval.value.contentHash !== hash.value
+    typeof input === "object" &&
+    input !== null &&
+    !Array.isArray(input) &&
+    Object.hasOwn(input, "authorization")
+  ) {
+    normalized = input as MainnetOperatorTestInput;
+  } else {
+    const legacy = input as LegacyMainnetOperatorTestInput;
+    const approval = rehydrateOperatorMainnetTestApproval(legacy.approval);
+    const hash = requireHash(legacy.approvalHash, "approvalHash");
+    const runId = requireIdentifier(legacy.runId, "runId");
+    if (
+      !approval.ok ||
+      !hash.ok ||
+      !runId.ok ||
+      approval.value.contentHash !== hash.value
+    )
+      return undefined;
+    normalized = {
+      authorization: {
+        kind: "approval",
+        approval: approval.value,
+        approvalHash: hash.value,
+      },
+      runId: runId.value,
+    };
+  }
+  const runId = requireIdentifier(normalized.runId, "runId");
+  if (!runId.ok) return undefined;
+  if (normalized.authorization.kind === "approval") {
+    const approval = rehydrateOperatorMainnetTestApproval(
+      normalized.authorization.approval,
+    );
+    const hash = requireHash(
+      normalized.authorization.approvalHash,
+      "approvalHash",
+    );
+    if (!approval.ok || !hash.ok || approval.value.contentHash !== hash.value)
+      return undefined;
+    const plan = rehydrateOperatorMainnetTestPlan(
+      approval.value.replayInputs.plan,
+    );
+    if (!plan.ok) return undefined;
+    return {
+      input: normalized,
+      authorization: normalized.authorization,
+      plan: plan.value,
+      runId: runId.value,
+    };
+  }
+  const receipt = rehydrateOperatorMainnetTradeCommandReceipt(
+    normalized.authorization.receipt,
+  );
+  const binding = rehydrateOperatorMainnetTradeCommandBinding(
+    normalized.authorization.binding,
+  );
+  const plan = rehydrateOperatorMainnetTradeCommandPlan(normalized.plan);
+  if (
+    !receipt.ok ||
+    !binding.ok ||
+    !plan.ok ||
+    plan.value.contentHash !== binding.value.planHash ||
+    binding.value.commandId !== receipt.value.commandId ||
+    binding.value.receiptHash !== receipt.value.contentHash ||
+    plan.value.commandReceiptHash !== receipt.value.contentHash
   )
     return undefined;
-  const plan = rehydrateOperatorMainnetTestPlan(
-    approval.value.replayInputs.plan,
-  );
-  if (!plan.ok) return undefined;
-  return { approval: approval.value, plan: plan.value, runId: runId.value };
+  return {
+    input: normalized,
+    authorization: {
+      kind: "trade-command" as const,
+      receipt: receipt.value,
+      binding: binding.value,
+    },
+    plan: plan.value as unknown as OperatorMainnetTestPlan,
+    runId: runId.value,
+  };
 }
 
 type ValidatedAdmission = Extract<
@@ -262,18 +392,30 @@ type ValidatedAdmission = Extract<
   { readonly ok: true }
 >["value"];
 
-/** Private production composition: real Keychain, GET-only evidence, and one durable CREATE dispatch. */
+export interface MainnetOperatorTestCompositionDependencies {
+  readonly credentialProvider?: Pick<CredentialProvider, "load">;
+  readonly openPersistence?: typeof openSqlitePersistence;
+  readonly request?: typeof fetch;
+  readonly wallClock?: () => number;
+  readonly monotonicClock?: () => number;
+  readonly preparedDirectTradeAdmission?: MainnetOperatorTestPreparation["directTradeAdmission"];
+}
+
+/** Production composition defaults to the real Keychain, SQLite store, and fetch transport. */
 export async function runMainnetOperatorTestComposition(
-  input: MainnetOperatorTestInput,
+  input: MainnetOperatorTestCompositionInput,
+  dependencies: MainnetOperatorTestCompositionDependencies = {},
 ): Promise<Result<MainnetOperatorTestOutcome>> {
   const getCounts = createMainnetGetCounts();
-  const stageStarted = performance.now();
+  const wall = dependencies.wallClock ?? Date.now;
+  const monotonic = dependencies.monotonicClock ?? (() => performance.now());
+  const stageStarted = monotonic();
   let exchangeReads = 0;
   let exchangeWrites = 0;
   let evidencePath: MainnetEvidencePath = "none";
   let compactFallbackReason: string | undefined;
   const metricsFor = (reads: number): MainnetInvocationMetrics => {
-    const elapsed = performance.now() - stageStarted;
+    const elapsed = monotonic() - stageStarted;
     return createMainnetInvocationMetrics({
       stage: "execute",
       exchangeReads: reads,
@@ -293,7 +435,12 @@ export async function runMainnetOperatorTestComposition(
   };
   const withCounts = <T>(result: Result<T>, reads: number, writes: number) =>
     withMainnetInvocationMetrics(result, reads, writes, metricsFor(reads));
-  const normalized = inputIdentity(input);
+  let normalized: ReturnType<typeof inputIdentity>;
+  try {
+    normalized = inputIdentity(input);
+  } catch {
+    normalized = undefined;
+  }
   if (!normalized)
     return withCounts(
       failed("APPROVAL_OR_PLAN_INVALID"),
@@ -301,8 +448,18 @@ export async function runMainnetOperatorTestComposition(
       exchangeWrites,
     );
   const admitted = normalized;
-  const wall = Date.now;
-  const monotonic = () => performance.now();
+  if (admitted.authorization.kind === "trade-command") {
+    const localActor = localOperatorIdentityHash();
+    if (
+      !localActor.ok ||
+      localActor.value !== admitted.authorization.receipt.actorIdentityHash
+    )
+      return withCounts(
+        failed("LOCAL_OPERATOR_IDENTITY_MISMATCH"),
+        exchangeReads,
+        exchangeWrites,
+      );
+  }
   const localClock = {
     now: () => {
       const parsed = timestampFromEpochMs(wall());
@@ -310,9 +467,11 @@ export async function runMainnetOperatorTestComposition(
       return parsed.value;
     },
   };
-  const persistence = openSqlitePersistence({
+  const persistence = (dependencies.openPersistence ?? openSqlitePersistence)({
     environment: "mainnet",
-    scope: scopeFor(admitted.plan),
+    scope: mainnetOperatorTestPersistenceScope(
+      admitted.plan.accountIdentityHash,
+    ),
     clock: localClock,
   });
   if (!persistence.ok)
@@ -344,7 +503,8 @@ export async function runMainnetOperatorTestComposition(
         );
       manualRecoveryAttestation = savedAttestation.value;
     }
-    const credentialProvider = createMacOSKeychainProvider();
+    const credentialProvider =
+      dependencies.credentialProvider ?? createMacOSKeychainProvider();
     let credentialSnapshot: Readonly<ExchangeCredentials> | undefined;
     const credentialLoader: Pick<CredentialProvider, "load"> = {
       load: async (environment: CredentialEnvironment) => {
@@ -367,7 +527,7 @@ export async function runMainnetOperatorTestComposition(
         getCounts.record(url, init);
       } else if (method === "POST") exchangeWrites += 1;
       else throw new Error("operator composition permits GET and CREATE only");
-      return fetch(url, init);
+      return (dependencies.request ?? fetch)(url, init);
     };
     const loadedCredentials = await credentialLoader.load("mainnet");
     const accountReader = createCompactOperatorAccountReader({
@@ -403,9 +563,18 @@ export async function runMainnetOperatorTestComposition(
         binding.sourceId,
       );
       if (!halt.ok || !source.ok || !source.value) return false;
+      const authorityMatches =
+        binding.kind === "approval"
+          ? source.value.authorization.kind === "approval" &&
+            source.value.authorization.hash === binding.approvalHash
+          : source.value.authorization.kind === "trade-command" &&
+            source.value.authorization.commandId === binding.commandId &&
+            source.value.authorization.receiptHash === binding.receiptHash &&
+            source.value.authorization.hash === binding.commandBindingHash;
       return Boolean(
         !halt.value.active &&
         !halt.value.reconciliationRequired &&
+        authorityMatches &&
         source.value.intent.operation === "CREATE" &&
         source.value.intent.runId === binding.runId &&
         source.value.source.payloadHash === binding.exactPayloadHash &&
@@ -428,10 +597,19 @@ export async function runMainnetOperatorTestComposition(
       )
         return false;
       if (!transport) return false;
-      const offset = await transport.getServerTimeOffset();
-      const now = providerTime(wall, offset);
+      const providerNow =
+        admitted.authorization.kind === "approval"
+          ? providerTime(wall, await transport.getServerTimeOffset())
+          : undefined;
+      const localNow = timestampFromEpochMs(wall());
       const elapsed = monotonic() - active.evidenceAtMonotonic;
-      if (!now || !Number.isFinite(elapsed) || elapsed < 0) return false;
+      if (
+        (admitted.authorization.kind === "approval" && !providerNow) ||
+        !localNow.ok ||
+        !Number.isFinite(elapsed) ||
+        elapsed < 0
+      )
+        return false;
       const evidenceStillValid = validateMainnetOperatorTestEvidence(
         admitted.plan,
         active.evidence,
@@ -441,17 +619,34 @@ export async function runMainnetOperatorTestComposition(
         active.ages,
         elapsed,
       );
-      const approvalStillValid = validateOperatorMainnetTestApproval(
-        admitted.approval,
-        admitted.plan,
-        admitted.approval.contentHash,
-        now,
+      const authorizationNow = authorizationTimeForCreate(
+        admitted.authorization.kind,
+        localNow.value,
+        providerNow,
       );
+      if (!authorizationNow) return false;
+      const authorityStillValid =
+        admitted.authorization.kind === "approval"
+          ? validateOperatorMainnetTestApproval(
+              admitted.authorization.approval,
+              admitted.plan,
+              admitted.authorization.approvalHash,
+              authorizationNow,
+            )
+          : validateOperatorMainnetTradeCommandBinding(
+              admitted.authorization.receipt,
+              admitted.authorization.binding,
+              authorizationNow,
+              binding.exactPayloadHash,
+            );
       return (
         evidenceStillValid.ok &&
         fresh.ok &&
-        approvalStillValid.ok &&
-        issuer.hasClaimedTransportGrant(binding.exactPayloadHash, now) &&
+        authorityStillValid.ok &&
+        issuer.hasClaimedTransportGrant(
+          binding.exactPayloadHash,
+          authorizationNow,
+        ) &&
         sourceIsCurrent()
       );
     }
@@ -505,6 +700,211 @@ export async function runMainnetOperatorTestComposition(
       collect: async (symbol) => {
         if (symbol !== admitted.plan.symbol)
           throw new Error("operator source symbol mismatch");
+        if (admitted.authorization.kind === "trade-command") {
+          evidencePath = "compact";
+          const handoff = dependencies.preparedDirectTradeAdmission;
+          if (!handoff || handoff.planHash !== admitted.plan.contentHash)
+            throw new OperatorEvidenceReadError(
+              "PREPARED_DIRECT_TRADE_EVIDENCE_UNAVAILABLE",
+              { source: "account" },
+            );
+          if (
+            !("compactAccount" in handoff.evidence) ||
+            handoff.evidence.compactAccount.schemaVersion !==
+              OPERATOR_MAINNET_DIRECT_ACCOUNT_SCHEMA_VERSION
+          )
+            throw new OperatorEvidenceReadError(
+              "PREPARED_DIRECT_TRADE_EVIDENCE_INVALID",
+              { source: "account" },
+            );
+          let fresh: MainnetOperatorTestDirectFreshEvidence =
+            handoff.evidence as MainnetOperatorTestDirectFreshEvidence;
+          let validated = validateMainnetOperatorTestEvidence(
+            admitted.plan,
+            fresh,
+          );
+          const staleDetails: Readonly<Record<string, unknown>> | undefined =
+            !validated.ok &&
+            validated.error.details?.reasonCode === "MAINNET_EVIDENCE_STALE"
+              ? validated.error.details
+              : undefined;
+          const evidenceElapsed = monotonic() - handoff.capturedAtMonotonic;
+          if (!Number.isFinite(evidenceElapsed) || evidenceElapsed < 0)
+            throw new OperatorEvidenceReadError("MONOTONIC_CLOCK_INVALID");
+          const anchorMs = timestampToEpochMs(fresh.providerTimeAnchor);
+          const providerNowMs = anchorMs + evidenceElapsed;
+          const observation = fresh.compactAccount.observations[0];
+          const directAccountAges = {
+            identity:
+              providerNowMs -
+              timestampToEpochMs(
+                fresh.compactAccount.accountBinding.authenticatedAt,
+              ),
+            mode:
+              providerNowMs - timestampToEpochMs(observation.modeObservedAt),
+            balance:
+              providerNowMs - timestampToEpochMs(observation.balanceObservedAt),
+          };
+          const quoteAge =
+            providerNowMs - timestampToEpochMs(fresh.quote.observedAt);
+          const feeAge =
+            providerNowMs - timestampToEpochMs(fresh.feeRate.observedAt);
+          const targetStateAge =
+            providerNowMs - timestampToEpochMs(fresh.state.serverTime);
+          // A future quote is a source-time defect, not stale data. Do not let
+          // any refresh turn it into an apparently valid observation.
+          if (quoteAge < 0)
+            throw new OperatorEvidenceReadError("MAINNET_EVIDENCE_STALE", {
+              source: "quote",
+              futureByMs: Math.ceil(-quoteAge),
+              limitMs: admitted.plan.quoteFreshnessMs,
+            });
+          const staleFacts = {
+            accountIdentity:
+              directAccountAges.identity >
+              PROVISIONAL_M1_MAX_ACCOUNT_EVIDENCE_AGE_MS,
+            accountMode:
+              directAccountAges.mode >
+              PROVISIONAL_M1_MAX_ACCOUNT_EVIDENCE_AGE_MS,
+            balance:
+              directAccountAges.balance >
+              PROVISIONAL_M1_MAX_ACCOUNT_EVIDENCE_AGE_MS,
+            quote: quoteAge > admitted.plan.quoteFreshnessMs,
+            fee: feeAge > PROVISIONAL_M1_MAX_ACCOUNT_EVIDENCE_AGE_MS,
+            targetState:
+              targetStateAge > PROVISIONAL_M1_MAX_ACCOUNT_EVIDENCE_AGE_MS,
+          };
+          const hasStaleFacts = Object.values(staleFacts).some(Boolean);
+          const mayRefresh =
+            hasStaleFacts &&
+            staleDetails?.futureByMs === undefined &&
+            (validated.ok || staleDetails !== undefined);
+          let refreshedAtMonotonic = handoff.capturedAtMonotonic;
+          if (mayRefresh) {
+            try {
+              if (
+                staleFacts.accountIdentity ||
+                staleFacts.accountMode ||
+                staleFacts.balance
+              ) {
+                const compactAccount = await refreshDirectTradeAccountEvidence(
+                  accountReader.reader,
+                  loadedCredentials,
+                  fresh.compactAccount,
+                  {
+                    ...(staleFacts.accountIdentity
+                      ? { identity: true as const }
+                      : {}),
+                    ...(staleFacts.accountMode ? { mode: true as const } : {}),
+                    ...(staleFacts.balance ? { balance: true as const } : {}),
+                  },
+                );
+                fresh = { ...fresh, compactAccount };
+              }
+              if (staleFacts.quote) {
+                fresh = {
+                  ...fresh,
+                  quote: await publicMarkets.readOperatorQuote(symbol, {
+                    directTrade: true,
+                  }),
+                };
+              }
+              if (staleFacts.fee) {
+                const feeResponse = await accountReader.transport.get(
+                  ACCOUNT_FEE_RATE_PATH,
+                  { category: "linear", symbol },
+                );
+                const feeRate = extractOperatorFeeRate(feeResponse, symbol);
+                if (!feeRate.ok)
+                  throw new OperatorEvidenceReadError(
+                    "FEE_RATE_RESPONSE_INVALID",
+                    {
+                      source: "fee",
+                    },
+                  );
+                fresh = { ...fresh, feeRate: feeRate.value };
+              }
+              if (staleFacts.targetState) {
+                const state = await exchangeAdapter.readState({
+                  instrument: symbol,
+                });
+                if (!state.ok)
+                  throw new OperatorEvidenceReadError(
+                    "TARGET_STATE_READ_FAILED",
+                    { source: "target-state" },
+                  );
+                fresh = { ...fresh, state: state.value };
+              }
+              const providerTimeAnchor = deriveDirectTradeProviderTimeAnchor({
+                compactAccount: fresh.compactAccount,
+                instrument: fresh.instrument,
+                quote: fresh.quote,
+                feeRate: fresh.feeRate,
+                state: fresh.state,
+              });
+              if (!providerTimeAnchor)
+                throw new OperatorEvidenceReadError(
+                  "PROVIDER_TIME_UNAVAILABLE",
+                  { source: "provider-time" },
+                );
+              fresh = { ...fresh, providerTimeAnchor };
+              refreshedAtMonotonic = monotonic();
+              if (!Number.isFinite(refreshedAtMonotonic))
+                throw new OperatorEvidenceReadError("MONOTONIC_CLOCK_INVALID");
+            } catch (error) {
+              if (error instanceof OperatorEvidenceReadError) throw error;
+              throw new OperatorEvidenceReadError(
+                "TARGETED_EVIDENCE_REFRESH_FAILED",
+                {
+                  source: staleFacts.balance
+                    ? "balance"
+                    : staleFacts.accountIdentity || staleFacts.accountMode
+                      ? "account"
+                      : staleFacts.quote
+                        ? "quote"
+                        : staleFacts.fee
+                          ? "fee"
+                          : "target-state",
+                },
+              );
+            }
+            validated = validateMainnetOperatorTestEvidence(
+              admitted.plan,
+              fresh,
+            );
+          }
+          if (!validated.ok) {
+            const code = validated.error.details?.reasonCode;
+            throw new OperatorEvidenceReadError(
+              typeof code === "string"
+                ? code
+                : "FRESH_MAINNET_EVIDENCE_INVALID",
+              validated.error.details ?? {},
+            );
+          }
+          const evidenceAtMonotonic = refreshedAtMonotonic;
+          const finalElapsed = monotonic() - evidenceAtMonotonic;
+          if (!Number.isFinite(finalElapsed) || finalElapsed < 0)
+            throw new OperatorEvidenceReadError("MONOTONIC_CLOCK_INVALID");
+          const ageCheck = revalidateMainnetOperatorEvidenceAge(
+            admitted.plan,
+            validated.value,
+            finalElapsed,
+          );
+          if (!ageCheck.ok) {
+            const code = ageCheck.error.details?.reasonCode;
+            throw new OperatorEvidenceReadError(
+              typeof code === "string" ? code : "MAINNET_EVIDENCE_EXPIRED",
+              { source: "account" },
+            );
+          }
+          latestAdmission = {
+            evidence: fresh,
+            evidenceAtMonotonic,
+            ages: validated.value,
+          };
+          return fresh;
+        }
         evidencePath = "compact";
         try {
           compactAccount = await collectCompactOperatorAccountEvidence(
@@ -658,6 +1058,15 @@ export async function runMainnetOperatorTestComposition(
             throw new OperatorEvidenceReadError(
               "FRESH_MAINNET_EVIDENCE_UNAVAILABLE",
             );
+          if (error instanceof BybitMainnetReadCapabilityError)
+            throw new OperatorEvidenceReadError(
+              error.code === "UNSUPPORTED_LEVERAGE"
+                ? "TARGET_LEVERAGE_UNSUPPORTED"
+                : error.code === "UNSUPPORTED_INSTRUMENT"
+                  ? "TARGET_INSTRUMENT_UNSUPPORTED"
+                  : "INSTRUMENT_RESPONSE_INVALID",
+              { source: "instrument", causeCode: error.code },
+            );
           const reasonCode =
             error instanceof CompactAccountEvidenceUnavailable
               ? error.reasonCode
@@ -761,11 +1170,19 @@ export async function runMainnetOperatorTestComposition(
         const payloadHash = `sha256:${createHash("sha256")
           .update(body, "utf8")
           .digest("hex")}`;
-        const offset = await privateTransport.getServerTimeOffset();
-        const now = providerTime(wall, offset);
+        const localNow = timestampFromEpochMs(wall());
+        const providerNow =
+          admitted.authorization.kind === "approval"
+            ? providerTime(wall, await privateTransport.getServerTimeOffset())
+            : undefined;
+        const authorizationNow = authorizationTimeForCreate(
+          admitted.authorization.kind,
+          localNow.ok ? localNow.value : undefined,
+          providerNow,
+        );
         if (
-          !now ||
-          !issuer.claimForTransport(payloadHash, now) ||
+          !authorizationNow ||
+          !issuer.claimForTransport(payloadHash, authorizationNow) ||
           !sourceIsCurrent()
         )
           throw new Error(
@@ -784,7 +1201,7 @@ export async function runMainnetOperatorTestComposition(
       consume: issuer.authorization.consume,
     };
 
-    const result = await executeMainnetOperatorTest(input, {
+    const result = await executeMainnetOperatorTest(admitted.input, {
       persistence: sqlite,
       journal: operatorJournal,
       exchange,
@@ -792,6 +1209,7 @@ export async function runMainnetOperatorTestComposition(
       authorization,
       localClock,
       monotonicClock: monotonic,
+      localActorIdentityHash: localOperatorIdentityHash,
     });
     return result.ok
       ? {
@@ -804,9 +1222,20 @@ export async function runMainnetOperatorTestComposition(
           },
         }
       : withCounts(result, exchangeReads, exchangeWrites);
-  } catch {
+  } catch (error) {
     return withCounts(
-      failed("MAINNET_OPERATOR_TEST_FAILED_CLOSED"),
+      failed(
+        error instanceof BybitMainnetReadCapabilityError
+          ? error.code === "UNSUPPORTED_LEVERAGE"
+            ? "TARGET_LEVERAGE_UNSUPPORTED"
+            : error.code === "UNSUPPORTED_INSTRUMENT"
+              ? "TARGET_INSTRUMENT_UNSUPPORTED"
+              : "INSTRUMENT_RESPONSE_INVALID"
+          : "MAINNET_OPERATOR_TEST_FAILED_CLOSED",
+        error instanceof BybitMainnetReadCapabilityError
+          ? { source: "instrument", causeCode: error.code }
+          : {},
+      ),
       exchangeReads,
       exchangeWrites,
     );

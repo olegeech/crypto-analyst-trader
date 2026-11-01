@@ -4,6 +4,7 @@ import {
   BybitPublicMarketMappingError,
   mapFundingHistory,
   mapInstrumentInfo,
+  mapOperatorTicker,
   mapKline,
   mapOpenInterest,
   mapTicker,
@@ -105,10 +106,17 @@ export class BybitPublicMarketClient {
 
   /** Read one ticker and bind it to the fixed linear Mainnet source and provider-time bracket. */
   async readOperatorQuote(
-    symbol: MarketEvidenceSymbol,
+    symbol: string,
+    options: { readonly directTrade?: boolean } = {},
   ): Promise<OperatorMainnetQuote> {
     const collectionStartedAt = await this.readExchangeTime();
-    const ticker = await this.readTicker(symbol);
+    const tickerResponse = await this.transport.get(PUBLIC_TICKERS_PATH, {
+      category: BYBIT_LINEAR_CATEGORY,
+      symbol,
+    });
+    const ticker = options.directTrade
+      ? mapOperatorTicker(tickerResponse, symbol)
+      : mapTicker(tickerResponse, symbol);
     const collectionCompletedAt = await this.readExchangeTime();
     const quote = createOperatorMainnetQuote({
       exchange: "bybit",

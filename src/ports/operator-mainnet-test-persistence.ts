@@ -3,6 +3,11 @@ import type {
   OperatorMainnetTestPlan,
 } from "../domain/execution/operator-mainnet-test-plan.js";
 import type {
+  OperatorMainnetTradeCommandBinding,
+  OperatorMainnetTradeCommandPlan,
+  OperatorMainnetTradeCommandReceipt,
+} from "../domain/execution/operator-mainnet-trade-command.js";
+import type {
   OperatorMainnetRecoveryAttestation,
   OperatorMainnetRecoveryGrant,
 } from "../domain/execution/operator-mainnet-recovery.js";
@@ -33,13 +38,28 @@ export interface OperatorMainnetTestSourceRecord {
   readonly scope: PersistenceScope;
   readonly planHash: PlanHash;
   readonly planArtifactId: string;
-  readonly approvalHash: PlanHash;
-  readonly approvalArtifactId: string;
+  readonly authorization: OperatorMainnetAuthorizationReference;
   readonly clientOrderId: string;
   readonly payloadJson: string;
   readonly payloadHash: PlanHash;
   readonly createdAt: UtcTimestamp;
 }
+
+/** Durable artifact reference; direct-command authority is never represented as an approval. */
+export type OperatorMainnetAuthorizationReference =
+  | {
+      readonly kind: "approval";
+      readonly hash: PlanHash;
+      readonly artifactId: string;
+    }
+  | {
+      readonly kind: "trade-command";
+      readonly hash: PlanHash;
+      readonly artifactId: string;
+      readonly commandId: string;
+      readonly receiptHash: PlanHash;
+      readonly receiptArtifactId: string;
+    };
 
 export interface OperatorMainnetTestIntentRecord {
   readonly writeIntentId: string;
@@ -49,6 +69,9 @@ export interface OperatorMainnetTestIntentRecord {
   readonly canonicalJson: string;
   readonly canonicalHash: PlanHash;
   readonly preparedAt: UtcTimestamp;
+  readonly commandId?: string;
+  readonly commandReceiptHash?: PlanHash;
+  readonly commandBindingHash?: PlanHash;
 }
 
 export interface OperatorMainnetTestAttemptRecord {
@@ -96,10 +119,9 @@ export interface OperatorMainnetTestSourceDispositionRecord {
   readonly recordedAt: UtcTimestamp;
 }
 
-export interface OperatorMainnetTestSnapshot {
+interface OperatorMainnetTestSnapshotBase {
   readonly source: OperatorMainnetTestSourceRecord;
   readonly plan: OperatorMainnetTestPlan;
-  readonly approval: OperatorMainnetTestApproval;
   readonly intent: OperatorMainnetTestIntentRecord;
   readonly attempt?: OperatorMainnetTestAttemptRecord;
   readonly reconciliations: readonly OperatorMainnetTestReconciliationRecord[];
@@ -108,16 +130,161 @@ export interface OperatorMainnetTestSnapshot {
   readonly halt: HaltState;
 }
 
-export interface PrepareOperatorMainnetTestCreateRequest {
+export type OperatorMainnetTestSnapshot =
+  | (OperatorMainnetTestSnapshotBase & {
+      readonly authorization: {
+        readonly kind: "approval";
+        readonly hash: PlanHash;
+        readonly artifactId: string;
+        readonly approval: OperatorMainnetTestApproval;
+      };
+    })
+  | (OperatorMainnetTestSnapshotBase & {
+      readonly authorization: {
+        readonly kind: "trade-command";
+        readonly hash: PlanHash;
+        readonly artifactId: string;
+        readonly commandId: string;
+        readonly receiptHash: PlanHash;
+        readonly receiptArtifactId: string;
+        readonly receipt: OperatorMainnetTradeCommandReceipt;
+        readonly binding: OperatorMainnetTradeCommandBinding;
+      };
+    });
+
+interface PrepareOperatorMainnetTestCreateRequestBase {
   readonly runId: string;
-  readonly plan: OperatorMainnetTestPlan;
-  readonly approval: OperatorMainnetTestApproval;
   /** Exact UTF-8 bytes passed to the Bybit create transport. */
   readonly payloadJson: string;
   readonly payloadHash: PlanHash;
   readonly preparedAt: UtcTimestamp;
-  /** Optional source-bound one-plan recovery grant, consumed atomically with intent. */
-  readonly recoveryGrantId?: string;
+}
+
+export type PrepareOperatorMainnetTestCreateRequest =
+  | (PrepareOperatorMainnetTestCreateRequestBase & {
+      readonly plan: OperatorMainnetTestPlan;
+      readonly approval: OperatorMainnetTestApproval;
+      readonly tradeCommand?: never;
+      /** Optional source-bound one-plan recovery grant, consumed atomically with intent. */
+      readonly recoveryGrantId?: string;
+    })
+  | (PrepareOperatorMainnetTestCreateRequestBase & {
+      readonly plan: OperatorMainnetTradeCommandPlan;
+      readonly approval?: never;
+      readonly tradeCommand: {
+        readonly receipt: OperatorMainnetTradeCommandReceipt;
+        readonly binding: OperatorMainnetTradeCommandBinding;
+        /** Local authorization clock used for the receipt submission expiry check. */
+        readonly authorizationAt: UtcTimestamp;
+      };
+      readonly recoveryGrantId?: never;
+    });
+
+export type OperatorMainnetTradeCommandOutcomeStage =
+  "plan-derivation" | "precheck" | "binding" | "admission";
+
+export const OPERATOR_MAINNET_TRADE_COMMAND_DIAGNOSTIC_FIELDS = [
+  "reason",
+  "symbol",
+  "availableBalance",
+  "requiredAmount",
+  "shortfall",
+  "orderNotional",
+  "entryFeeReserve",
+  "exitFeeReserve",
+  "totalReserve",
+  "requiredAvailableBalance",
+  "quoteBid",
+  "quoteAsk",
+  "quoteAgeMs",
+  "approvedBidLower",
+  "approvedBidUpper",
+  "allowedDeviationBps",
+  "criticalChangedGroups",
+  "source",
+  "ageMs",
+  "futureByMs",
+  "limitMs",
+  "collectionFutureByMs",
+  "quoteObservedAt",
+  "causeCode",
+  "pass",
+  "predicate",
+  "group",
+  "changedConstraint",
+  "readOnly",
+  "contractOrder",
+  "contractPosition",
+  "walletTransfer",
+  "withdraw",
+  "spotHedging",
+  "positionSide",
+  "positionQuantity",
+  "positionPresent",
+  "activeOrdersPresent",
+  "activeOrderCount",
+  "leverage",
+  "leverageConfiguration",
+  "leverageConfigOutcome",
+  "leverageBuy",
+  "leverageSell",
+  "leverageEffective",
+  "marginMode",
+  "utaStatus",
+  "stage",
+] as const;
+
+export type OperatorMainnetTradeCommandDiagnosticDetails = Readonly<
+  Record<string, string | number | boolean>
+>;
+
+export interface OperatorMainnetTradeCommandOutcomeRecord {
+  readonly outcomeId: string;
+  readonly commandId: string;
+  readonly revision: number;
+  readonly stage: OperatorMainnetTradeCommandOutcomeStage;
+  readonly code: string;
+  readonly occurredAt: UtcTimestamp;
+  readonly diagnosticDetails: OperatorMainnetTradeCommandDiagnosticDetails;
+  readonly canonicalJson: string;
+  readonly canonicalHash: PlanHash;
+}
+
+export interface OperatorMainnetTradeCommandConsumptionRecord {
+  readonly commandId: string;
+  readonly receiptHash: PlanHash;
+  readonly bindingHash: PlanHash;
+  readonly sourceId: string;
+  readonly writeIntentId: string;
+  readonly consumedAt: UtcTimestamp;
+}
+
+/** Read-only aggregate used by command-id status, including interrupted pre-intent states. */
+export interface OperatorMainnetTradeCommandSnapshot {
+  readonly receipt: OperatorMainnetTradeCommandReceipt;
+  readonly binding?: OperatorMainnetTradeCommandBinding;
+  readonly outcomes: readonly OperatorMainnetTradeCommandOutcomeRecord[];
+  readonly consumption?: OperatorMainnetTradeCommandConsumptionRecord;
+  readonly source?: OperatorMainnetTestSnapshot;
+}
+
+export interface PersistOperatorMainnetTradeCommandReceiptRequest {
+  readonly receipt: OperatorMainnetTradeCommandReceipt;
+  readonly recordedAt: UtcTimestamp;
+}
+
+export interface BindOperatorMainnetTradeCommandRequest {
+  readonly binding: OperatorMainnetTradeCommandBinding;
+  readonly boundAt: UtcTimestamp;
+}
+
+export interface AppendOperatorMainnetTradeCommandOutcomeRequest {
+  readonly commandId: string;
+  readonly outcomeId: string;
+  readonly stage: OperatorMainnetTradeCommandOutcomeStage;
+  readonly code: string;
+  readonly diagnosticDetails?: OperatorMainnetTradeCommandDiagnosticDetails;
+  readonly occurredAt: UtcTimestamp;
 }
 
 export type OperatorMainnetRecoveryResolutionRequest =
@@ -181,6 +348,27 @@ export interface OperatorMainnetTestPersistencePort {
   readPreparedPlan(
     planHash: PlanHash,
   ): Result<OperatorMainnetTestPlan | undefined>;
+  /** Persist one immutable local command receipt before plan derivation. */
+  persistOperatorMainnetTradeCommandReceipt(
+    request: PersistOperatorMainnetTradeCommandReceiptRequest,
+  ): Result<OperatorMainnetTradeCommandReceipt>;
+  readOperatorMainnetTradeCommandReceipt(
+    commandId: string,
+  ): Result<OperatorMainnetTradeCommandReceipt | undefined>;
+  /** Bind the saved receipt to exactly one deterministic plan and payload. */
+  bindOperatorMainnetTradeCommand(
+    request: BindOperatorMainnetTradeCommandRequest,
+  ): Result<OperatorMainnetTradeCommandBinding>;
+  readOperatorMainnetTradeCommandBinding(
+    commandId: string,
+  ): Result<OperatorMainnetTradeCommandBinding | undefined>;
+  /** Append a safe, pre-intent outcome; absence after interruption remains unknown. */
+  appendOperatorMainnetTradeCommandOutcome(
+    request: AppendOperatorMainnetTradeCommandOutcomeRequest,
+  ): Result<OperatorMainnetTradeCommandOutcomeRecord>;
+  readOperatorMainnetTradeCommand(
+    commandId: string,
+  ): Result<OperatorMainnetTradeCommandSnapshot | undefined>;
   /** Persist immutable, redacted UI provenance before explicit recovery consent. */
   persistOperatorMainnetRecoveryAttestation(
     request: PersistOperatorMainnetRecoveryAttestationRequest,
@@ -206,9 +394,9 @@ export interface OperatorMainnetTestPersistencePort {
   readOperatorMainnetTestSource(
     sourceId: string,
   ): Result<OperatorMainnetTestSnapshot | undefined>;
-  findPendingOperatorMainnetTestSource(): Result<
-    OperatorMainnetTestSourceRecord | undefined
-  >;
+  findPendingOperatorMainnetTestSource(
+    symbol?: string,
+  ): Result<OperatorMainnetTestSourceRecord | undefined>;
   prepareCreateIntent(
     request: PrepareOperatorMainnetTestCreateRequest,
   ): Result<OperatorMainnetTestSnapshot>;

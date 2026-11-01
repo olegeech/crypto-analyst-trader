@@ -8,7 +8,10 @@ import {
   createOperatorMainnetTestPlan,
 } from "../src/domain/execution/operator-mainnet-test-plan.js";
 
-import { BybitMainnetReadCapabilityFacade } from "../src/adapters/bybit-v5/read-capability-facade.js";
+import {
+  BybitMainnetReadCapabilityError,
+  BybitMainnetReadCapabilityFacade,
+} from "../src/adapters/bybit-v5/read-capability-facade.js";
 import {
   BybitAccountReadError,
   createBybitAccountReadTransport,
@@ -37,6 +40,11 @@ function instrument(overrides: Record<string, unknown> = {}) {
       minOrderQty: "1",
       maxOrderQty: "100000",
       minNotionalValue: "5",
+    },
+    leverageFilter: {
+      minLeverage: "1",
+      maxLeverage: "100",
+      leverageStep: "0.01",
     },
     ...overrides,
   };
@@ -70,7 +78,10 @@ function facadeFixture(
         JSON.stringify({
           retCode: 0,
           retMsg: "OK",
-          result: options.result ?? { list: [instrument()] },
+          result: options.result ?? {
+            category: "linear",
+            list: [instrument()],
+          },
           time: Date.parse("2026-10-07T12:00:00.000Z"),
         }),
         { status: 200 },
@@ -124,15 +135,24 @@ test("Mainnet facade reads one selected Trading linear USDT perpetual through bo
   assert.equal("post" in fixture.facade, false);
 });
 
+test("legacy instrument read retains the pre-v3 response contract", async () => {
+  const fixture = facadeFixture({ result: { list: [instrument()] } });
+  const selected = await fixture.facade.readInstrument("DOGEUSDT");
+  assert.equal(selected.symbol, "DOGEUSDT");
+  assert.equal(fixture.calls.length, 1);
+});
+
 test("Mainnet facade rejects non-trading, non-linear, and non-USDT instrument evidence", async () => {
   for (const overrides of [
     { status: "PreLaunch" },
+    { status: "PendingOpen" },
     { contractType: "LinearFutures" },
+    { contractType: "InversePerpetual" },
     { quoteCoin: "USDC" },
     { settleCoin: "USDC" },
   ]) {
     const fixture = facadeFixture({
-      result: { list: [instrument(overrides)] },
+      result: { category: "linear", list: [instrument(overrides)] },
     });
     await assert.rejects(fixture.facade.readInstrument("DOGEUSDT"));
   }
@@ -247,17 +267,25 @@ test("production instrument read retains venue bounds for operator-test preparat
 });
 
 test("production instrument read blocks absent, malformed, nonpositive and contradictory venue bounds", async () => {
-  for (const field of ["minPrice", "maxPrice", "maxOrderQty"]) {
+  const fields = [
+    { field: "tickSize", filter: "priceFilter" },
+    { field: "minPrice", filter: "priceFilter" },
+    { field: "maxPrice", filter: "priceFilter" },
+    { field: "qtyStep", filter: "lotSizeFilter" },
+    { field: "minOrderQty", filter: "lotSizeFilter" },
+    { field: "maxOrderQty", filter: "lotSizeFilter" },
+    { field: "minNotionalValue", filter: "lotSizeFilter" },
+  ] as const;
+  for (const { field, filter: filterName } of fields) {
     for (const invalid of [undefined, "-1", "0", "invalid"]) {
       const row = instrument();
-      const filter: Record<string, unknown> =
-        field === "maxOrderQty" ? row.lotSizeFilter : row.priceFilter;
+      const filter = row[filterName] as Record<string, unknown>;
       if (invalid === undefined) delete filter[field];
       else filter[field] = invalid;
       await assert.rejects(
-        facadeFixture({ result: { list: [row] } }).facade.readInstrument(
-          "DOGEUSDT",
-        ),
+        facadeFixture({
+          result: { category: "linear", list: [row] },
+        }).facade.readInstrument("DOGEUSDT"),
       );
     }
   }
@@ -274,8 +302,81 @@ test("production instrument read blocks absent, malformed, nonpositive and contr
   ]) {
     await assert.rejects(
       facadeFixture({
-        result: { list: [instrument(overrides)] },
+        result: { category: "linear", list: [instrument(overrides)] },
       }).facade.readInstrument("DOGEUSDT"),
     );
   }
+});
+
+test("targeted instrument response must be exact linear evidence with one-x support", async () => {
+  for (const result of [
+    { list: [instrument({ symbol: "LINKUSDT" })] },
+    { category: "inverse", list: [instrument({ symbol: "LINKUSDT" })] },
+    { category: "linear", list: [instrument()] },
+    {
+      category: "linear",
+      list: [instrument({ symbol: "LINKUSDT" }), instrument()],
+    },
+  ]) {
+    await assert.rejects(
+      facadeFixture({ result }).facade.readInstrument("LINKUSDT", {
+        requireOneX: true,
+      }),
+      (error: unknown) => error instanceof BybitMainnetReadCapabilityError,
+    );
+  }
+
+  for (const scenario of [
+    { leverageFilter: undefined, code: "UNSUPPORTED_LEVERAGE" },
+    {
+      leverageFilter: {
+        minLeverage: "2",
+        maxLeverage: "100",
+        leverageStep: "0.01",
+      },
+      code: "UNSUPPORTED_LEVERAGE",
+    },
+    {
+      leverageFilter: {
+        minLeverage: "0.5",
+        maxLeverage: "100",
+        leverageStep: "0.3",
+      },
+      code: "UNSUPPORTED_LEVERAGE",
+    },
+    {
+      leverageFilter: {
+        minLeverage: "1",
+        maxLeverage: "100",
+        leverageStep: "bad",
+      },
+      code: "INVALID_RESPONSE",
+    },
+  ]) {
+    const selected = instrument({
+      symbol: "LINKUSDT",
+      leverageFilter: scenario.leverageFilter,
+    });
+    await assert.rejects(
+      facadeFixture({
+        result: { category: "linear", list: [selected] },
+      }).facade.readInstrument("LINKUSDT", { requireOneX: true }),
+      (error: unknown) =>
+        error instanceof BybitMainnetReadCapabilityError &&
+        error.code === scenario.code,
+    );
+  }
+
+  const fixture = facadeFixture({
+    result: { category: "linear", list: [instrument({ symbol: "LINKUSDT" })] },
+  });
+  const selected = await fixture.facade.readInstrument("LINKUSDT", {
+    requireOneX: true,
+  });
+  assert.equal(selected.symbol, "LINKUSDT");
+  assert.equal(fixture.calls.length, 1);
+  assert.equal(
+    new URL(fixture.calls[0]!.url).searchParams.get("symbol"),
+    "LINKUSDT",
+  );
 });

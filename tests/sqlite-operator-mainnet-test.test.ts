@@ -8,12 +8,20 @@ import test from "node:test";
 import { openSqliteConnection } from "../src/adapters/sqlite/connection.js";
 import { createSqliteExecutionStore } from "../src/adapters/sqlite/execution-store.js";
 import { createSqliteOperatorMainnetTestStore } from "../src/adapters/sqlite/operator-mainnet-test-store.js";
+import { resolveOperatorMainnetTradeCommand } from "../src/adapters/sqlite/operator-mainnet-test-lookup.js";
 import {
   createOperatorMainnetQuote,
   createOperatorMainnetTestApproval,
   createOperatorMainnetTestPlan,
   deriveOperatorMainnetTestSourceId,
+  type OperatorMainnetTestPlan,
 } from "../src/domain/execution/operator-mainnet-test-plan.js";
+import { createOperatorMainnetCreateRequest } from "../src/application/mainnet-entry-evidence.js";
+import {
+  createOperatorMainnetTradeCommandBinding,
+  createOperatorMainnetTradeCommandPlan,
+  createOperatorMainnetTradeCommandReceipt,
+} from "../src/domain/execution/operator-mainnet-trade-command.js";
 import { createOperatorMainnetRecoveryAttestation } from "../src/domain/execution/operator-mainnet-recovery.js";
 import { createInstrumentConstraints } from "../src/domain/market/instrument-constraints.js";
 import {
@@ -53,11 +61,18 @@ function plan(
   nonce = "operator-test-01",
   recoveryAttestationHash?: PlanHash,
   preparedAt: UtcTimestamp = NOW,
+  symbol = "DOGEUSDT",
 ) {
   const preparedAtMs = Date.parse(preparedAt);
+  const market =
+    symbol === "ETHUSDT"
+      ? { bid: "2500", ask: "2500.1", tick: "0.1", step: "0.001" }
+      : symbol === "BTCUSDT"
+        ? { bid: "68000", ask: "68001", tick: "0.1", step: "0.001" }
+        : { bid: "0.08869", ask: "0.08870", tick: "0.0001", step: "0.1" };
   const quote = value(
     createOperatorMainnetQuote({
-      symbol: "DOGEUSDT",
+      symbol,
       exchange: "bybit",
       environment: "mainnet",
       category: "linear",
@@ -65,28 +80,28 @@ function plan(
       observedAt: new Date(preparedAtMs - 10).toISOString(),
       collectionStartedAt: new Date(preparedAtMs - 20).toISOString(),
       collectionCompletedAt: new Date(preparedAtMs - 5).toISOString(),
-      bid: "0.08869",
-      ask: "0.08870",
-      last: "0.08869",
+      bid: market.bid,
+      ask: market.ask,
+      last: market.bid,
     }),
   );
   const constraints = value(
     createInstrumentConstraints({
-      instrument: "DOGEUSDT",
+      instrument: symbol,
       version: "bybit-v5:public-instrument/v2",
-      priceTickSize: "0.0001",
-      quantityStep: "0.1",
-      minQuantity: "1",
+      priceTickSize: market.tick,
+      quantityStep: market.step,
+      minQuantity: market.step,
       minNotional: "5",
-      minPrice: "0.0001",
-      maxPrice: "100",
+      minPrice: market.tick,
+      maxPrice: symbol === "DOGEUSDT" ? "100" : "1000000",
       maxLimitQuantity: "100000",
     }),
   );
   return value(
     createOperatorMainnetTestPlan({
       accountIdentityHash: ACCOUNT,
-      symbol: "DOGEUSDT",
+      symbol,
       nonce,
       allocation: "10",
       grossNotionalCap: "8",
@@ -122,7 +137,12 @@ function apiStatusEvidence(observedAt: UtcTimestamp) {
   };
 }
 
-function exactPayload(valuePlan: ReturnType<typeof plan>): string {
+function exactPayload(
+  valuePlan: Pick<
+    OperatorMainnetTestPlan,
+    "symbol" | "entry" | "clientOrderId"
+  >,
+): string {
   return JSON.stringify({
     category: "linear",
     symbol: valuePlan.symbol,
@@ -139,6 +159,165 @@ function exactPayload(valuePlan: ReturnType<typeof plan>): string {
     tpOrderType: "Market",
     tpTriggerBy: "LastPrice",
   });
+}
+
+function tradeCommand(
+  commandId = "trade-command-01",
+  bid = "0.08869",
+  savedReceipt?: ReturnType<
+    typeof createOperatorMainnetTradeCommandReceipt
+  > extends Result<infer T>
+    ? T
+    : never,
+  symbol = "DOGEUSDT",
+  preparedAt: UtcTimestamp = NOW,
+) {
+  const defaultBid =
+    symbol === "NEARUSDT" ? "4.38" : symbol === "INJUSDT" ? "7.237" : bid;
+  const ask =
+    symbol === "NEARUSDT"
+      ? "4.381"
+      : symbol === "INJUSDT"
+        ? "7.238"
+        : bid === "0.08869"
+          ? "0.08870"
+          : (Number(bid) + 0.00001).toFixed(8).replace(/0+$/u, "");
+  const receipt =
+    savedReceipt ??
+    value(
+      createOperatorMainnetTradeCommandReceipt({
+        commandId,
+        actorIdentityHash: `sha256:${"b".repeat(64)}`,
+        accountIdentityHash: ACCOUNT,
+        symbol,
+        allocation: "10",
+        grossNotionalCap: "8",
+        maxDeviationBps: "10",
+        takeProfitMode: "percent",
+        takeProfitValue: "0.20",
+        acceptedAt: preparedAt,
+      }),
+    );
+  const preparedAtMs = Date.parse(preparedAt);
+  const quote = value(
+    createOperatorMainnetQuote({
+      symbol: receipt.symbol,
+      exchange: "bybit",
+      environment: "mainnet",
+      category: "linear",
+      origin: "https://api.bybit.com",
+      observedAt: new Date(preparedAtMs - 10).toISOString(),
+      collectionStartedAt: new Date(preparedAtMs - 20).toISOString(),
+      collectionCompletedAt: new Date(preparedAtMs - 5).toISOString(),
+      bid: defaultBid,
+      ask,
+      last: defaultBid,
+    }),
+  );
+  const constraints = value(
+    createInstrumentConstraints({
+      instrument: receipt.symbol,
+      version: "bybit-v5:public-instrument/v2",
+      priceTickSize: receipt.symbol === "DOGEUSDT" ? "0.0001" : "0.001",
+      quantityStep: receipt.symbol === "DOGEUSDT" ? "0.1" : "0.1",
+      minQuantity: "0.1",
+      minNotional: "5",
+      minPrice: receipt.symbol === "DOGEUSDT" ? "0.0001" : "0.001",
+      maxPrice: receipt.symbol === "DOGEUSDT" ? "100" : "1000000",
+      maxLimitQuantity: "100000",
+    }),
+  );
+  const commandPlan = value(
+    createOperatorMainnetTradeCommandPlan({
+      receipt,
+      quote,
+      warningCodes: [],
+      constraints,
+      preparedAt,
+    }),
+  );
+  const payloadJson = exactPayload(commandPlan);
+  const payloadHashValue = payloadHash(payloadJson);
+  const binding = value(
+    createOperatorMainnetTradeCommandBinding({
+      receipt,
+      plan: commandPlan,
+      createPayloadHash: payloadHashValue,
+      boundAt: preparedAt,
+    }),
+  );
+  return {
+    receipt,
+    plan: commandPlan,
+    binding,
+    payloadJson,
+    payloadHash: payloadHashValue,
+  };
+}
+
+function saveDirectCommand(
+  fixture: ReturnType<typeof setup>,
+  command: ReturnType<typeof tradeCommand>,
+) {
+  value(
+    fixture.store.persistOperatorMainnetTradeCommandReceipt({
+      receipt: command.receipt,
+      recordedAt: command.receipt.acceptedAt,
+    }),
+  );
+  value(
+    fixture.store.bindOperatorMainnetTradeCommand({
+      binding: command.binding,
+      boundAt: command.binding.boundAt,
+    }),
+  );
+}
+
+function directIntentRequest(
+  command: ReturnType<typeof tradeCommand>,
+  preparedAt: UtcTimestamp = command.plan.preparedAt,
+) {
+  return {
+    runId: command.receipt.commandId,
+    plan: command.plan,
+    tradeCommand: {
+      receipt: command.receipt,
+      binding: command.binding,
+      authorizationAt: command.receipt.acceptedAt,
+    },
+    payloadJson: command.payloadJson,
+    payloadHash: command.payloadHash,
+    preparedAt,
+  } as const;
+}
+
+function prepareDirectIntent(
+  fixture: ReturnType<typeof setup>,
+  command: ReturnType<typeof tradeCommand>,
+  preparedAt: UtcTimestamp = command.plan.preparedAt,
+) {
+  saveDirectCommand(fixture, command);
+  return value(
+    fixture.store.prepareCreateIntent(directIntentRequest(command, preparedAt)),
+  );
+}
+
+function recordAcceptedAttempt(
+  fixture: ReturnType<typeof setup>,
+  command: ReturnType<typeof tradeCommand>,
+  sourceId: string,
+  recordedAt: UtcTimestamp,
+) {
+  return value(
+    fixture.store.recordAttempt({
+      runId: command.receipt.commandId,
+      sourceId,
+      attemptId: `${command.receipt.commandId}-attempt`,
+      outcome: "accepted",
+      exchangeOrderId: `${command.receipt.commandId}-order`,
+      recordedAt,
+    }),
+  );
 }
 
 function payloadHash(payload: string): PlanHash {
@@ -323,7 +502,11 @@ test("operator create intent, canonical artifacts and exact payload commit atomi
   const source = value(prepare(fixture, valuePlan, valueApproval));
 
   assert.equal(source.source.planHash, valuePlan.contentHash);
-  assert.equal(source.source.approvalHash, valueApproval.contentHash);
+  assert.deepEqual(source.source.authorization, {
+    kind: "approval",
+    hash: valueApproval.contentHash,
+    artifactId: `operator-mainnet-test-approval:${valueApproval.contentHash}`,
+  });
   assert.equal(source.source.clientOrderId, valuePlan.clientOrderId);
   assert.equal(source.source.payloadJson, exactPayload(valuePlan));
   assert.equal(
@@ -361,7 +544,7 @@ test("operator create intent, canonical artifacts and exact payload commit atomi
       .get()?.count,
     2,
   );
-  assert.equal(CURRENT_SCHEMA_VERSION, 13);
+  assert.equal(CURRENT_SCHEMA_VERSION, 14);
 });
 
 test("prepared plan is durable and readable before any CREATE intent", () => {
@@ -1484,7 +1667,7 @@ test("manual recovery rejects nonterminal source TP status even when account-wid
   fixture.connection.close();
 });
 
-test("v8 through v13 migrations preserve populated historical v1 intent bytes and recovery records", () => {
+test("v8 through v14 migrations preserve populated historical v1 intent bytes and recovery records", () => {
   const fixture = setup();
   const created = value(prepare(fixture));
   value(
@@ -1512,6 +1695,23 @@ test("v8 through v13 migrations preserve populated historical v1 intent bytes an
     DROP TABLE history_source_observations;
     DROP TABLE history_accounting_reports;
     DROP TABLE history_accounting_wallet_anchors;
+    DROP TRIGGER operator_mainnet_test_sources_authorization_insert;
+    DROP TRIGGER operator_mainnet_test_sources_authorization_update;
+    DROP TRIGGER operator_mainnet_trade_command_receipts_no_update;
+    DROP TRIGGER operator_mainnet_trade_command_receipts_no_delete;
+    DROP TRIGGER operator_mainnet_trade_command_bindings_no_update;
+    DROP TRIGGER operator_mainnet_trade_command_bindings_no_delete;
+    DROP TRIGGER operator_mainnet_trade_command_consumptions_no_update;
+    DROP TRIGGER operator_mainnet_trade_command_consumptions_no_delete;
+    DROP TRIGGER operator_mainnet_trade_command_outcomes_no_update;
+    DROP TRIGGER operator_mainnet_trade_command_outcomes_no_delete;
+    DROP TABLE operator_mainnet_trade_command_outcomes;
+    DROP TABLE operator_mainnet_trade_command_consumptions;
+    DROP TABLE operator_mainnet_trade_command_bindings;
+    DROP TABLE operator_mainnet_trade_command_receipts;
+    ALTER TABLE operator_mainnet_test_sources DROP COLUMN authorization_artifact_id;
+    ALTER TABLE operator_mainnet_test_sources DROP COLUMN authorization_hash;
+    ALTER TABLE operator_mainnet_test_sources DROP COLUMN authorization_kind;
     UPDATE schema_meta SET schema_version = 8;
   `);
   const historical = value(
@@ -1554,6 +1754,9 @@ test("v8 through v13 migrations preserve populated historical v1 intent bytes an
   assert.equal(recovered?.intent.canonicalHash, historicalHash);
   assert.equal(recovered?.attempt?.outcome, "ambiguous");
   assert.equal(recovered?.halt.active, true);
+  assert.equal(recovered?.authorization.kind, "approval");
+  if (!recovered || recovered.authorization.kind !== "approval")
+    throw new Error("legacy source did not retain approval authority");
   assert.equal("leaseEpoch" in recovered!.intent, false);
   assert.equal("lease" in recovered!, false);
   assert.deepEqual(
@@ -1565,6 +1768,23 @@ test("v8 through v13 migrations preserve populated historical v1 intent bytes an
     artifacts,
   );
   assert.deepEqual(migrated.db.prepare("PRAGMA foreign_key_check").all(), []);
+  const migratedAuthorization = migrated.db
+    .prepare(
+      `SELECT authorization_kind, authorization_hash, authorization_artifact_id,
+                approval_hash, approval_artifact_id
+         FROM operator_mainnet_test_sources WHERE source_id = ?`,
+    )
+    .get(created.source.sourceId);
+  assert.deepEqual(
+    migratedAuthorization ? { ...migratedAuthorization } : undefined,
+    {
+      authorization_kind: "approval",
+      authorization_hash: created.source.authorization.hash,
+      authorization_artifact_id: created.source.authorization.artifactId,
+      approval_hash: created.source.authorization.hash,
+      approval_artifact_id: created.source.authorization.artifactId,
+    },
+  );
   assert.equal(
     migrated.db
       .prepare("SELECT schema_version FROM schema_meta WHERE singleton = 1")
@@ -1581,7 +1801,7 @@ test("v8 through v13 migrations preserve populated historical v1 intent bytes an
     store.prepareCreateIntent({
       runId: "new-run",
       plan: recovered!.plan,
-      approval: recovered!.approval,
+      approval: recovered.authorization.approval,
       payloadJson: recovered!.source.payloadJson,
       payloadHash: recovered!.source.payloadHash,
       preparedAt: NOW,
@@ -1602,4 +1822,792 @@ test("v8 through v13 migrations preserve populated historical v1 intent bytes an
     false,
   );
   migrated.close();
+});
+
+test("direct trade-command evidence binds once and consumes atomically without approval artifacts", () => {
+  const fixture = setup();
+  const command = tradeCommand();
+  value(
+    fixture.store.persistOperatorMainnetTradeCommandReceipt({
+      receipt: command.receipt,
+      recordedAt: NOW,
+    }),
+  );
+  value(
+    fixture.store.bindOperatorMainnetTradeCommand({
+      binding: command.binding,
+      boundAt: NOW,
+    }),
+  );
+
+  fixture.connection.db.exec(`
+    CREATE TRIGGER test_abort_trade_command_consumption
+    BEFORE INSERT ON operator_mainnet_trade_command_consumptions
+    BEGIN SELECT RAISE(ABORT, 'injected transaction failure'); END;
+  `);
+  const request = {
+    runId: "trade-command-run-01",
+    plan: command.plan,
+    tradeCommand: {
+      receipt: command.receipt,
+      binding: command.binding,
+      authorizationAt: NOW,
+    },
+    payloadJson: command.payloadJson,
+    payloadHash: command.payloadHash,
+    preparedAt: NOW,
+  } as const;
+  assert.equal(fixture.store.prepareCreateIntent(request).ok, false);
+  for (const table of [
+    "operator_mainnet_test_sources",
+    "operator_mainnet_test_write_intents",
+    "operator_mainnet_trade_command_consumptions",
+  ])
+    assert.equal(
+      fixture.connection.db
+        .prepare(`SELECT COUNT(*) AS count FROM ${table}`)
+        .get()?.count,
+      0,
+    );
+  fixture.connection.db.exec(
+    "DROP TRIGGER test_abort_trade_command_consumption",
+  );
+
+  const created = value(fixture.store.prepareCreateIntent(request));
+  assert.equal(created.authorization.kind, "trade-command");
+  if (created.authorization.kind !== "trade-command")
+    throw new Error("direct source was decoded as legacy approval");
+  assert.equal("approval" in created.authorization, false);
+  assert.equal(
+    created.authorization.artifactId,
+    `operator-mainnet-trade-command-binding:${command.binding.contentHash}`,
+  );
+  assert.equal(created.source.authorization.kind, "trade-command");
+  assert.equal(
+    created.source.authorization.artifactId,
+    created.authorization.artifactId,
+  );
+  assert.equal(created.intent.commandId, command.receipt.commandId);
+  assert.equal(created.intent.commandReceiptHash, command.receipt.contentHash);
+  assert.equal(created.intent.commandBindingHash, command.binding.contentHash);
+
+  const storedArtifacts = fixture.connection.db
+    .prepare(
+      `SELECT artifact_kind FROM artifacts
+       WHERE artifact_id IN (?, ?, ?)
+       ORDER BY artifact_id`,
+    )
+    .all(
+      `operator-mainnet-trade-command-binding:${command.binding.contentHash}`,
+      `operator-mainnet-trade-command-receipt:${command.receipt.contentHash}`,
+      `operator-mainnet-test:${command.plan.contentHash}`,
+    )
+    .map((row) => row.artifact_kind);
+  assert.deepEqual(
+    storedArtifacts.sort(),
+    [
+      "operator-mainnet-trade-command-binding",
+      "operator-mainnet-trade-command-receipt",
+      "operator-mainnet-execution-test",
+    ].sort(),
+  );
+  assert.equal(
+    fixture.connection.db
+      .prepare(
+        `SELECT COUNT(*) AS count FROM artifacts
+         WHERE artifact_kind = 'operator-mainnet-execution-approval'`,
+      )
+      .get()?.count,
+    0,
+  );
+  const compatibilityRef = fixture.connection.db
+    .prepare(
+      `SELECT s.authorization_kind, s.approval_hash, s.approval_artifact_id,
+              a.artifact_kind
+       FROM operator_mainnet_test_sources s
+       JOIN artifacts a ON a.artifact_id = s.approval_artifact_id
+       WHERE s.source_id = ?`,
+    )
+    .get(created.source.sourceId) as Record<string, unknown>;
+  assert.deepEqual(
+    { ...compatibilityRef },
+    {
+      authorization_kind: "trade-command",
+      approval_hash: command.binding.contentHash,
+      approval_artifact_id: created.authorization.artifactId,
+      artifact_kind: "operator-mainnet-trade-command-binding",
+    },
+  );
+
+  const aggregate = value(
+    fixture.store.readOperatorMainnetTradeCommand(command.receipt.commandId),
+  );
+  assert.equal(aggregate?.consumption?.sourceId, created.source.sourceId);
+  assert.equal(aggregate?.source?.authorization.kind, "trade-command");
+  assert.equal(fixture.store.prepareCreateIntent(request).ok, false);
+
+  fixture.connection.close();
+  const reopened = value(
+    openSqliteConnection({
+      environment: "mainnet",
+      databasePath: fixture.path,
+      runtime,
+      clock: { now: () => NOW },
+    }),
+  );
+  const reopenedStore = value(
+    createSqliteOperatorMainnetTestStore(reopened, fixture.scope),
+  );
+  const recovered = value(
+    reopenedStore.readOperatorMainnetTradeCommand(command.receipt.commandId),
+  );
+  assert.equal(recovered?.receipt.contentHash, command.receipt.contentHash);
+  assert.equal(recovered?.binding?.contentHash, command.binding.contentHash);
+  assert.equal(
+    recovered?.consumption?.writeIntentId,
+    created.intent.writeIntentId,
+  );
+  assert.equal(recovered?.source?.authorization.kind, "trade-command");
+  const resolved = value(
+    resolveOperatorMainnetTradeCommand(command.receipt.commandId, {
+      databasePath: fixture.path,
+    }),
+  );
+  assert.equal(
+    resolved?.snapshot.receipt.contentHash,
+    command.receipt.contentHash,
+  );
+  assert.equal(
+    resolved?.snapshot.consumption?.sourceId,
+    created.source.sourceId,
+  );
+  assert.equal(
+    reopened.db
+      .prepare(
+        "SELECT COUNT(*) AS count FROM operator_mainnet_trade_command_consumptions",
+      )
+      .get()?.count,
+    1,
+  );
+  assert.deepEqual(reopened.db.prepare("PRAGMA foreign_key_check").all(), []);
+  reopened.close();
+});
+
+test("direct cross-symbol intent accepts an older INJ source and keeps both command statuses independent", () => {
+  const fixture = setup();
+  const injPreparedAt = timestamp("2026-10-22T10:00:56.000Z");
+  const injAttemptAt = timestamp("2026-10-22T10:00:58.000Z");
+  const inj = tradeCommand(
+    "accepted-inj-pending-tp",
+    "7.237",
+    undefined,
+    "INJUSDT",
+    injPreparedAt,
+  );
+  const injIntent = prepareDirectIntent(fixture, inj);
+  const acceptedInj = recordAcceptedAttempt(
+    fixture,
+    inj,
+    injIntent.source.sourceId,
+    injAttemptAt,
+  );
+  value(
+    fixture.store.appendReconciliation({
+      sourceId: injIntent.source.sourceId,
+      lifecycleOutcome: "PARTIAL_EVIDENCE",
+      cleanupStatus: "pending",
+      evidence: { positionQuantity: "1.3", activeTakeProfitQuantity: "1.3" },
+      observedAt: timestamp("2026-10-22T10:00:58.500Z"),
+    }),
+  );
+
+  const nearPreparedAt = timestamp("2026-10-22T10:00:59.000Z");
+  const nearIntentAt = timestamp("2026-10-22T10:00:59.200Z");
+  const near = tradeCommand(
+    "near-with-older-inj",
+    "4.38",
+    undefined,
+    "NEARUSDT",
+    nearPreparedAt,
+  );
+  const nearIntent = prepareDirectIntent(fixture, near, nearIntentAt);
+  assert.equal(nearIntent.plan.symbol, "NEARUSDT");
+  const acceptedNear = recordAcceptedAttempt(
+    fixture,
+    near,
+    nearIntent.source.sourceId,
+    timestamp("2026-10-22T10:00:59.400Z"),
+  );
+
+  const injStatus = value(
+    fixture.store.readOperatorMainnetTradeCommand(inj.receipt.commandId),
+  );
+  const nearStatus = value(
+    fixture.store.readOperatorMainnetTradeCommand(near.receipt.commandId),
+  );
+  assert.equal(injStatus?.source?.plan.symbol, "INJUSDT");
+  assert.equal(
+    injStatus?.source?.attempt?.exchangeOrderId,
+    acceptedInj.attempt?.exchangeOrderId,
+  );
+  assert.equal(
+    injStatus?.source?.reconciliations.at(-1)?.cleanupStatus,
+    "pending",
+  );
+  assert.equal(nearStatus?.source?.plan.symbol, "NEARUSDT");
+  assert.equal(
+    nearStatus?.source?.attempt?.exchangeOrderId,
+    acceptedNear.attempt?.exchangeOrderId,
+  );
+  assert.notEqual(injIntent.source.sourceId, nearIntent.source.sourceId);
+  fixture.connection.close();
+});
+
+test("direct CREATE intent atomically blocks same-symbol sources, in-progress writes and newer accepted attempts", () => {
+  const sameSymbolFixture = setup();
+  const firstDoge = tradeCommand(
+    "same-symbol-first",
+    "0.08869",
+    undefined,
+    "DOGEUSDT",
+    timestamp("2026-10-22T10:00:58.000Z"),
+  );
+  const firstDogeIntent = prepareDirectIntent(sameSymbolFixture, firstDoge);
+  recordAcceptedAttempt(
+    sameSymbolFixture,
+    firstDoge,
+    firstDogeIntent.source.sourceId,
+    timestamp("2026-10-22T10:00:59.000Z"),
+  );
+  const secondDoge = tradeCommand("same-symbol-second");
+  saveDirectCommand(sameSymbolFixture, secondDoge);
+  const sameSymbolResult = sameSymbolFixture.store.prepareCreateIntent(
+    directIntentRequest(secondDoge),
+  );
+  assert.equal(sameSymbolResult.ok, false);
+  if (!sameSymbolResult.ok) {
+    assert.equal(sameSymbolResult.error.code, "UNRESOLVED_STATE");
+    assert.equal(
+      sameSymbolResult.error.details?.reasonCode,
+      "UNRESOLVED_SAME_SYMBOL_SOURCE_EXISTS",
+    );
+  }
+  sameSymbolFixture.connection.close();
+
+  const inProgressFixture = setup();
+  const inProgressInj = tradeCommand(
+    "cross-symbol-in-progress",
+    "7.237",
+    undefined,
+    "INJUSDT",
+    timestamp("2026-10-22T10:00:58.000Z"),
+  );
+  prepareDirectIntent(inProgressFixture, inProgressInj);
+  const inProgressNear = tradeCommand(
+    "near-after-in-progress",
+    "4.38",
+    undefined,
+    "NEARUSDT",
+    timestamp("2026-10-22T10:00:59.000Z"),
+  );
+  saveDirectCommand(inProgressFixture, inProgressNear);
+  const inProgressResult = inProgressFixture.store.prepareCreateIntent(
+    directIntentRequest(inProgressNear, timestamp("2026-10-22T10:00:59.100Z")),
+  );
+  assert.equal(inProgressResult.ok, false);
+  if (!inProgressResult.ok)
+    assert.equal(
+      inProgressResult.error.details?.reasonCode,
+      "ACCOUNT_CREATE_OUTCOME_UNKNOWN",
+    );
+  inProgressFixture.connection.close();
+
+  const staleFixture = setup();
+  const laterInj = tradeCommand(
+    "cross-symbol-later-inj",
+    "7.237",
+    undefined,
+    "INJUSDT",
+    timestamp("2026-10-22T10:00:57.000Z"),
+  );
+  const laterInjIntent = prepareDirectIntent(staleFixture, laterInj);
+  recordAcceptedAttempt(
+    staleFixture,
+    laterInj,
+    laterInjIntent.source.sourceId,
+    timestamp("2026-10-22T10:00:59.500Z"),
+  );
+  const staleNear = tradeCommand(
+    "near-with-stale-capacity-evidence",
+    "4.38",
+    undefined,
+    "NEARUSDT",
+    timestamp("2026-10-22T10:00:59.000Z"),
+  );
+  saveDirectCommand(staleFixture, staleNear);
+  const staleResult = staleFixture.store.prepareCreateIntent(
+    directIntentRequest(staleNear, timestamp("2026-10-22T10:00:59.500Z")),
+  );
+  assert.equal(staleResult.ok, false);
+  if (!staleResult.ok)
+    assert.equal(
+      staleResult.error.details?.reasonCode,
+      "ACCOUNT_CAPACITY_EVIDENCE_PRECEDES_OTHER_CREATE",
+    );
+  staleFixture.connection.close();
+});
+
+test("legacy approved CREATE remains account-wide while another symbol source is pending", () => {
+  const fixture = setup();
+  const inj = tradeCommand(
+    "legacy-global-inj-source",
+    "7.237",
+    undefined,
+    "INJUSDT",
+    timestamp("2026-10-22T10:00:58.000Z"),
+  );
+  prepareDirectIntent(fixture, inj);
+  const ethPlan = plan("legacy-eth-blocked-by-inj", undefined, NOW, "ETHUSDT");
+  const ethCreate = value(createOperatorMainnetCreateRequest(ethPlan));
+  const legacyResult = fixture.store.prepareCreateIntent({
+    runId: "legacy-eth-after-inj",
+    plan: ethPlan,
+    approval: approval(ethPlan),
+    payloadJson: ethCreate.payloadJson,
+    payloadHash: ethCreate.payloadHash as PlanHash,
+    preparedAt: NOW,
+  });
+  assert.equal(legacyResult.ok, false);
+  if (!legacyResult.ok)
+    assert.equal(legacyResult.error.code, "UNRESOLVED_STATE");
+  assert.equal(
+    value(fixture.store.findPendingOperatorMainnetTestSource())?.sourceId,
+    value(deriveOperatorMainnetTestSourceId(inj.plan.contentHash)),
+  );
+  fixture.connection.close();
+});
+
+test("symbol-filtered pending lookup validates other-symbol persisted evidence before ignoring it", () => {
+  const fixture = setup();
+  const inj = tradeCommand(
+    "corrupt-inj-before-near-filter",
+    "7.237",
+    undefined,
+    "INJUSDT",
+  );
+  const created = prepareDirectIntent(fixture, inj);
+  const corruptIntent = value(
+    canonicalSerialize({ invalid: "not an operator CREATE intent" }),
+  );
+  fixture.connection.db
+    .prepare(
+      `UPDATE operator_mainnet_test_write_intents
+       SET canonical_json = ?, canonical_hash = ? WHERE source_id = ?`,
+    )
+    .run(corruptIntent, payloadHash(corruptIntent), created.source.sourceId);
+
+  const filtered =
+    fixture.store.findPendingOperatorMainnetTestSource("NEARUSDT");
+  assert.equal(filtered.ok, false);
+  if (!filtered.ok) assert.equal(filtered.error.code, "PERSISTENCE_INTEGRITY");
+  fixture.connection.close();
+});
+
+test("direct trade-command plans cannot create legacy recovery grants", () => {
+  const fixture = setup();
+  const original = value(prepare(fixture));
+  const command = tradeCommand("direct-plan-cannot-recover");
+  saveRecoveryPlan(fixture, command.plan as unknown as OperatorMainnetTestPlan);
+  const haltBefore = value(fixture.execution.readHalt());
+
+  const grant = fixture.store.createOperatorMainnetRecoveryGrant({
+    sourceId: original.source.sourceId,
+    planHash: command.plan.contentHash,
+    resolution: {
+      kind: "manual-attested",
+      attestationHash: `sha256:${"c".repeat(64)}` as PlanHash,
+    },
+    actor: "operator-01",
+    consent: true,
+    issuedAt: fixture.clock.value,
+  });
+
+  assert.equal(grant.ok, false);
+  if (!grant.ok) {
+    assert.equal(grant.error.code, "PERSISTENCE_CONFLICT");
+    assert.match(
+      grant.error.message,
+      /direct trade-command plans cannot authorize recovery grants/u,
+    );
+  }
+  assert.deepEqual(value(fixture.execution.readHalt()), haltBefore);
+  assert.equal(
+    fixture.connection.db
+      .prepare("SELECT COUNT(*) AS count FROM operator_mainnet_recovery_grants")
+      .get()?.count,
+    0,
+  );
+  fixture.connection.close();
+});
+
+test("direct intent expiry uses local authorization time, not provider event time", () => {
+  const validFixture = setup();
+  const validCommand = tradeCommand("trade-command-local-expiry-valid");
+  value(
+    validFixture.store.persistOperatorMainnetTradeCommandReceipt({
+      receipt: validCommand.receipt,
+      recordedAt: NOW,
+    }),
+  );
+  value(
+    validFixture.store.bindOperatorMainnetTradeCommand({
+      binding: validCommand.binding,
+      boundAt: NOW,
+    }),
+  );
+  const providerAfterExpiry = new Date(
+    Date.parse(validCommand.receipt.expiresAt) + 1_000,
+  ).toISOString() as UtcTimestamp;
+  const localBeforeExpiry = new Date(
+    Date.parse(validCommand.receipt.expiresAt) - 1,
+  ).toISOString() as UtcTimestamp;
+  const accepted = value(
+    validFixture.store.prepareCreateIntent({
+      runId: "trade-command-run-01",
+      plan: validCommand.plan,
+      tradeCommand: {
+        receipt: validCommand.receipt,
+        binding: validCommand.binding,
+        authorizationAt: localBeforeExpiry,
+      },
+      payloadJson: validCommand.payloadJson,
+      payloadHash: validCommand.payloadHash,
+      preparedAt: providerAfterExpiry,
+    }),
+  );
+  assert.equal(accepted.intent.preparedAt, providerAfterExpiry);
+  assert.equal(accepted.authorization.kind, "trade-command");
+  validFixture.connection.close();
+
+  const expiredFixture = setup();
+  const expiredCommand = tradeCommand("trade-command-local-expiry-blocked");
+  value(
+    expiredFixture.store.persistOperatorMainnetTradeCommandReceipt({
+      receipt: expiredCommand.receipt,
+      recordedAt: NOW,
+    }),
+  );
+  value(
+    expiredFixture.store.bindOperatorMainnetTradeCommand({
+      binding: expiredCommand.binding,
+      boundAt: NOW,
+    }),
+  );
+  const providerBeforeExpiry = new Date(
+    Date.parse(expiredCommand.receipt.expiresAt) - 1_000,
+  ).toISOString() as UtcTimestamp;
+  const rejected = expiredFixture.store.prepareCreateIntent({
+    runId: "trade-command-run-01",
+    plan: expiredCommand.plan,
+    tradeCommand: {
+      receipt: expiredCommand.receipt,
+      binding: expiredCommand.binding,
+      authorizationAt: expiredCommand.receipt.expiresAt,
+    },
+    payloadJson: expiredCommand.payloadJson,
+    payloadHash: expiredCommand.payloadHash,
+    preparedAt: providerBeforeExpiry,
+  });
+  assert.equal(rejected.ok, false);
+  for (const table of [
+    "operator_mainnet_test_sources",
+    "operator_mainnet_test_write_intents",
+    "operator_mainnet_trade_command_consumptions",
+  ])
+    assert.equal(
+      expiredFixture.connection.db
+        .prepare(`SELECT COUNT(*) AS count FROM ${table}`)
+        .get()?.count,
+      0,
+    );
+  expiredFixture.connection.close();
+});
+
+test("direct trade-command outcomes are safe, append-only and prevent later binding", () => {
+  const fixture = setup();
+  const command = tradeCommand();
+  value(
+    fixture.store.persistOperatorMainnetTradeCommandReceipt({
+      receipt: command.receipt,
+      recordedAt: NOW,
+    }),
+  );
+  assert.equal(
+    fixture.store.persistOperatorMainnetTradeCommandReceipt({
+      receipt: command.receipt,
+      recordedAt: NOW,
+    }).ok,
+    true,
+  );
+  value(
+    fixture.store.bindOperatorMainnetTradeCommand({
+      binding: command.binding,
+      boundAt: NOW,
+    }),
+  );
+  const changedDerivation = tradeCommand(
+    command.receipt.commandId,
+    "0.08860",
+    command.receipt,
+  );
+  assert.notEqual(
+    changedDerivation.binding.contentHash,
+    command.binding.contentHash,
+  );
+  assert.equal(
+    fixture.store.bindOperatorMainnetTradeCommand({
+      binding: changedDerivation.binding,
+      boundAt: NOW,
+    }).ok,
+    false,
+  );
+  value(
+    fixture.store.appendOperatorMainnetTradeCommandOutcome({
+      commandId: command.receipt.commandId,
+      outcomeId: "trade-command-outcome-01",
+      stage: "precheck",
+      code: "ACCOUNT_CAPACITY_INCOMPLETE",
+      diagnosticDetails: { reason: "balance unavailable", symbol: "DOGEUSDT" },
+      occurredAt: NOW,
+    }),
+  );
+  assert.equal(
+    fixture.store.appendOperatorMainnetTradeCommandOutcome({
+      commandId: command.receipt.commandId,
+      outcomeId: "trade-command-outcome-secret",
+      stage: "precheck",
+      code: "BLOCKED",
+      diagnosticDetails: { apiKey: "must-not-persist" } as never,
+      occurredAt: NOW,
+    }).ok,
+    false,
+  );
+  const aggregate = value(
+    fixture.store.readOperatorMainnetTradeCommand(command.receipt.commandId),
+  );
+  assert.equal(aggregate?.binding?.contentHash, command.binding.contentHash);
+  assert.equal(aggregate?.consumption, undefined);
+  assert.equal(aggregate?.source, undefined);
+  assert.equal(aggregate?.outcomes.length, 1);
+  assert.equal(
+    aggregate?.outcomes[0]?.diagnosticDetails.reason,
+    "balance unavailable",
+  );
+  assert.equal(
+    fixture.store.bindOperatorMainnetTradeCommand({
+      binding: changedDerivation.binding,
+      boundAt: NOW,
+    }).ok,
+    false,
+  );
+  assert.equal(
+    fixture.store.prepareCreateIntent({
+      runId: "trade-command-run-01",
+      plan: command.plan,
+      tradeCommand: {
+        receipt: command.receipt,
+        binding: command.binding,
+        authorizationAt: NOW,
+      },
+      payloadJson: command.payloadJson,
+      payloadHash: command.payloadHash,
+      preparedAt: NOW,
+    }).ok,
+    false,
+  );
+  assert.equal(
+    fixture.connection.db
+      .prepare("SELECT COUNT(*) AS count FROM operator_mainnet_test_sources")
+      .get()?.count,
+    0,
+  );
+  fixture.connection.close();
+});
+
+test("direct trade-command bind gate accepts only proven leverage prechecks", () => {
+  const refusedFixture = setup();
+  const refused = tradeCommand("trade-command-leverage-refused");
+  value(
+    refusedFixture.store.persistOperatorMainnetTradeCommandReceipt({
+      receipt: refused.receipt,
+      recordedAt: NOW,
+    }),
+  );
+  value(
+    refusedFixture.store.appendOperatorMainnetTradeCommandOutcome({
+      commandId: refused.receipt.commandId,
+      outcomeId: "trade-command-leverage-refused-outcome",
+      stage: "precheck",
+      code: "TARGET_SYMBOL_POSITION_PRESENT",
+      diagnosticDetails: {
+        symbol: "DOGEUSDT",
+        positionPresent: true,
+        activeOrderCount: 0,
+        activeOrdersPresent: false,
+        leverageConfiguration: "not-attempted",
+      },
+      occurredAt: NOW,
+    }),
+  );
+  assert.equal(
+    refusedFixture.store.bindOperatorMainnetTradeCommand({
+      binding: refused.binding,
+      boundAt: NOW,
+    }).ok,
+    false,
+    "a position refusal must never create a binding or reach CREATE",
+  );
+  assert.equal(
+    refusedFixture.connection.db
+      .prepare(
+        "SELECT COUNT(*) AS count FROM operator_mainnet_trade_command_bindings",
+      )
+      .get()?.count,
+    0,
+  );
+  refusedFixture.connection.close();
+
+  const verifiedFixture = setup();
+  const verified = tradeCommand("trade-command-leverage-verified");
+  value(
+    verifiedFixture.store.persistOperatorMainnetTradeCommandReceipt({
+      receipt: verified.receipt,
+      recordedAt: NOW,
+    }),
+  );
+  value(
+    verifiedFixture.store.appendOperatorMainnetTradeCommandOutcome({
+      commandId: verified.receipt.commandId,
+      outcomeId: "trade-command-leverage-attempted-outcome",
+      stage: "precheck",
+      code: "LEVERAGE_CONFIG_ATTEMPTED",
+      diagnosticDetails: {
+        symbol: "DOGEUSDT",
+        positionPresent: false,
+        activeOrderCount: 0,
+        activeOrdersPresent: false,
+        leverageConfiguration: "uncertain",
+        leverageConfigOutcome: "attempted",
+      },
+      occurredAt: NOW,
+    }),
+  );
+  value(
+    verifiedFixture.store.appendOperatorMainnetTradeCommandOutcome({
+      commandId: verified.receipt.commandId,
+      outcomeId: "trade-command-leverage-verified-outcome",
+      stage: "precheck",
+      code: "LEVERAGE_CONFIG_VERIFIED",
+      diagnosticDetails: {
+        symbol: "DOGEUSDT",
+        positionPresent: false,
+        activeOrderCount: 0,
+        activeOrdersPresent: false,
+        leverageConfiguration: "confirmed-1x",
+        leverageConfigOutcome: "verified",
+      },
+      occurredAt: NOW,
+    }),
+  );
+  value(
+    verifiedFixture.store.bindOperatorMainnetTradeCommand({
+      binding: verified.binding,
+      boundAt: NOW,
+    }),
+  );
+  assert.equal(
+    verifiedFixture.connection.db
+      .prepare(
+        "SELECT COUNT(*) AS count FROM operator_mainnet_trade_command_bindings",
+      )
+      .get()?.count,
+    1,
+    "only an append-only verified leverage sequence may bind the plan",
+  );
+  verifiedFixture.connection.close();
+});
+
+test("direct-command status rejects consumption and intent cross-link corruption", () => {
+  const fixture = setup();
+  const command = tradeCommand();
+  value(
+    fixture.store.persistOperatorMainnetTradeCommandReceipt({
+      receipt: command.receipt,
+      recordedAt: NOW,
+    }),
+  );
+  value(
+    fixture.store.bindOperatorMainnetTradeCommand({
+      binding: command.binding,
+      boundAt: NOW,
+    }),
+  );
+  const created = value(
+    fixture.store.prepareCreateIntent({
+      runId: "trade-command-run-01",
+      plan: command.plan,
+      tradeCommand: {
+        receipt: command.receipt,
+        binding: command.binding,
+        authorizationAt: NOW,
+      },
+      payloadJson: command.payloadJson,
+      payloadHash: command.payloadHash,
+      preparedAt: NOW,
+    }),
+  );
+
+  // Simulate out-of-band journal corruption while retaining valid hash shapes.
+  fixture.connection.db.exec(
+    "DROP TRIGGER operator_mainnet_trade_command_consumptions_no_update",
+  );
+  const corruptHash = `sha256:${"f".repeat(64)}`;
+  fixture.connection.db
+    .prepare(
+      `UPDATE operator_mainnet_trade_command_consumptions
+       SET binding_hash = ? WHERE command_id = ?`,
+    )
+    .run(corruptHash, command.receipt.commandId);
+  assert.equal(
+    fixture.store.readOperatorMainnetTradeCommand(command.receipt.commandId).ok,
+    false,
+  );
+  fixture.connection.db
+    .prepare(
+      `UPDATE operator_mainnet_trade_command_consumptions
+       SET binding_hash = ? WHERE command_id = ?`,
+    )
+    .run(command.binding.contentHash, command.receipt.commandId);
+
+  const source = value(
+    fixture.store.readOperatorMainnetTestSource(created.source.sourceId),
+  );
+  assert.ok(source);
+  const alteredIntent = value(
+    canonicalSerialize({
+      ...JSON.parse(source.intent.canonicalJson),
+      commandReceiptHash: corruptHash,
+    }),
+  );
+  fixture.connection.db
+    .prepare(
+      `UPDATE operator_mainnet_test_write_intents
+       SET canonical_json = ?, canonical_hash = ? WHERE source_id = ?`,
+    )
+    .run(alteredIntent, payloadHash(alteredIntent), created.source.sourceId);
+  assert.equal(
+    fixture.store.readOperatorMainnetTestSource(created.source.sourceId).ok,
+    false,
+  );
+  fixture.connection.close();
 });

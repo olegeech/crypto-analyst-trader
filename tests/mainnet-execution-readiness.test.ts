@@ -13,7 +13,12 @@ import {
   deriveMainnetExecutionReadiness,
   type MainnetExecutionReadinessInput,
 } from "../src/application/mainnet-execution-readiness.js";
-import { fixture } from "./account-evidence-fixture.js";
+import {
+  decimal,
+  fixture,
+  order,
+  position,
+} from "./account-evidence-fixture.js";
 
 const evaluatedAt = "2026-10-02T12:00:02.000Z";
 const symbol = "BTCUSDT";
@@ -54,10 +59,14 @@ function accountResult(
     ) => boolean)[];
     readonly incompleteReasonCode?: AccountEvidenceFailureCode;
     readonly collectionStatus?: "complete" | "incomplete";
+    readonly configuredSymbols?: readonly string[];
     readonly mutate?: (payload: Record<string, unknown>) => void;
   } = {},
 ): AccountEvidenceCollectionResult {
-  const payload = fixture() as unknown as Record<string, unknown>;
+  const payload = fixture(options.configuredSymbols) as unknown as Record<
+    string,
+    unknown
+  >;
   const environment = options.environment ?? "mainnet";
   payload.accountBinding = {
     ...(payload.accountBinding as Record<string, unknown>),
@@ -149,6 +158,208 @@ test("valid Mainnet facts and exact target reads produce READY, SUPPORTED not LI
   assert.equal(result.accountEvidenceAgeMs, 0);
   assert.ok(result.internalBinding?.accountIdentityHash.startsWith("sha256:"));
   assert.ok(result.internalBinding?.accountEvidenceHash.startsWith("sha256:"));
+});
+
+test("only receipt-bound direct trade readiness admits a configured non-M1 symbol", () => {
+  const directAccount = accountResult({ configuredSymbols: ["INJUSDT"] });
+  const directInstrument = validInstrument("INJUSDT");
+  const legacy = deriveMainnetExecutionReadiness({
+    accountResult: directAccount,
+    symbol: "INJUSDT",
+    instrument: directInstrument,
+    evaluatedAt,
+  });
+  assert.deepEqual(legacy.reasonCodes, ["INVALID_REQUEST"]);
+
+  const direct = deriveMainnetExecutionReadiness({
+    accountResult: directAccount,
+    symbol: "INJUSDT",
+    instrument: directInstrument,
+    evaluatedAt,
+    directTrade: true,
+  });
+  assert.equal(direct.verdict, "READY");
+  assert.deepEqual(direct.reasonCodes, []);
+
+  const mismatchedInstrument = deriveMainnetExecutionReadiness({
+    accountResult: directAccount,
+    symbol: "INJUSDT",
+    instrument: validInstrument("LINKUSDT"),
+    evaluatedAt,
+    directTrade: true,
+  });
+  assert.equal(mismatchedInstrument.verdict, "BLOCKED");
+  assert.ok(
+    mismatchedInstrument.reasonCodes.includes("INSTRUMENT_SYMBOL_MISMATCH"),
+  );
+
+  const unsupportedInstrument = deriveMainnetExecutionReadiness({
+    accountResult: directAccount,
+    symbol: "INJUSDT",
+    instrument: validInstrument("INJUSDT", { status: "PendingOpen" }),
+    evaluatedAt,
+    directTrade: true,
+  });
+  assert.equal(unsupportedInstrument.verdict, "BLOCKED");
+  assert.ok(
+    unsupportedInstrument.reasonCodes.includes("INSTRUMENT_UNSUPPORTED"),
+  );
+
+  const unconfiguredTarget = deriveMainnetExecutionReadiness({
+    accountResult: accountResult(),
+    symbol: "INJUSDT",
+    instrument: directInstrument,
+    evaluatedAt,
+    directTrade: true,
+  });
+  assert.equal(unconfiguredTarget.verdict, "BLOCKED");
+  assert.ok(
+    unconfiguredTarget.reasonCodes.includes("TARGET_SYMBOL_UNCONFIGURED"),
+  );
+
+  const incompleteTargetCoverage = deriveMainnetExecutionReadiness({
+    accountResult: accountResult({
+      configuredSymbols: ["INJUSDT"],
+      incompletePartition: (partition) =>
+        partition.pass === "A" &&
+        partition.endpoint === "positions" &&
+        partition.category === "linear" &&
+        partition.settleCoin === "USDT",
+    }),
+    symbol: "INJUSDT",
+    instrument: directInstrument,
+    evaluatedAt,
+    directTrade: true,
+  });
+  assert.equal(incompleteTargetCoverage.verdict, "BLOCKED");
+  assert.ok(
+    incompleteTargetCoverage.reasonCodes.includes(
+      "REQUIRED_PARTITION_INCOMPLETE",
+    ),
+  );
+});
+
+test("direct readiness tolerates only known numeric asset movement and still uses strict legacy comparison", () => {
+  const movement = accountResult({
+    configuredSymbols: ["INJUSDT"],
+    mutate: (payload) => {
+      payload.collectionStatus = "incomplete";
+      const passes = payload.criticalPasses as Record<
+        "A" | "B",
+        Record<string, unknown>
+      >;
+      const passA = passes.A;
+      const passB = passes.B;
+      const assetsA = passA.assets as Record<string, unknown>[];
+      const assetsB = passB.assets as Record<string, unknown>[];
+      assetsA[0]!.walletBalance = decimal("49", "coin");
+      assetsA[0]!.locked = decimal("1", "coin");
+      assetsA[0]!.borrowAmount = decimal("0", "coin");
+      assetsB[0]!.walletBalance = decimal("50", "coin");
+      assetsB[0]!.locked = decimal("0", "coin");
+      assetsB[0]!.borrowAmount = decimal("0.25", "coin");
+      assetsB[0]!.bonus = decimal("0.1", "coin");
+    },
+  });
+  const instrument = validInstrument("INJUSDT");
+  const legacyMovement = accountResult({
+    configuredSymbols: [symbol],
+    mutate: (payload) => {
+      payload.collectionStatus = "incomplete";
+      const passes = payload.criticalPasses as Record<
+        "A" | "B",
+        Record<string, unknown>
+      >;
+      const assetsA = passes.A.assets as Record<string, unknown>[];
+      const assetsB = passes.B.assets as Record<string, unknown>[];
+      assetsA[0]!.walletBalance = decimal("49", "coin");
+      assetsA[0]!.locked = decimal("1", "coin");
+      assetsA[0]!.borrowAmount = decimal("0", "coin");
+      assetsB[0]!.walletBalance = decimal("50", "coin");
+      assetsB[0]!.locked = decimal("0", "coin");
+      assetsB[0]!.borrowAmount = decimal("0.25", "coin");
+      assetsB[0]!.bonus = decimal("0.1", "coin");
+    },
+  });
+  const legacy = deriveMainnetExecutionReadiness({
+    accountResult: legacyMovement,
+    symbol,
+    instrument: validInstrument(),
+    evaluatedAt,
+  });
+  assert.ok(
+    legacy.reasonCodes.includes("CRITICAL_STATE_CHANGED"),
+    JSON.stringify(legacy),
+  );
+
+  const direct = deriveMainnetExecutionReadiness({
+    accountResult: movement,
+    symbol: "INJUSDT",
+    instrument,
+    evaluatedAt,
+    directTrade: true,
+  });
+  assert.equal(direct.verdict, "READY");
+  assert.deepEqual(direct.reasonCodes, []);
+
+  const unknownBorrow = accountResult({
+    configuredSymbols: ["INJUSDT"],
+    mutate: (payload) => {
+      payload.collectionStatus = "incomplete";
+      const passes = payload.criticalPasses as Record<
+        "A" | "B",
+        Record<string, unknown>
+      >;
+      const assetsB = passes.B.assets as Record<string, unknown>[];
+      assetsB[0]!.walletBalance = decimal("49", "coin");
+      assetsB[0]!.borrowAmount = {
+        state: "unavailable",
+        reason: "not-returned",
+        unit: "coin",
+      };
+    },
+  });
+  const blocked = deriveMainnetExecutionReadiness({
+    accountResult: unknownBorrow,
+    symbol: "INJUSDT",
+    instrument,
+    evaluatedAt,
+    directTrade: true,
+  });
+  assert.equal(blocked.verdict, "BLOCKED");
+  assert.ok(blocked.reasonCodes.includes("CRITICAL_STATE_UNPROVEN"));
+});
+
+test("direct readiness still blocks structural collateral, position and order changes", () => {
+  for (const group of ["collateral", "positions", "orders"] as const) {
+    const changed = accountResult({
+      configuredSymbols: ["INJUSDT"],
+      mutate: (payload) => {
+        payload.collectionStatus = "incomplete";
+        const passes = payload.criticalPasses as Record<
+          "A" | "B",
+          Record<string, unknown>
+        >;
+        const rows = passes.B[group] as Record<string, unknown>[];
+        if (group === "collateral")
+          rows[0]!.collateralSwitch = { state: "known", value: false };
+        else if (group === "positions") {
+          (passes.A[group] as Record<string, unknown>[]).push(position());
+        } else {
+          (passes.A[group] as Record<string, unknown>[]).push(order());
+        }
+      },
+    });
+    const result = deriveMainnetExecutionReadiness({
+      accountResult: changed,
+      symbol: "INJUSDT",
+      instrument: validInstrument("INJUSDT"),
+      evaluatedAt,
+      directTrade: true,
+    });
+    assert.equal(result.verdict, "BLOCKED", group);
+    assert.ok(result.reasonCodes.includes("CRITICAL_STATE_CHANGED"), group);
+  }
 });
 
 test("only attributable unrelated auxiliary gaps remain READY and visible", () => {

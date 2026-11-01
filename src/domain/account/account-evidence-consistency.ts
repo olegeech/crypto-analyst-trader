@@ -120,6 +120,160 @@ export function changedAccountCriticalGroups(
     groups.push("discovery");
   return groups;
 }
+
+/**
+ * The direct, synchronous v3 instruction may use the later pass when a known
+ * numeric asset/collateral amount changes during its bounded collection.
+ * Every non-numeric fact (including collateral settings, positions, orders and
+ * mode probes) must remain exactly equal; outstanding borrow facts must still
+ * be known in the later pass.
+ */
+export function accountCriticalDifferenceIsOnlyNumericAssetMovement(
+  payload: Pick<AccountEvidencePayload, "criticalPasses" | "discovery">,
+): boolean {
+  const { A, B } = payload.criticalPasses;
+  if (
+    !A ||
+    !B ||
+    !structuralEstablished(A) ||
+    !structuralEstablished(B) ||
+    (payload.discovery !== null && discoveryExpanded(payload.discovery)) ||
+    A.assets.length !== B.assets.length ||
+    A.collateral.length !== B.collateral.length ||
+    A.assets.some((asset, index) => {
+      const other = B.assets[index];
+      return (
+        !other ||
+        asset.coin !== other.coin ||
+        asset.walletBalance.state !== "known" ||
+        other.walletBalance.state !== "known" ||
+        asset.walletBalance.unit !== other.walletBalance.unit ||
+        !(asset.walletBalance.value instanceof DecimalValue) ||
+        !(other.walletBalance.value instanceof DecimalValue)
+      );
+    })
+  )
+    return false;
+
+  const numericAssetFields = new Set([
+    "walletBalance",
+    "equity",
+    "usdValue",
+    "usdEquity",
+    "locked",
+    "bonus",
+    "borrowAmount",
+    "spotBorrow",
+    "accruedInterest",
+    "totalOrderIM",
+    "totalPositionIM",
+    "totalPositionMM",
+    "unrealisedPnl",
+  ]);
+  const numericCollateralFields = new Set([
+    "borrowAmount",
+    "otherBorrowAmount",
+    "maxBorrowingAmount",
+    "hourlyBorrowRate",
+  ]);
+  const withoutAmounts = <T extends object>(
+    row: T,
+    fields: ReadonlySet<string>,
+  ) =>
+    Object.fromEntries(
+      Object.entries(row).filter(([field]) => !fields.has(field)),
+    );
+  let amountChanged = false;
+  for (let index = 0; index < A.assets.length; index++) {
+    const left = A.assets[index];
+    const right = B.assets[index];
+    if (!left || !right || left.coin !== right.coin) return false;
+    for (const field of numericAssetFields) {
+      const before = (left as unknown as Record<string, unknown>)[field];
+      const after = (right as unknown as Record<string, unknown>)[field];
+      if (!equal(before, after)) {
+        if (
+          typeof before !== "object" ||
+          before === null ||
+          typeof after !== "object" ||
+          after === null ||
+          !("state" in before) ||
+          !("state" in after) ||
+          before.state !== "known" ||
+          after.state !== "known" ||
+          !("unit" in before) ||
+          !("unit" in after) ||
+          before.unit !== after.unit ||
+          !("value" in before) ||
+          !("value" in after) ||
+          !(before.value instanceof DecimalValue) ||
+          !(after.value instanceof DecimalValue)
+        )
+          return false;
+        amountChanged = true;
+      }
+    }
+    if (
+      [right.borrowAmount, right.spotBorrow, right.accruedInterest].some(
+        (fact) => !known(fact) || fact.value.isNegative(),
+      )
+    )
+      return false;
+  }
+  for (let index = 0; index < A.collateral.length; index++) {
+    const left = A.collateral[index];
+    const right = B.collateral[index];
+    if (!left || !right || left.coin !== right.coin) return false;
+    for (const field of numericCollateralFields) {
+      const before = (left as unknown as Record<string, unknown>)[field];
+      const after = (right as unknown as Record<string, unknown>)[field];
+      if (!equal(before, after)) {
+        if (
+          typeof before !== "object" ||
+          before === null ||
+          typeof after !== "object" ||
+          after === null ||
+          !("state" in before) ||
+          !("state" in after) ||
+          before.state !== "known" ||
+          after.state !== "known" ||
+          !("unit" in before) ||
+          !("unit" in after) ||
+          before.unit !== after.unit ||
+          !("value" in before) ||
+          !("value" in after) ||
+          !(before.value instanceof DecimalValue) ||
+          !(after.value instanceof DecimalValue)
+        )
+          return false;
+        amountChanged = true;
+      }
+    }
+    if (
+      !known(right.borrowAmount) ||
+      !known(right.otherBorrowAmount) ||
+      right.borrowAmount.value.isNegative() ||
+      right.otherBorrowAmount.value.isNegative()
+    )
+      return false;
+  }
+  if (!amountChanged) return false;
+
+  const assetStructure = (pass: AccountCriticalPass) =>
+    pass.assets.map((asset) => withoutAmounts(asset, numericAssetFields));
+  const collateralStructure = (pass: AccountCriticalPass) =>
+    pass.collateral.map((item) =>
+      withoutAmounts(item, numericCollateralFields),
+    );
+  return (
+    equal(A.account, B.account) &&
+    equal(assetStructure(A), assetStructure(B)) &&
+    equal(collateralStructure(A), collateralStructure(B)) &&
+    equal(A.positions, B.positions) &&
+    equal(A.orders, B.orders) &&
+    equal(A.modeProbes, B.modeProbes)
+  );
+}
 function known<T>(
   fact: AccountEvidenceFact<T>,
 ): fact is { readonly state: "known"; readonly value: T } {

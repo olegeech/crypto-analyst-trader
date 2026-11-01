@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mapAccountReadIdentity } from "../src/adapters/bybit-v5/account-key-mapper.js";
+import {
+  configuredBybitAccountIdentityHash,
+  mapAccountReadIdentity,
+} from "../src/adapters/bybit-v5/account-key-mapper.js";
 import { BybitAccountReadError } from "../src/adapters/bybit-v5/account-read-transport.js";
 import { mapAccountKeyMetadata } from "../src/adapters/bybit-v5/read-mappers.js";
 
@@ -55,6 +58,24 @@ test("environment identities stay isolated and unknown environment fails", () =>
   assert.throws(() =>
     mapAccountReadIdentity(response(), "123", "unexpected" as never, at),
   );
+});
+
+test("configured account identity uses the same hash as authenticated Bybit identity", () => {
+  const authenticated = mapAccountReadIdentity(
+    response(),
+    "123",
+    "mainnet",
+    at,
+  );
+  const configured = configuredBybitAccountIdentityHash("123", "mainnet");
+  assert.equal(configured.ok, true);
+  if (!configured.ok) throw new Error("configured identity was rejected");
+  assert.equal(
+    configured.value,
+    authenticated.accountBinding.accountIdentityHash,
+  );
+  assert.equal(configuredBybitAccountIdentityHash("0", "mainnet").ok, false);
+  assert.equal(configuredBybitAccountIdentityHash("123", "demo").ok, true);
 });
 
 test("all wallet transfer permission labels are conservatively treated as write authority", () => {

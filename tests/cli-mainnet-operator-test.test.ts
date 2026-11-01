@@ -5,9 +5,15 @@ import { join } from "node:path";
 import test from "node:test";
 
 import {
+  MAINNET_OPERATOR_TEST_USAGE,
   runMainnetOperatorTestCli,
   type MainnetOperatorTestCliDependencies,
 } from "../src/cli/mainnet-operator-test.js";
+import type {
+  MainnetOperatorTradeCommandStatus,
+  MainnetOperatorTradeOutcome,
+} from "../src/application/mainnet-operator-trade.js";
+import type { OperatorMainnetTradeCommandReceipt } from "../src/domain/execution/operator-mainnet-trade-command.js";
 import {
   createOperatorMainnetQuote,
   createOperatorMainnetTestPlan,
@@ -30,6 +36,14 @@ const scope: PersistenceScope = {
   category: "linear",
   positionMode: "one-way",
 };
+
+test("CLI usage lists the configured M1 symbols", () => {
+  assert.match(
+    MAINNET_OPERATOR_TEST_USAGE,
+    /<BTCUSDT\|ETHUSDT\|SOLUSDT\|DOGEUSDT>/,
+  );
+  assert.equal(MAINNET_OPERATOR_TEST_USAGE.includes("XRPUSDT"), false);
+});
 
 function unwrap<T>(result: Result<T>): T {
   if (!result.ok)
@@ -207,6 +221,457 @@ test("prepare persists and displays the frozen plan without exchange writes", as
   );
   assert.match(terminal.text(), /GET_COUNTS_PREPARE_STATUS=AVAILABLE/u);
   assert.match(terminal.text(), /GET_COUNTS_PREPARE=\{"wallet":6\}/u);
+});
+
+test("trade dispatches one local instruction without a second prompt and reports stage metrics", async () => {
+  const terminal = streams(false);
+  const commandId = "e1ad1292-7892-4f63-a872-4caabc69fdb7";
+  let tradeCalls = 0;
+  let dispatchedTrade: Record<string, unknown> | undefined;
+  const outcome: MainnetOperatorTradeOutcome = {
+    kind: "attempted",
+    commandId,
+    receiptSaved: true,
+    receiptHash: `sha256:${"1".repeat(64)}` as PlanHash,
+    planHash: `sha256:${"2".repeat(64)}` as PlanHash,
+    payloadHash: `sha256:${"3".repeat(64)}` as PlanHash,
+    sourceId,
+    clientOrderId: plan.clientOrderId,
+    limitPrice: "100",
+    quantity: "0.08",
+    takeProfitTrigger: "100.2",
+    takeProfitEffectivePercent: "0.2",
+    preparationQuoteAgeMs: 100,
+    admissionQuoteAgeAtReadMs: 200,
+    stages: {
+      prepare: {
+        exchangeReads: 17,
+        exchangeWrites: 0,
+        exchangeGetCounts: '{"wallet":2}',
+        exchangeStageElapsedMs: 12,
+      },
+      execute: {
+        exchangeReads: 4,
+        exchangeWrites: 1,
+        exchangeGetCounts: '{"fees":1,"time":3}',
+        exchangeStageElapsedMs: 9,
+      },
+      status: {
+        exchangeReads: 13,
+        exchangeWrites: 0,
+        exchangeGetCounts: '{"history":7,"time":6}',
+        exchangeStageElapsedMs: 15,
+      },
+    },
+    exchangeReads: 34,
+    exchangeWrites: 1,
+    elapsedMs: 100,
+    execution: {
+      kind: "attempted",
+      sourceId,
+      clientOrderId: plan.clientOrderId,
+      attemptOutcome: "accepted",
+      attemptJournaled: true,
+      admissionQuoteAgeAtReadMs: 200,
+    },
+  };
+  const code = await runMainnetOperatorTestCli(
+    [
+      "trade",
+      "--tp-price",
+      "0.089",
+      "--symbol",
+      "BTCUSDT",
+      "--allocation",
+      "10",
+      "--gross-cap",
+      "8",
+      "--max-deviation-bps",
+      "10",
+    ],
+    {
+      ...terminal,
+      prompt: async () => {
+        throw new Error("trade must not request a second confirmation");
+      },
+      trade: async (input, lifecycle) => {
+        tradeCalls += 1;
+        dispatchedTrade = input as unknown as Record<string, unknown>;
+        lifecycle?.onCommandIdGenerated?.(commandId);
+        lifecycle?.onReceiptSaved?.({
+          contentHash: outcome.receiptHash!,
+        } as unknown as OperatorMainnetTradeCommandReceipt);
+        return ok(outcome);
+      },
+    },
+  );
+  assert.equal(code, 0);
+  assert.equal(tradeCalls, 1);
+  assert.equal(dispatchedTrade?.takeProfitMode, "price");
+  assert.equal(dispatchedTrade?.takeProfitValue, "0.089");
+  assert.match(terminal.text(), new RegExp(`COMMAND_ID=${commandId}`, "u"));
+  assert.match(terminal.text(), /COMMAND_ID_PERSISTENCE=SAVED/u);
+  assert.match(terminal.text(), /EXECUTION_STAGE=ATTEMPTED/u);
+  assert.match(terminal.text(), /QUOTE_AGE_AT_ADMISSION_MS=200/u);
+  assert.match(terminal.text(), /EXCHANGE_READS_TOTAL=34/u);
+  assert.match(terminal.text(), /EXCHANGE_WRITES_TOTAL=1/u);
+  assert.match(
+    terminal.text(),
+    /TAKE_PROFIT_INPUT=price:0\.089\/Partial\/Market\/LastPrice/u,
+  );
+  assert.match(terminal.text(), /TP_EFFECTIVE_PERCENT=0\.2/u);
+  assert.match(terminal.text(), /EXCHANGE_GET_COUNTS_PREPARE=\{"wallet":2\}/u);
+  assert.match(terminal.text(), /OPERATOR_PROMPTS=0/u);
+  assert.match(terminal.text(), /KEYCHAIN_INTERACTION_TIME=UNMEASURED/u);
+  assert.match(terminal.text(), /do not repeat the trade/u);
+});
+
+test("trade parser requires exactly one take-profit input", async () => {
+  const cases = [
+    [
+      "trade",
+      "--symbol",
+      "DOGEUSDT",
+      "--allocation",
+      "10",
+      "--gross-cap",
+      "10",
+      "--max-deviation-bps",
+      "10",
+    ],
+    [
+      "trade",
+      "--symbol",
+      "DOGEUSDT",
+      "--allocation",
+      "10",
+      "--gross-cap",
+      "10",
+      "--max-deviation-bps",
+      "10",
+      "--tp-percent",
+      "0.5",
+      "--tp-price",
+      "0.09",
+    ],
+  ];
+  for (const args of cases) {
+    const terminal = streams(false);
+    let tradeCalls = 0;
+    const code = await runMainnetOperatorTestCli(args, {
+      ...terminal,
+      trade: async () => {
+        tradeCalls += 1;
+        return fail(domainError("INVALID_VALUE", "parser should block"));
+      },
+    });
+    assert.equal(code, 2);
+    assert.equal(tradeCalls, 0);
+    assert.match(terminal.text(), /REASON_CODE=INVALID_REQUEST/u);
+    assert.match(terminal.text(), /EXCHANGE_WRITES=0/u);
+  }
+});
+
+test("trade CLI prints unknown exchange counts when preparation throws before reporting them", async () => {
+  const terminal = streams(false);
+  const outcome: MainnetOperatorTradeOutcome = {
+    kind: "blocked",
+    commandId: "e1ad1292-7892-4f63-a872-4caabc69fdb7",
+    receiptSaved: true,
+    stoppedAt: "preparation",
+    reasonCode: "PREPARATION_FAILED_CLOSED",
+    stages: {
+      prepare: { exchangeReads: undefined, exchangeWrites: 0 },
+    },
+    exchangeReads: undefined,
+    exchangeWrites: 0,
+  };
+  const code = await runMainnetOperatorTestCli(
+    [
+      "trade",
+      "--tp-percent",
+      "0.20",
+      "--symbol",
+      "DOGEUSDT",
+      "--allocation",
+      "10",
+      "--gross-cap",
+      "10",
+      "--max-deviation-bps",
+      "10",
+    ],
+    {
+      ...terminal,
+      trade: async () => ok(outcome),
+    },
+  );
+  assert.equal(code, 4);
+  assert.match(terminal.text(), /EXCHANGE_READS_PREPARE=UNKNOWN/u);
+  assert.match(terminal.text(), /EXCHANGE_READS_TOTAL=UNKNOWN/u);
+  assert.match(terminal.text(), /EXCHANGE_WRITES_TOTAL=0/u);
+});
+
+test("trade CLI reports an ambiguous CREATE with active HALT as unresolved", async () => {
+  const terminal = streams(false);
+  const commandId = "e1ad1292-7892-4f63-a872-4caabc69fdb9";
+  const outcome: MainnetOperatorTradeOutcome = {
+    kind: "attempted",
+    commandId,
+    receiptSaved: true,
+    reasonCode: "CREATE_OUTCOME_AMBIGUOUS",
+    stages: {},
+    exchangeReads: 4,
+    exchangeWrites: 1,
+    execution: {
+      kind: "attempted",
+      sourceId,
+      clientOrderId: plan.clientOrderId,
+      attemptOutcome: "ambiguous",
+      attemptJournaled: true,
+    },
+    immediateStatus: {
+      lifecycleOutcome: "NOT_EXERCISED",
+      cleanupStatus: "pending",
+      halt: { active: true, reconciliationRequired: true },
+    } as unknown as NonNullable<MainnetOperatorTradeOutcome["immediateStatus"]>,
+  };
+  const code = await runMainnetOperatorTestCli(
+    [
+      "trade",
+      "--tp-percent",
+      "0.20",
+      "--symbol",
+      "BTCUSDT",
+      "--allocation",
+      "10",
+      "--gross-cap",
+      "8",
+      "--max-deviation-bps",
+      "10",
+    ],
+    { ...terminal, trade: async () => ok(outcome) },
+  );
+
+  assert.equal(code, 5);
+  assert.match(terminal.text(), /HALT=ACTIVE/u);
+  assert.match(terminal.text(), /CREATE_OUTCOME=ambiguous/u);
+  assert.match(terminal.text(), /do not repeat the trade instruction/u);
+  assert.match(
+    terminal.text(),
+    /do not repeat the trade instruction or clear HALT/u,
+  );
+});
+
+test("status by command ID reports pre-intent refusal with no exchange access", async () => {
+  const terminal = streams(false);
+  const commandId = "e1ad1292-7892-4f63-a872-4caabc69fdb7";
+  let lookups = 0;
+  const status: MainnetOperatorTradeCommandStatus = {
+    kind: "pre-intent-refused",
+    commandId,
+    receiptHash: `sha256:${"1".repeat(64)}` as PlanHash,
+    reasonCode: "AVAILABLE_MARGIN_OR_FEE_RESERVE_INSUFFICIENT",
+    diagnosticDetails: {
+      availableBalance: "1.25",
+      orderNotional: "8",
+      entryFeeReserve: "0.0044",
+      exitFeeReserve: "0.0045",
+      totalReserve: "0.0089",
+      requiredAvailableBalance: "8.0089",
+      shortfall: "6.7589",
+    },
+    exchangeReads: 0,
+  };
+  const code = await runMainnetOperatorTestCli(
+    ["status", "--command-id", commandId],
+    {
+      ...terminal,
+      tradeStatus: async () => {
+        lookups += 1;
+        return ok(status);
+      },
+    },
+  );
+  assert.equal(code, 4);
+  assert.equal(lookups, 1);
+  assert.match(terminal.text(), /COMMAND_STATUS=PRE_INTENT_REFUSED/u);
+  assert.match(terminal.text(), /EXCHANGE_READS=0/u);
+  assert.match(terminal.text(), /EXCHANGE_WRITES=0/u);
+  assert.match(terminal.text(), /AVAILABLE_BALANCE_USD_EQUIVALENT=1\.25/u);
+  assert.match(
+    terminal.text(),
+    /REQUIRED_AVAILABLE_BALANCE_USD_EQUIVALENT=8\.0089/u,
+  );
+  assert.match(terminal.text(), /SHORTFALL_USD_EQUIVALENT=6\.7589/u);
+  assert.match(terminal.text(), /this command will not resume/u);
+});
+
+test("status by command ID retains the client order identity when provider status fails", async () => {
+  const terminal = streams(false);
+  const commandId = "e1ad1292-7892-4f63-a872-4caabc69fdb8";
+  const sourceId = "operator-mainnet-test:trade-command-status";
+  const clientOrderId = "trade-command-order-1";
+  const code = await runMainnetOperatorTestCli(
+    ["status", "--command-id", commandId],
+    {
+      ...terminal,
+      tradeStatus: async () =>
+        ok({
+          kind: "intent-present",
+          commandId,
+          sourceId,
+          clientOrderId,
+          statusFailureCode: "READ_FAILED",
+          exchangeReads: 3,
+        }),
+    },
+  );
+
+  assert.equal(code, 5);
+  assert.match(
+    terminal.text(),
+    new RegExp(`CLIENT_ORDER_ID=${clientOrderId}`, "u"),
+  );
+  assert.match(
+    terminal.text(),
+    new RegExp(`status --source-id ${sourceId}`, "u"),
+  );
+  assert.match(terminal.text(), /do not repeat the trade instruction/u);
+});
+
+test("trade parser rejects unrelated policy overrides before invoking trade", async () => {
+  const terminal = streams(false);
+  let tradeCalls = 0;
+  const code = await runMainnetOperatorTestCli(
+    [
+      "trade",
+      "--tp-percent",
+      "0.20",
+      "--symbol",
+      "BTCUSDT",
+      "--allocation",
+      "10",
+      "--gross-cap",
+      "8",
+      "--max-deviation-bps",
+      "10",
+      "--take-profit",
+      "0.5",
+    ],
+    {
+      ...terminal,
+      trade: async () => {
+        tradeCalls += 1;
+        return fail(domainError("INVALID_VALUE", "unexpected"));
+      },
+    },
+  );
+  assert.equal(code, 2);
+  assert.equal(tradeCalls, 0);
+  assert.match(terminal.text(), /REASON_CODE=INVALID_REQUEST/u);
+  assert.match(terminal.text(), /EXCHANGE_WRITES=0/u);
+});
+
+test("direct-command plan is not accepted by legacy execute or recover CLI", async () => {
+  const directPlan = {
+    ...plan,
+    schemaVersion: "operator-mainnet-execution-test/v3",
+  } as unknown as OperatorMainnetTestPlan;
+  const sourceId = "operator-mainnet-test:direct-command";
+  const commands = [
+    ["execute", "--plan-hash", plan.contentHash],
+    [
+      "recover",
+      "--source-id",
+      sourceId,
+      "--plan-hash",
+      plan.contentHash,
+      "--resolution",
+      "manual",
+    ],
+  ] as const;
+  for (const args of commands) {
+    const terminal = streams(true);
+    let promptCalls = 0;
+    let writeCalls = 0;
+    const code = await runMainnetOperatorTestCli(args, {
+      ...terminal,
+      resolvePlan: () => ok({ scope, plan: directPlan }),
+      resolveSource: () => ok({ scope, snapshot: {} as never }),
+      prompt: async () => {
+        promptCalls += 1;
+        return "yes";
+      },
+      execute: async () => {
+        writeCalls += 1;
+        throw new Error("direct command must never reach legacy execute");
+      },
+      recover: () => {
+        writeCalls += 1;
+        return fail(
+          domainError(
+            "INVALID_CAPABILITY",
+            "direct command must never reach legacy recovery",
+          ),
+        );
+      },
+    });
+    assert.equal(code, 4);
+    assert.match(
+      terminal.text(),
+      /REASON_CODE=DIRECT_COMMAND_PLAN_NOT_ELIGIBLE/u,
+    );
+    assert.match(terminal.text(), /EXCHANGE_READS=0/u);
+    assert.match(terminal.text(), /EXCHANGE_WRITES=0/u);
+    assert.equal(promptCalls, 0);
+    assert.equal(writeCalls, 0);
+  }
+});
+
+test("direct trade quote refusal reports only the retained upper bound", async () => {
+  const terminal = streams(false);
+  const code = await runMainnetOperatorTestCli(
+    [
+      "trade",
+      "--tp-percent",
+      "0.20",
+      "--symbol",
+      "DOGEUSDT",
+      "--allocation",
+      "10",
+      "--gross-cap",
+      "10",
+      "--max-deviation-bps",
+      "10",
+    ],
+    {
+      ...terminal,
+      trade: async () =>
+        ok({
+          kind: "blocked",
+          commandId: "trade-upper-bound-refusal",
+          receiptSaved: true,
+          stoppedAt: "admission",
+          reasonCode: "QUOTE_OUTSIDE_APPROVED_RANGE",
+          diagnosticDetails: {
+            quoteBid: "0.076",
+            approvedBidLower: "0.075",
+            approvedBidUpper: "0.0759",
+          },
+          stages: {},
+          exchangeReads: 7,
+          exchangeWrites: 0,
+        }),
+    },
+  );
+
+  assert.equal(code, 4);
+  assert.match(
+    terminal.text(),
+    /Fresh bid 0\.076 is above the instruction's upper bound 0\.0759\./u,
+  );
+  assert.doesNotMatch(terminal.text(), /APPROVED_BID_LOWER/u);
+  assert.doesNotMatch(terminal.text(), /exact price range approved/u);
 });
 
 test("count mismatch is reported as unavailable diagnostics without changing the preparation outcome", async () => {
@@ -875,7 +1340,10 @@ test("status records manual-action declarations and sanitizes terminal fields", 
           source: {
             clientOrderId: "order\rINJECTED",
             planHash: `sha256:${"a".repeat(64)}`,
-            approvalHash: `sha256:${"b".repeat(64)}`,
+            authorization: {
+              kind: "approval",
+              hash: `sha256:${"b".repeat(64)}`,
+            },
             payloadHash: `sha256:${"c".repeat(64)}`,
           },
           attempt: { outcome: "ambiguous" },
@@ -933,6 +1401,7 @@ test("status records manual-action declarations and sanitizes terminal fields", 
   assert.match(terminal.text(), /CLIENT_ORDER_ID=orderINJECTED/u);
   assert.match(terminal.text(), /REASONS=PROOFINJECTED/u);
   assert.match(terminal.text(), /POLICY_VERSION=operator-mainnet-test\/v1/u);
+  assert.match(terminal.text(), /AUTHORIZATION_KIND=approval/u);
   assert.match(terminal.text(), /PLAN_HASH=sha256:/u);
   assert.match(terminal.text(), /APPROVAL_HASH=sha256:/u);
   assert.match(terminal.text(), /PAYLOAD_HASH=sha256:/u);
@@ -1008,6 +1477,47 @@ test("incomplete venue bounds produce actionable allowlisted diagnostics without
   );
   assert.match(terminal.text(), /EXCHANGE_WRITES=0/u);
   assert.doesNotMatch(terminal.text(), /PRIVATE_PROVIDER_SECRET|INJECTED/u);
+});
+
+test("below-minimum notional reports the current Bybit minimum without changing the requested size", async () => {
+  const terminal = streams(false);
+  const code = await runMainnetOperatorTestCli(
+    [
+      "prepare",
+      "--symbol",
+      "DOGEUSDT",
+      "--allocation",
+      "9",
+      "--gross-cap",
+      "9",
+      "--max-deviation-bps",
+      "10",
+    ],
+    {
+      ...terminal,
+      prepare: async () =>
+        fail(
+          domainError("NOTIONAL_TOO_SMALL", "venue minimum block", {
+            computedNotional: "9",
+            minimumNotional: "10",
+          }),
+        ),
+    },
+  );
+
+  assert.equal(code, 4);
+  assert.match(terminal.text(), /REASON_CODE=NOTIONAL_TOO_SMALL/u);
+  assert.match(terminal.text(), /COMPUTED_NOTIONAL_USDT=9/u);
+  assert.match(terminal.text(), /BYBIT_MINIMUM_NOTIONAL_USDT=10/u);
+  assert.match(
+    terminal.text(),
+    /EXPLANATION=.*below Bybit's current 10 USDT venue minimum/u,
+  );
+  assert.match(terminal.text(), /WHY=.*9 USDT.*minimum is 10 USDT/u);
+  assert.match(
+    terminal.text(),
+    /NEXT_ACTION=.*If you choose a larger size, enter it explicitly.*requested size is never increased automatically/u,
+  );
 });
 
 test("quote precision failures expose a safe reason without printing raw provider errors", async () => {

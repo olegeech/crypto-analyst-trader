@@ -242,11 +242,10 @@ export function mapInstrumentInfo(
   return Object.freeze(mapped);
 }
 
-export function mapTicker(
+function mapTickerForSymbol(
   response: BybitPublicResponse,
-  expectedSymbol: string,
+  symbol: string,
 ): MarketTickerEvidence {
-  const symbol = configuredSymbol(expectedSymbol);
   if (
     response.result.symbol !== undefined &&
     text(response.result, "symbol", "tickers") !== symbol
@@ -324,6 +323,27 @@ export function mapTicker(
     ...(volume24h === undefined ? {} : { volume24h }),
     ...(turnover24h === undefined ? {} : { turnover24h }),
   });
+}
+
+export function mapTicker(
+  response: BybitPublicResponse,
+  expectedSymbol: string,
+): MarketTickerEvidence {
+  return mapTickerForSymbol(response, configuredSymbol(expectedSymbol));
+}
+
+/** Dynamic-symbol ticker mapping is reserved for the operator's direct trade path. */
+export function mapOperatorTicker(
+  response: BybitPublicResponse,
+  expectedSymbol: string,
+): MarketTickerEvidence {
+  if (!/^[A-Z0-9]{2,32}$/u.test(expectedSymbol))
+    precondition("Requested operator ticker symbol is malformed.");
+  if (text(response.result, "category", "tickers") !== "linear")
+    precondition(
+      "Bybit operator ticker response did not prove linear category.",
+    );
+  return mapTickerForSymbol(response, expectedSymbol);
 }
 
 export function mapKline(

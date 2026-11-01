@@ -1,9 +1,15 @@
 import { randomUUID } from "node:crypto";
 
 import { createMacOSKeychainProvider } from "../adapters/macos-keychain.js";
-import { BybitAccountReadTransport } from "../adapters/bybit-v5/account-read-transport.js";
+import {
+  BybitAccountReadError,
+  BybitAccountReadTransport,
+} from "../adapters/bybit-v5/account-read-transport.js";
 import { BybitAccountReadClient } from "../adapters/bybit-v5/account-read-client.js";
-import { BybitMainnetReadCapabilityFacade } from "../adapters/bybit-v5/read-capability-facade.js";
+import {
+  BybitMainnetReadCapabilityError,
+  BybitMainnetReadCapabilityFacade,
+} from "../adapters/bybit-v5/read-capability-facade.js";
 import { BybitMainnetExecutionAdapter } from "../adapters/bybit-v5/execution-adapter.js";
 import { BybitPrivateTransport } from "../adapters/bybit-v5/transport.js";
 import { BybitPublicMarketClient } from "../adapters/bybit-v5/public-market-client.js";
@@ -17,11 +23,18 @@ import { changedAccountCriticalGroups } from "../domain/account/account-evidence
 import type { AccountEvidenceCollectionResult } from "../domain/account/account-evidence-bundle.js";
 import {
   createOperatorMainnetTestPlan,
+  type OperatorMainnetQuote,
   type OperatorMainnetTestPlan,
 } from "../domain/execution/operator-mainnet-test-plan.js";
+import {
+  createOperatorMainnetTradeCommandPlan,
+  rehydrateOperatorMainnetTradeCommandReceipt,
+} from "../domain/execution/operator-mainnet-trade-command.js";
 import { rehydrateOperatorMainnetRecoveryAttestation } from "../domain/execution/operator-mainnet-recovery.js";
 import { domainError } from "../domain/shared/errors.js";
 import { fail, ok, type Result } from "../domain/shared/result.js";
+import type { InstrumentConstraints } from "../domain/market/instrument-constraints.js";
+import { DecimalValue } from "../domain/shared/decimal.js";
 import {
   parseUtcTimestamp,
   timestampFromEpochMs,
@@ -39,15 +52,22 @@ import { collectAccountEvidence } from "./account-evidence-collection.js";
 import { deriveMainnetExecutionReadiness } from "./mainnet-execution-readiness.js";
 import {
   collectCompactOperatorAccountEvidence,
+  collectDirectTradeAccountEvidence,
   createCompactOperatorAccountReader,
+  readCompactOperatorAccountIdentity,
   extractOperatorFeeRate,
   CompactAccountEvidenceUnavailable,
+  OperatorEvidenceReadError,
 } from "./mainnet-operator-test-evidence.js";
 import {
   calculateOperatorMainnetTestCapacity,
   calculateOperatorMainnetTestCapacityFromAvailableBalance,
+  validateMainnetOperatorTestEvidence,
   validateCompactOperatorAccountForPlan,
   validateCompactOperatorPreparationEvidence,
+  deriveDirectTradeProviderTimeAnchor,
+  type MainnetOperatorTestAdmissionEvidence,
+  type MainnetOperatorTestDirectFreshEvidence,
 } from "./mainnet-entry-evidence.js";
 import { PROVISIONAL_M1_MAX_ACCOUNT_EVIDENCE_AGE_MS } from "./policies/provisional-m1.js";
 import {
@@ -58,12 +78,14 @@ import {
   type MainnetEvidencePath,
   type MainnetInvocationMetrics,
 } from "./mainnet-composition-helpers.js";
+import { mainnetOperatorTestPersistenceScope } from "./mainnet-operator-test-scope.js";
 
 export interface MainnetOperatorTestPrepareInput {
   readonly symbol: unknown;
   readonly allocation: unknown;
   readonly grossNotionalCap: unknown;
   readonly maxDeviationBps: unknown;
+  readonly tradeCommandReceipt?: unknown;
   readonly recoveryAttestationHash?: unknown;
   readonly recoveryAttestation?: unknown;
 }
@@ -76,16 +98,12 @@ export interface MainnetOperatorTestPreparation extends Omit<
   readonly exchangeReads: number;
   readonly exchangeWrites: 0;
   readonly exchangeStage: "prepare";
-}
-
-function scopeFor(accountId: string) {
-  return {
-    exchange: "bybit" as const,
-    environment: "mainnet" as const,
-    accountId,
-    category: "linear" as const,
-    positionMode: "one-way" as const,
-  };
+  /** Same-process only; attached non-enumerably and consumed by direct v3 execution. */
+  readonly directTradeAdmission?: Readonly<{
+    readonly planHash: string;
+    readonly evidence: MainnetOperatorTestAdmissionEvidence;
+    readonly capturedAtMonotonic: number;
+  }>;
 }
 
 function failed(
@@ -183,12 +201,38 @@ export async function prepareMainnetOperatorTest(
       metricsFor(reads),
     );
   let exchangeReads = 0;
+  const inputKeys =
+    typeof input === "object" && input !== null && !Array.isArray(input)
+      ? Reflect.ownKeys(input)
+      : [];
+  const baseInputKeys = [
+    "symbol",
+    "allocation",
+    "grossNotionalCap",
+    "maxDeviationBps",
+  ];
+  const validInputShape =
+    (inputKeys.length === baseInputKeys.length &&
+      baseInputKeys.every((key) => inputKeys.includes(key))) ||
+    (inputKeys.length === baseInputKeys.length + 1 &&
+      [...baseInputKeys, "tradeCommandReceipt"].every((key) =>
+        inputKeys.includes(key),
+      )) ||
+    (inputKeys.length === baseInputKeys.length + 2 &&
+      [
+        ...baseInputKeys,
+        "recoveryAttestationHash",
+        "recoveryAttestation",
+      ].every((key) => inputKeys.includes(key)));
+  const hasTradeCommandReceipt =
+    typeof input === "object" &&
+    input !== null &&
+    Object.hasOwn(input, "tradeCommandReceipt");
   if (
     typeof input !== "object" ||
     input === null ||
     Array.isArray(input) ||
-    (Reflect.ownKeys(input).length !== 4 &&
-      Reflect.ownKeys(input).length !== 6) ||
+    !validInputShape ||
     !Object.hasOwn(input, "symbol") ||
     !Object.hasOwn(input, "allocation") ||
     !Object.hasOwn(input, "grossNotionalCap") ||
@@ -196,12 +240,104 @@ export async function prepareMainnetOperatorTest(
     Object.hasOwn(input, "recoveryAttestationHash") !==
       Object.hasOwn(input, "recoveryAttestation") ||
     typeof input.symbol !== "string" ||
-    !isPlanningSymbol(input.symbol) ||
+    (!isPlanningSymbol(input.symbol) &&
+      !(hasTradeCommandReceipt && /^[A-Z0-9]{2,32}$/u.test(input.symbol))) ||
     [input.allocation, input.grossNotionalCap, input.maxDeviationBps].some(
       (value) => typeof value !== "string" || value.length > 128,
     )
   )
     return withCounts(failed("INVALID_INPUT"), exchangeReads, 0);
+
+  const tradeCommandReceipt = hasTradeCommandReceipt
+    ? rehydrateOperatorMainnetTradeCommandReceipt(input.tradeCommandReceipt)
+    : undefined;
+  if (
+    (tradeCommandReceipt !== undefined && !tradeCommandReceipt.ok) ||
+    (hasTradeCommandReceipt &&
+      (Object.hasOwn(input, "recoveryAttestation") ||
+        Object.hasOwn(input, "recoveryAttestationHash")))
+  )
+    return withCounts(
+      failed("TRADE_COMMAND_RECEIPT_INVALID"),
+      exchangeReads,
+      0,
+    );
+
+  if (tradeCommandReceipt?.ok) {
+    const allocation = DecimalValue.fromString(input.allocation as string);
+    const grossNotionalCap = DecimalValue.fromString(
+      input.grossNotionalCap as string,
+    );
+    const maxDeviationBps = DecimalValue.fromString(
+      input.maxDeviationBps as string,
+    );
+    if (
+      !allocation.ok ||
+      !grossNotionalCap.ok ||
+      !maxDeviationBps.ok ||
+      tradeCommandReceipt.value.symbol !== input.symbol ||
+      tradeCommandReceipt.value.allocation.compare(allocation.value) !== 0 ||
+      tradeCommandReceipt.value.grossNotionalCap.compare(
+        grossNotionalCap.value,
+      ) !== 0 ||
+      tradeCommandReceipt.value.maxDeviationBps.compare(
+        maxDeviationBps.value,
+      ) !== 0
+    )
+      return withCounts(
+        failed("TRADE_COMMAND_INSTRUCTION_MISMATCH"),
+        exchangeReads,
+        0,
+      );
+  }
+
+  const makePlan = (planInput: {
+    readonly accountIdentityHash: string;
+    readonly quote: OperatorMainnetQuote;
+    readonly warningCodes: readonly "API_KEY_IP_UNBOUND"[];
+    readonly constraints: InstrumentConstraints;
+    readonly preparedAt: UtcTimestamp;
+  }): Result<OperatorMainnetTestPlan> => {
+    if (tradeCommandReceipt?.ok) {
+      const localNow = timestampFromEpochMs(wall());
+      if (!localNow.ok) return localNow;
+      if (
+        timestampToEpochMs(localNow.value) >=
+        timestampToEpochMs(tradeCommandReceipt.value.expiresAt)
+      )
+        return failed("TRADE_COMMAND_EXPIRED");
+      if (
+        tradeCommandReceipt.value.accountIdentityHash !==
+        planInput.accountIdentityHash
+      )
+        return failed("TRADE_COMMAND_ACCOUNT_MISMATCH");
+      const directPlan = createOperatorMainnetTradeCommandPlan({
+        receipt: tradeCommandReceipt.value,
+        quote: planInput.quote,
+        warningCodes: planInput.warningCodes,
+        constraints: planInput.constraints,
+        preparedAt: planInput.preparedAt,
+      });
+      return directPlan.ok
+        ? ok(directPlan.value as unknown as OperatorMainnetTestPlan)
+        : directPlan;
+    }
+    return createOperatorMainnetTestPlan({
+      accountIdentityHash: planInput.accountIdentityHash,
+      symbol: input.symbol as string,
+      nonce: randomUUID(),
+      allocation: input.allocation as string,
+      grossNotionalCap: input.grossNotionalCap as string,
+      maxDeviationBps: input.maxDeviationBps as string,
+      quote: planInput.quote,
+      warningCodes: planInput.warningCodes,
+      constraints: planInput.constraints,
+      preparedAt: planInput.preparedAt,
+      ...(recoveryAttestationHash?.ok
+        ? { recoveryAttestationHash: recoveryAttestationHash.value }
+        : {}),
+    });
+  };
 
   const recoveryAttestation = Object.hasOwn(input, "recoveryAttestation")
     ? rehydrateOperatorMainnetRecoveryAttestation(input.recoveryAttestation)
@@ -275,6 +411,222 @@ export async function prepareMainnetOperatorTest(
   };
   try {
     const loaded = await credentialLoader.load("mainnet");
+    if (tradeCommandReceipt?.ok) {
+      try {
+        // Freeze the exact direct-command terms before reading the bounded v3
+        // account facts. This path deliberately does not invoke the full A/B audit.
+        evidencePath = "compact";
+        const compactReader = createCompactOperatorAccountReader({
+          credentials: loaded,
+          request,
+          utcClock: wall,
+          monotonicClock: monotonic,
+        });
+        accountTransport = compactReader.transport;
+        const identity = await readCompactOperatorAccountIdentity(
+          compactReader.reader,
+          loaded,
+        );
+        if (
+          identity.accountBinding.accountIdentityHash !==
+          tradeCommandReceipt.value.accountIdentityHash
+        )
+          return withCounts(
+            failed("TRADE_COMMAND_ACCOUNT_MISMATCH"),
+            exchangeReads,
+            0,
+          );
+        const initialInstrument = await new BybitMainnetReadCapabilityFacade(
+          compactReader.transport,
+        ).readInstrument(input.symbol, { requireOneX: true });
+        const publicMarkets = new BybitPublicMarketClient({
+          transport: new BybitPublicTransport({ request }),
+        });
+        const initialQuote = await publicMarkets.readOperatorQuote(
+          input.symbol,
+          {
+            directTrade: true,
+          },
+        );
+        const plan = makePlan({
+          accountIdentityHash: identity.accountBinding.accountIdentityHash,
+          quote: initialQuote,
+          warningCodes: identity.credentialPosture.warnings,
+          constraints: initialInstrument.constraints,
+          preparedAt: initialQuote.collectionCompletedAt,
+        });
+        if (!plan.ok) return withCounts(plan, exchangeReads, 0);
+        const directAccount = await collectDirectTradeAccountEvidence(
+          compactReader.reader,
+          loaded,
+          identity,
+        );
+        const fee = await readPreparationFee(
+          compactReader.transport,
+          input.symbol,
+        );
+        if (!fee.ok) return withCounts(fee, exchangeReads, 0);
+        const directObservation = directAccount.observations[0]!;
+        const earlyProviderMs = Math.max(
+          timestampToEpochMs(identity.accountBinding.authenticatedAt),
+          timestampToEpochMs(directObservation.modeObservedAt),
+          timestampToEpochMs(directObservation.balanceObservedAt),
+          timestampToEpochMs(fee.value.observedAt),
+        );
+        const earlyProviderTime = timestampFromEpochMs(earlyProviderMs);
+        if (!earlyProviderTime.ok)
+          return withCounts(
+            failed("PROVIDER_TIME_UNAVAILABLE", { source: "provider-time" }),
+            exchangeReads,
+            0,
+          );
+        const accountCheck = validateCompactOperatorAccountForPlan(
+          plan.value,
+          directAccount,
+          earlyProviderTime.value,
+        );
+        if (!accountCheck.ok) {
+          const reasonCode = accountCheck.error.details?.reasonCode;
+          return withCounts(
+            failed(
+              typeof reasonCode === "string"
+                ? reasonCode
+                : "ACCOUNT_EVIDENCE_INVALID",
+              accountCheck.error.details ?? {},
+            ),
+            exchangeReads,
+            0,
+          );
+        }
+        const capacity =
+          calculateOperatorMainnetTestCapacityFromAvailableBalance(
+            plan.value,
+            accountCheck.value.availableBalance,
+            fee.value,
+          );
+        if (!capacity.ok) return withCounts(capacity, exchangeReads, 0);
+        const exchange = new BybitMainnetExecutionAdapter({
+          transport: new BybitPrivateTransport({
+            environment: "mainnet",
+            credentials: loaded,
+            request,
+            clock: wall,
+          }),
+        });
+        const state = await exchange.readState({ instrument: input.symbol });
+        if (!state.ok)
+          return withCounts(
+            failed("TARGET_STATE_READ_FAILED"),
+            exchangeReads,
+            0,
+          );
+        const fresh: Omit<
+          MainnetOperatorTestDirectFreshEvidence,
+          "providerTimeAnchor"
+        > = {
+          compactAccount: directAccount,
+          state: state.value,
+          instrument: initialInstrument,
+          quote: initialQuote,
+          feeRate: fee.value,
+        };
+        const providerTimeAnchor = deriveDirectTradeProviderTimeAnchor(fresh);
+        if (!providerTimeAnchor)
+          return withCounts(
+            failed("PROVIDER_TIME_UNAVAILABLE", { source: "provider-time" }),
+            exchangeReads,
+            0,
+          );
+        const anchoredFresh: MainnetOperatorTestDirectFreshEvidence = {
+          ...fresh,
+          providerTimeAnchor,
+        };
+        const validated = validateMainnetOperatorTestEvidence(
+          plan.value,
+          anchoredFresh,
+        );
+        if (!validated.ok) {
+          const reasonCode = validated.error.details?.reasonCode;
+          return withCounts(
+            failed(
+              typeof reasonCode === "string"
+                ? reasonCode
+                : "FRESH_MAINNET_EVIDENCE_INVALID",
+              validated.error.details ?? {},
+            ),
+            exchangeReads,
+            0,
+          );
+        }
+        const capturedAtMonotonic = stageClock();
+        if (!Number.isFinite(capturedAtMonotonic) || capturedAtMonotonic < 0)
+          return withCounts(
+            failed("MONOTONIC_CLOCK_INVALID"),
+            exchangeReads,
+            0,
+          );
+        const persistence = (
+          dependencies.openPersistence ?? openSqlitePersistence
+        )({
+          environment: "mainnet",
+          scope: mainnetOperatorTestPersistenceScope(
+            plan.value.accountIdentityHash,
+          ),
+          clock: { now: () => state.value.serverTime },
+        });
+        if (!persistence.ok) return withCounts(persistence, exchangeReads, 0);
+        try {
+          const journal = persistence.value.operatorMainnetTest;
+          if (!journal)
+            return withCounts(
+              failed("OPERATOR_PLAN_STORE_UNAVAILABLE"),
+              exchangeReads,
+              0,
+            );
+          const stored = journal.persistPreparedPlan(plan.value);
+          if (!stored.ok) return withCounts(stored, exchangeReads, 0);
+          const prepared: MainnetOperatorTestPreparation = {
+            plan: plan.value,
+            exchangeReads,
+            exchangeWrites: 0,
+            ...metricsFor(exchangeReads),
+          };
+          Object.defineProperty(prepared, "directTradeAdmission", {
+            configurable: false,
+            enumerable: false,
+            value: Object.freeze({
+              planHash: plan.value.contentHash,
+              evidence: anchoredFresh,
+              capturedAtMonotonic,
+            }),
+            writable: false,
+          });
+          return ok(prepared);
+        } finally {
+          persistence.value.close();
+        }
+      } catch (error) {
+        const reasonCode =
+          error instanceof CompactAccountEvidenceUnavailable
+            ? error.reasonCode
+            : error instanceof BybitAccountReadError
+              ? error.code
+              : error instanceof BybitMainnetReadCapabilityError
+                ? error.code === "UNSUPPORTED_LEVERAGE"
+                  ? "TARGET_LEVERAGE_UNSUPPORTED"
+                  : error.code === "UNSUPPORTED_INSTRUMENT"
+                    ? "TARGET_INSTRUMENT_UNSUPPORTED"
+                    : "INSTRUMENT_RESPONSE_INVALID"
+                : error instanceof OperatorEvidenceReadError
+                  ? error.reasonCode
+                  : "DIRECT_TRADE_PREPARATION_EVIDENCE_UNAVAILABLE";
+        return withCounts(
+          failed(reasonCode, { source: "account" }),
+          exchangeReads,
+          0,
+        );
+      }
+    }
     const compactReader = createCompactOperatorAccountReader({
       credentials: loaded,
       request,
@@ -337,20 +689,12 @@ export async function prepareMainnetOperatorTest(
     const quote = await publicMarkets.readOperatorQuote(input.symbol);
     // Exact venue rounding and both entry/exit fees own affordability. Do this
     // before the comparatively expensive target-state reads or persistence.
-    const candidate = createOperatorMainnetTestPlan({
+    const candidate = makePlan({
       accountIdentityHash: accountCheck.value.accountIdentityHash,
-      symbol: input.symbol,
-      nonce: randomUUID(),
-      allocation: input.allocation,
-      grossNotionalCap: input.grossNotionalCap,
-      maxDeviationBps: input.maxDeviationBps,
       quote,
       warningCodes: accountCheck.value.credentialPosture.warnings,
       constraints: instrument.constraints,
       preparedAt: quote.observedAt,
-      ...(recoveryAttestationHash?.ok
-        ? { recoveryAttestationHash: recoveryAttestationHash.value }
-        : {}),
     });
     if (!candidate.ok) return withCounts(candidate, exchangeReads, 0);
     const earlyFeeAge =
@@ -455,6 +799,19 @@ export async function prepareMainnetOperatorTest(
           : "COMPACT_EVIDENCE_INVALID";
     }
   } catch (error) {
+    if (error instanceof BybitMainnetReadCapabilityError)
+      return withCounts(
+        failed(
+          error.code === "UNSUPPORTED_LEVERAGE"
+            ? "TARGET_LEVERAGE_UNSUPPORTED"
+            : error.code === "UNSUPPORTED_INSTRUMENT"
+              ? "TARGET_INSTRUMENT_UNSUPPORTED"
+              : "INSTRUMENT_RESPONSE_INVALID",
+          { source: "instrument", causeCode: error.code },
+        ),
+        exchangeReads,
+        0,
+      );
     // No raw provider error is exposed. The route and safe reason explain extra reads.
     compactFallbackReason =
       error instanceof CompactAccountEvidenceUnavailable &&
@@ -520,11 +877,15 @@ export async function prepareMainnetOperatorTest(
         );
       instrument = await new BybitMainnetReadCapabilityFacade(
         accountTransport,
-      ).readInstrument(input.symbol);
+      ).readInstrument(input.symbol, {
+        requireOneX: tradeCommandReceipt?.ok === true,
+      });
       const publicMarkets = new BybitPublicMarketClient({
         transport: new BybitPublicTransport({ request }),
       });
-      quote = await publicMarkets.readOperatorQuote(input.symbol);
+      quote = await publicMarkets.readOperatorQuote(input.symbol, {
+        directTrade: tradeCommandReceipt?.ok === true,
+      });
       const fallbackFee = await readPreparationFee(
         accountTransport,
         input.symbol,
@@ -545,6 +906,7 @@ export async function prepareMainnetOperatorTest(
         symbol: input.symbol,
         instrument,
         evaluatedAt: providerTime.value,
+        ...(tradeCommandReceipt?.ok === true ? { directTrade: true } : {}),
       });
       if (
         readiness.verdict !== "READY" ||
@@ -584,20 +946,12 @@ export async function prepareMainnetOperatorTest(
         exchangeReads,
         0,
       );
-    const plan = createOperatorMainnetTestPlan({
+    const plan = makePlan({
       accountIdentityHash,
-      symbol: input.symbol,
-      nonce: randomUUID(),
-      allocation: input.allocation,
-      grossNotionalCap: input.grossNotionalCap,
-      maxDeviationBps: input.maxDeviationBps,
       quote,
       warningCodes,
       constraints: instrument.constraints,
       preparedAt: providerTime.value,
-      ...(recoveryAttestationHash?.ok
-        ? { recoveryAttestationHash: recoveryAttestationHash.value }
-        : {}),
     });
     if (!plan.ok) return withCounts(plan, exchangeReads, 0);
     // Recheck fresh fee/balance evidence at the shared persistence boundary,
@@ -692,7 +1046,9 @@ export async function prepareMainnetOperatorTest(
     const persistence = (dependencies.openPersistence ?? openSqlitePersistence)(
       {
         environment: "mainnet",
-        scope: scopeFor(plan.value.accountIdentityHash),
+        scope: mainnetOperatorTestPersistenceScope(
+          plan.value.accountIdentityHash,
+        ),
         clock: { now: () => providerTime.value },
       },
     );
@@ -720,12 +1076,20 @@ export async function prepareMainnetOperatorTest(
   } catch (error) {
     return withCounts(
       failed(
-        error instanceof BybitPublicTransportError
-          ? (error.reasonCode ??
+        error instanceof BybitMainnetReadCapabilityError
+          ? error.code === "UNSUPPORTED_LEVERAGE"
+            ? "TARGET_LEVERAGE_UNSUPPORTED"
+            : error.code === "UNSUPPORTED_INSTRUMENT"
+              ? "TARGET_INSTRUMENT_UNSUPPORTED"
+              : "INSTRUMENT_RESPONSE_INVALID"
+          : error instanceof BybitPublicTransportError
+            ? (error.reasonCode ??
               `PUBLIC_${error.kind.toUpperCase().replaceAll("-", "_")}`)
-          : error instanceof BybitPublicMarketMappingError
-            ? `PUBLIC_MARKET_${error.kind.toUpperCase().replaceAll("-", "_")}`
-            : "PREPARATION_FAILED_CLOSED",
+            : error instanceof BybitPublicMarketMappingError
+              ? `PUBLIC_MARKET_${error.kind.toUpperCase().replaceAll("-", "_")}`
+              : error instanceof CompactAccountEvidenceUnavailable
+                ? error.reasonCode
+                : "PREPARATION_FAILED_CLOSED",
       ),
       exchangeReads,
       0,

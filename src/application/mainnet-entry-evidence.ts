@@ -1,4 +1,7 @@
-import { changedAccountCriticalGroups } from "../domain/account/account-evidence-consistency.js";
+import {
+  accountCriticalDifferenceIsOnlyNumericAssetMovement,
+  changedAccountCriticalGroups,
+} from "../domain/account/account-evidence-consistency.js";
 import { createHash } from "node:crypto";
 
 import {
@@ -26,6 +29,7 @@ import {
   validateOperatorMainnetQuoteForPlan,
   rehydrateOperatorMainnetQuote,
   OPERATOR_MAINNET_QUOTE_FRESHNESS_MS,
+  OPERATOR_MAINNET_TRADE_COMMAND_PLAN_SCHEMA_VERSION,
   type OperatorMainnetQuote,
   type OperatorMainnetTestPlan,
 } from "../domain/execution/operator-mainnet-test-plan.js";
@@ -84,6 +88,8 @@ export interface MainnetOperatorTestFreshEvidence {
 
 export const OPERATOR_MAINNET_COMPACT_ACCOUNT_SCHEMA_VERSION =
   "operator-mainnet-compact-account/v1" as const;
+export const OPERATOR_MAINNET_DIRECT_ACCOUNT_SCHEMA_VERSION =
+  "operator-mainnet-direct-account/v1" as const;
 
 export interface MainnetOperatorTestCompactAccountObservation {
   readonly mode: AccountModeEvidence;
@@ -99,6 +105,15 @@ export interface MainnetOperatorTestCompactAccountEvidence {
   readonly credentialPosture: AccountCredentialPosture;
   readonly observations: readonly [
     MainnetOperatorTestCompactAccountObservation,
+    MainnetOperatorTestCompactAccountObservation,
+  ];
+}
+
+export interface MainnetOperatorTestDirectAccountEvidence {
+  readonly schemaVersion: typeof OPERATOR_MAINNET_DIRECT_ACCOUNT_SCHEMA_VERSION;
+  readonly accountBinding: AccountBinding;
+  readonly credentialPosture: AccountCredentialPosture;
+  readonly observations: readonly [
     MainnetOperatorTestCompactAccountObservation,
   ];
 }
@@ -124,8 +139,20 @@ export type MainnetOperatorTestCompactFreshEvidence = {
     }
 );
 
+export type MainnetOperatorTestDirectFreshEvidence = {
+  readonly compactAccount: MainnetOperatorTestDirectAccountEvidence;
+  readonly instrument: BybitInstrumentInfo;
+  readonly quote: OperatorMainnetQuote;
+  readonly feeRate: OperatorMainnetFeeRateEvidence;
+  readonly state: MainnetExchangeReadState;
+  /** Explicit latest Bybit response-time anchor for the one-shot v3 path. */
+  readonly providerTimeAnchor: UtcTimestamp;
+};
+
 export type MainnetOperatorTestAdmissionEvidence =
-  MainnetOperatorTestFreshEvidence | MainnetOperatorTestCompactFreshEvidence;
+  | MainnetOperatorTestFreshEvidence
+  | MainnetOperatorTestCompactFreshEvidence
+  | MainnetOperatorTestDirectFreshEvidence;
 
 export interface MainnetOperatorTestEvidencePort {
   collect(symbol: string): Promise<MainnetOperatorTestAdmissionEvidence>;
@@ -302,6 +329,7 @@ function unprovenWalletBalance(pass: "A" | "B"): Result<DecimalValue> {
 
 function currentAvailableBalance(
   account: AccountEvidenceBundle,
+  allowLatestBalance: boolean,
 ): Result<DecimalValue> {
   const passA = account.criticalPasses.A;
   const passB = account.criticalPasses.B;
@@ -311,7 +339,7 @@ function currentAvailableBalance(
   const availableB = knownUsd(passB.totals.totalAvailableBalance);
   if (availableA === undefined) return unprovenWalletBalance("A");
   if (availableB === undefined) return unprovenWalletBalance("B");
-  if (availableA.compare(availableB) !== 0)
+  if (!allowLatestBalance && availableA.compare(availableB) !== 0)
     return blocked(
       "AVAILABLE_BALANCE_SNAPSHOTS_DIFFER",
       "valid wallet A and B available-balance snapshots differ",
@@ -321,7 +349,7 @@ function currentAvailableBalance(
         predicate: "totalAvailableBalance",
       },
     );
-  return ok(availableA);
+  return ok(allowLatestBalance ? availableB : availableA);
 }
 
 function validateCurrentCommitments(
@@ -389,8 +417,12 @@ export function calculateOperatorMainnetTestCapacity(
   plan: OperatorMainnetTestPlan,
   account: AccountEvidenceBundle,
   feeRate: OperatorMainnetFeeRateEvidence,
+  options: { readonly useLatestAvailableBalance?: boolean } = {},
 ): Result<OperatorMainnetTestCapacity> {
-  const availableBalance = currentAvailableBalance(account);
+  const availableBalance = currentAvailableBalance(
+    account,
+    options.useLatestAvailableBalance === true,
+  );
   if (!availableBalance.ok) return availableBalance;
   const commitments = validateCurrentCommitments(account);
   if (!commitments.ok) return commitments;
@@ -525,15 +557,23 @@ function validateCompactAccountEvidence(
   readonly accountIdentityHash: string;
   readonly credentialPosture: AccountCredentialPosture;
 }> {
+  const directSchema =
+    plainDataRecord(input) &&
+    input.schemaVersion === OPERATOR_MAINNET_DIRECT_ACCOUNT_SCHEMA_VERSION;
+  const expectedObservationCount = directSchema ? 1 : 2;
   if (
     !plainDataRecord(input) ||
     Reflect.ownKeys(input).length !== 4 ||
-    input.schemaVersion !== OPERATOR_MAINNET_COMPACT_ACCOUNT_SCHEMA_VERSION ||
+    (input.schemaVersion !== OPERATOR_MAINNET_COMPACT_ACCOUNT_SCHEMA_VERSION &&
+      input.schemaVersion !== OPERATOR_MAINNET_DIRECT_ACCOUNT_SCHEMA_VERSION) ||
+    (directSchema &&
+      plan?.schemaVersion !==
+        OPERATOR_MAINNET_TRADE_COMMAND_PLAN_SCHEMA_VERSION) ||
     !Object.hasOwn(input, "accountBinding") ||
     !Object.hasOwn(input, "credentialPosture") ||
     !Object.hasOwn(input, "observations") ||
     !Array.isArray(input.observations) ||
-    input.observations.length !== 2
+    input.observations.length !== expectedObservationCount
   )
     return blocked(
       "FRESH_MAINNET_EVIDENCE_INVALID",
@@ -622,31 +662,34 @@ function validateCompactAccountEvidence(
       balanceObservedAt: balanceObservedAt.value,
     });
   }
-  const [first, second] = observations;
+  const first = observations[0];
+  const second = observations.at(-1);
   if (!first || !second) return blocked("FRESH_MAINNET_EVIDENCE_INVALID");
-  const sameMode =
-    JSON.stringify(first.mode.utaStatus) ===
-      JSON.stringify(second.mode.utaStatus) &&
-    JSON.stringify(first.mode.marginMode) ===
-      JSON.stringify(second.mode.marginMode) &&
-    JSON.stringify(first.mode.spotHedging) ===
-      JSON.stringify(second.mode.spotHedging);
-  if (!sameMode)
-    return blocked(
-      "CRITICAL_STATE_CHANGED",
-      "account mode changed between the two compact observations",
-      { criticalChangedGroups: "account" },
-    );
-  if (first.availableBalance.compare(second.availableBalance) !== 0)
-    return blocked(
-      "AVAILABLE_BALANCE_SNAPSHOTS_DIFFER",
-      "account-wide available balance changed between the two compact observations",
-      {
-        source: "balance",
-        pass: "A/B",
-        predicate: "totalAvailableBalance",
-      },
-    );
+  if (!directSchema) {
+    const sameMode =
+      JSON.stringify(first.mode.utaStatus) ===
+        JSON.stringify(second.mode.utaStatus) &&
+      JSON.stringify(first.mode.marginMode) ===
+        JSON.stringify(second.mode.marginMode) &&
+      JSON.stringify(first.mode.spotHedging) ===
+        JSON.stringify(second.mode.spotHedging);
+    if (!sameMode)
+      return blocked(
+        "CRITICAL_STATE_CHANGED",
+        "account mode changed between the two compact observations",
+        { criticalChangedGroups: "account" },
+      );
+    if (first.availableBalance.compare(second.availableBalance) !== 0)
+      return blocked(
+        "AVAILABLE_BALANCE_SNAPSHOTS_DIFFER",
+        "account-wide available balance changed between the two compact observations",
+        {
+          source: "balance",
+          pass: "A/B",
+          predicate: "totalAvailableBalance",
+        },
+      );
+  }
   const mode = second.mode;
   const utaStatus = compactKnownFact(mode.utaStatus, (value): value is number =>
     Number.isSafeInteger(value),
@@ -698,12 +741,52 @@ function validateCompactAccountEvidence(
   const identityAge =
     providerMs - timestampToEpochMs(binding.value.authenticatedAt);
   const accountAgeAtReadMs = Math.max(identityAge, ...ages);
-  if (
+  const stale = (age: number) =>
+    age < 0 || age > PROVISIONAL_M1_MAX_ACCOUNT_EVIDENCE_AGE_MS;
+  if (directSchema) {
+    const directAges: readonly (readonly [
+      "identity" | "account-mode" | "totalAvailableBalance",
+      "account" | "balance",
+      number,
+    ])[] = [
+      ["identity", "account", identityAge],
+      ...observations.map(
+        (item) =>
+          [
+            "account-mode",
+            "account",
+            providerMs - timestampToEpochMs(item.modeObservedAt),
+          ] as const,
+      ),
+      ...observations.map(
+        (item) =>
+          [
+            "totalAvailableBalance",
+            "balance",
+            providerMs - timestampToEpochMs(item.balanceObservedAt),
+          ] as const,
+      ),
+    ];
+    const staleFact = directAges.find(([, , age]) => stale(age));
+    if (staleFact) {
+      const [predicate, source, age] = staleFact;
+      return blocked(
+        "MAINNET_EVIDENCE_STALE",
+        "account evidence is outside the allowed freshness window",
+        {
+          ...timeFailureDetails(
+            source,
+            age,
+            PROVISIONAL_M1_MAX_ACCOUNT_EVIDENCE_AGE_MS,
+          ),
+          predicate,
+        },
+      );
+    }
+  } else if (
     identityAge < 0 ||
     identityAge > PROVISIONAL_M1_MAX_ACCOUNT_EVIDENCE_AGE_MS ||
-    ages.some(
-      (age) => age < 0 || age > PROVISIONAL_M1_MAX_ACCOUNT_EVIDENCE_AGE_MS,
-    )
+    ages.some(stale)
   ) {
     const accountAges = [
       identityAge,
@@ -741,7 +824,9 @@ function validateCompactAccountEvidence(
 
 export function validateCompactOperatorAccountForPlan(
   plan: OperatorMainnetTestPlan | undefined,
-  compactAccount: MainnetOperatorTestCompactAccountEvidence,
+  compactAccount:
+    | MainnetOperatorTestCompactAccountEvidence
+    | MainnetOperatorTestDirectAccountEvidence,
   providerTime: UtcTimestamp,
 ): Result<{
   readonly availableBalance: DecimalValue;
@@ -1048,15 +1133,27 @@ function isTerminalOperatorCoverage(
  */
 function approvedOperatorAuxiliaryHistoryGapCount(
   bundle: AccountEvidenceBundle,
+  allowNumericAssetMovement = false,
 ): number | undefined {
   const discovery = bundle.discovery;
+  const allowsNumericMovement =
+    allowNumericAssetMovement &&
+    bundle.consistency.structuralComparison === "changed" &&
+    accountCriticalDifferenceIsOnlyNumericAssetMovement(bundle);
+  const allowedConsistencyReasons = allowsNumericMovement
+    ? ["COVERAGE_INCOMPLETE", "CRITICAL_STATE_CHANGED"]
+    : ["COVERAGE_INCOMPLETE"];
   if (
     bundle.collectionStatus !== "incomplete" ||
     discovery === null ||
     bundle.diagnostics.length !== 0 ||
-    bundle.consistency.structuralComparison !== "unchanged" ||
-    bundle.consistency.reasonCodes.length !== 1 ||
-    bundle.consistency.reasonCodes[0] !== "COVERAGE_INCOMPLETE"
+    (bundle.consistency.structuralComparison !== "unchanged" &&
+      !allowsNumericMovement) ||
+    bundle.consistency.reasonCodes.length !==
+      allowedConsistencyReasons.length ||
+    allowedConsistencyReasons.some(
+      (reason, index) => bundle.consistency.reasonCodes[index] !== reason,
+    )
   )
     return undefined;
 
@@ -1135,7 +1232,9 @@ export function validateMainnetOperatorTestEvidence(
   evidenceInput: MainnetOperatorTestAdmissionEvidence,
 ): Result<{
   readonly account:
-    AccountEvidenceBundle | MainnetOperatorTestCompactAccountEvidence;
+    | AccountEvidenceBundle
+    | MainnetOperatorTestCompactAccountEvidence
+    | MainnetOperatorTestDirectAccountEvidence;
   readonly quote: OperatorMainnetQuote;
   readonly accountAgeAtReadMs: number;
   readonly quoteAgeAtReadMs: number;
@@ -1211,7 +1310,13 @@ export function validateMainnetOperatorTestEvidence(
     !Array.isArray(readiness.providerReasonCodes)
   )
     return blocked("FRESH_MAINNET_EVIDENCE_INVALID");
-  if (readiness.reasonCodes.includes("CRITICAL_STATE_CHANGED"))
+  const v3WalletMovementOnly =
+    plan.schemaVersion === OPERATOR_MAINNET_TRADE_COMMAND_PLAN_SCHEMA_VERSION &&
+    accountCriticalDifferenceIsOnlyNumericAssetMovement(account.value);
+  if (
+    readiness.reasonCodes.includes("CRITICAL_STATE_CHANGED") &&
+    !v3WalletMovementOnly
+  )
     return blocked(
       "CRITICAL_STATE_CHANGED",
       "account critical state changed between observations",
@@ -1225,6 +1330,7 @@ export function validateMainnetOperatorTestEvidence(
   const plannedIpWarning = plan.warningCodes.includes("API_KEY_IP_UNBOUND");
   const approvedAuxiliaryGapCount = approvedOperatorAuxiliaryHistoryGapCount(
     account.value,
+    plan.schemaVersion === OPERATOR_MAINNET_TRADE_COMMAND_PLAN_SCHEMA_VERSION,
   );
   const allowsApprovedAuxiliaryGaps = approvedAuxiliaryGapCount !== undefined;
   const hasAuxiliaryCoverageWarning = readinessWarnings.includes(
@@ -1423,6 +1529,13 @@ export function validateMainnetOperatorTestEvidence(
     plan,
     account.value,
     feeRate.value,
+    {
+      useLatestAvailableBalance:
+        plan.schemaVersion ===
+          OPERATOR_MAINNET_TRADE_COMMAND_PLAN_SCHEMA_VERSION &&
+        (account.value.consistency.structuralComparison === "unchanged" ||
+          v3WalletMovementOnly),
+    },
   );
   if (!capacity.ok) return capacity;
   return ok({
@@ -1437,7 +1550,9 @@ export function validateMainnetOperatorTestEvidence(
 
 function isCompactOperatorEvidence(
   input: unknown,
-): input is MainnetOperatorTestCompactFreshEvidence {
+): input is
+  | MainnetOperatorTestCompactFreshEvidence
+  | MainnetOperatorTestDirectFreshEvidence {
   return plainDataRecord(input) && Object.hasOwn(input, "compactAccount");
 }
 
@@ -1542,11 +1657,42 @@ export function validateCompactOperatorPreparationEvidence(
   });
 }
 
+/**
+ * A direct v3 handoff anchors freshness to actual Bybit response times. The
+ * quote timestamp is intentionally excluded: a bad/future quote must remain
+ * visible to quote validation instead of moving the clock used to validate it.
+ */
+export function deriveDirectTradeProviderTimeAnchor(
+  evidence: Omit<MainnetOperatorTestDirectFreshEvidence, "providerTimeAnchor">,
+): UtcTimestamp | undefined {
+  const sourceTimes: unknown[] = [
+    evidence.state.serverTime,
+    evidence.compactAccount.accountBinding.authenticatedAt,
+    evidence.feeRate.observedAt,
+    evidence.quote.collectionCompletedAt,
+    ...evidence.compactAccount.observations.flatMap((observation) => [
+      observation.modeObservedAt,
+      observation.balanceObservedAt,
+    ]),
+  ];
+  const parsed = sourceTimes.map(parseUtcTimestamp);
+  if (parsed.some((item) => !item.ok)) return undefined;
+  const values = parsed.flatMap((item) => (item.ok ? [item.value] : []));
+  const latest = values.reduce((current, item) =>
+    timestampToEpochMs(item) > timestampToEpochMs(current) ? item : current,
+  );
+  return latest;
+}
+
 function validateCompactMainnetOperatorTestEvidence(
   plan: OperatorMainnetTestPlan,
-  evidenceInput: MainnetOperatorTestCompactFreshEvidence,
+  evidenceInput:
+    | MainnetOperatorTestCompactFreshEvidence
+    | MainnetOperatorTestDirectFreshEvidence,
 ): Result<{
-  readonly account: MainnetOperatorTestCompactAccountEvidence;
+  readonly account:
+    | MainnetOperatorTestCompactAccountEvidence
+    | MainnetOperatorTestDirectAccountEvidence;
   readonly quote: OperatorMainnetQuote;
   readonly accountAgeAtReadMs: number;
   readonly quoteAgeAtReadMs: number;
@@ -1565,7 +1711,13 @@ function validateCompactMainnetOperatorTestEvidence(
   if (
     !plainDataRecord(evidenceInput) ||
     Reflect.ownKeys(evidenceInput).length !==
-      4 + Number(hasState) + Number(hasManualState) ||
+      4 +
+        Number(hasState) +
+        Number(hasManualState) +
+        Number(
+          evidenceInput.compactAccount?.schemaVersion ===
+            OPERATOR_MAINNET_DIRECT_ACCOUNT_SCHEMA_VERSION,
+        ) ||
     !Object.hasOwn(evidenceInput, "compactAccount") ||
     !Object.hasOwn(evidenceInput, "instrument") ||
     !Object.hasOwn(evidenceInput, "quote") ||
@@ -1573,20 +1725,79 @@ function validateCompactMainnetOperatorTestEvidence(
     !plainDataRecord(evidenceInput.instrument) ||
     (!hasState && !hasManualState) ||
     (hasState && !plainDataRecord(evidenceInput.state)) ||
-    (hasManualState && !plainDataRecord(evidenceInput.manualTargetState))
+    (hasManualState &&
+      (!Object.hasOwn(evidenceInput, "manualTargetState") ||
+        !plainDataRecord(
+          (evidenceInput as MainnetOperatorTestCompactFreshEvidence)
+            .manualTargetState,
+        )))
   )
     return blocked("FRESH_MAINNET_EVIDENCE_INVALID");
 
   const state = evidenceInput.state;
-  const manualTargetState = evidenceInput.manualTargetState;
+  const manualTargetState =
+    "manualTargetState" in evidenceInput
+      ? evidenceInput.manualTargetState
+      : undefined;
   const serverTime = parseUtcTimestamp(
     state?.serverTime ?? manualTargetState?.serverTime,
   );
   if (!serverTime.ok) return blocked("EVIDENCE_TIME_INVALID");
+  const directAccount =
+    evidenceInput.compactAccount.schemaVersion ===
+    OPERATOR_MAINNET_DIRECT_ACCOUNT_SCHEMA_VERSION;
+  let freshnessTime = serverTime.value;
+  if (directAccount) {
+    const directEvidence =
+      evidenceInput as MainnetOperatorTestDirectFreshEvidence;
+    const anchor = parseUtcTimestamp(directEvidence.providerTimeAnchor);
+    if (
+      plan.schemaVersion !==
+        OPERATOR_MAINNET_TRADE_COMMAND_PLAN_SCHEMA_VERSION ||
+      !state ||
+      !anchor.ok
+    )
+      return blocked("FRESH_MAINNET_EVIDENCE_INVALID");
+    const derivedAnchor = deriveDirectTradeProviderTimeAnchor({
+      compactAccount:
+        evidenceInput.compactAccount as MainnetOperatorTestDirectAccountEvidence,
+      instrument: evidenceInput.instrument,
+      quote: evidenceInput.quote,
+      feeRate: evidenceInput.feeRate,
+      state,
+    });
+    if (
+      !derivedAnchor ||
+      timestampToEpochMs(anchor.value) !== timestampToEpochMs(derivedAnchor)
+    )
+      return blocked(
+        "FRESH_MAINNET_EVIDENCE_INVALID",
+        "direct-trade response-time anchor does not match its provider evidence",
+        { source: "provider-time", causeCode: "PROVIDER_TIME_ANCHOR_INVALID" },
+      );
+    freshnessTime = anchor.value;
+    const targetStateAge =
+      timestampToEpochMs(freshnessTime) - timestampToEpochMs(serverTime.value);
+    if (
+      targetStateAge < 0 ||
+      targetStateAge > PROVISIONAL_M1_MAX_ACCOUNT_EVIDENCE_AGE_MS
+    )
+      return blocked(
+        "MAINNET_EVIDENCE_STALE",
+        "target-state evidence is outside the allowed freshness window",
+        timeFailureDetails(
+          "target-state",
+          targetStateAge,
+          PROVISIONAL_M1_MAX_ACCOUNT_EVIDENCE_AGE_MS,
+        ),
+      );
+  } else if (Object.hasOwn(evidenceInput, "providerTimeAnchor")) {
+    return blocked("FRESH_MAINNET_EVIDENCE_INVALID");
+  }
   const account = validateCompactAccountEvidence(
     plan,
     evidenceInput.compactAccount,
-    serverTime.value,
+    freshnessTime,
   );
   if (!account.ok) return account;
   const quote = validateOperatorMainnetQuoteForPlan(
@@ -1718,10 +1929,10 @@ function validateCompactMainnetOperatorTestEvidence(
       { source: "fee", causeCode: "FEE_RATE_SYMBOL_MISMATCH" },
     );
   const quoteAgeAtReadMs =
-    timestampToEpochMs(serverTime.value) -
+    timestampToEpochMs(freshnessTime) -
     timestampToEpochMs(quote.value.observedAt);
   const feeRateAgeAtReadMs =
-    timestampToEpochMs(serverTime.value) -
+    timestampToEpochMs(freshnessTime) -
     timestampToEpochMs(feeRate.value.observedAt);
   if (quoteAgeAtReadMs < 0 || quoteAgeAtReadMs > plan.quoteFreshnessMs)
     return blocked(

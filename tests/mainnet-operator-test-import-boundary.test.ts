@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { readFile, readdir } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import test from "node:test";
 import ts from "typescript";
@@ -49,6 +49,16 @@ async function resolveLocalImport(
     }
   }
   return undefined;
+}
+
+async function sourceFiles(directory: string): Promise<string[]> {
+  const files: string[] = [];
+  for (const entry of await readdir(directory, { withFileTypes: true })) {
+    const path = resolve(directory, entry.name);
+    if (entry.isDirectory()) files.push(...(await sourceFiles(path)));
+    else if (entry.isFile() && /\.ts$/u.test(entry.name)) files.push(path);
+  }
+  return files;
 }
 
 function inspectStatusModule(source: string, file: string): string[] {
@@ -175,4 +185,39 @@ test("#31 status/reconciliation graph is GET-only and cannot reach an issuer or 
       ),
     ),
   );
+});
+
+test("#147 trade authority is imported only by the explicit operator CLI", async () => {
+  const tradeApplication = resolve(
+    repositoryRoot,
+    "src/application/mainnet-operator-trade.ts",
+  );
+  const operatorCli = resolve(
+    repositoryRoot,
+    "src/cli/mainnet-operator-test.ts",
+  );
+  const importers: string[] = [];
+  for (const file of await sourceFiles(resolve(repositoryRoot, "src"))) {
+    const parsed = ts.createSourceFile(
+      file,
+      await readFile(file, "utf8"),
+      ts.ScriptTarget.Latest,
+      true,
+    );
+    const specifiers: string[] = [];
+    for (const statement of parsed.statements) {
+      if (
+        (ts.isImportDeclaration(statement) ||
+          ts.isExportDeclaration(statement)) &&
+        statement.moduleSpecifier &&
+        ts.isStringLiteral(statement.moduleSpecifier)
+      )
+        specifiers.push(statement.moduleSpecifier.text);
+    }
+    for (const specifier of specifiers) {
+      if ((await resolveLocalImport(file, specifier)) === tradeApplication)
+        importers.push(file);
+    }
+  }
+  assert.deepEqual(importers, [operatorCli]);
 });

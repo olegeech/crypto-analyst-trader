@@ -121,6 +121,10 @@ test("operator quote plan rounds the bid, budget quantity and attached TP exactl
 
 test("manual recovery uses a versioned plan codec without changing legacy plan identity", () => {
   const legacy = value(validPlan());
+  assert.equal(
+    legacy.contentHash,
+    "sha256:024aeb930b7d52122f9f73bb4c97989637a39856555fc7b737a44cdabd308bc8",
+  );
   const legacyEncoded = value(
     encodeCanonicalArtifact("operator-mainnet-execution-test", legacy),
   );
@@ -133,6 +137,10 @@ test("manual recovery uses a versioned plan codec without changing legacy plan i
 
   const recoveryAttestationHash = `sha256:${"b".repeat(64)}` as PlanHash;
   const manual = value(validPlan({ recoveryAttestationHash }));
+  assert.equal(
+    manual.contentHash,
+    "sha256:7973a2a9b257c152b3124a707ab4ded460a94fab25159768661875fb7170ec7f",
+  );
   const encoded = value(
     encodeCanonicalArtifact("operator-mainnet-execution-test", manual),
   );
@@ -173,7 +181,7 @@ test("IP-unbound remains a hashed warning and cannot become an implicit blocker"
 
 test("operator quote attribution rejects wrong symbol, scope, origin and invalid books", () => {
   for (const invalid of [
-    { symbol: "BNBUSDT" },
+    { symbol: "BNB-USDT" },
     { category: "spot" },
     { origin: "https://api-testnet.bybit.com" },
     { bid: "0" },
@@ -184,6 +192,22 @@ test("operator quote attribution rejects wrong symbol, scope, origin and invalid
   ]) {
     assert.equal(createOperatorMainnetQuote(quoteInput(invalid)).ok, false);
   }
+  assert.equal(
+    createOperatorMainnetQuote(quoteInput({ symbol: "INJUSDT" })).ok,
+    true,
+    "operator quotes accept syntactically valid symbols for targeted provider validation",
+  );
+  assert.equal(
+    validPlan({
+      symbol: "INJUSDT",
+      quote: value(
+        createOperatorMainnetQuote(quoteInput({ symbol: "INJUSDT" })),
+      ),
+      constraints: constraints({ instrument: "INJUSDT" }),
+    }).ok,
+    false,
+    "the legacy M1 plan remains restricted to its configured research universe",
+  );
 });
 
 test("operator plan rejects stale or future provider quotes and invalid deviation", () => {
@@ -250,8 +274,13 @@ test("operator budget floors quantity and never raises an impossible minimum", (
     }),
   });
   assert.equal(belowMinimumNotional.ok, false);
-  if (!belowMinimumNotional.ok)
+  if (!belowMinimumNotional.ok) {
     assert.equal(belowMinimumNotional.error.code, "NOTIONAL_TOO_SMALL");
+    assert.deepEqual(belowMinimumNotional.error.details, {
+      computedNotional: "9",
+      minimumNotional: "10",
+    });
+  }
 
   assert.equal(
     validPlan({ constraints: constraints({ maxLimitQuantity: "50" }) }).ok,
@@ -408,6 +437,10 @@ test("client ID precedes plan hash and derived source identity; approval identit
       consent: true,
       approvedAt: "2026-10-22T10:01:00.000Z",
     }),
+  );
+  assert.equal(
+    firstApproval.contentHash,
+    "sha256:a4fc581045d6330ff04c90f974d22996bbf50b46941133d6655471efcc807e18",
   );
   const renewedApproval = value(
     createOperatorMainnetTestApproval({

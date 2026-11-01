@@ -14,3 +14,4 @@ Current decisions:
 - [ADR-0004: SQLite execution and accounting journal](0004-sqlite-journal.md)
 - [ADR-0005: Deterministic values and evidence boundaries](0005-deterministic-values-and-evidence-boundaries.md)
 - [ADR-0006: Managed entries require take-profit, stop-loss optional](0006-managed-entry-take-profit.md)
+- [ADR-0007: Bounded local operator command authorization](0007-bounded-operator-command-authorization.md)

@@ -8,16 +8,26 @@ import {
 } from "../../domain/identity/canonical-artifact.js";
 import {
   canonicalSerialize,
+  hashCanonical,
   type PlanHash,
 } from "../../domain/identity/canonical-serialization.js";
 import {
   deriveOperatorMainnetTestSourceId,
+  OPERATOR_MAINNET_TRADE_COMMAND_PLAN_SCHEMA_VERSION,
   rehydrateOperatorMainnetTestApproval,
   rehydrateOperatorMainnetTestPlan,
   validateOperatorMainnetTestApproval,
   type OperatorMainnetTestApproval,
   type OperatorMainnetTestPlan,
 } from "../../domain/execution/operator-mainnet-test-plan.js";
+import {
+  rehydrateOperatorMainnetTradeCommandBinding,
+  rehydrateOperatorMainnetTradeCommandPlan,
+  rehydrateOperatorMainnetTradeCommandReceipt,
+  validateOperatorMainnetTradeCommandBinding,
+  type OperatorMainnetTradeCommandBinding,
+  type OperatorMainnetTradeCommandReceipt,
+} from "../../domain/execution/operator-mainnet-trade-command.js";
 import {
   isTerminalOperatorRecoveryOrderStatus,
   operatorMainnetRecoverySourceRevision,
@@ -49,6 +59,8 @@ import {
 import type {
   AppendOperatorMainnetTestManualActionRequest,
   AppendOperatorMainnetTestReconciliationRequest,
+  AppendOperatorMainnetTradeCommandOutcomeRequest,
+  BindOperatorMainnetTradeCommandRequest,
   CreateOperatorMainnetRecoveryGrantRequest,
   OperatorMainnetTestSourceDispositionRecord,
   OperatorMainnetTestAttemptRecord,
@@ -59,11 +71,15 @@ import type {
   OperatorMainnetTestPersistencePort,
   OperatorMainnetTestSnapshot,
   OperatorMainnetTestSourceRecord,
+  OperatorMainnetTradeCommandOutcomeRecord,
+  OperatorMainnetTradeCommandSnapshot,
   OperatorMainnetRecoveryResolutionRequest,
   PrepareOperatorMainnetTestCreateRequest,
   PersistOperatorMainnetRecoveryAttestationRequest,
+  PersistOperatorMainnetTradeCommandReceiptRequest,
   RecordOperatorMainnetTestAttemptRequest,
 } from "../../ports/operator-mainnet-test-persistence.js";
+import { OPERATOR_MAINNET_TRADE_COMMAND_DIAGNOSTIC_FIELDS } from "../../ports/operator-mainnet-test-persistence.js";
 import type { HaltState, PersistenceScope } from "../../ports/persistence.js";
 import type { SqliteConnection } from "./connection.js";
 import {
@@ -87,9 +103,17 @@ import { runInTransaction, sqliteError } from "./transaction.js";
 
 const PLAN_KIND = "operator-mainnet-execution-test" as const;
 const APPROVAL_KIND = "operator-mainnet-execution-approval" as const;
+const TRADE_COMMAND_RECEIPT_KIND =
+  "operator-mainnet-trade-command-receipt" as const;
+const TRADE_COMMAND_BINDING_KIND =
+  "operator-mainnet-trade-command-binding" as const;
 const PLAN_ARTIFACT_ID = (hash: string) => `operator-mainnet-test:${hash}`;
 const APPROVAL_ARTIFACT_ID = (hash: string) =>
   `operator-mainnet-test-approval:${hash}`;
+const TRADE_COMMAND_RECEIPT_ARTIFACT_ID = (hash: string) =>
+  `operator-mainnet-trade-command-receipt:${hash}`;
+const TRADE_COMMAND_BINDING_ARTIFACT_ID = (hash: string) =>
+  `operator-mainnet-trade-command-binding:${hash}`;
 const invalid = (
   message = "operator Mainnet test persistence input is invalid",
 ) => fail(domainError("PERSISTENCE_INTEGRITY", message));
@@ -109,6 +133,85 @@ function encode(value: unknown): Result<{ json: string; hash: PlanHash }> {
   return serialized.ok
     ? ok({ json: serialized.value, hash: hashPayload(serialized.value) })
     : invalid("operator journal record is not canonical");
+}
+
+const TRADE_COMMAND_OUTCOME_STAGES = [
+  "plan-derivation",
+  "precheck",
+  "binding",
+  "admission",
+] as const;
+const TRADE_COMMAND_DIAGNOSTIC_KEYS = new Set<string>(
+  OPERATOR_MAINNET_TRADE_COMMAND_DIAGNOSTIC_FIELDS,
+);
+
+function isTradeCommandOutcomeStage(
+  value: unknown,
+): value is (typeof TRADE_COMMAND_OUTCOME_STAGES)[number] {
+  return (
+    typeof value === "string" &&
+    TRADE_COMMAND_OUTCOME_STAGES.includes(
+      value as (typeof TRADE_COMMAND_OUTCOME_STAGES)[number],
+    )
+  );
+}
+
+/** Only a completed safe target-leverage precheck may precede a v3 binding/CREATE. */
+function tradeCommandPreIntentOutcomesPermitCreate(
+  database: DatabaseSync,
+  commandId: string,
+): boolean {
+  const rows = database
+    .prepare(
+      `SELECT stage, code FROM operator_mainnet_trade_command_outcomes
+       WHERE command_id = ? ORDER BY revision`,
+    )
+    .all(commandId) as SqliteRow[];
+  if (rows.length === 0) return true;
+  if (rows.some((row) => row.stage !== "precheck")) return false;
+  const codes = rows.map((row) => row.code);
+  return (
+    (codes.length === 1 && codes[0] === "LEVERAGE_CONFIG_ALREADY_1X") ||
+    (codes.length === 2 &&
+      codes[0] === "LEVERAGE_CONFIG_ATTEMPTED" &&
+      codes[1] === "LEVERAGE_CONFIG_VERIFIED")
+  );
+}
+
+function normalizeTradeCommandDiagnostics(
+  input: unknown,
+): Result<Readonly<Record<string, string | number | boolean>>> {
+  if (!isRecord(input) || Object.getPrototypeOf(input) !== Object.prototype)
+    return invalid("trade-command diagnostics must be a plain object");
+  const output: Record<string, string | number | boolean> = {};
+  for (const [key, value] of Object.entries(input)) {
+    if (!TRADE_COMMAND_DIAGNOSTIC_KEYS.has(key))
+      return invalid(
+        "trade-command diagnostics contain a non-allowlisted field",
+      );
+    if (typeof value === "string") {
+      const safe = requireSafeText(value, key);
+      if (!safe.ok || safe.value.length > 256)
+        return invalid("trade-command diagnostic text is invalid");
+      output[key] = safe.value;
+    } else if (typeof value === "number") {
+      if (!Number.isFinite(value) || Math.abs(value) > 1_000_000_000_000)
+        return invalid("trade-command diagnostic number is invalid");
+      output[key] = value;
+    } else if (typeof value === "boolean") {
+      output[key] = value;
+    } else {
+      return invalid("trade-command diagnostic value is invalid");
+    }
+  }
+  return ok(output);
+}
+
+function receiptArtifactBytes(
+  receipt: OperatorMainnetTradeCommandReceipt,
+): string | undefined {
+  const serialized = canonicalSerialize(receipt);
+  return serialized.ok ? serialized.value : undefined;
 }
 
 function hasLatestApiVerifiedCleanReconciliation(
@@ -400,6 +503,473 @@ export class SqliteOperatorMainnetTestStore implements OperatorMainnetTestPersis
         "prepared operator plan does not match its scope",
       );
     return ok(plan.value);
+  }
+
+  persistOperatorMainnetTradeCommandReceipt(
+    request: PersistOperatorMainnetTradeCommandReceiptRequest,
+  ): Result<OperatorMainnetTradeCommandReceipt> {
+    const receipt = rehydrateOperatorMainnetTradeCommandReceipt(
+      request.receipt,
+    );
+    const recordedAt = parseUtcTimestamp(request.recordedAt);
+    if (
+      !receipt.ok ||
+      !recordedAt.ok ||
+      !validScope(this.scope) ||
+      receipt.value.accountIdentityHash !== this.scope.accountId ||
+      timestampToEpochMs(recordedAt.value) <
+        timestampToEpochMs(receipt.value.acceptedAt)
+    )
+      return invalid(
+        "trade-command receipt does not match its persisted scope",
+      );
+    const envelope = encodeCanonicalArtifact(
+      TRADE_COMMAND_RECEIPT_KIND,
+      receipt.value,
+    );
+    if (!envelope.ok) return envelope;
+    const artifactId = TRADE_COMMAND_RECEIPT_ARTIFACT_ID(
+      receipt.value.contentHash,
+    );
+    return runInTransaction(
+      this.db,
+      (database) => {
+        const existing = database
+          .prepare(
+            `SELECT command_id FROM operator_mainnet_trade_command_receipts
+             WHERE command_id = ?`,
+          )
+          .get(receipt.value.commandId) as SqliteRow | undefined;
+        if (existing) {
+          const saved = this.tradeCommandReceiptFromRow(
+            receipt.value.commandId,
+            database,
+          );
+          if (!saved.ok) return saved;
+          const same =
+            saved.value.contentHash === receipt.value.contentHash &&
+            receiptArtifactBytes(saved.value) ===
+              receiptArtifactBytes(receipt.value);
+          return same
+            ? saved
+            : fail(
+                domainError(
+                  "PERSISTENCE_CONFLICT",
+                  "trade-command ID is already bound to another receipt",
+                ),
+              );
+        }
+        const stored = insertArtifact(
+          database,
+          this.scope,
+          artifactId,
+          envelope.value,
+          receipt.value.contentHash,
+          recordedAt.value,
+        );
+        if (!stored.ok) return stored;
+        database
+          .prepare(
+            `INSERT INTO operator_mainnet_trade_command_receipts
+             (command_id, exchange, environment, account_id, category, position_mode,
+              receipt_hash, receipt_artifact_id, accepted_at, expires_at, recorded_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          )
+          .run(
+            receipt.value.commandId,
+            ...scopeValues(this.scope),
+            receipt.value.contentHash,
+            artifactId,
+            receipt.value.acceptedAt,
+            receipt.value.expiresAt,
+            recordedAt.value,
+          );
+        return ok(receipt.value);
+      },
+      "PERSISTENCE_CONFLICT",
+    );
+  }
+
+  readOperatorMainnetTradeCommandReceipt(
+    commandIdInput: string,
+  ): Result<OperatorMainnetTradeCommandReceipt | undefined> {
+    const commandId = requireIdentifier(commandIdInput, "commandId");
+    if (!commandId.ok || !validScope(this.scope)) return invalid();
+    const row = this.db
+      .prepare(
+        `SELECT 1 AS present FROM operator_mainnet_trade_command_receipts
+         WHERE command_id = ? AND exchange = ? AND environment = ?
+           AND account_id = ? AND category = ? AND position_mode = ?`,
+      )
+      .get(commandId.value, ...scopeValues(this.scope));
+    if (!row) return ok(undefined);
+    const receipt = this.tradeCommandReceiptFromRow(commandId.value);
+    return receipt.ok ? ok(receipt.value) : receipt;
+  }
+
+  bindOperatorMainnetTradeCommand(
+    request: BindOperatorMainnetTradeCommandRequest,
+  ): Result<OperatorMainnetTradeCommandBinding> {
+    const binding = rehydrateOperatorMainnetTradeCommandBinding(
+      request.binding,
+    );
+    const boundAt = parseUtcTimestamp(request.boundAt);
+    if (
+      !binding.ok ||
+      !boundAt.ok ||
+      !validScope(this.scope) ||
+      binding.value.boundAt !== boundAt.value ||
+      binding.value.replayInputs.receipt.accountIdentityHash !==
+        this.scope.accountId
+    )
+      return invalid("trade-command binding does not match its scope or time");
+    const receiptEnvelope = encodeCanonicalArtifact(
+      TRADE_COMMAND_RECEIPT_KIND,
+      binding.value.replayInputs.receipt,
+    );
+    const planEnvelope = encodeCanonicalArtifact(
+      PLAN_KIND,
+      binding.value.replayInputs.plan,
+    );
+    const bindingEnvelope = encodeCanonicalArtifact(
+      TRADE_COMMAND_BINDING_KIND,
+      binding.value,
+    );
+    if (!receiptEnvelope.ok || !planEnvelope.ok || !bindingEnvelope.ok)
+      return invalid("trade-command artifact encoding failed");
+    const receiptArtifactId = TRADE_COMMAND_RECEIPT_ARTIFACT_ID(
+      binding.value.receiptHash,
+    );
+    const planArtifactId = PLAN_ARTIFACT_ID(binding.value.planHash);
+    const bindingArtifactId = TRADE_COMMAND_BINDING_ARTIFACT_ID(
+      binding.value.contentHash,
+    );
+    return runInTransaction(
+      this.db,
+      (database) => {
+        const receipt = this.tradeCommandReceiptFromRow(
+          binding.value.commandId,
+          database,
+        );
+        if (!receipt.ok) return receipt;
+        if (
+          receipt.value.contentHash !== binding.value.receiptHash ||
+          receiptArtifactId !==
+            TRADE_COMMAND_RECEIPT_ARTIFACT_ID(receipt.value.contentHash)
+        )
+          return fail(
+            domainError(
+              "PERSISTENCE_CONFLICT",
+              "trade-command receipt differs from the saved instruction",
+            ),
+          );
+        const existing = database
+          .prepare(
+            `SELECT binding_hash FROM operator_mainnet_trade_command_bindings
+             WHERE command_id = ?`,
+          )
+          .get(binding.value.commandId) as SqliteRow | undefined;
+        if (existing) {
+          const saved = this.tradeCommandBindingFromRow(
+            TRADE_COMMAND_BINDING_ARTIFACT_ID(String(existing.binding_hash)),
+            database,
+          );
+          if (!saved.ok) return saved;
+          return saved.value.contentHash === binding.value.contentHash
+            ? saved
+            : fail(
+                domainError(
+                  "PERSISTENCE_CONFLICT",
+                  "trade-command receipt is already bound to another plan",
+                ),
+              );
+        }
+        if (
+          !tradeCommandPreIntentOutcomesPermitCreate(
+            database,
+            binding.value.commandId,
+          )
+        )
+          return fail(
+            domainError(
+              "PERSISTENCE_CONFLICT",
+              "a trade-command has a blocking pre-intent outcome and cannot be bound",
+            ),
+          );
+        const receiptStored = insertArtifact(
+          database,
+          this.scope,
+          receiptArtifactId,
+          receiptEnvelope.value,
+          binding.value.receiptHash,
+          boundAt.value,
+        );
+        if (!receiptStored.ok) return receiptStored;
+        const planStored = insertArtifact(
+          database,
+          this.scope,
+          planArtifactId,
+          planEnvelope.value,
+          binding.value.planHash,
+          binding.value.replayInputs.plan.preparedAt,
+        );
+        if (!planStored.ok) return planStored;
+        const bindingStored = insertArtifact(
+          database,
+          this.scope,
+          bindingArtifactId,
+          bindingEnvelope.value,
+          binding.value.contentHash,
+          boundAt.value,
+        );
+        if (!bindingStored.ok) return bindingStored;
+        database
+          .prepare(
+            `INSERT INTO operator_mainnet_trade_command_bindings
+             (command_id, exchange, environment, account_id, category, position_mode,
+              binding_hash, binding_artifact_id, plan_hash, plan_artifact_id,
+              source_id, client_order_id, create_payload_hash, bound_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          )
+          .run(
+            binding.value.commandId,
+            ...scopeValues(this.scope),
+            binding.value.contentHash,
+            bindingArtifactId,
+            binding.value.planHash,
+            planArtifactId,
+            binding.value.sourceId,
+            binding.value.clientOrderId,
+            binding.value.createPayloadHash,
+            boundAt.value,
+          );
+        return ok(binding.value);
+      },
+      "PERSISTENCE_CONFLICT",
+    );
+  }
+
+  readOperatorMainnetTradeCommandBinding(
+    commandIdInput: string,
+  ): Result<OperatorMainnetTradeCommandBinding | undefined> {
+    const commandId = requireIdentifier(commandIdInput, "commandId");
+    if (!commandId.ok || !validScope(this.scope)) return invalid();
+    const row = this.db
+      .prepare(
+        `SELECT binding_artifact_id FROM operator_mainnet_trade_command_bindings
+         WHERE command_id = ? AND exchange = ? AND environment = ?
+           AND account_id = ? AND category = ? AND position_mode = ?`,
+      )
+      .get(commandId.value, ...scopeValues(this.scope)) as
+      SqliteRow | undefined;
+    if (!row) return ok(undefined);
+    const artifactId = storedIdentifier(row, "binding_artifact_id");
+    if (!artifactId.ok)
+      return persistenceFailure("persisted binding reference is invalid");
+    const binding = this.tradeCommandBindingFromRow(artifactId.value);
+    return binding.ok ? ok(binding.value) : binding;
+  }
+
+  appendOperatorMainnetTradeCommandOutcome(
+    request: AppendOperatorMainnetTradeCommandOutcomeRequest,
+  ): Result<OperatorMainnetTradeCommandOutcomeRecord> {
+    const commandId = requireIdentifier(request.commandId, "commandId");
+    const outcomeId = requireIdentifier(request.outcomeId, "outcomeId");
+    const code = requireSafeText(request.code, "outcomeCode");
+    const occurredAt = parseUtcTimestamp(request.occurredAt);
+    const diagnostics = normalizeTradeCommandDiagnostics(
+      request.diagnosticDetails ?? {},
+    );
+    if (
+      !commandId.ok ||
+      !outcomeId.ok ||
+      !code.ok ||
+      !occurredAt.ok ||
+      !diagnostics.ok ||
+      !isTradeCommandOutcomeStage(request.stage) ||
+      !validScope(this.scope)
+    )
+      return invalid("trade-command outcome is invalid");
+    return runInTransaction(
+      this.db,
+      (database) => {
+        const receipt = this.tradeCommandReceiptFromRow(
+          commandId.value,
+          database,
+        );
+        if (!receipt.ok) return receipt;
+        const binding = database
+          .prepare(
+            `SELECT source_id FROM operator_mainnet_trade_command_bindings
+             WHERE command_id = ?`,
+          )
+          .get(commandId.value) as SqliteRow | undefined;
+        const sourceId = binding
+          ? storedIdentifier(binding, "source_id")
+          : undefined;
+        if (sourceId && !sourceId.ok)
+          return persistenceFailure(
+            "direct-command source reference is invalid",
+          );
+        if (
+          database
+            .prepare(
+              `SELECT 1 AS present FROM operator_mainnet_trade_command_consumptions
+               WHERE command_id = ?`,
+            )
+            .get(commandId.value) ||
+          (sourceId && sourceId.ok && this.sourceRow(sourceId.value, database))
+        )
+          return fail(
+            domainError(
+              "PERSISTENCE_CONFLICT",
+              "a consumed trade-command cannot receive a pre-intent outcome",
+            ),
+          );
+        const revisionRow = database
+          .prepare(
+            `SELECT COALESCE(MAX(revision), 0) AS revision
+             FROM operator_mainnet_trade_command_outcomes WHERE command_id = ?`,
+          )
+          .get(commandId.value) as SqliteRow | undefined;
+        const previousRevision = requireFiniteInteger(
+          revisionRow?.revision,
+          "outcomeRevision",
+        );
+        if (!previousRevision.ok)
+          return persistenceFailure(
+            "trade-command outcome revision is invalid",
+          );
+        const revision = previousRevision.value + 1;
+        const value = {
+          schemaVersion: "operator-mainnet-trade-command-outcome/v1",
+          outcomeId: outcomeId.value,
+          commandId: commandId.value,
+          revision,
+          stage: request.stage,
+          code: code.value,
+          occurredAt: occurredAt.value,
+          diagnosticDetails: diagnostics.value,
+        };
+        const encoded = encode(value);
+        const diagnosticsEncoded = encode(diagnostics.value);
+        if (!encoded.ok || !diagnosticsEncoded.ok)
+          return invalid("trade-command outcome could not be encoded");
+        database
+          .prepare(
+            `INSERT INTO operator_mainnet_trade_command_outcomes
+             (outcome_id, command_id, revision, stage, code, occurred_at,
+              diagnostics_json, canonical_json, canonical_hash)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          )
+          .run(
+            outcomeId.value,
+            commandId.value,
+            revision,
+            request.stage,
+            code.value,
+            occurredAt.value,
+            diagnosticsEncoded.value.json,
+            encoded.value.json,
+            encoded.value.hash,
+          );
+        return this.tradeCommandOutcomeFromRow(
+          database
+            .prepare(
+              `SELECT * FROM operator_mainnet_trade_command_outcomes
+               WHERE outcome_id = ?`,
+            )
+            .get(outcomeId.value) as SqliteRow,
+        );
+      },
+      "PERSISTENCE_CONFLICT",
+    );
+  }
+
+  readOperatorMainnetTradeCommand(
+    commandIdInput: string,
+  ): Result<OperatorMainnetTradeCommandSnapshot | undefined> {
+    const commandId = requireIdentifier(commandIdInput, "commandId");
+    if (!commandId.ok || !validScope(this.scope)) return invalid();
+    return runInTransaction(
+      this.db,
+      (database) => {
+        const row = database
+          .prepare(
+            `SELECT 1 AS present FROM operator_mainnet_trade_command_receipts
+             WHERE command_id = ? AND exchange = ? AND environment = ?
+               AND account_id = ? AND category = ? AND position_mode = ?`,
+          )
+          .get(commandId.value, ...scopeValues(this.scope));
+        if (!row) return ok(undefined);
+        const receipt = this.tradeCommandReceiptFromRow(
+          commandId.value,
+          database,
+        );
+        if (!receipt.ok) return receipt;
+        const binding = this.readTradeCommandBindingFromCommandRow(
+          commandId.value,
+          database,
+        );
+        if (!binding.ok) return binding;
+        const outcomes = this.tradeCommandOutcomeRows(
+          commandId.value,
+          database,
+        );
+        if (!outcomes.ok) return outcomes;
+        const consumptionRow = database
+          .prepare(
+            `SELECT * FROM operator_mainnet_trade_command_consumptions
+             WHERE command_id = ?`,
+          )
+          .get(commandId.value) as SqliteRow | undefined;
+        const consumption = consumptionRow
+          ? this.tradeCommandConsumptionFromRow(consumptionRow)
+          : ok<OperatorMainnetTradeCommandSnapshot["consumption"]>(undefined);
+        if (!consumption.ok) return consumption;
+        const source =
+          binding.value && consumption.value
+            ? this.readOperatorMainnetTestSource(consumption.value.sourceId)
+            : ok<OperatorMainnetTestSnapshot | undefined>(undefined);
+        if (!source.ok) return source;
+        if (consumption.value) {
+          if (!binding.value || !source.value)
+            return persistenceFailure(
+              "consumed trade-command binding or source is missing",
+            );
+          const authorization = source.value.authorization;
+          if (
+            consumption.value.commandId !== receipt.value.commandId ||
+            consumption.value.receiptHash !== receipt.value.contentHash ||
+            consumption.value.bindingHash !== binding.value.contentHash ||
+            consumption.value.sourceId !== binding.value.sourceId ||
+            consumption.value.writeIntentId !==
+              source.value.intent.writeIntentId ||
+            authorization.kind !== "trade-command" ||
+            authorization.commandId !== receipt.value.commandId ||
+            authorization.receiptHash !== receipt.value.contentHash ||
+            authorization.hash !== binding.value.contentHash ||
+            source.value.intent.commandId !== receipt.value.commandId ||
+            source.value.intent.commandReceiptHash !==
+              receipt.value.contentHash ||
+            source.value.intent.commandBindingHash !== binding.value.contentHash
+          )
+            return persistenceFailure(
+              "trade-command consumption does not match its receipt, binding, source and intent",
+            );
+        }
+        return ok({
+          receipt: receipt.value,
+          ...(binding.value === undefined ? {} : { binding: binding.value }),
+          outcomes: outcomes.value,
+          ...(consumption.value === undefined
+            ? {}
+            : { consumption: consumption.value }),
+          ...(source.value === undefined ? {} : { source: source.value }),
+        });
+      },
+      "PERSISTENCE_INTEGRITY",
+    );
   }
 
   private sourceDispositionFromRow(
@@ -1031,6 +1601,16 @@ export class SqliteOperatorMainnetTestStore implements OperatorMainnetTestPersis
               "recovery plan must be a different saved plan for this exact account",
             ),
           );
+        if (
+          plan.value.schemaVersion ===
+          OPERATOR_MAINNET_TRADE_COMMAND_PLAN_SCHEMA_VERSION
+        )
+          return fail(
+            domainError(
+              "PERSISTENCE_CONFLICT",
+              "direct trade-command plans cannot authorize recovery grants",
+            ),
+          );
         const pending = this.pendingSourceRows(database);
         if (!pending.ok) return pending;
         if (pending.value.some((source) => source.sourceId !== sourceId.value))
@@ -1568,8 +2148,16 @@ export class SqliteOperatorMainnetTestStore implements OperatorMainnetTestPersis
     const sourceId = storedIdentifier(row, "source_id");
     const planHash = storedHash(row, "plan_hash");
     const planArtifactId = storedIdentifier(row, "plan_artifact_id");
-    const approvalHash = storedHash(row, "approval_hash");
-    const approvalArtifactId = storedIdentifier(row, "approval_artifact_id");
+    const legacyApprovalHash = storedHash(row, "approval_hash");
+    const legacyApprovalArtifactId = storedIdentifier(
+      row,
+      "approval_artifact_id",
+    );
+    const authorizationHash = storedHash(row, "authorization_hash");
+    const authorizationArtifactId = storedIdentifier(
+      row,
+      "authorization_artifact_id",
+    );
     const clientOrderId = storedIdentifier(row, "client_order_id");
     const payloadJson = storedString(row, "payload_json");
     const payloadHash = storedHash(row, "payload_hash");
@@ -1583,8 +2171,10 @@ export class SqliteOperatorMainnetTestStore implements OperatorMainnetTestPersis
       !sourceId.ok ||
       !planHash.ok ||
       !planArtifactId.ok ||
-      !approvalHash.ok ||
-      !approvalArtifactId.ok ||
+      !legacyApprovalHash.ok ||
+      !legacyApprovalArtifactId.ok ||
+      !authorizationHash.ok ||
+      !authorizationArtifactId.ok ||
       !clientOrderId.ok ||
       !payloadJson.ok ||
       !payloadHash.ok ||
@@ -1605,23 +2195,15 @@ export class SqliteOperatorMainnetTestStore implements OperatorMainnetTestPersis
         "persisted operator CREATE payload hash is invalid",
       );
     const planArtifact = this.artifactRow(planArtifactId.value);
-    const approvalArtifact = this.artifactRow(approvalArtifactId.value);
     if (!planArtifact.ok) return fail(planArtifact.error);
-    if (!approvalArtifact.ok) return fail(approvalArtifact.error);
     if (
       planArtifact.value?.artifactKind !== PLAN_KIND ||
-      approvalArtifact.value?.artifactKind !== APPROVAL_KIND ||
-      planArtifact.value.materialHash !== planHash.value ||
-      approvalArtifact.value.materialHash !== approvalHash.value
+      planArtifact.value.materialHash !== planHash.value
     )
       return persistenceFailure(
-        "operator artifact reference or material hash is invalid",
+        "operator plan artifact reference or material hash is invalid",
       );
     const plan = rehydrateArtifact(PLAN_KIND, planArtifact.value.envelope);
-    const approval = rehydrateArtifact(
-      APPROVAL_KIND,
-      approvalArtifact.value.envelope,
-    );
     const expectedSourceId = plan.ok
       ? deriveOperatorMainnetTestSourceId(plan.value.contentHash)
       : plan;
@@ -1630,27 +2212,111 @@ export class SqliteOperatorMainnetTestStore implements OperatorMainnetTestPersis
       : plan;
     if (
       !plan.ok ||
-      !approval.ok ||
       !expectedSourceId.ok ||
       !payloadValidated.ok ||
       plan.value.contentHash !== planHash.value ||
-      approval.value.contentHash !== approvalHash.value ||
-      approval.value.planHash !== planHash.value ||
-      approval.value.sourceId !== sourceId.value ||
-      approval.value.clientOrderId !== clientOrderId.value ||
       plan.value.clientOrderId !== clientOrderId.value ||
       expectedSourceId.value !== sourceId.value
     )
       return persistenceFailure(
         "persisted operator source identity is invalid",
       );
+    let authorization: OperatorMainnetTestSourceRecord["authorization"];
+    if (row.authorization_kind === "approval") {
+      if (
+        authorizationHash.value !== legacyApprovalHash.value ||
+        authorizationArtifactId.value !== legacyApprovalArtifactId.value
+      )
+        return persistenceFailure(
+          "legacy operator approval reference differs from its tagged authorization",
+        );
+      const approvalArtifact = this.artifactRow(authorizationArtifactId.value);
+      if (!approvalArtifact.ok) return fail(approvalArtifact.error);
+      if (
+        approvalArtifact.value?.artifactKind !== APPROVAL_KIND ||
+        approvalArtifact.value.materialHash !== authorizationHash.value
+      )
+        return persistenceFailure(
+          "legacy operator approval artifact reference is invalid",
+        );
+      const approval = rehydrateArtifact(
+        APPROVAL_KIND,
+        approvalArtifact.value.envelope,
+      );
+      if (
+        !approval.ok ||
+        approval.value.contentHash !== authorizationHash.value ||
+        approval.value.planHash !== planHash.value ||
+        approval.value.sourceId !== sourceId.value ||
+        approval.value.clientOrderId !== clientOrderId.value
+      )
+        return persistenceFailure(
+          "legacy operator approval does not match its source",
+        );
+      authorization = {
+        kind: "approval",
+        hash: authorizationHash.value as PlanHash,
+        artifactId: authorizationArtifactId.value,
+      };
+    } else if (row.authorization_kind === "trade-command") {
+      // These v8 NOT NULL columns remain compatibility aliases only. The
+      // neutral reference points at a real binding artifact, not an approval.
+      if (
+        authorizationHash.value !== legacyApprovalHash.value ||
+        authorizationArtifactId.value !== legacyApprovalArtifactId.value
+      )
+        return persistenceFailure(
+          "direct-command compatibility reference differs from its tagged authorization",
+        );
+      const binding = this.tradeCommandBindingFromRow(
+        authorizationArtifactId.value,
+        this.db,
+      );
+      if (!binding.ok) return binding;
+      const receipt = this.tradeCommandReceiptFromRow(
+        binding.value.commandId,
+        this.db,
+      );
+      if (!receipt.ok) return receipt;
+      const planDigest = hashCanonical(plan.value);
+      if (
+        !planDigest.ok ||
+        binding.value.contentHash !== authorizationHash.value ||
+        binding.value.planHash !== planHash.value ||
+        binding.value.planArtifactHash !== planDigest.value ||
+        binding.value.sourceId !== sourceId.value ||
+        binding.value.clientOrderId !== clientOrderId.value ||
+        binding.value.createPayloadHash !== payloadHash.value ||
+        binding.value.commandId !== receipt.value.commandId ||
+        binding.value.receiptHash !== receipt.value.contentHash ||
+        binding.value.replayInputs.plan.contentHash !== planHash.value ||
+        binding.value.replayInputs.receipt.contentHash !==
+          receipt.value.contentHash
+      )
+        return persistenceFailure(
+          "direct-command binding does not match its persisted source",
+        );
+      authorization = {
+        kind: "trade-command",
+        hash: authorizationHash.value as PlanHash,
+        artifactId: authorizationArtifactId.value,
+        commandId: binding.value.commandId,
+        receiptHash: receipt.value.contentHash,
+        receiptArtifactId: TRADE_COMMAND_RECEIPT_ARTIFACT_ID(
+          receipt.value.contentHash,
+        ),
+      };
+    } else {
+      return persistenceFailure(
+        "persisted operator authorization kind is invalid",
+      );
+    }
     return ok({
       sourceId: sourceId.value,
       scope: this.scope,
       planHash: planHash.value as PlanHash,
       planArtifactId: planArtifactId.value,
-      approvalHash: approvalHash.value as PlanHash,
-      approvalArtifactId: approvalArtifactId.value,
+      authorization,
       clientOrderId: clientOrderId.value,
       payloadJson: payloadJson.value,
       payloadHash: payloadHash.value as PlanHash,
@@ -1706,6 +2372,297 @@ export class SqliteOperatorMainnetTestStore implements OperatorMainnetTestPersis
     });
   }
 
+  private tradeCommandReceiptFromRow(
+    commandId: string,
+    database = this.db,
+  ): Result<OperatorMainnetTradeCommandReceipt> {
+    const row = database
+      .prepare(
+        `SELECT * FROM operator_mainnet_trade_command_receipts
+         WHERE command_id = ? AND exchange = ? AND environment = ?
+           AND account_id = ? AND category = ? AND position_mode = ?`,
+      )
+      .get(commandId, ...scopeValues(this.scope)) as SqliteRow | undefined;
+    if (!row) return persistenceFailure("direct-command receipt is missing");
+    const storedCommandId = storedIdentifier(row, "command_id");
+    const receiptHash = storedHash(row, "receipt_hash");
+    const receiptArtifactId = storedIdentifier(row, "receipt_artifact_id");
+    const acceptedAt = storedTimestamp(row, "accepted_at");
+    const expiresAt = storedTimestamp(row, "expires_at");
+    const recordedAt = storedTimestamp(row, "recorded_at");
+    if (
+      row.exchange !== "bybit" ||
+      row.environment !== "mainnet" ||
+      row.account_id !== this.scope.accountId ||
+      row.category !== "linear" ||
+      row.position_mode !== "one-way" ||
+      !storedCommandId.ok ||
+      !receiptHash.ok ||
+      !receiptArtifactId.ok ||
+      !acceptedAt.ok ||
+      !expiresAt.ok ||
+      !recordedAt.ok
+    )
+      return persistenceFailure(
+        "persisted direct-command receipt row is invalid",
+      );
+    const artifact = this.artifactRow(receiptArtifactId.value);
+    if (!artifact.ok) return artifact;
+    if (
+      artifact.value?.artifactKind !== TRADE_COMMAND_RECEIPT_KIND ||
+      artifact.value.materialHash !== receiptHash.value ||
+      receiptArtifactId.value !==
+        TRADE_COMMAND_RECEIPT_ARTIFACT_ID(receiptHash.value)
+    )
+      return persistenceFailure(
+        "direct-command receipt artifact reference is invalid",
+      );
+    const receipt = rehydrateArtifact(
+      TRADE_COMMAND_RECEIPT_KIND,
+      artifact.value.envelope,
+    );
+    if (
+      !receipt.ok ||
+      receipt.value.commandId !== storedCommandId.value ||
+      receipt.value.contentHash !== receiptHash.value ||
+      receipt.value.accountIdentityHash !== this.scope.accountId ||
+      receipt.value.acceptedAt !== acceptedAt.value ||
+      receipt.value.expiresAt !== expiresAt.value ||
+      timestampToEpochMs(recordedAt.value) <
+        timestampToEpochMs(acceptedAt.value)
+    )
+      return persistenceFailure(
+        "persisted direct-command receipt identity is invalid",
+      );
+    return receipt;
+  }
+
+  private tradeCommandBindingFromRow(
+    bindingArtifactId: string,
+    database = this.db,
+  ): Result<OperatorMainnetTradeCommandBinding> {
+    const row = database
+      .prepare(
+        `SELECT * FROM operator_mainnet_trade_command_bindings
+         WHERE binding_artifact_id = ? AND exchange = ? AND environment = ?
+           AND account_id = ? AND category = ? AND position_mode = ?`,
+      )
+      .get(bindingArtifactId, ...scopeValues(this.scope)) as
+      SqliteRow | undefined;
+    if (!row)
+      return persistenceFailure("direct-command binding row is missing");
+    const commandId = storedIdentifier(row, "command_id");
+    const bindingHash = storedHash(row, "binding_hash");
+    const storedArtifactId = storedIdentifier(row, "binding_artifact_id");
+    const planHash = storedHash(row, "plan_hash");
+    const planArtifactId = storedIdentifier(row, "plan_artifact_id");
+    const sourceId = storedIdentifier(row, "source_id");
+    const clientOrderId = storedIdentifier(row, "client_order_id");
+    const payloadHash = storedHash(row, "create_payload_hash");
+    const boundAt = storedTimestamp(row, "bound_at");
+    if (
+      row.exchange !== "bybit" ||
+      row.environment !== "mainnet" ||
+      row.account_id !== this.scope.accountId ||
+      row.category !== "linear" ||
+      row.position_mode !== "one-way" ||
+      !commandId.ok ||
+      !bindingHash.ok ||
+      !storedArtifactId.ok ||
+      !planHash.ok ||
+      !planArtifactId.ok ||
+      !sourceId.ok ||
+      !clientOrderId.ok ||
+      !payloadHash.ok ||
+      !boundAt.ok ||
+      storedArtifactId.value !== bindingArtifactId
+    )
+      return persistenceFailure(
+        "persisted direct-command binding row is invalid",
+      );
+    const artifact = this.artifactRow(bindingArtifactId);
+    if (!artifact.ok) return artifact;
+    if (
+      artifact.value?.artifactKind !== TRADE_COMMAND_BINDING_KIND ||
+      artifact.value.materialHash !== bindingHash.value ||
+      bindingArtifactId !== TRADE_COMMAND_BINDING_ARTIFACT_ID(bindingHash.value)
+    )
+      return persistenceFailure(
+        "direct-command binding artifact reference is invalid",
+      );
+    const binding = rehydrateArtifact(
+      TRADE_COMMAND_BINDING_KIND,
+      artifact.value.envelope,
+    );
+    const receipt = this.tradeCommandReceiptFromRow(commandId.value, database);
+    const planDigest = binding.ok
+      ? hashCanonical(binding.value.replayInputs.plan)
+      : binding;
+    if (
+      !binding.ok ||
+      !receipt.ok ||
+      !planDigest.ok ||
+      binding.value.commandId !== commandId.value ||
+      binding.value.contentHash !== bindingHash.value ||
+      binding.value.planHash !== planHash.value ||
+      binding.value.planArtifactHash !== planDigest.value ||
+      binding.value.replayInputs.plan.contentHash !== planHash.value ||
+      binding.value.sourceId !== sourceId.value ||
+      binding.value.clientOrderId !== clientOrderId.value ||
+      binding.value.createPayloadHash !== payloadHash.value ||
+      binding.value.receiptHash !== receipt.value.contentHash ||
+      binding.value.replayInputs.receipt.contentHash !==
+        receipt.value.contentHash ||
+      binding.value.boundAt !== boundAt.value ||
+      planArtifactId.value !== PLAN_ARTIFACT_ID(planHash.value)
+    )
+      return persistenceFailure(
+        "persisted direct-command binding identity is invalid",
+      );
+    return binding;
+  }
+
+  private readTradeCommandBindingFromCommandRow(
+    commandId: string,
+    database = this.db,
+  ): Result<OperatorMainnetTradeCommandBinding | undefined> {
+    const row = database
+      .prepare(
+        `SELECT binding_artifact_id FROM operator_mainnet_trade_command_bindings
+         WHERE command_id = ? AND exchange = ? AND environment = ?
+           AND account_id = ? AND category = ? AND position_mode = ?`,
+      )
+      .get(commandId, ...scopeValues(this.scope)) as SqliteRow | undefined;
+    if (!row) return ok(undefined);
+    const artifactId = storedIdentifier(row, "binding_artifact_id");
+    if (!artifactId.ok)
+      return persistenceFailure(
+        "persisted direct-command binding reference is invalid",
+      );
+    const binding = this.tradeCommandBindingFromRow(artifactId.value, database);
+    return binding.ok ? ok(binding.value) : binding;
+  }
+
+  private tradeCommandOutcomeFromRow(
+    row: SqliteRow,
+  ): Result<OperatorMainnetTradeCommandOutcomeRecord> {
+    const outcomeId = storedIdentifier(row, "outcome_id");
+    const commandId = storedIdentifier(row, "command_id");
+    const revision = requireFiniteInteger(row.revision, "revision", 1);
+    const code = requireSafeText(row.code, "outcomeCode");
+    const occurredAt = storedTimestamp(row, "occurred_at");
+    const diagnosticsJson = storedString(row, "diagnostics_json");
+    const canonicalJson = storedString(row, "canonical_json");
+    const canonicalHash = storedHash(row, "canonical_hash");
+    if (
+      !outcomeId.ok ||
+      !commandId.ok ||
+      !revision.ok ||
+      !code.ok ||
+      !occurredAt.ok ||
+      !diagnosticsJson.ok ||
+      !canonicalJson.ok ||
+      !canonicalHash.ok ||
+      !isTradeCommandOutcomeStage(row.stage)
+    )
+      return persistenceFailure("persisted trade-command outcome is invalid");
+    const parsed = parseJsonHash(canonicalJson.value, canonicalHash.value);
+    if (!parsed.ok) return parsed;
+    let diagnostics: unknown;
+    try {
+      diagnostics = JSON.parse(diagnosticsJson.value) as unknown;
+    } catch {
+      return persistenceFailure(
+        "persisted trade-command diagnostics are invalid",
+      );
+    }
+    const normalized = normalizeTradeCommandDiagnostics(diagnostics);
+    const diagnosticCanonical = canonicalSerialize(diagnostics);
+    const canonical = canonicalSerialize(parsed.value);
+    const normalizedCanonical = normalized.ok
+      ? canonicalSerialize(normalized.value)
+      : normalized;
+    if (
+      !normalized.ok ||
+      !diagnosticCanonical.ok ||
+      !canonical.ok ||
+      !normalizedCanonical.ok ||
+      diagnosticCanonical.value !== diagnosticsJson.value ||
+      canonical.value !== canonicalJson.value ||
+      !isRecord(parsed.value) ||
+      parsed.value.schemaVersion !==
+        "operator-mainnet-trade-command-outcome/v1" ||
+      parsed.value.outcomeId !== outcomeId.value ||
+      parsed.value.commandId !== commandId.value ||
+      parsed.value.revision !== revision.value ||
+      parsed.value.stage !== row.stage ||
+      parsed.value.code !== code.value ||
+      parsed.value.occurredAt !== occurredAt.value ||
+      normalizedCanonical.value !== diagnosticsJson.value
+    )
+      return persistenceFailure("trade-command outcome identity is invalid");
+    return ok({
+      outcomeId: outcomeId.value,
+      commandId: commandId.value,
+      revision: revision.value,
+      stage: row.stage,
+      code: code.value,
+      occurredAt: occurredAt.value,
+      diagnosticDetails: normalized.value,
+      canonicalJson: canonicalJson.value,
+      canonicalHash: canonicalHash.value as PlanHash,
+    });
+  }
+
+  private tradeCommandOutcomeRows(
+    commandId: string,
+    database = this.db,
+  ): Result<readonly OperatorMainnetTradeCommandOutcomeRecord[]> {
+    const rows = database
+      .prepare(
+        `SELECT * FROM operator_mainnet_trade_command_outcomes
+         WHERE command_id = ? ORDER BY revision`,
+      )
+      .all(commandId) as SqliteRow[];
+    const output: OperatorMainnetTradeCommandOutcomeRecord[] = [];
+    for (const row of rows) {
+      const outcome = this.tradeCommandOutcomeFromRow(row);
+      if (!outcome.ok) return outcome;
+      output.push(outcome.value);
+    }
+    return ok(output);
+  }
+
+  private tradeCommandConsumptionFromRow(
+    row: SqliteRow,
+  ): Result<OperatorMainnetTradeCommandSnapshot["consumption"]> {
+    const commandId = storedIdentifier(row, "command_id");
+    const receiptHash = storedHash(row, "receipt_hash");
+    const bindingHash = storedHash(row, "binding_hash");
+    const sourceId = storedIdentifier(row, "source_id");
+    const writeIntentId = storedIdentifier(row, "write_intent_id");
+    const consumedAt = storedTimestamp(row, "consumed_at");
+    if (
+      !commandId.ok ||
+      !receiptHash.ok ||
+      !bindingHash.ok ||
+      !sourceId.ok ||
+      !writeIntentId.ok ||
+      !consumedAt.ok
+    )
+      return persistenceFailure(
+        "persisted trade-command consumption is invalid",
+      );
+    return ok({
+      commandId: commandId.value,
+      receiptHash: receiptHash.value as PlanHash,
+      bindingHash: bindingHash.value as PlanHash,
+      sourceId: sourceId.value,
+      writeIntentId: writeIntentId.value,
+      consumedAt: consumedAt.value,
+    });
+  }
+
   private intentFromRow(
     row: SqliteRow,
   ): Result<OperatorMainnetTestIntentRecord> {
@@ -1742,7 +2699,8 @@ export class SqliteOperatorMainnetTestStore implements OperatorMainnetTestPersis
     if (
       (value.schemaVersion !== "operator-mainnet-test-create-intent/v1" &&
         value.schemaVersion !== "operator-mainnet-test-create-intent/v2" &&
-        value.schemaVersion !== "operator-mainnet-test-create-intent/v3") ||
+        value.schemaVersion !== "operator-mainnet-test-create-intent/v3" &&
+        value.schemaVersion !== "operator-mainnet-test-create-intent/v4") ||
       (value.schemaVersion === "operator-mainnet-test-create-intent/v1" &&
         (!requireIdentifier(value.leaseOwnerRunId, "leaseOwnerRunId").ok ||
           !requireFiniteInteger(value.leaseEpoch, "leaseEpoch", 1).ok)) ||
@@ -1753,7 +2711,15 @@ export class SqliteOperatorMainnetTestStore implements OperatorMainnetTestPersis
       (value.schemaVersion === "operator-mainnet-test-create-intent/v3" &&
         ("leaseOwnerRunId" in value ||
           "leaseEpoch" in value ||
-          !requireIdentifier(value.recoveryGrantId, "recoveryGrantId").ok))
+          !requireIdentifier(value.recoveryGrantId, "recoveryGrantId").ok)) ||
+      (value.schemaVersion === "operator-mainnet-test-create-intent/v4" &&
+        ("leaseOwnerRunId" in value ||
+          "leaseEpoch" in value ||
+          "recoveryGrantId" in value ||
+          !requireIdentifier(value.commandId, "commandId").ok ||
+          !requireHash(value.commandReceiptHash, "commandReceiptHash").ok ||
+          !requireHash(value.commandBindingHash, "commandBindingHash").ok ||
+          "approvalHash" in value))
     )
       return persistenceFailure("operator CREATE intent version is invalid");
     return ok({
@@ -1764,6 +2730,13 @@ export class SqliteOperatorMainnetTestStore implements OperatorMainnetTestPersis
       canonicalJson: canonicalJson.value,
       canonicalHash: canonicalHash.value as PlanHash,
       preparedAt: preparedAt.value,
+      ...(value.schemaVersion === "operator-mainnet-test-create-intent/v4"
+        ? {
+            commandId: value.commandId as string,
+            commandReceiptHash: value.commandReceiptHash as PlanHash,
+            commandBindingHash: value.commandBindingHash as PlanHash,
+          }
+        : {}),
     });
   }
 
@@ -1947,23 +2920,77 @@ export class SqliteOperatorMainnetTestStore implements OperatorMainnetTestPersis
     const source = this.sourceFromRow(sourceRow);
     if (!source.ok) return source;
     const planArtifact = this.artifactRow(source.value.planArtifactId);
-    const approvalArtifact = this.artifactRow(source.value.approvalArtifactId);
     if (!planArtifact.ok) return planArtifact;
-    if (!approvalArtifact.ok) return approvalArtifact;
-    if (!planArtifact.value || !approvalArtifact.value)
-      return persistenceFailure("operator source artifacts are missing");
+    if (!planArtifact.value)
+      return persistenceFailure("operator plan artifact is missing");
     const plan = rehydrateArtifact(PLAN_KIND, planArtifact.value.envelope);
-    const approval = rehydrateArtifact(
-      APPROVAL_KIND,
-      approvalArtifact.value.envelope,
-    );
-    if (
-      !plan.ok ||
-      !approval.ok ||
-      plan.value.contentHash !== source.value.planHash ||
-      approval.value.contentHash !== source.value.approvalHash
-    )
-      return persistenceFailure("operator source artifacts failed validation");
+    if (!plan.ok || plan.value.contentHash !== source.value.planHash)
+      return persistenceFailure("operator plan artifact failed validation");
+    let authorization:
+      | Extract<
+          OperatorMainnetTestSnapshot["authorization"],
+          { kind: "approval" }
+        >
+      | Extract<
+          OperatorMainnetTestSnapshot["authorization"],
+          { kind: "trade-command" }
+        >;
+    if (source.value.authorization.kind === "approval") {
+      const approvalArtifact = this.artifactRow(
+        source.value.authorization.artifactId,
+      );
+      if (!approvalArtifact.ok) return approvalArtifact;
+      if (
+        approvalArtifact.value?.artifactKind !== APPROVAL_KIND ||
+        approvalArtifact.value.materialHash !== source.value.authorization.hash
+      )
+        return persistenceFailure(
+          "operator approval artifact is missing or invalid",
+        );
+      const approval = rehydrateArtifact(
+        APPROVAL_KIND,
+        approvalArtifact.value.envelope,
+      );
+      if (
+        !approval.ok ||
+        approval.value.contentHash !== source.value.authorization.hash
+      )
+        return persistenceFailure(
+          "operator approval artifact failed validation",
+        );
+      authorization = {
+        ...source.value.authorization,
+        approval: approval.value,
+      };
+    } else {
+      const binding = this.tradeCommandBindingFromRow(
+        source.value.authorization.artifactId,
+        database,
+      );
+      if (!binding.ok) return binding;
+      const receipt = this.tradeCommandReceiptFromRow(
+        source.value.authorization.commandId,
+        database,
+      );
+      if (!receipt.ok) return receipt;
+      const directPlan = rehydrateOperatorMainnetTradeCommandPlan(plan.value);
+      if (
+        !directPlan.ok ||
+        binding.value.contentHash !== source.value.authorization.hash ||
+        binding.value.commandId !== source.value.authorization.commandId ||
+        receipt.value.contentHash !== source.value.authorization.receiptHash ||
+        receipt.value.contentHash !== binding.value.receiptHash ||
+        directPlan.value.contentHash !== binding.value.planHash
+      )
+        return persistenceFailure(
+          "operator direct-command artifacts failed validation",
+        );
+      authorization = {
+        ...source.value.authorization,
+        receipt: receipt.value,
+        binding: binding.value,
+      };
+    }
     const intentRow = database
       .prepare(
         "SELECT * FROM operator_mainnet_test_write_intents WHERE source_id = ?",
@@ -1973,6 +3000,15 @@ export class SqliteOperatorMainnetTestStore implements OperatorMainnetTestPersis
       return persistenceFailure("operator source has no durable CREATE intent");
     const intent = this.intentFromRow(intentRow);
     if (!intent.ok) return intent;
+    if (
+      authorization.kind === "trade-command" &&
+      (intent.value.commandId !== authorization.commandId ||
+        intent.value.commandReceiptHash !== authorization.receiptHash ||
+        intent.value.commandBindingHash !== authorization.hash)
+    )
+      return persistenceFailure(
+        "direct-command CREATE intent does not match its receipt and binding",
+      );
     const attemptRow = database
       .prepare(
         "SELECT * FROM operator_mainnet_test_attempts WHERE write_intent_id = ?",
@@ -1999,10 +3035,9 @@ export class SqliteOperatorMainnetTestStore implements OperatorMainnetTestPersis
     if (!sourceDisposition.ok) return sourceDisposition;
     const halt = haltRow(database, this.scope);
     if (!halt.ok) return halt;
-    return ok({
+    const common = {
       source: source.value,
       plan: plan.value,
-      approval: approval.value,
       intent: intent.value,
       ...(attempt.value === undefined ? {} : { attempt: attempt.value }),
       reconciliations: reconciliations.value,
@@ -2011,7 +3046,10 @@ export class SqliteOperatorMainnetTestStore implements OperatorMainnetTestPersis
         ? {}
         : { sourceDisposition: sourceDisposition.value }),
       halt: halt.value,
-    });
+    };
+    return authorization.kind === "approval"
+      ? ok({ ...common, authorization })
+      : ok({ ...common, authorization });
   }
 
   private haltOriginEvidence(
@@ -2034,9 +3072,9 @@ export class SqliteOperatorMainnetTestStore implements OperatorMainnetTestPersis
     return encoded.ok ? ok(encoded.value.json) : encoded;
   }
 
-  private pendingSourceRows(
+  private pendingSourceSnapshots(
     database = this.db,
-  ): Result<readonly OperatorMainnetTestSourceRecord[]> {
+  ): Result<readonly OperatorMainnetTestSnapshot[]> {
     const rows = database
       .prepare(
         `SELECT s.* FROM operator_mainnet_test_sources s
@@ -2046,7 +3084,7 @@ export class SqliteOperatorMainnetTestStore implements OperatorMainnetTestPersis
          ORDER BY s.created_at, s.source_id`,
       )
       .all(...scopeValues(this.scope)) as SqliteRow[];
-    const pending: OperatorMainnetTestSourceRecord[] = [];
+    const pending: OperatorMainnetTestSnapshot[] = [];
     for (const row of rows) {
       // Validate the complete persisted source and its canonical reconciliation
       // rows before trusting cleanup status to release the account gate.
@@ -2069,20 +3107,35 @@ export class SqliteOperatorMainnetTestStore implements OperatorMainnetTestPersis
           )
           .get(latestGrant.value.grantId) as SqliteRow | undefined;
         if (!consumed) {
-          pending.push(snapshot.value.source);
+          pending.push(snapshot.value);
           continue;
         }
       }
-      pending.push(snapshot.value.source);
+      pending.push(snapshot.value);
     }
     return ok(pending);
   }
 
+  private pendingSourceRows(
+    database = this.db,
+  ): Result<readonly OperatorMainnetTestSourceRecord[]> {
+    const snapshots = this.pendingSourceSnapshots(database);
+    return snapshots.ok
+      ? ok(snapshots.value.map((snapshot) => snapshot.source))
+      : snapshots;
+  }
+
   private pendingSourceRow(
     database = this.db,
+    symbol?: string,
   ): Result<OperatorMainnetTestSourceRecord | undefined> {
-    const pending = this.pendingSourceRows(database);
-    return pending.ok ? ok(pending.value[0]) : pending;
+    const pending = this.pendingSourceSnapshots(database);
+    if (!pending.ok) return pending;
+    return ok(
+      pending.value.find(
+        (snapshot) => symbol === undefined || snapshot.plan.symbol === symbol,
+      )?.source,
+    );
   }
 
   readOperatorMainnetTestSource(
@@ -2098,13 +3151,13 @@ export class SqliteOperatorMainnetTestStore implements OperatorMainnetTestPersis
     }
   }
 
-  findPendingOperatorMainnetTestSource(): Result<
-    OperatorMainnetTestSourceRecord | undefined
-  > {
+  findPendingOperatorMainnetTestSource(
+    symbol?: string,
+  ): Result<OperatorMainnetTestSourceRecord | undefined> {
     if (!validScope(this.scope)) return invalid();
     return runInTransaction(
       this.db,
-      (database) => this.pendingSourceRow(database),
+      (database) => this.pendingSourceRow(database, symbol),
       "PERSISTENCE_INTEGRITY",
     );
   }
@@ -2112,6 +3165,8 @@ export class SqliteOperatorMainnetTestStore implements OperatorMainnetTestPersis
   prepareCreateIntent(
     request: PrepareOperatorMainnetTestCreateRequest,
   ): Result<OperatorMainnetTestSnapshot> {
+    if (request.tradeCommand !== undefined)
+      return this.prepareTradeCommandCreateIntent(request);
     const runId = requireIdentifier(request.runId, "runId");
     const at = parseUtcTimestamp(request.preparedAt);
     const recoveryGrantId =
@@ -2246,14 +3301,17 @@ export class SqliteOperatorMainnetTestStore implements OperatorMainnetTestPersis
             `INSERT INTO operator_mainnet_test_sources
              (source_id, exchange, environment, account_id, category, position_mode,
               plan_hash, plan_artifact_id, approval_hash, approval_artifact_id,
+              authorization_kind, authorization_hash, authorization_artifact_id,
               client_order_id, payload_json, payload_hash, created_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'approval', ?, ?, ?, ?, ?, ?)`,
           )
           .run(
             sourceId,
             ...scopeValues(this.scope),
             artifacts.value.plan.contentHash,
             planArtifactId,
+            artifacts.value.approval.contentHash,
+            approvalArtifactId,
             artifacts.value.approval.contentHash,
             approvalArtifactId,
             artifacts.value.plan.clientOrderId,
@@ -2290,6 +3348,288 @@ export class SqliteOperatorMainnetTestStore implements OperatorMainnetTestPersis
         if (!source)
           return invalid(
             "operator source did not persist with its CREATE intent",
+          );
+        return this.snapshot(source, database);
+      },
+      "PERSISTENCE_CONFLICT",
+    );
+  }
+
+  private prepareTradeCommandCreateIntent(
+    request: Extract<
+      PrepareOperatorMainnetTestCreateRequest,
+      { readonly tradeCommand: unknown }
+    >,
+  ): Result<OperatorMainnetTestSnapshot> {
+    const runId = requireIdentifier(request.runId, "runId");
+    const at = parseUtcTimestamp(request.preparedAt);
+    const authorizationAt = parseUtcTimestamp(
+      request.tradeCommand.authorizationAt,
+    );
+    const receipt = rehydrateOperatorMainnetTradeCommandReceipt(
+      request.tradeCommand.receipt,
+    );
+    const binding = rehydrateOperatorMainnetTradeCommandBinding(
+      request.tradeCommand.binding,
+    );
+    const plan = rehydrateOperatorMainnetTradeCommandPlan(request.plan);
+    if (
+      !runId.ok ||
+      !at.ok ||
+      !authorizationAt.ok ||
+      !receipt.ok ||
+      !binding.ok ||
+      !plan.ok ||
+      !validScope(this.scope) ||
+      receipt.value.accountIdentityHash !== this.scope.accountId ||
+      plan.value.contentHash !== binding.value.planHash ||
+      plan.value.commandId !== receipt.value.commandId ||
+      plan.value.commandReceiptHash !== receipt.value.contentHash ||
+      binding.value.commandId !== receipt.value.commandId ||
+      binding.value.receiptHash !== receipt.value.contentHash ||
+      binding.value.replayInputs.plan.contentHash !== plan.value.contentHash
+    )
+      return invalid(
+        "direct-command intent inputs do not match the saved authority",
+      );
+    const currentBinding = validateOperatorMainnetTradeCommandBinding(
+      receipt.value,
+      binding.value,
+      authorizationAt.value,
+      request.payloadHash,
+    );
+    if (!currentBinding.ok) return currentBinding;
+    const payload = validatePayload(
+      plan.value as unknown as OperatorMainnetTestPlan,
+      request.payloadJson,
+      request.payloadHash,
+    );
+    if (!payload.ok) return payload;
+    if (
+      payload.value.hash !== binding.value.createPayloadHash ||
+      timestampToEpochMs(at.value) < timestampToEpochMs(plan.value.preparedAt)
+    )
+      return invalid(
+        "direct-command CREATE payload differs from its immutable binding",
+      );
+    const sourceId = deriveOperatorMainnetTestSourceId(plan.value.contentHash);
+    if (!sourceId.ok || sourceId.value !== binding.value.sourceId)
+      return invalid("direct-command source identity differs from its binding");
+    const writeIntentId = deterministicId(
+      "operator-mainnet-test-write",
+      `${sourceId.value}:CREATE`,
+    );
+    const intentValue = {
+      schemaVersion: "operator-mainnet-test-create-intent/v4",
+      operation: "CREATE" as const,
+      sourceId: sourceId.value,
+      runId: runId.value,
+      planHash: plan.value.contentHash,
+      commandId: receipt.value.commandId,
+      commandReceiptHash: receipt.value.contentHash,
+      commandBindingHash: binding.value.contentHash,
+      accountIdentityHash: plan.value.accountIdentityHash,
+      symbol: plan.value.symbol,
+      clientOrderId: plan.value.clientOrderId,
+      exactPayloadHash: payload.value.hash,
+      expiresAt: receipt.value.expiresAt,
+      preparedAt: at.value,
+    };
+    const intent = encode(intentValue);
+    if (!intent.ok) return intent;
+    const receiptEnvelope = encodeCanonicalArtifact(
+      TRADE_COMMAND_RECEIPT_KIND,
+      receipt.value,
+    );
+    const planEnvelope = encodeCanonicalArtifact(PLAN_KIND, plan.value);
+    const bindingEnvelope = encodeCanonicalArtifact(
+      TRADE_COMMAND_BINDING_KIND,
+      binding.value,
+    );
+    if (!receiptEnvelope.ok || !planEnvelope.ok || !bindingEnvelope.ok)
+      return invalid("direct-command artifacts could not be encoded");
+    const receiptArtifactId = TRADE_COMMAND_RECEIPT_ARTIFACT_ID(
+      receipt.value.contentHash,
+    );
+    const planArtifactId = PLAN_ARTIFACT_ID(plan.value.contentHash);
+    const bindingArtifactId = TRADE_COMMAND_BINDING_ARTIFACT_ID(
+      binding.value.contentHash,
+    );
+    return runInTransaction(
+      this.db,
+      (database) => {
+        const persistedReceipt = this.tradeCommandReceiptFromRow(
+          receipt.value.commandId,
+          database,
+        );
+        if (!persistedReceipt.ok) return persistedReceipt;
+        const persistedBinding = this.tradeCommandBindingFromRow(
+          bindingArtifactId,
+          database,
+        );
+        if (!persistedBinding.ok) return persistedBinding;
+        if (
+          persistedReceipt.value.contentHash !== receipt.value.contentHash ||
+          persistedBinding.value.contentHash !== binding.value.contentHash ||
+          persistedBinding.value.planHash !== plan.value.contentHash ||
+          persistedBinding.value.createPayloadHash !== payload.value.hash
+        )
+          return fail(
+            domainError(
+              "PERSISTENCE_CONFLICT",
+              "saved direct-command authority differs from the requested CREATE",
+            ),
+          );
+        if (
+          !tradeCommandPreIntentOutcomesPermitCreate(
+            database,
+            receipt.value.commandId,
+          )
+        )
+          return fail(
+            domainError(
+              "PERSISTENCE_CONFLICT",
+              "a trade-command has a blocking pre-intent outcome and cannot create an intent",
+            ),
+          );
+        if (
+          database
+            .prepare(
+              `SELECT 1 AS present FROM operator_mainnet_trade_command_consumptions
+               WHERE command_id = ?`,
+            )
+            .get(receipt.value.commandId)
+        )
+          return fail(
+            domainError(
+              "PERSISTENCE_CONFLICT",
+              "direct-command authority was already consumed",
+            ),
+          );
+        const halt = haltRow(database, this.scope);
+        if (!halt.ok) return halt;
+        if (halt.value.active)
+          return fail(
+            domainError(
+              "HALT_ACTIVE",
+              "HALT blocks a new operator Mainnet CREATE; inspect saved event and source/intent evidence before explicit recovery",
+            ),
+          );
+        const pending = this.pendingSourceSnapshots(database);
+        if (!pending.ok) return pending;
+        for (const snapshot of pending.value) {
+          const reasonCode =
+            snapshot.plan.symbol === plan.value.symbol
+              ? "UNRESOLVED_SAME_SYMBOL_SOURCE_EXISTS"
+              : snapshot.attempt === undefined ||
+                  snapshot.attempt.outcome === "ambiguous"
+                ? "ACCOUNT_CREATE_OUTCOME_UNKNOWN"
+                : snapshot.attempt.outcome === "accepted" &&
+                    timestampToEpochMs(snapshot.attempt.recordedAt) >=
+                      timestampToEpochMs(at.value)
+                  ? "ACCOUNT_CAPACITY_EVIDENCE_PRECEDES_OTHER_CREATE"
+                  : undefined;
+          if (reasonCode !== undefined)
+            return fail(
+              domainError(
+                "UNRESOLVED_STATE",
+                "another operator Mainnet source is not safe to ignore for this direct CREATE",
+                { reasonCode, symbol: plan.value.symbol },
+              ),
+            );
+        }
+        if (this.sourceRow(sourceId.value, database))
+          return fail(
+            domainError(
+              "PERSISTENCE_CONFLICT",
+              "operator source already has a durable intent",
+            ),
+          );
+        for (const [artifactId, envelope, materialHash, createdAt] of [
+          [
+            receiptArtifactId,
+            receiptEnvelope.value,
+            receipt.value.contentHash,
+            receipt.value.acceptedAt,
+          ],
+          [
+            planArtifactId,
+            planEnvelope.value,
+            plan.value.contentHash,
+            plan.value.preparedAt,
+          ],
+          [
+            bindingArtifactId,
+            bindingEnvelope.value,
+            binding.value.contentHash,
+            binding.value.boundAt,
+          ],
+        ] as const) {
+          const stored = insertArtifact(
+            database,
+            this.scope,
+            artifactId,
+            envelope,
+            materialHash,
+            createdAt,
+          );
+          if (!stored.ok) return stored;
+        }
+        database
+          .prepare(
+            `INSERT INTO operator_mainnet_test_sources
+             (source_id, exchange, environment, account_id, category, position_mode,
+              plan_hash, plan_artifact_id, approval_hash, approval_artifact_id,
+              authorization_kind, authorization_hash, authorization_artifact_id,
+              client_order_id, payload_json, payload_hash, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'trade-command', ?, ?, ?, ?, ?, ?)`,
+          )
+          .run(
+            sourceId.value,
+            ...scopeValues(this.scope),
+            plan.value.contentHash,
+            planArtifactId,
+            binding.value.contentHash,
+            bindingArtifactId,
+            binding.value.contentHash,
+            bindingArtifactId,
+            plan.value.clientOrderId,
+            payload.value.json,
+            payload.value.hash,
+            at.value,
+          );
+        database
+          .prepare(
+            `INSERT INTO operator_mainnet_test_write_intents
+             (write_intent_id, source_id, operation, run_id, canonical_json, canonical_hash, prepared_at)
+             VALUES (?, ?, 'CREATE', ?, ?, ?, ?)`,
+          )
+          .run(
+            writeIntentId,
+            sourceId.value,
+            runId.value,
+            intent.value.json,
+            intent.value.hash,
+            at.value,
+          );
+        database
+          .prepare(
+            `INSERT INTO operator_mainnet_trade_command_consumptions
+             (command_id, receipt_hash, binding_hash, source_id, write_intent_id, consumed_at)
+             VALUES (?, ?, ?, ?, ?, ?)`,
+          )
+          .run(
+            receipt.value.commandId,
+            receipt.value.contentHash,
+            binding.value.contentHash,
+            sourceId.value,
+            writeIntentId,
+            at.value,
+          );
+        const source = this.sourceRow(sourceId.value, database);
+        if (!source)
+          return invalid(
+            "direct-command source did not persist with its CREATE intent",
           );
         return this.snapshot(source, database);
       },

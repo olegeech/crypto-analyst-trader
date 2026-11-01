@@ -4,6 +4,7 @@ import {
   type AccountEvidenceBundle,
   type AccountEvidenceCollectionResult,
 } from "../domain/account/account-evidence-bundle.js";
+import { accountCriticalDifferenceIsOnlyNumericAssetMovement } from "../domain/account/account-evidence-consistency.js";
 import {
   accountEvidencePartitionKey,
   type AccountEvidencePartition,
@@ -102,6 +103,8 @@ export interface MainnetExecutionReadinessInput {
   readonly symbol: string;
   readonly instrument: BybitInstrumentInfo | null;
   readonly evaluatedAt: UtcTimestamp;
+  /** Only the receipt-bound v3 direct trade path may opt out of the M1 symbol list. */
+  readonly directTrade?: true;
 }
 
 const mainnetOrigin = BYBIT_MAINNET_ORIGIN;
@@ -194,11 +197,16 @@ function attributableUnrelatedGap(
 function pushMappedConsistencyReasons(
   reasons: Set<MainnetExecutionReadinessReason>,
   bundle: AccountEvidenceBundle,
+  allowWalletBalanceMovement: boolean,
 ): void {
   for (const code of bundle.consistency.reasonCodes) {
     switch (code) {
       case "CRITICAL_STATE_CHANGED":
-        reasons.add("CRITICAL_STATE_CHANGED");
+        if (
+          !allowWalletBalanceMovement ||
+          !accountCriticalDifferenceIsOnlyNumericAssetMovement(bundle)
+        )
+          reasons.add("CRITICAL_STATE_CHANGED");
         break;
       case "CONTRADICTORY_OBSERVATION":
         reasons.add("ACCOUNT_EVIDENCE_CONTRADICTORY");
@@ -357,6 +365,7 @@ function checkAccountFacts(
   evaluatedAt: UtcTimestamp,
   reasons: Set<MainnetExecutionReadinessReason>,
   warnings: Set<MainnetExecutionReadinessWarning>,
+  allowWalletBalanceMovement: boolean,
 ): void {
   const { A, B } = bundle.criticalPasses;
   if (A === null || B === null) {
@@ -364,9 +373,13 @@ function checkAccountFacts(
     return;
   }
 
-  if (bundle.consistency.structuralComparison === "changed")
-    reasons.add("CRITICAL_STATE_CHANGED");
-  else if (bundle.consistency.structuralComparison !== "unchanged")
+  if (bundle.consistency.structuralComparison === "changed") {
+    if (
+      !allowWalletBalanceMovement ||
+      !accountCriticalDifferenceIsOnlyNumericAssetMovement(bundle)
+    )
+      reasons.add("CRITICAL_STATE_CHANGED");
+  } else if (bundle.consistency.structuralComparison !== "unchanged")
     reasons.add("CRITICAL_STATE_UNPROVEN");
 
   for (const pass of [A, B]) {
@@ -479,14 +492,16 @@ export function deriveMainnetExecutionReadiness(
 ): MainnetExecutionReadiness {
   const reasons = new Set<MainnetExecutionReadinessReason>();
   const warnings = new Set<MainnetExecutionReadinessWarning>();
-  if (
-    !closedPlainRecord(input, [
-      "accountResult",
-      "symbol",
-      "instrument",
-      "evaluatedAt",
-    ])
-  ) {
+  const readinessKeys = [
+    "accountResult",
+    "symbol",
+    "instrument",
+    "evaluatedAt",
+    ...(isRecord(input) && Object.hasOwn(input, "directTrade")
+      ? ["directTrade"]
+      : []),
+  ];
+  if (!closedPlainRecord(input, readinessKeys)) {
     return result({
       symbol: "unknown",
       evaluatedAt: INVALID_TIMESTAMP,
@@ -497,7 +512,14 @@ export function deriveMainnetExecutionReadiness(
 
   const symbol = requireIdentifier(input.symbol, "symbol");
   const evaluatedAt = parseUtcTimestamp(input.evaluatedAt);
-  if (!symbol.ok || !isPlanningSymbol(symbol.value) || !evaluatedAt.ok) {
+  const directTrade = input.directTrade === true;
+  if (
+    (!directTrade && Object.hasOwn(input, "directTrade")) ||
+    !symbol.ok ||
+    (!isPlanningSymbol(symbol.value) &&
+      !(directTrade && /^[A-Z0-9]{1,26}USDT$/u.test(symbol.value))) ||
+    !evaluatedAt.ok
+  ) {
     reasons.add("INVALID_REQUEST");
     return result({
       symbol: symbol.ok ? symbol.value : "unknown",
@@ -600,8 +622,17 @@ export function deriveMainnetExecutionReadiness(
   );
   checkCoverageDiagnostics(bundle, symbol.value, reasons);
   checkDiscovery(bundle, reasons);
-  checkAccountFacts(bundle, symbol.value, evaluatedAt.value, reasons, warnings);
-  pushMappedConsistencyReasons(reasons, bundle);
+  const allowWalletBalanceMovement =
+    directTrade && accountCriticalDifferenceIsOnlyNumericAssetMovement(bundle);
+  checkAccountFacts(
+    bundle,
+    symbol.value,
+    evaluatedAt.value,
+    reasons,
+    warnings,
+    allowWalletBalanceMovement,
+  );
+  pushMappedConsistencyReasons(reasons, bundle, allowWalletBalanceMovement);
 
   return result({
     symbol: symbol.value,

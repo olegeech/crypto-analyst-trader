@@ -77,6 +77,11 @@ export interface AccountEvidenceCollectionOptions {
   readonly evidenceProfile?: "complete-account" | "operator-execution";
   readonly utcClock?: () => number;
   readonly monotonicClock?: () => number;
+  /** Authenticated identity already read by the synchronous v3 plan freeze. */
+  readonly identityEvidence?: Readonly<{
+    readonly accountBinding: AccountBinding;
+    readonly credentialPosture: AccountCredentialPosture;
+  }>;
   readonly createReadPort?: (options: {
     environment: AccountEvidenceEnvironment;
     credentials: ExchangeCredentials;
@@ -522,15 +527,20 @@ export async function collectAccountEvidence(
           }),
           utcClock: wall,
         });
-    const identity = await bounded(() => readPort.readIdentity());
-    const mapped = mapAccountReadIdentity(
-      identity,
-      credentials.accountId,
-      options.environment,
-      timestamp(wall()),
-    );
-    binding = mapped.accountBinding;
-    posture = mapped.credentialPosture;
+    if (options.identityEvidence) {
+      binding = options.identityEvidence.accountBinding;
+      posture = options.identityEvidence.credentialPosture;
+    } else {
+      const identity = await bounded(() => readPort.readIdentity());
+      const mapped = mapAccountReadIdentity(
+        identity,
+        credentials.accountId,
+        options.environment,
+        timestamp(wall()),
+      );
+      binding = mapped.accountBinding;
+      posture = mapped.credentialPosture;
+    }
     initial = timestamp(await bounded(() => readPort.readExchangeTime()));
     const first = await discover();
     discovery = {
