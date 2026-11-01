@@ -274,8 +274,13 @@ test("operator budget floors quantity and never raises an impossible minimum", (
     }),
   });
   assert.equal(belowMinimumNotional.ok, false);
-  if (!belowMinimumNotional.ok)
+  if (!belowMinimumNotional.ok) {
     assert.equal(belowMinimumNotional.error.code, "NOTIONAL_TOO_SMALL");
+    assert.deepEqual(belowMinimumNotional.error.details, {
+      computedNotional: "9",
+      minimumNotional: "10",
+    });
+  }
 
   assert.equal(
     validPlan({ constraints: constraints({ maxLimitQuantity: "50" }) }).ok,

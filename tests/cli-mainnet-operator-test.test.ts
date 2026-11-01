@@ -1479,6 +1479,47 @@ test("incomplete venue bounds produce actionable allowlisted diagnostics without
   assert.doesNotMatch(terminal.text(), /PRIVATE_PROVIDER_SECRET|INJECTED/u);
 });
 
+test("below-minimum notional reports the current Bybit minimum without changing the requested size", async () => {
+  const terminal = streams(false);
+  const code = await runMainnetOperatorTestCli(
+    [
+      "prepare",
+      "--symbol",
+      "DOGEUSDT",
+      "--allocation",
+      "9",
+      "--gross-cap",
+      "9",
+      "--max-deviation-bps",
+      "10",
+    ],
+    {
+      ...terminal,
+      prepare: async () =>
+        fail(
+          domainError("NOTIONAL_TOO_SMALL", "venue minimum block", {
+            computedNotional: "9",
+            minimumNotional: "10",
+          }),
+        ),
+    },
+  );
+
+  assert.equal(code, 4);
+  assert.match(terminal.text(), /REASON_CODE=NOTIONAL_TOO_SMALL/u);
+  assert.match(terminal.text(), /COMPUTED_NOTIONAL_USDT=9/u);
+  assert.match(terminal.text(), /BYBIT_MINIMUM_NOTIONAL_USDT=10/u);
+  assert.match(
+    terminal.text(),
+    /EXPLANATION=.*below Bybit's current 10 USDT venue minimum/u,
+  );
+  assert.match(terminal.text(), /WHY=.*9 USDT.*minimum is 10 USDT/u);
+  assert.match(
+    terminal.text(),
+    /NEXT_ACTION=.*If you choose a larger size, enter it explicitly.*requested size is never increased automatically/u,
+  );
+});
+
 test("quote precision failures expose a safe reason without printing raw provider errors", async () => {
   for (const reasonCode of [
     "PROVIDER_TIME_PRECISION_INSUFFICIENT",

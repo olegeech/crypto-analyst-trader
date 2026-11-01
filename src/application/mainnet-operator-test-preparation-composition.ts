@@ -442,7 +442,7 @@ export async function prepareMainnetOperatorTest(
         quote: initialQuote,
         warningCodes: identity.credentialPosture.warnings,
         constraints: initialInstrument.constraints,
-        preparedAt: initialQuote.observedAt,
+        preparedAt: initialQuote.collectionCompletedAt,
       });
       if (!plan.ok) return withCounts(plan, exchangeReads, 0);
 

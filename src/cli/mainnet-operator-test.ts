@@ -675,6 +675,22 @@ function operatorFailureDiagnostic(
   details: Record<string, unknown> | undefined,
   notStarted: boolean,
 ): OperatorFailureDiagnostic {
+  if (reasonCode === "NOTIONAL_TOO_SMALL") {
+    const computedNotional = safeDecimalDetail(details, "computedNotional");
+    const minimumNotional = safeDecimalDetail(details, "minimumNotional");
+    return {
+      explanation: minimumNotional
+        ? `The computed entry notional is below Bybit's current ${minimumNotional} USDT venue minimum.`
+        : "The computed entry notional is below Bybit's current venue minimum.",
+      why:
+        computedNotional && minimumNotional
+          ? `The computed entry notional is ${computedNotional} USDT; Bybit's current minimum is ${minimumNotional} USDT.`
+          : "The plan's computed entry notional is below the current Bybit venue minimum.",
+      nextAction: minimumNotional
+        ? `Review the proposed allocation and cap against the ${minimumNotional} USDT minimum. If you choose a larger size, enter it explicitly in a new trade instruction or prepare a new plan and approve its exact terms; the requested size is never increased automatically.`
+        : "Review Bybit's current instrument minimum. If you choose a larger size, enter it explicitly in a new trade instruction or prepare a new plan and approve its exact terms; the requested size is never increased automatically.",
+    };
+  }
   if (
     notStarted &&
     reasonCode === "AVAILABLE_MARGIN_OR_FEE_RESERVE_INSUFFICIENT"
@@ -1005,6 +1021,8 @@ function printOperatorFailureDiagnostic(
       ["APPROVED_BID_LOWER", "approvedBidLower"],
       ["APPROVED_BID_UPPER", "approvedBidUpper"],
       ["ALLOWED_DEVIATION_BPS", "allowedDeviationBps"],
+      ["COMPUTED_NOTIONAL_USDT", "computedNotional"],
+      ["BYBIT_MINIMUM_NOTIONAL_USDT", "minimumNotional"],
       ["POSITION_QUANTITY", "positionQuantity"],
       ["LEVERAGE", "leverage"],
       ["LEVERAGE_BUY", "leverageBuy"],

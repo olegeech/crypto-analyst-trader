@@ -25,6 +25,8 @@ import {
 } from "../src/application/mainnet-operator-trade.js";
 import { runMainnetOperatorTestCli } from "../src/cli/mainnet-operator-test.js";
 import { mainnetOperatorTestPersistenceScope } from "../src/application/mainnet-operator-test-scope.js";
+import { createOperatorMainnetTradeCommandReceipt } from "../src/domain/execution/operator-mainnet-trade-command.js";
+import { hashCanonical } from "../src/domain/identity/canonical-serialization.js";
 import type { SqlitePersistenceOptions } from "../src/adapters/sqlite/sqlite-persistence.js";
 import type { UtcTimestamp } from "../src/domain/shared/time.js";
 import type { MainnetOperatorTestStatusResult } from "../src/application/mainnet-operator-test-status.js";
@@ -50,10 +52,10 @@ function response(
   );
 }
 
-function providerTimeResult() {
+function providerTimeResult(timeMs = NOW) {
   return {
-    timeSecond: String(Math.floor(NOW / 1_000)),
-    timeNano: String(BigInt(NOW) * 1_000_000n),
+    timeSecond: String(Math.floor(timeMs / 1_000)),
+    timeNano: String(BigInt(timeMs) * 1_000_000n),
   };
 }
 
@@ -119,11 +121,16 @@ async function runOperatorTradeE2e(
   initialTargetLeverage = "1",
   walletAmountDrift = false,
   staleAccountHandoff = false,
+  advancingQuoteTime = false,
+  preparationOnly = false,
 ): Promise<void> {
   const root = mkdtempSync(join(tmpdir(), "operator-trade-e2e-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const databasePath = join(root, "mainnet.db");
-  const clock = { now: () => NOW_ISO };
+  let eventTime = NOW;
+  const clock = {
+    now: () => new Date(eventTime).toISOString() as UtcTimestamp,
+  };
   const openPersistence = (options: SqlitePersistenceOptions) =>
     openSqlitePersistence({
       ...options,
@@ -139,6 +146,9 @@ async function runOperatorTradeE2e(
   const credentialProvider = { load: async () => credentials };
   const attempts: Array<{ method: string; path: string }> = [];
   let tickerReads = 0;
+  let initialQuoteCollectionStartedAt: number | undefined;
+  let initialQuoteObservedAt: number | undefined;
+  let initialQuoteCollectionCompletedAt: number | undefined;
   let walletReads = 0;
   let createCalls = 0;
   let createBody: Record<string, unknown> | undefined;
@@ -200,8 +210,19 @@ async function runOperatorTradeE2e(
     assert.equal(method, "GET", `unexpected provider method ${method}`);
 
     switch (target.pathname) {
-      case "/v5/market/time":
-        return response(providerTimeResult());
+      case "/v5/market/time": {
+        const providerTime = advancingQuoteTime ? NOW + tickerReads * 300 : NOW;
+        eventTime = Math.max(eventTime, providerTime);
+        if (advancingQuoteTime && tickerReads === 0)
+          initialQuoteCollectionStartedAt = providerTime;
+        if (
+          advancingQuoteTime &&
+          tickerReads === 1 &&
+          initialQuoteCollectionCompletedAt === undefined
+        )
+          initialQuoteCollectionCompletedAt = providerTime;
+        return response(providerTimeResult(providerTime), providerTime);
+      }
       case "/v5/user/query-api":
         return response({
           userID: 123,
@@ -278,19 +299,28 @@ async function runOperatorTradeE2e(
       }
       case "/v5/market/tickers": {
         tickerReads += 1;
+        const tickerTime = advancingQuoteTime
+          ? NOW + 100 + (tickerReads - 1) * 300
+          : NOW;
+        eventTime = Math.max(eventTime, tickerTime);
+        if (advancingQuoteTime && tickerReads === 1)
+          initialQuoteObservedAt = tickerTime;
         const bid = tickerReads === 1 ? "0.07537" : "0.07529";
         const ask = tickerReads === 1 ? "0.07538" : "0.0753";
-        return response({
-          category: "linear",
-          list: [
-            {
-              symbol: "INJUSDT",
-              bid1Price: bid,
-              ask1Price: ask,
-              lastPrice: bid,
-            },
-          ],
-        });
+        return response(
+          {
+            category: "linear",
+            list: [
+              {
+                symbol: "INJUSDT",
+                bid1Price: bid,
+                ask1Price: ask,
+                lastPrice: bid,
+              },
+            ],
+          },
+          tickerTime,
+        );
       }
       case "/v5/account/collateral-info":
         return response(structuredClone(collateralResponse.result));
@@ -381,11 +411,90 @@ async function runOperatorTradeE2e(
     }
   };
 
+  if (preparationOnly) {
+    const accountIdentity = configuredBybitAccountIdentityHash(
+      "123",
+      "mainnet",
+    );
+    const actorIdentity = hashCanonical({
+      localOperatorIdentity: "test-owner",
+    });
+    assert.equal(accountIdentity.ok, true);
+    assert.equal(actorIdentity.ok, true);
+    if (!accountIdentity.ok || !actorIdentity.ok) return;
+
+    const receipt = createOperatorMainnetTradeCommandReceipt({
+      commandId: "advancing-quote-preparation-01",
+      actorIdentityHash: actorIdentity.value,
+      accountIdentityHash: accountIdentity.value,
+      symbol: "INJUSDT",
+      allocation: "10",
+      grossNotionalCap: "10",
+      maxDeviationBps: "10",
+      takeProfitMode: "percent",
+      takeProfitValue: "0.50",
+      acceptedAt: NOW_ISO,
+    });
+    assert.equal(receipt.ok, true);
+    if (!receipt.ok) return;
+
+    const prepared = await prepareMainnetOperatorTest(
+      {
+        symbol: "INJUSDT",
+        allocation: "10",
+        grossNotionalCap: "10",
+        maxDeviationBps: "10",
+        tradeCommandReceipt: receipt.value,
+      },
+      {
+        credentialProvider,
+        openPersistence,
+        request,
+        utcClock: () => eventTime,
+      },
+    );
+    assert.equal(prepared.ok, true, JSON.stringify(prepared));
+    assert.equal(createCalls, 0, "preparation must remain GET-only");
+    assert.equal(
+      attempts.some(({ method }) => method === "POST"),
+      false,
+      "preparation must not issue provider writes",
+    );
+    if (!prepared.ok) return;
+
+    const { plan } = prepared.value;
+    assert.equal(prepared.value.exchangeWrites, 0);
+    assert.equal(plan.schemaVersion, "operator-mainnet-execution-test/v3");
+    assert.equal(plan.commandId, receipt.value.commandId);
+    assert.deepEqual(
+      [
+        initialQuoteCollectionStartedAt,
+        initialQuoteObservedAt,
+        initialQuoteCollectionCompletedAt,
+      ],
+      [NOW, NOW + 100, NOW + 300],
+      "the quote must preserve its advancing provider-time bracket",
+    );
+    assert.ok(
+      Date.parse(plan.quote.collectionStartedAt) <
+        Date.parse(plan.quote.observedAt) &&
+        Date.parse(plan.quote.observedAt) <
+          Date.parse(plan.quote.collectionCompletedAt),
+      "the plan quote must retain its advancing provider-time bracket",
+    );
+    assert.ok(
+      Date.parse(plan.preparedAt) >=
+        Date.parse(plan.quote.collectionCompletedAt),
+      "preparedAt must not precede quote collection completion",
+    );
+    return;
+  }
+
   const compositionDependencies = {
     credentialProvider,
     openPersistence,
     request,
-    wallClock: () => NOW,
+    wallClock: () => eventTime,
   };
   const statusDependencies = {
     ...compositionDependencies,
@@ -413,7 +522,7 @@ async function runOperatorTradeE2e(
     credentialProvider,
     openPersistence,
     request,
-    clock: () => NOW,
+    clock: () => eventTime,
     prepare: async (
       prepareInput: Parameters<typeof prepareMainnetOperatorTest>[0],
     ) => {
@@ -421,7 +530,7 @@ async function runOperatorTradeE2e(
         credentialProvider,
         openPersistence,
         request,
-        utcClock: () => NOW,
+        utcClock: () => eventTime,
       });
       assert.equal(createCalls, 0, "preparation must remain GET-only");
       assert.equal(prepared.ok, true, JSON.stringify(prepared));
@@ -667,3 +776,6 @@ test("v3 hands one full account proof forward when only numeric wallet assets ch
 
 test("v3 blocks stale account proof before intent without restarting the full scan", async (t) =>
   runOperatorTradeE2e(t, false, "1", false, true));
+
+test("v3 production preparation accepts an advancing quote bracket without writes", async (t) =>
+  runOperatorTradeE2e(t, false, "1", false, false, true, true));

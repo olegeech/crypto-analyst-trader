@@ -520,6 +520,10 @@ function canonicalizePlanInput(
       domainError(
         "NOTIONAL_TOO_SMALL",
         "effective gross notional is below the venue minimum",
+        {
+          computedNotional: effectiveGrossNotional.toString(),
+          minimumNotional: constraints.value.minNotional.toString(),
+        },
       ),
     );
 
