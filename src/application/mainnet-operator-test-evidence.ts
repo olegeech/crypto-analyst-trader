@@ -21,13 +21,16 @@ import { fail } from "../domain/shared/result.js";
 import {
   parseUtcTimestamp,
   timestampFromEpochMs,
+  type UtcTimestamp,
 } from "../domain/shared/time.js";
 import { ACCOUNT_EVIDENCE_COLLECTION_POLICY } from "../domain/account/account-evidence-policy.js";
 import type { MainnetExchangeExecutionPort } from "../ports/exchange-execution.js";
 import {
   createOperatorMainnetFeeRateEvidence,
+  OPERATOR_MAINNET_DIRECT_ACCOUNT_SCHEMA_VERSION,
   OPERATOR_MAINNET_COMPACT_ACCOUNT_SCHEMA_VERSION,
   type MainnetOperatorTestCompactAccountEvidence,
+  type MainnetOperatorTestDirectAccountEvidence,
   type MainnetOperatorTestCompactAccountObservation,
   validateMainnetOperatorTestEvidence,
   type MainnetOperatorTestFreshEvidence,
@@ -144,6 +147,8 @@ export class OperatorEvidenceReadError extends Error {
         key === "predicate" &&
         [
           "totalAvailableBalance",
+          "identity",
+          "account-mode",
           "wallet-observation",
           "critical-pass",
           "account-mode",
@@ -291,6 +296,188 @@ async function compactPartitionSample(
     response: sample.responses[0]!,
     observedAt: sample.observation.exchangeResponseTime,
   };
+}
+
+async function readDirectAccountMode(
+  reader: AccountEvidenceReadPort,
+  fallbackObservedAt: UtcTimestamp,
+): Promise<{
+  readonly mode: MainnetOperatorTestCompactAccountObservation["mode"];
+  readonly observedAt: UtcTimestamp;
+}> {
+  const sample = await directPartitionSample(reader, "account-info");
+  return {
+    mode: mapAccountInfo(sample.response),
+    observedAt: sample.observedAt ?? fallbackObservedAt,
+  };
+}
+
+async function readDirectAccountBalance(
+  reader: AccountEvidenceReadPort,
+  fallbackObservedAt: UtcTimestamp,
+): Promise<{
+  readonly availableBalance: DecimalValue;
+  readonly observedAt: UtcTimestamp;
+}> {
+  const sample = await directPartitionSample(reader, "wallet");
+  const balance = mapAccountWallet(sample.response).totals
+    .totalAvailableBalance;
+  if (balance.state !== "known" || balance.unit !== "USD")
+    throw new CompactAccountEvidenceUnavailable("WALLET_BALANCE_UNPROVEN");
+  return {
+    availableBalance: balance.value,
+    observedAt: sample.observedAt ?? fallbackObservedAt,
+  };
+}
+
+async function directPartitionSample(
+  reader: AccountEvidenceReadPort,
+  endpoint: "account-info" | "wallet",
+) {
+  const sample = await reader.readPartition(accountPartition(endpoint, "A"));
+  if (
+    sample.coverage.status !== "traversed" ||
+    sample.coverage.reasonCodes.length !== 0 ||
+    sample.responses.length !== 1 ||
+    !sample.observation
+  )
+    throw new CompactAccountEvidenceUnavailable(
+      endpoint === "wallet"
+        ? "WALLET_A_OBSERVATION_MISSING"
+        : "ACCOUNT_EVIDENCE_INVALID",
+    );
+  return {
+    response: sample.responses[0]!,
+    observedAt: sample.observation.exchangeResponseTime ?? undefined,
+  };
+}
+
+async function readDirectAccountFacts(
+  reader: AccountEvidenceReadPort,
+  requested: { readonly mode: boolean; readonly balance: boolean },
+) {
+  const beforeMs = await reader.readExchangeTime();
+  const before = timestampFromEpochMs(beforeMs);
+  if (!before.ok)
+    throw new CompactAccountEvidenceUnavailable("PROVIDER_TIME_UNAVAILABLE");
+  const [mode, balance] = await Promise.all([
+    requested.mode ? readDirectAccountMode(reader, before.value) : undefined,
+    requested.balance
+      ? readDirectAccountBalance(reader, before.value)
+      : undefined,
+  ]);
+  const afterMs = await reader.readExchangeTime();
+  const after = timestampFromEpochMs(afterMs);
+  if (!after.ok || afterMs < beforeMs)
+    throw new CompactAccountEvidenceUnavailable("PROVIDER_TIME_INVALID");
+  // Exact provider response times remain authoritative. For endpoints that
+  // omit them, before.value is a conservative provider-side lower bound for
+  // the facts collected after it; no local time is substituted.
+  return { mode, balance };
+}
+
+/** One account-wide mode read and one account-wide available-balance read for direct v3. */
+export async function collectDirectTradeAccountEvidence(
+  reader: AccountEvidenceReadPort,
+  credentials: ExchangeCredentials,
+  verifiedIdentity?: CompactOperatorAccountIdentity,
+): Promise<MainnetOperatorTestDirectAccountEvidence> {
+  try {
+    const identity =
+      verifiedIdentity ??
+      (await readCompactOperatorAccountIdentity(reader, credentials));
+    const { mode, balance } = await readDirectAccountFacts(reader, {
+      mode: true,
+      balance: true,
+    });
+    if (!mode || !balance)
+      throw new CompactAccountEvidenceUnavailable("ACCOUNT_EVIDENCE_INVALID");
+    return Object.freeze({
+      schemaVersion: OPERATOR_MAINNET_DIRECT_ACCOUNT_SCHEMA_VERSION,
+      accountBinding: identity.accountBinding,
+      credentialPosture: identity.credentialPosture,
+      observations: Object.freeze([
+        Object.freeze({
+          mode: mode.mode,
+          availableBalance: balance.availableBalance,
+          modeObservedAt: mode.observedAt,
+          balanceObservedAt: balance.observedAt,
+        }),
+      ]) as readonly [MainnetOperatorTestCompactAccountObservation],
+    });
+  } catch (error) {
+    if (error instanceof CompactAccountEvidenceUnavailable) throw error;
+    throw new CompactAccountEvidenceUnavailable(
+      error instanceof Error &&
+        "code" in error &&
+        typeof error.code === "string"
+        ? error.code
+        : error instanceof Error &&
+            "reasonCode" in error &&
+            typeof error.reasonCode === "string"
+          ? error.reasonCode
+          : "ACCOUNT_EVIDENCE_INVALID",
+    );
+  }
+}
+
+export interface DirectTradeAccountRefreshNeeds {
+  readonly identity?: true;
+  readonly mode?: true;
+  readonly balance?: true;
+}
+
+/** Refreshes only named direct-v3 facts, once each; it never starts a full scan. */
+export async function refreshDirectTradeAccountEvidence(
+  reader: AccountEvidenceReadPort,
+  credentials: ExchangeCredentials,
+  current: MainnetOperatorTestDirectAccountEvidence,
+  needs: DirectTradeAccountRefreshNeeds,
+): Promise<MainnetOperatorTestDirectAccountEvidence> {
+  if (
+    current.schemaVersion !== OPERATOR_MAINNET_DIRECT_ACCOUNT_SCHEMA_VERSION ||
+    current.observations.length !== 1
+  )
+    throw new CompactAccountEvidenceUnavailable("DIRECT_ACCOUNT_PROOF_INVALID");
+  const previous = current.observations[0]!;
+  try {
+    const [identity, facts] = await Promise.all([
+      needs.identity
+        ? readCompactOperatorAccountIdentity(reader, credentials)
+        : Promise.resolve(undefined),
+      needs.mode || needs.balance
+        ? readDirectAccountFacts(reader, {
+            mode: needs.mode === true,
+            balance: needs.balance === true,
+          })
+        : Promise.resolve({ mode: undefined, balance: undefined }),
+    ]);
+    const { mode, balance } = facts;
+    return Object.freeze({
+      schemaVersion: OPERATOR_MAINNET_DIRECT_ACCOUNT_SCHEMA_VERSION,
+      accountBinding: identity?.accountBinding ?? current.accountBinding,
+      credentialPosture:
+        identity?.credentialPosture ?? current.credentialPosture,
+      observations: Object.freeze([
+        Object.freeze({
+          mode: mode?.mode ?? previous.mode,
+          availableBalance:
+            balance?.availableBalance ?? previous.availableBalance,
+          modeObservedAt: mode?.observedAt ?? previous.modeObservedAt,
+          balanceObservedAt: balance?.observedAt ?? previous.balanceObservedAt,
+        }),
+      ]) as readonly [MainnetOperatorTestCompactAccountObservation],
+    });
+  } catch (error) {
+    if (error instanceof CompactAccountEvidenceUnavailable) throw error;
+    throw new CompactAccountEvidenceUnavailable(
+      error instanceof Error &&
+        "code" in error &&
+        typeof error.code === "string"
+        ? error.code
+        : "ACCOUNT_EVIDENCE_REFRESH_FAILED",
+    );
+  }
 }
 
 /** Reads only the bounded #31 identity, account-mode, and account-wide capacity facts. */

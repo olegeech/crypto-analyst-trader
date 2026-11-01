@@ -81,6 +81,7 @@ async function prepare(options: {
   tradeCommandReceipt?: OperatorMainnetTradeCommandReceipt;
   quoteBid?: string;
   stageCostPerAttemptMs?: number;
+  failMarketTimeReadAt?: number;
   failPositionRead?: boolean;
   failOpenOrdersRead?: boolean;
   recoveryAttestation?: OperatorMainnetRecoveryAttestation;
@@ -98,6 +99,7 @@ async function prepare(options: {
   }> = [];
   let opened = 0;
   let wallets = 0;
+  let marketTimeReads = 0;
   let feeAttempts = 0;
   let stageClockCalls = 0;
   const stageStart = 10_000;
@@ -180,6 +182,20 @@ async function prepare(options: {
           outcome: "ok" as const,
         };
         attempts.push(attempt);
+        if (path === "/v5/market/time") {
+          marketTimeReads += 1;
+          if (marketTimeReads === options.failMarketTimeReadAt) {
+            attempt.outcome = "rejected";
+            return new Response(
+              JSON.stringify({
+                retCode: 10001,
+                retMsg: "invalid parameter",
+                result: {},
+              }),
+              { status: 200 },
+            );
+          }
+        }
         if (
           (options.failPositionRead && path === "/v5/position/list") ||
           (options.failOpenOrdersRead && path === "/v5/order/realtime")
@@ -580,12 +596,22 @@ test("direct command preparation persists a v3 plan through production GET mappe
   });
   assert.equal(run.result.ok, true, JSON.stringify(run.result));
   assert.equal(run.opened, 1);
-  assert.equal(run.paths.length, 58);
+  assert.equal(run.paths.length, 17);
   assert.deepEqual(
     JSON.parse(run.result.ok ? run.result.value.exchangeGetCounts! : "{}"),
     groupedFromFetchAttempts(run.paths),
   );
   if (!run.result.ok) return;
+  const directGroups = JSON.parse(
+    run.result.value.exchangeGetCounts!,
+  ) as Record<string, number>;
+  assert.equal(directGroups.identity, 1);
+  assert.equal(directGroups.account, 1);
+  assert.equal(directGroups.wallet, 1);
+  assert.equal(directGroups.fees, 1);
+  assert.equal(directGroups.collateral, undefined);
+  assert.equal(directGroups["order-history"], undefined);
+  assert.equal(run.result.value.exchangeEvidencePath, "compact");
 
   const plan = run.result.value.plan;
   assert.equal(plan.schemaVersion, "operator-mainnet-execution-test/v3");
@@ -619,7 +645,7 @@ test("direct command preparation persists a v3 plan through production GET mappe
   }
 });
 
-test("direct INJUSDT preparation succeeds on account-info no-time full fallback without writes", async () => {
+test("direct INJUSDT preparation brackets missing account-info response time with provider time", async () => {
   const accountIdentity = configuredBybitAccountIdentityHash("123", "mainnet");
   const actorIdentity = hashCanonical({ localOperatorIdentity: "test-owner" });
   assert.equal(accountIdentity.ok, true);
@@ -651,27 +677,68 @@ test("direct INJUSDT preparation succeeds on account-info no-time full fallback 
   assert.equal(run.result.ok, true, JSON.stringify(run.result));
   assert.equal(run.opened, 1);
   assert.equal(run.paths.length, run.attempts.length);
-  assert.equal(
-    run.paths.every((path) => path !== "/v5/order/create"),
-    true,
-  );
   if (!run.result.ok) return;
+  assert.equal(run.result.value.exchangeEvidencePath, "compact");
+  assert.equal(run.result.value.exchangeReads, 17);
   assert.equal(run.result.value.exchangeWrites, 0);
-  assert.equal(run.result.value.exchangeEvidencePath, "full");
-  assert.equal(run.result.value.compactFallbackReason, undefined);
-  assert.equal(run.result.value.plan.symbol, "INJUSDT");
   assert.equal(
-    run.result.value.plan.schemaVersion,
-    "operator-mainnet-execution-test/v3",
+    run.paths.filter((path) => path === "/v5/market/time").length,
+    7,
   );
-  const boundReceipt = run.result.value.plan.tradeCommandReceipt;
-  assert.ok(boundReceipt);
-  const boundTakeProfit = boundReceipt.takeProfitPolicy as {
-    readonly mode: string;
-    readonly value: { toString(): string };
-  };
-  assert.equal(boundTakeProfit.mode, "percent");
-  assert.equal(boundTakeProfit.value.toString(), "0.5");
+  assert.equal(
+    run.paths.filter((path) => path === "/v5/account/info").length,
+    1,
+  );
+  assert.equal(
+    run.paths.filter((path) => path === "/v5/account/wallet-balance").length,
+    1,
+  );
+  assert.equal(run.paths.includes("/v5/account/collateral-info"), false);
+  assert.equal(run.paths.includes("/v5/order/history"), false);
+  assert.equal(run.paths.includes("/v5/market/option-base-coins"), false);
+});
+
+test("direct preparation fails with a precise reason when provider-time bracketing is unavailable", async () => {
+  const accountIdentity = configuredBybitAccountIdentityHash("123", "mainnet");
+  const actorIdentity = hashCanonical({ localOperatorIdentity: "test-owner" });
+  assert.equal(accountIdentity.ok, true);
+  assert.equal(actorIdentity.ok, true);
+  if (!accountIdentity.ok || !actorIdentity.ok) return;
+
+  const receipt = createOperatorMainnetTradeCommandReceipt({
+    commandId: "direct-inj-bracket-failure-01",
+    actorIdentityHash: actorIdentity.value,
+    accountIdentityHash: accountIdentity.value,
+    symbol: "INJUSDT",
+    allocation: input.allocation,
+    grossNotionalCap: input.grossNotionalCap,
+    maxDeviationBps: input.maxDeviationBps,
+    takeProfitMode: "percent",
+    takeProfitValue: "0.50",
+    acceptedAt: new Date(now).toISOString(),
+  });
+  assert.equal(receipt.ok, true);
+  if (!receipt.ok) return;
+
+  const run = await prepare({
+    balance: "11",
+    symbol: "INJUSDT",
+    accountInfoNoTime: true,
+    failMarketTimeReadAt: 4,
+    tradeCommandReceipt: receipt.value,
+  });
+
+  assert.equal(run.result.ok, false, JSON.stringify(run.result));
+  assert.equal(run.opened, 0);
+  assert.equal(run.paths.includes("/v5/account/collateral-info"), false);
+  assert.equal(run.paths.includes("/v5/order/history"), false);
+  if (!run.result.ok) {
+    assert.equal(
+      run.result.error.details?.reasonCode,
+      "UNSUPPORTED_CAPABILITY",
+    );
+    assert.equal(run.result.error.details?.exchangeWrites, 0);
+  }
 });
 
 test("U2 profiles match compact success and account-info no-time full fallback", async () => {

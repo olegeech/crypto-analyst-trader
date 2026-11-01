@@ -74,8 +74,11 @@ import {
   revalidateMainnetOperatorEvidenceAge,
   validateMainnetOperatorTestEvidence,
   validateCompactOperatorAccountForPlan,
+  deriveDirectTradeProviderTimeAnchor,
+  OPERATOR_MAINNET_DIRECT_ACCOUNT_SCHEMA_VERSION,
   type MainnetOperatorTestEvidencePort,
   type MainnetOperatorTestAdmissionEvidence,
+  type MainnetOperatorTestDirectFreshEvidence,
 } from "./mainnet-entry-evidence.js";
 import { PROVISIONAL_M1_MAX_ACCOUNT_EVIDENCE_AGE_MS } from "./policies/provisional-m1.js";
 import { deriveMainnetExecutionReadiness } from "./mainnet-execution-readiness.js";
@@ -94,6 +97,7 @@ import {
   createCompactOperatorAccountReader,
   collectOperatorAdmissionEvidence,
   extractOperatorFeeRate,
+  refreshDirectTradeAccountEvidence,
   CompactAccountEvidenceUnavailable,
   OperatorEvidenceReadError,
 } from "./mainnet-operator-test-evidence.js";
@@ -697,64 +701,115 @@ export async function runMainnetOperatorTestComposition(
         if (symbol !== admitted.plan.symbol)
           throw new Error("operator source symbol mismatch");
         if (admitted.authorization.kind === "trade-command") {
-          evidencePath = "full";
+          evidencePath = "compact";
           const handoff = dependencies.preparedDirectTradeAdmission;
           if (!handoff || handoff.planHash !== admitted.plan.contentHash)
             throw new OperatorEvidenceReadError(
               "PREPARED_DIRECT_TRADE_EVIDENCE_UNAVAILABLE",
               { source: "account" },
             );
-          let fresh: MainnetOperatorTestAdmissionEvidence = handoff.evidence;
+          if (
+            !("compactAccount" in handoff.evidence) ||
+            handoff.evidence.compactAccount.schemaVersion !==
+              OPERATOR_MAINNET_DIRECT_ACCOUNT_SCHEMA_VERSION
+          )
+            throw new OperatorEvidenceReadError(
+              "PREPARED_DIRECT_TRADE_EVIDENCE_INVALID",
+              { source: "account" },
+            );
+          let fresh: MainnetOperatorTestDirectFreshEvidence =
+            handoff.evidence as MainnetOperatorTestDirectFreshEvidence;
           let validated = validateMainnetOperatorTestEvidence(
             admitted.plan,
             fresh,
           );
-          let staleSource: unknown =
+          const staleDetails: Readonly<Record<string, unknown>> | undefined =
             !validated.ok &&
             validated.error.details?.reasonCode === "MAINNET_EVIDENCE_STALE"
-              ? validated.error.details.source
+              ? validated.error.details
               : undefined;
           const evidenceElapsed = monotonic() - handoff.capturedAtMonotonic;
           if (!Number.isFinite(evidenceElapsed) || evidenceElapsed < 0)
             throw new OperatorEvidenceReadError("MONOTONIC_CLOCK_INVALID");
-          if (validated.ok && staleSource === undefined) {
-            const ages = validated.value;
-            if (
-              ages.accountAgeAtReadMs + evidenceElapsed >
-              PROVISIONAL_M1_MAX_ACCOUNT_EVIDENCE_AGE_MS
-            )
-              staleSource = "account";
-            else if (
-              ages.quoteAgeAtReadMs + evidenceElapsed >
-              admitted.plan.quoteFreshnessMs
-            )
-              staleSource = "quote";
-            else if (
-              ages.feeRateAgeAtReadMs + evidenceElapsed >
-              PROVISIONAL_M1_MAX_ACCOUNT_EVIDENCE_AGE_MS
-            )
-              staleSource = "fee";
-          }
+          const anchorMs = timestampToEpochMs(fresh.providerTimeAnchor);
+          const providerNowMs = anchorMs + evidenceElapsed;
+          const observation = fresh.compactAccount.observations[0];
+          const directAccountAges = {
+            identity:
+              providerNowMs -
+              timestampToEpochMs(
+                fresh.compactAccount.accountBinding.authenticatedAt,
+              ),
+            mode:
+              providerNowMs - timestampToEpochMs(observation.modeObservedAt),
+            balance:
+              providerNowMs - timestampToEpochMs(observation.balanceObservedAt),
+          };
+          const quoteAge =
+            providerNowMs - timestampToEpochMs(fresh.quote.observedAt);
+          const feeAge =
+            providerNowMs - timestampToEpochMs(fresh.feeRate.observedAt);
+          const targetStateAge =
+            providerNowMs - timestampToEpochMs(fresh.state.serverTime);
+          // A future quote is a source-time defect, not stale data. Do not let
+          // any refresh turn it into an apparently valid observation.
+          if (quoteAge < 0)
+            throw new OperatorEvidenceReadError("MAINNET_EVIDENCE_STALE", {
+              source: "quote",
+              futureByMs: Math.ceil(-quoteAge),
+              limitMs: admitted.plan.quoteFreshnessMs,
+            });
+          const staleFacts = {
+            accountIdentity:
+              directAccountAges.identity >
+              PROVISIONAL_M1_MAX_ACCOUNT_EVIDENCE_AGE_MS,
+            accountMode:
+              directAccountAges.mode >
+              PROVISIONAL_M1_MAX_ACCOUNT_EVIDENCE_AGE_MS,
+            balance:
+              directAccountAges.balance >
+              PROVISIONAL_M1_MAX_ACCOUNT_EVIDENCE_AGE_MS,
+            quote: quoteAge > admitted.plan.quoteFreshnessMs,
+            fee: feeAge > PROVISIONAL_M1_MAX_ACCOUNT_EVIDENCE_AGE_MS,
+            targetState:
+              targetStateAge > PROVISIONAL_M1_MAX_ACCOUNT_EVIDENCE_AGE_MS,
+          };
+          const hasStaleFacts = Object.values(staleFacts).some(Boolean);
+          const mayRefresh =
+            hasStaleFacts &&
+            staleDetails?.futureByMs === undefined &&
+            (validated.ok || staleDetails !== undefined);
           let refreshedAtMonotonic = handoff.capturedAtMonotonic;
-          if (staleSource !== undefined) {
-            if (staleSource === "account")
-              // The full A/B proof carries account-wide current commitments,
-              // borrow facts, collateral, and permissions. Existing compact
-              // reads cannot refresh that complete proof; fail before intent
-              // rather than restart the account-wide sweep or accept a partial
-              // account refresh as equivalent.
-              throw new OperatorEvidenceReadError("MAINNET_EVIDENCE_STALE", {
-                source: "account",
-              });
+          if (mayRefresh) {
             try {
-              if (staleSource === "quote") {
+              if (
+                staleFacts.accountIdentity ||
+                staleFacts.accountMode ||
+                staleFacts.balance
+              ) {
+                const compactAccount = await refreshDirectTradeAccountEvidence(
+                  accountReader.reader,
+                  loadedCredentials,
+                  fresh.compactAccount,
+                  {
+                    ...(staleFacts.accountIdentity
+                      ? { identity: true as const }
+                      : {}),
+                    ...(staleFacts.accountMode ? { mode: true as const } : {}),
+                    ...(staleFacts.balance ? { balance: true as const } : {}),
+                  },
+                );
+                fresh = { ...fresh, compactAccount };
+              }
+              if (staleFacts.quote) {
                 fresh = {
                   ...fresh,
                   quote: await publicMarkets.readOperatorQuote(symbol, {
                     directTrade: true,
                   }),
                 };
-              } else if (staleSource === "fee") {
+              }
+              if (staleFacts.fee) {
                 const feeResponse = await accountReader.transport.get(
                   ACCOUNT_FEE_RATE_PATH,
                   { category: "linear", symbol },
@@ -768,39 +823,31 @@ export async function runMainnetOperatorTestComposition(
                     },
                   );
                 fresh = { ...fresh, feeRate: feeRate.value };
-              } else if (staleSource === "target-state") {
-                // The current state read also supplies a fresh Bybit time anchor.
-              } else if (staleSource === "instrument") {
-                fresh = {
-                  ...fresh,
-                  instrument: await new BybitMainnetReadCapabilityFacade(
-                    accountReader.transport,
-                  ).readInstrument(symbol, { requireOneX: true }),
-                };
-              } else {
-                // The one-shot path never restarts the account-wide A/B sweep.
-                throw new OperatorEvidenceReadError("MAINNET_EVIDENCE_STALE", {
-                  source: "account",
-                });
               }
-              if (
-                staleSource === "quote" ||
-                staleSource === "fee" ||
-                staleSource === "instrument" ||
-                staleSource === "target-state"
-              ) {
+              if (staleFacts.targetState) {
                 const state = await exchangeAdapter.readState({
                   instrument: symbol,
                 });
                 if (!state.ok)
                   throw new OperatorEvidenceReadError(
                     "TARGET_STATE_READ_FAILED",
-                    {
-                      source: "target-state",
-                    },
+                    { source: "target-state" },
                   );
                 fresh = { ...fresh, state: state.value };
               }
+              const providerTimeAnchor = deriveDirectTradeProviderTimeAnchor({
+                compactAccount: fresh.compactAccount,
+                instrument: fresh.instrument,
+                quote: fresh.quote,
+                feeRate: fresh.feeRate,
+                state: fresh.state,
+              });
+              if (!providerTimeAnchor)
+                throw new OperatorEvidenceReadError(
+                  "PROVIDER_TIME_UNAVAILABLE",
+                  { source: "provider-time" },
+                );
+              fresh = { ...fresh, providerTimeAnchor };
               refreshedAtMonotonic = monotonic();
               if (!Number.isFinite(refreshedAtMonotonic))
                 throw new OperatorEvidenceReadError("MONOTONIC_CLOCK_INVALID");
@@ -809,13 +856,15 @@ export async function runMainnetOperatorTestComposition(
               throw new OperatorEvidenceReadError(
                 "TARGETED_EVIDENCE_REFRESH_FAILED",
                 {
-                  source:
-                    staleSource === "fee" ||
-                    staleSource === "quote" ||
-                    staleSource === "instrument" ||
-                    staleSource === "target-state"
-                      ? staleSource
-                      : "account",
+                  source: staleFacts.balance
+                    ? "balance"
+                    : staleFacts.accountIdentity || staleFacts.accountMode
+                      ? "account"
+                      : staleFacts.quote
+                        ? "quote"
+                        : staleFacts.fee
+                          ? "fee"
+                          : "target-state",
                 },
               );
             }

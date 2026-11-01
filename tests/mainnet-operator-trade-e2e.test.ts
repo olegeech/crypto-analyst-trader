@@ -123,6 +123,8 @@ async function runOperatorTradeE2e(
   staleAccountHandoff = false,
   advancingQuoteTime = false,
   preparationOnly = false,
+  failWalletRefresh = false,
+  futureQuoteHandoff = false,
 ): Promise<void> {
   const root = mkdtempSync(join(tmpdir(), "operator-trade-e2e-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -158,6 +160,12 @@ async function runOperatorTradeE2e(
   let createdTakeProfit = "";
   let targetLeverage = initialTargetLeverage;
   let leverageSetCalls = 0;
+  let executeReadReport:
+    | {
+        readonly count: number;
+        readonly paths: Readonly<Record<string, number>>;
+      }
+    | undefined;
 
   const request: typeof fetch = async (input, init) => {
     const url =
@@ -243,6 +251,15 @@ async function runOperatorTradeE2e(
         );
       case "/v5/account/wallet-balance":
         walletReads += 1;
+        if (failWalletRefresh && staleAccountHandoff && walletReads === 2)
+          return new Response(
+            JSON.stringify({
+              retCode: 10001,
+              retMsg: "invalid parameter",
+              result: {},
+            }),
+            { status: 200 },
+          );
         {
           const result = structuredClone(walletResponse.result);
           if (walletAmountDrift && walletReads === 1) {
@@ -535,7 +552,10 @@ async function runOperatorTradeE2e(
       assert.equal(createCalls, 0, "preparation must remain GET-only");
       assert.equal(prepared.ok, true, JSON.stringify(prepared));
       assert.equal(prepared.ok && prepared.value.exchangeWrites, 0);
-      assert.equal(prepared.ok && prepared.value.exchangeEvidencePath, "full");
+      assert.equal(
+        prepared.ok && prepared.value.exchangeEvidencePath,
+        "compact",
+      );
       return prepared;
     },
     execute: async (
@@ -544,51 +564,97 @@ async function runOperatorTradeE2e(
         Parameters<typeof runMainnetOperatorTestComposition>[1]
       >["preparedDirectTradeAdmission"],
     ) => {
-      const handoff =
+      let handoff =
         staleAccountHandoff && preparedDirectTradeAdmission
           ? {
               ...preparedDirectTradeAdmission,
               capturedAtMonotonic: performance.now() - 301_000,
             }
           : preparedDirectTradeAdmission;
+      if (futureQuoteHandoff && handoff) {
+        assert.ok("compactAccount" in handoff.evidence);
+        handoff = {
+          ...handoff,
+          evidence: {
+            ...handoff.evidence,
+            quote: {
+              ...handoff.evidence.quote,
+              observedAt: new Date(NOW + 1_000).toISOString() as UtcTimestamp,
+            },
+          },
+        };
+      }
+      const executeGetBaseline = attempts.filter(
+        ({ method }) => method === "GET",
+      ).length;
+      const executeAttemptStart = attempts.length;
       const executed = await runMainnetOperatorTestComposition(executeInput, {
         ...compositionDependencies,
         preparedDirectTradeAdmission: handoff,
       });
-      if (staleAccountHandoff) {
+      const executeGetAttempts = attempts
+        .slice(executeAttemptStart)
+        .filter(({ method }) => method === "GET");
+      const pathCounts: Record<string, number> = {};
+      for (const attempt of executeGetAttempts)
+        pathCounts[attempt.path] = (pathCounts[attempt.path] ?? 0) + 1;
+      executeReadReport = {
+        count:
+          attempts.filter(({ method }) => method === "GET").length -
+          executeGetBaseline,
+        paths: pathCounts,
+      };
+      if (failWalletRefresh || futureQuoteHandoff) {
         assert.equal(executed.ok, false, JSON.stringify(executed));
         if (!executed.ok) {
           assert.equal(
             executed.error.details?.reasonCode,
-            "MAINNET_EVIDENCE_STALE",
+            failWalletRefresh
+              ? "TARGETED_EVIDENCE_REFRESH_FAILED"
+              : "MAINNET_EVIDENCE_STALE",
           );
-          assert.equal(executed.error.details?.source, "account");
+          assert.equal(
+            executed.error.details?.source,
+            futureQuoteHandoff
+              ? "quote"
+              : failWalletRefresh
+                ? "balance"
+                : undefined,
+          );
+          if (futureQuoteHandoff)
+            assert.ok(Number(executed.error.details?.futureByMs) > 0);
         }
         assert.equal(
           createCalls,
           0,
-          "stale account proof must stop before CREATE",
+          "invalid or unrefreshable evidence must stop before CREATE",
         );
+        assert.equal(walletReads, staleAccountHandoff ? 2 : 1);
+        if (futureQuoteHandoff)
+          assert.equal(tickerReads, 1, "future quote must not be refreshed");
         assert.equal(
-          walletReads,
-          2,
-          "stale account proof must not restart the full A/B scan",
+          attempts.some(({ path }) =>
+            [
+              "/v5/account/collateral-info",
+              "/v5/spot-margin-trade/collateral",
+              "/v5/market/option-base-coins",
+              "/v5/order/history",
+              "/v5/execution/list",
+            ].includes(path),
+          ),
+          false,
+          "direct v3 refresh must not restart the full account scan",
         );
         return executed;
       }
       assert.equal(executed.ok, true, JSON.stringify(executed));
-      if (executed.ok) {
-        assert.equal(executed.value.exchangeEvidencePath, "full");
-        assert.equal(
-          executed.value.exchangeReads,
-          1,
-          "fresh v3 evidence is handed forward without a second account collection",
-        );
-        assert.deepEqual(JSON.parse(executed.value.exchangeGetCounts ?? "{}"), {
-          time: 1,
-        });
-        assert.equal(executed.value.exchangeWrites, 1);
-      }
+      if (executed.ok)
+        executeReadReport = {
+          count:
+            attempts.filter(({ method }) => method === "GET").length -
+            executeGetBaseline,
+          paths: pathCounts,
+        };
       return executed;
     },
     status: getCommandStatus,
@@ -626,7 +692,7 @@ async function runOperatorTradeE2e(
     },
   );
   const tradeText = tradeOutput.join("");
-  if (staleAccountHandoff) {
+  if (failWalletRefresh || futureQuoteHandoff) {
     assert.equal(createCalls, 0);
     assert.equal(
       attempts.filter(
@@ -634,9 +700,43 @@ async function runOperatorTradeE2e(
       ).length,
       0,
     );
+    const commandId = tradeText.match(/^COMMAND_ID=([\w-]+)$/mu)?.[1];
+    assert.ok(commandId, tradeText);
+    const accountIdentity = configuredBybitAccountIdentityHash(
+      "123",
+      "mainnet",
+    );
+    assert.equal(accountIdentity.ok, true);
+    if (accountIdentity.ok) {
+      const reopened = openPersistence({
+        environment: "mainnet",
+        scope: mainnetOperatorTestPersistenceScope(accountIdentity.value),
+      });
+      assert.equal(reopened.ok, true);
+      if (reopened.ok) {
+        try {
+          const command =
+            reopened.value.operatorMainnetTest?.readOperatorMainnetTradeCommand(
+              commandId!,
+            );
+          assert.equal(command?.ok, true);
+          assert.equal(
+            command?.ok && command.value?.source,
+            undefined,
+            "failed refresh must not create a source intent",
+          );
+        } finally {
+          reopened.value.close();
+        }
+      }
+    }
     return;
   }
-  assert.equal(tradeCode, 0, tradeText);
+  assert.equal(
+    tradeCode,
+    0,
+    `${tradeText}\nEXECUTE_READS=${JSON.stringify(executeReadReport)}`,
+  );
   assert.match(tradeText, /CREATE_OUTCOME=accepted/u);
   assert.match(tradeText, /LIFECYCLE_OUTCOME=TP_LIFECYCLE_PASS/u);
   assert.match(
@@ -652,7 +752,39 @@ async function runOperatorTradeE2e(
   assert.equal(createBody!.price, "0.0753");
   assert.equal(createBody!.takeProfit, "0.0757");
   assert.match(tradeText, /^TP_EFFECTIVE_PERCENT=0\.531208499335989/mu);
-  assert.equal(tickerReads, 3);
+  assert.equal(tickerReads, staleAccountHandoff ? 4 : 2);
+  assert.ok(executeReadReport);
+  if (executeReadReport) {
+    assert.equal(
+      executeReadReport.count,
+      staleAccountHandoff ? 16 : 1,
+      JSON.stringify(executeReadReport),
+    );
+    if (staleAccountHandoff) {
+      assert.equal(
+        walletReads,
+        2,
+        "the one stale wallet fact is refreshed once",
+      );
+      assert.deepEqual(executeReadReport.paths, {
+        "/v5/account/fee-rate": 1,
+        "/v5/account/info": 1,
+        "/v5/account/wallet-balance": 1,
+        "/v5/market/instruments-info": 1,
+        "/v5/market/tickers": 2,
+        "/v5/market/time": 7,
+        "/v5/order/realtime": 1,
+        "/v5/position/list": 1,
+        "/v5/user/query-api": 1,
+      });
+      assert.equal(
+        attempts.filter(({ path }) => path === "/v5/account/collateral-info")
+          .length,
+        0,
+        "bounded direct refresh must not restart the account-wide scan",
+      );
+    } else assert.deepEqual(executeReadReport.paths, { "/v5/market/time": 1 });
+  }
   const readsAfterTrade = attempts.filter(
     ({ method }) => method === "GET",
   ).length;
@@ -765,17 +897,23 @@ async function runOperatorTradeE2e(
 test("U5 production path: INJUSDT .50% command keeps frozen Limit after lower bid and reconciles TP fills", async (t) =>
   runOperatorTradeE2e(t, false));
 
-test("U5 production path: INJUSDT .50% full-fallback command keeps frozen Limit and reconciles TP fills", async (t) =>
+test("v3 command uses provider-time brackets for account-info without envelope time", async (t) =>
   runOperatorTradeE2e(t, true));
 
 test("U5 production path: non-1x flat INJUSDT is set once to 1x before one +0.50% CREATE", async (t) =>
   runOperatorTradeE2e(t, false, "2"));
 
-test("v3 hands one full account proof forward when only numeric wallet assets change between A/B", async (t) =>
+test("v3 accepts one current available-balance observation without A/B equality", async (t) =>
   runOperatorTradeE2e(t, false, "1", true));
 
-test("v3 blocks stale account proof before intent without restarting the full scan", async (t) =>
+test("v3 refreshes stale direct facts once, then creates with the frozen plan", async (t) =>
   runOperatorTradeE2e(t, false, "1", false, true));
+
+test("v3 fails closed when a bounded account refresh fails, with no intent or CREATE", async (t) =>
+  runOperatorTradeE2e(t, false, "1", false, true, false, false, true));
+
+test("v3 does not let targeted refresh mask a future quote timestamp", async (t) =>
+  runOperatorTradeE2e(t, false, "1", false, false, false, false, false, true));
 
 test("v3 production preparation accepts an advancing quote bracket without writes", async (t) =>
   runOperatorTradeE2e(t, false, "1", false, false, true, true));
