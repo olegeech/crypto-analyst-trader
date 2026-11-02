@@ -56,6 +56,13 @@ sorted venues, plus omitted-group/missing totals). Counts are `null` when the
 source or catalogue coverage is not proven; these diagnostics do not change the
 quality verdict.
 
+The saved v3 review may also show **shadow market intelligence**: source-derived
+observations and explicit source/model gaps for regime, early-warning, liquidity
+stress and trap context. These supplementary observations are not calibrated
+production scores, do not establish live strategy readiness, and do not change the
+core recommendation, review state or consent authority. Review reads them from the
+exact saved snapshot after restart; it does not refresh market or liquidation data.
+
 ADD requires a flat target with no active target orders; other account state is
 evaluated by risk. HOLD is no action, and REDUCE is a declarative quantity-only
 proposal/no-op, not execution authority. Review shows normalized Limit/GTC grid/TP,

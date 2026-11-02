@@ -12,6 +12,10 @@ import { localOperatorIdentity } from "../src/application/local-operator.js";
 import { ok } from "../src/domain/shared/result.js";
 import { fixedClock } from "../src/domain/shared/time.js";
 import { validatePreparedPlanApproval } from "../src/domain/review/prepared-plan-approval.js";
+import {
+  createPreparedDailyPlanV2,
+  type PreparedDailyPlan,
+} from "../src/domain/review/prepared-daily-plan.js";
 import { requireDailyFixture as value } from "./fixtures/daily-planning-evidence-fixtures.js";
 import {
   DAILY_PREPARE_CREDENTIALS,
@@ -24,18 +28,42 @@ import {
   dailyPrepareLiquidationV3,
 } from "./fixtures/daily-prepare-fixtures.js";
 
+function coreProjection(prepared: PreparedDailyPlan) {
+  const { shadowIntelligence: _shadow, ...summary } = prepared.summary;
+  void _shadow;
+  return {
+    state: prepared.state,
+    reasonCodes: prepared.reasonCodes,
+    noteRequired: prepared.noteRequired,
+    summary,
+  };
+}
+
 test("released chain persists READY; fresh-process review and offline consent cannot create execution state", async () => {
   const root = mkdtempSync(join(tmpdir(), "daily-prepare-integration-"));
   const directory = join(root, "data/private/execution");
   const clock = value(fixedClock(DAILY_PREPARE_TIME));
+  const sourceReads = {
+    market: 0,
+    liquidation: 0,
+    account: 0,
+    credentials: 0,
+    risk: 0,
+  };
   const openStore = (environment: "demo" | "testnet" | "mainnet") =>
     openSqlitePreparedArtifactStore({ environment, rootDirectory: directory });
   try {
     const boundary = createDailyPrepareBoundary({
-      collectMarket: async (runId) => ok(dailyPrepareMarket(runId)),
-      collectLiquidation: async (market, selectedAsset) =>
-        ok(dailyPrepareLiquidationV3(market, selectedAsset)),
+      collectMarket: async (runId) => {
+        sourceReads.market++;
+        return ok(dailyPrepareMarket(runId));
+      },
+      collectLiquidation: async (market, selectedAsset) => {
+        sourceReads.liquidation++;
+        return ok(dailyPrepareLiquidationV3(market, selectedAsset));
+      },
       collectAccount: async (options) => {
+        sourceReads.account++;
         await options.credentialLoader.load(options.environment);
         return {
           kind: "account-evidence",
@@ -45,16 +73,30 @@ test("released chain persists READY; fresh-process review and offline consent ca
           }),
         };
       },
-      credentialLoader: { load: async () => DAILY_PREPARE_CREDENTIALS },
+      credentialLoader: {
+        load: async () => {
+          sourceReads.credentials++;
+          return DAILY_PREPARE_CREDENTIALS;
+        },
+      },
       createRiskReader: ({ environment }) => ({
         environment,
         origin: DAILY_PREPARE_ORIGINS[environment],
-        readIdentity: async () => dailyPrepareIdentity(),
-        readTargetPositions: async () => ({
-          rows: dailyPrepareAccount().criticalPasses.B!.positions,
-          observedAt: DAILY_PREPARE_TIME,
-        }),
-        readExchangeTime: async () => DAILY_PREPARE_TIME,
+        readIdentity: async () => {
+          sourceReads.risk++;
+          return dailyPrepareIdentity();
+        },
+        readTargetPositions: async () => {
+          sourceReads.risk++;
+          return {
+            rows: dailyPrepareAccount().criticalPasses.B!.positions,
+            observedAt: DAILY_PREPARE_TIME,
+          };
+        },
+        readExchangeTime: async () => {
+          sourceReads.risk++;
+          return DAILY_PREPARE_TIME;
+        },
         requestCount: () => 2,
       }),
       storeForEnvironment: openStore,
@@ -70,6 +112,8 @@ test("released chain persists READY; fresh-process review and offline consent ca
     if (result.kind !== "prepared") return;
     const prepared = result.prepared;
     assert.equal(prepared.state, "READY_FOR_APPROVAL");
+    assert.equal(prepared.noteRequired, false);
+    assert.equal(prepared.executionAuthority, "none");
     assert.equal(prepared.schemaVersion, "prepared-daily-plan/v3");
     assert.equal(prepared.replayInputs.shadowContext?.status, "recorded");
     assert.ok(prepared.inputIdentity.shadowContextHash?.startsWith("sha256:"));
@@ -89,6 +133,20 @@ test("released chain persists READY; fresh-process review and offline consent ca
     assert.equal(result.diagnostics.providerExplicitBuckets, 24);
     assert.equal(result.diagnostics.providerImpliedZeroBuckets, 0);
     assert.equal(result.diagnostics.unresolvedRequestedBuckets, 0);
+    assert.equal(result.diagnostics.exchangeWrites, 0);
+    assert.equal(result.diagnostics.executionAuthority, "none");
+
+    // The fresh-process exact-hash review below rehydrates this saved identity.
+    // A v2 projection of the same preflight proves the supplemental attachment
+    // leaves core readiness, consent and outputs alone.
+    const { shadowContext: _shadowContext, ...legacyInputs } =
+      prepared.replayInputs;
+    void _shadowContext;
+    const legacy = value(createPreparedDailyPlanV2(legacyInputs));
+    assert.equal(legacy.schemaVersion, "prepared-daily-plan/v2");
+    assert.notEqual(legacy.contentHash, prepared.contentHash);
+    assert.deepEqual(coreProjection(prepared), coreProjection(legacy));
+    const readsAfterPrepare = { ...sourceReads };
     const cli = resolve("src/cli/daily.ts");
     const tsx = resolve("node_modules/tsx/dist/loader.mjs");
     const args = [
@@ -103,6 +161,7 @@ test("released chain persists READY; fresh-process review and offline consent ca
       { cwd: root, encoding: "utf8", timeout: 60000 },
     );
     assert.equal(review.status, 0, review.stderr);
+    assert.ok(review.stdout.includes(prepared.contentHash));
     assert.match(review.stdout, /READY_FOR_APPROVAL/u);
     assert.match(review.stdout, /not-configured/u);
     assert.match(review.stdout, /"shadowIntelligence": \{/u);
@@ -117,24 +176,34 @@ test("released chain persists READY; fresh-process review and offline consent ca
         "u",
       ),
     );
-    const redirected = spawnSync(
-      process.execPath,
-      ["--import", tsx, cli, "approve", ...args],
-      { cwd: root, input: "yes\n", encoding: "utf8", timeout: 60000 },
-    );
-    assert.equal(redirected.status, 3, redirected.stderr);
+    let offlinePrepareCalls = 0;
+    let offlineReviewOutput = "";
     const deps = {
       prepare: async () => {
-        throw new Error("offline only");
+        offlinePrepareCalls++;
+        throw new Error("provider and credential loaders unavailable offline");
       },
       openStore,
       actor: localOperatorIdentity,
       clock,
       interactive: true,
       prompt: async () => "yes",
-      write: () => {},
+      write: (text: string) => {
+        offlineReviewOutput += text;
+      },
     };
+    assert.equal(await runDailyCommand(["review", ...args], deps), 0);
+    assert.ok(offlineReviewOutput.includes(prepared.contentHash));
+    assert.equal(offlinePrepareCalls, 0);
+    const redirected = spawnSync(
+      process.execPath,
+      ["--import", tsx, cli, "approve", ...args],
+      { cwd: root, input: "yes\n", encoding: "utf8", timeout: 60000 },
+    );
+    assert.equal(redirected.status, 3, redirected.stderr);
     assert.equal(await runDailyCommand(["approve", ...args], deps), 0);
+    assert.equal(offlinePrepareCalls, 0);
+    assert.deepEqual(sourceReads, readsAfterPrepare);
     const db = new DatabaseSync(join(directory, "demo.db"));
     try {
       const approvals = db
@@ -150,6 +219,12 @@ test("released chain persists READY; fresh-process review and offline consent ca
         );
         assert.ok(approval);
         assert.equal(approval.actor, value(localOperatorIdentity()));
+        assert.equal(approval.preparedHash, prepared.contentHash);
+        assert.equal(
+          validatePreparedPlanApproval(approval, prepared, approval.approvedAt)
+            .ok,
+          true,
+        );
         assert.equal(
           validatePreparedPlanApproval(approval, prepared, approval.expiresAt)
             .ok,

@@ -13,6 +13,21 @@
 > output is evidence only. Missing, stale, contradictory or mixed-run evidence
 > must not silently authorize new exposure.
 
+## Current shadow baseline (issue #116)
+
+The current read-only baseline records source-derived observations from existing
+market, analytics and liquidation evidence. It may show partial or unavailable
+context for the four families below, with explicit source and model gaps. It does
+not emit calibrated production scores, predictive probabilities, model confidence
+or a trade recommendation; a partial observation is not a low-risk assessment.
+
+This context is supplemental to the native daily decision evidence. It does not
+change strategy readiness, the directional quorum, review consent or execution
+authority. The immutable prepared snapshot retains the observations, and offline
+review displays that saved snapshot without recollecting or repricing. Required
+native-data gaps still block daily readiness. Broader source coverage, defensible
+models and calibration remain open work tracked by issues #115, #14, #39 and #30.
+
 ## 1. Purpose
 
 The dashboard is intended to answer three questions:
