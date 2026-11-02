@@ -1,6 +1,6 @@
 import { createProvisionalM1Composition } from "../../src/application/policies/provisional-m1.js";
 import { evaluatePortfolioRiskPreflight } from "../../src/domain/risk/portfolio-risk-preflight.js";
-import { createPreparedDailyPlan } from "../../src/domain/review/prepared-daily-plan.js";
+import { createPreparedDailyPlanV2 } from "../../src/domain/review/prepared-daily-plan.js";
 import { createPreparedPlanApproval } from "../../src/domain/review/prepared-plan-approval.js";
 import {
   decimal as accountDecimal,
@@ -106,7 +106,7 @@ export function preparedLegExecutionFixture(
     }),
   );
   const prepared = value(
-    createPreparedDailyPlan({
+    createPreparedDailyPlanV2({
       preflight,
       reviewPolicy: composition.reviewPolicy,
       approvalPolicy: composition.approvalPolicy,

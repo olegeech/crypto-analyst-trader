@@ -21,6 +21,11 @@ test("scoped restart replay and consent use private canonical artifacts only", (
     openSqlitePreparedArtifactStore({ environment, rootDirectory: root }),
   );
   try {
+    assert.equal(p.schemaVersion, "prepared-daily-plan/v3");
+    const shadowContextHash = p.inputIdentity.shadowContextHash;
+    const shadowSummary = p.summary.shadowIntelligence;
+    assert.ok(shadowContextHash);
+    assert.ok(shadowSummary);
     assert.equal(store.savePrepared(p).ok, true);
     assert.equal(store.savePrepared(p).ok, true);
     const a = value(
@@ -39,10 +44,10 @@ test("scoped restart replay and consent use private canonical artifacts only", (
     store = value(
       openSqlitePreparedArtifactStore({ environment, rootDirectory: root }),
     );
-    assert.equal(
-      value(store.loadPrepared(p.contentHash))?.contentHash,
-      p.contentHash,
-    );
+    const restored = value(store.loadPrepared(p.contentHash));
+    assert.equal(restored?.contentHash, p.contentHash);
+    assert.equal(restored?.inputIdentity.shadowContextHash, shadowContextHash);
+    assert.deepEqual(restored?.summary.shadowIntelligence, shadowSummary);
     assert.equal(
       value(store.loadApproval(a.contentHash))?.contentHash,
       a.contentHash,
@@ -89,6 +94,23 @@ test("scoped restart replay and consent use private canonical artifacts only", (
         statSync(join(root, `${environment}.db`)).mode & 0o777,
         0o600,
       );
+      const stored = db
+        .prepare("SELECT canonical_json FROM artifacts WHERE artifact_id = ?")
+        .get(`prepared:${p.contentHash}`) as
+        { canonical_json: string } | undefined;
+      assert.ok(stored);
+      const corrupted = stored.canonical_json.replace(
+        "SHADOW_SOURCE_INCOMPATIBLE",
+        "SHADOW_CONTEXT_UNAVAILABLE",
+      );
+      assert.notEqual(corrupted, stored.canonical_json);
+      db.prepare(
+        "UPDATE artifacts SET canonical_json = ? WHERE artifact_id = ?",
+      ).run(corrupted, `prepared:${p.contentHash}`);
+      assert.equal(store.loadPrepared(p.contentHash).ok, false);
+      db.prepare(
+        "UPDATE artifacts SET canonical_json = ? WHERE artifact_id = ?",
+      ).run(stored.canonical_json, `prepared:${p.contentHash}`);
       db.prepare(
         "UPDATE artifacts SET account_id = 'raw-user-id' WHERE artifact_kind = 'prepared-daily-plan'",
       ).run();
