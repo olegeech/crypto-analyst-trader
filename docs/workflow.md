@@ -143,12 +143,19 @@ step.
    technical protections, and choose a concrete test that proves success.
    Settle the execution mode and release boundary with the owner in the
    existing issue or plan; no separate document or agent is required.
+   For a new execution mode, check whether inherited research lists, TP defaults,
+   legacy approvals or pending-source policies are actual venue/safety contracts
+   rather than incidental implementation scope; record the distinction in the
+   existing issue's positive and negative examples.
 2. **Test the changed boundary.** For external provider contract changes,
    inspect production mappers and current official API documentation. Verify
    actual response shapes through those mappers using representative sanitized
    fixtures, preserving meaningful empty, optional and extra fields, plus
    negative cases for critical fields. Record fixture provenance without
-   secrets or private account data. For money-affecting internal logic without
+   secrets or private account data. For a changed multi-request provider-time
+   contract, include coherent advancing timestamps and assert evidence
+   observation/collection/preparation ordering; frozen-clock unit tests alone
+   do not cover that integration boundary. For money-affecting internal logic without
    provider contract changes, focus on production-path tests, financial
    boundary cases and existing safety invariants; new provider fixtures are
    not required. Use the existing Node test runner.
@@ -166,6 +173,10 @@ defect fixes after the first full green CI, and operator retries caused by
 program defects. Separate product-scope changes and expected safety blocks
 from defects. This trial needs no metrics system, additional agents, blanket
 cross-model review or Mainnet smoke on every commit.
+[PR #148's documented integration retrospective](engineering/pr-148-retrospective.md)
+provides a concrete example; the [quote-bracket lesson](engineering/provider-quote-bracket-preparation-time.md)
+details the provider-time regression. These are historical case studies, not a
+second backlog or a new required live test.
 
 ## Named issue delivery
 
