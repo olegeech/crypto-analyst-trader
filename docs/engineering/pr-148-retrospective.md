@@ -12,13 +12,33 @@ A supervised INJUSDT entry was accepted and filled (1.3 INJ), with an attached T
 
 ## What the attempts taught us
 
-| Observation | Cause or classification | Response |
-| --- | --- | --- |
-| Direct INJUSDT initially could not progress through the full readiness fallback (51 GET, 0 writes; `READINESS_INVALID_REQUEST`) | Execution inherited a static M1 research-universe check; the generic account source label was misleading | Validate a direct requested instrument against current venue evidence in both compact and fallback paths, preserving M1/legacy eligibility independently. [Diagnosis](https://github.com/olegeech/crypto-analyst-trader/pull/148#issuecomment-6550598329) |
-| A 10-USDT INJ attempt made 116 GETs and refused with `CRITICAL_STATE_CHANGED` in assets | The one-shot path repeated large account checks and treated ordinary numeric wallet changes as structural conflict. A deposit was plausible, but the exact live field was not proven | Reuse one bounded logical proof in the direct path, compute fee-aware capacity from current trustworthy available balance, and refresh only stale necessary facts. [PO decision](https://github.com/olegeech/crypto-analyst-trader/pull/148#issuecomment-6557114246) |
-| A subsequent attempt refused `STALE_EVIDENCE` after 10 GETs and no writes, despite green offline CI | `preparedAt` was set to ticker `observedAt`, although the after-ticker provider-time read completed later. Frozen fixture clocks masked the invalid event ordering | Anchor preparation to `collectionCompletedAt`; add a production-path regression with advancing provider timestamps. [Detailed learning](provider-quote-bracket-preparation-time.md) |
-| A 5-USDT NEAR preparation failed `NOTIONAL_TOO_SMALL` | Legitimate venue minimum, not an application whitelist or trade rejection | Explain computed notional and minimum; never silently increase owner-specified capital. [Live report](https://github.com/olegeech/crypto-analyst-trader/pull/148#issuecomment-6556922008) |
-| A new NEAR trade was refused while an unrelated INJ source had an active TP (21 GET, 0 writes) | Historical account-wide pending-source rule was broader than needed for independent symbols | Final `d200aa7` scopes same-symbol conflicts in application and atomic SQLite admission; cross-symbol attempts also need proven account-capacity evidence newer than prior accepted CREATE, with ambiguity still blocking. [Fix](https://github.com/olegeech/crypto-analyst-trader/pull/148#issuecomment-6563217821) |
+- **M1 research eligibility leaked into direct execution.** A first INJUSDT
+  fallback refused after 51 GETs with `READINESS_INVALID_REQUEST`, while
+  diagnostics misleadingly named the account. The remedy was to validate the
+  direct request against actual current instrument evidence in compact *and*
+  fallback paths without changing M1 or legacy eligibility.
+  [Diagnosis](https://github.com/olegeech/crypto-analyst-trader/pull/148#issuecomment-6550598329).
+- **Duplicate account validation and numeric equality.** A 10-USDT INJ
+  attempt made 116 GETs and refused `CRITICAL_STATE_CHANGED` in assets. A
+  deposit was plausible, not proven. Reusing one bounded current proof and
+  refreshing only required stale facts eliminated this unnecessary class of
+  refusal for direct v3.
+  [PO decision](https://github.com/olegeech/crypto-analyst-trader/pull/148#issuecomment-6557114246).
+- **Frozen fixture timestamps masked a real temporal defect.** A later
+  attempt stopped at `STALE_EVIDENCE` after 10 GETs and no writes because
+  `preparedAt` preceded quote collection completion. The fix and regression
+  are captured in the [quote-bracket learning](provider-quote-bracket-preparation-time.md).
+- **A genuine venue minimum deserves a concrete diagnostic.** A 5-USDT NEAR
+  preparation failed `NOTIONAL_TOO_SMALL`. The amount was not increased
+  automatically; diagnostics were extended with computed notional and venue
+  minimum. [Live report](https://github.com/olegeech/crypto-analyst-trader/pull/148#issuecomment-6556922008).
+- **Account-wide pending source was too broad for independent symbols.**
+  NEAR was refused after 21 GETs while INJ had an active TP. Final `d200aa7`
+  scopes same-symbol checks both in the application and the atomic SQLite
+  guard. Other-symbol sources are eligible only with a known accepted CREATE
+  strictly older than current account-capacity evidence; ambiguous or newer
+  attempts still block.
+  [Fix](https://github.com/olegeech/crypto-analyst-trader/pull/148#issuecomment-6563217821).
 
 A synthetic production-path comparison measured **63 pre-CREATE GETs** after evidence reuse versus **116** in an earlier duplicated path. The successful attended INJ command reported **40 GETs / 1 CREATE** including its immediate status, or **58 GETs** with a separate follow-up status. These are different scopes and environments, **not** a before/after production speed benchmark or a guaranteed count. [Performance evidence](https://github.com/olegeech/crypto-analyst-trader/pull/148#issuecomment-6557673140).
 
