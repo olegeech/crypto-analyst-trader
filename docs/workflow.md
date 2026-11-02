@@ -143,13 +143,18 @@ step.
    technical protections, and choose a concrete test that proves success.
    Settle the execution mode and release boundary with the owner in the
    existing issue or plan; no separate document or agent is required.
+   For a new execution mode, distinguish inherited research/legacy policy
+   from venue and safety requirements in the issue's acceptance examples.
 2. **Test the changed boundary.** For external provider contract changes,
    inspect production mappers and current official API documentation. Verify
    actual response shapes through those mappers using representative sanitized
    fixtures, preserving meaningful empty, optional and extra fields, plus
    negative cases for critical fields. Record fixture provenance without
-   secrets or private account data. For money-affecting internal logic without
-   provider contract changes, focus on production-path tests, financial
+   secrets or private account data. For time-separated provider reads,
+   test evidence ordering with advancing timestamps through production
+   composition; frozen clocks alone do not verify the contract. For
+   money-affecting internal logic without provider contract changes, focus on
+   production-path tests, financial
    boundary cases and existing safety invariants; new provider fixtures are
    not required. Use the existing Node test runner.
 3. **Prove the operator path incrementally.** For execution work, cover
@@ -166,6 +171,9 @@ defect fixes after the first full green CI, and operator retries caused by
 program defects. Separate product-scope changes and expected safety blocks
 from defects. This trial needs no metrics system, additional agents, blanket
 cross-model review or Mainnet smoke on every commit.
+See [PR #148 lessons](engineering/pr-148-retrospective.md) and the
+[quote-bracket case study](engineering/provider-quote-bracket-preparation-time.md)
+when those boundaries are relevant; neither adds a new required live test.
 
 ## Named issue delivery
 
