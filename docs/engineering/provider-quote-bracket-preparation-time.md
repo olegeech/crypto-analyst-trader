@@ -4,11 +4,7 @@
 
 ## Failure mechanism
 
-The public-market adapter obtains provider times before and after the ticker:
-
-```text
-collectionStartedAt <= observedAt <= collectionCompletedAt
-```
+The public-market adapter obtains `collectionStartedAt` before the ticker, `observedAt` from the ticker and `collectionCompletedAt` afterward. The valid ordering is `collectionStartedAt <= observedAt <= collectionCompletedAt`.
 
 Preparation originally set `preparedAt = quote.observedAt`, while the plan validator requires `collectionCompletedAt <= preparedAt` and a fresh observation. With real sequential requests, collection completes *after* ticker observation: the plan fails even when the quote itself is recent. Tests had used one frozen timestamp for all three responses, masking this contract violation.
 
@@ -16,10 +12,9 @@ Preparation originally set `preparedAt = quote.observedAt`, while the plan valid
 
 Merged v3 composition sets `preparedAt: initialQuote.collectionCompletedAt` while retaining the original ticker `observedAt`. The freshness and ordering constraints remain intact.
 
-- Adapter: `src/adapters/bybit-v5/public-market-client.ts`.
-- Composition: `src/application/mainnet-operator-test-preparation-composition.ts`.
-- Validator: `src/domain/execution/operator-mainnet-test-plan.ts`.
-- Regression: `tests/mainnet-operator-trade-e2e.test.ts`, using different ordered provider times (`T`, `T+100ms`, `T+300ms`) and asserting preparation performs no writes.
+The producer is `src/adapters/bybit-v5/public-market-client.ts`; the correction is in `src/application/mainnet-operator-test-preparation-composition.ts`, and the validator remains in `src/domain/execution/operator-mainnet-test-plan.ts`.
+
+The regression in `tests/mainnet-operator-trade-e2e.test.ts` uses different ordered provider times (`T`, `T+100ms`, `T+300ms`) and asserts preparation performs no exchange writes.
 
 ## Reuse trigger
 
