@@ -309,6 +309,7 @@ function assessmentStatus(
 function familyDispositions(
   outcomes: readonly ShadowFamilyOutcome[],
   dispositions: readonly ShadowQualityObservationDisposition[],
+  globalReasons: readonly ShadowQualityReasonCode[],
 ): ShadowQualityFamilyDisposition[] {
   const byId = new Map(dispositions.map((item) => [item.observationId, item]));
   return outcomes.map((outcome) => {
@@ -318,9 +319,12 @@ function familyDispositions(
     const rejectedObservationIds = outcome.observationIds.filter(
       (id) => byId.get(id)?.disposition === "rejected",
     );
-    const reasonCodes = sortedUnique(
-      outcome.observationIds.flatMap((id) => byId.get(id)?.reasonCodes ?? []),
-    );
+    const reasonCodes = sortedUnique([
+      ...globalReasons,
+      ...outcome.observationIds.flatMap(
+        (id) => byId.get(id)?.reasonCodes ?? [],
+      ),
+    ]);
     let status: ShadowQualityFamilyDisposition["status"];
     if (outcome.observationIds.length === 0) status = "unavailable";
     else if (acceptedObservationIds.length === 0) status = "rejected";
@@ -357,6 +361,7 @@ function sourceDispositions(
     const record = records.find((item) => item.role === role);
     const reasonCodes = sortedUnique([
       ...(record?.failures ?? []),
+      ...(failures.get(role) ?? []),
       ...findings
         .filter((finding) => mapFindingRole(finding.role) === role)
         .map((finding) => finding.reasonCode),
@@ -545,7 +550,11 @@ export function createShadowQualityAssessment(
   });
 
   const outcomes = replay.value.families;
-  const familyResults = familyDispositions(outcomes, dispositions);
+  const familyResults = familyDispositions(
+    outcomes,
+    dispositions,
+    globalReasons,
+  );
   const reportFindings = mapQualityFindings(findings);
   if (!claimedModelIsTrusted)
     reportFindings.push({ role: "shadow", reasonCode: "UNTRUSTED_EVIDENCE" });

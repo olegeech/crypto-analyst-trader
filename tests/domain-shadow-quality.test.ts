@@ -242,6 +242,24 @@ test("rehashed false observations and source references are rejected across ever
         item.reasonCodes.includes("UNTRUSTED_EVIDENCE"),
     ),
   );
+  const noTickerFixture = shadowQualityFixture({
+    removeTicker: true,
+    liquidationMode: "missing",
+  });
+  const noTickerUntrusted = assess(
+    noTickerFixture,
+    rehashShadow(noTickerFixture.shadow, (payload) => ({
+      ...payload,
+      modelVersion: "untrusted-model/v9" as typeof payload.modelVersion,
+    })),
+  );
+  assert.equal(noTickerUntrusted.ok, true);
+  if (!noTickerUntrusted.ok) return;
+  const unavailableLiquidity = noTickerUntrusted.value.familyDispositions.find(
+    (item) => item.family === "liquidity-stress",
+  );
+  assert.equal(unavailableLiquidity?.status, "unavailable");
+  assert.ok(unavailableLiquidity?.reasonCodes.includes("UNTRUSTED_EVIDENCE"));
   const wrongProducer = rehashShadow(fixture.shadow, (payload) => ({
     ...payload,
     producer: "untrusted-producer/v1" as typeof payload.producer,
@@ -321,6 +339,11 @@ test("canonical bundle freshness expires at 300000 ms and honors an earlier sour
   assert.equal(earlierExpired.ok, true);
   if (!earlierExpired.ok) return;
   assert.equal(earlierExpired.value.status, "rejected");
+  const analyticsSource = earlierExpired.value.sourceDispositions.find(
+    (item) => item.role === "analytics",
+  );
+  assert.equal(analyticsSource?.disposition, "rejected");
+  assert.ok(analyticsSource?.reasonCodes.includes("STALE_EVIDENCE"));
 });
 
 test("ticker freshness rejects stale quote facts without refreshing them or expiring historical windows", () => {
