@@ -132,7 +132,7 @@ function main(): void {
       "npx",
       [
         "--yes",
-        "--package=prettier@3.9.8",
+        "--package=prettier@3.9.10",
         "prettier",
         "--check",
         ...existing.map((file) => `./${file}`),
