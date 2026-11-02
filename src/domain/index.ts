@@ -26,6 +26,19 @@ export {
   type AssessDataQualityInput,
 } from "./quality/assess-data-quality.js";
 export {
+  createShadowQualityAssessment,
+  SHADOW_QUALITY_ASSESSMENT_PRODUCER,
+  SHADOW_QUALITY_ASSESSMENT_SCHEMA_VERSION,
+  SHADOW_QUALITY_PROFILE_VERSION,
+  type CreateShadowQualityAssessmentInput,
+  type ShadowQualityAssessment,
+  type ShadowQualityFamilyDisposition,
+  type ShadowQualityFinding,
+  type ShadowQualityObservationDisposition,
+  type ShadowQualityReasonCode,
+  type ShadowQualitySourceDisposition,
+} from "./quality/shadow-quality-assessment.js";
+export {
   admitQualitySource,
   type QualitySourceInput,
   type QualityInputRecord,
@@ -363,6 +376,24 @@ export {
   type AnalyticsEvidenceBundle,
   type CreateAnalyticsEvidenceBundleInput,
 } from "./analytics/analytics-evidence-bundle.js";
+export {
+  createShadowMarketIntelligence,
+  SHADOW_MARKET_FAMILIES,
+  SHADOW_MARKET_INTELLIGENCE_ANALYTICS_SOURCE_PRODUCER,
+  SHADOW_MARKET_INTELLIGENCE_MAX_SOURCE_AGE_MS,
+  SHADOW_MARKET_INTELLIGENCE_MODEL_VERSION,
+  SHADOW_MARKET_INTELLIGENCE_PRODUCER,
+  SHADOW_MARKET_INTELLIGENCE_PROFILE_VERSION,
+  SHADOW_MARKET_INTELLIGENCE_SCHEMA_VERSION,
+  type CreateShadowMarketIntelligenceInput,
+  type ShadowFamilyOutcome,
+  type ShadowMarketFamily,
+  type ShadowMarketIntelligenceBundle,
+  type ShadowMarketSourceManifest,
+  type ShadowObservation,
+  type ShadowObservationUnit,
+  type ShadowObservationWindow,
+} from "./analytics/shadow-market-intelligence.js";
 export {
   ANALYTICS_FEATURES_VERSION,
   ANALYTICS_FEATURES_VERSION_V2,
