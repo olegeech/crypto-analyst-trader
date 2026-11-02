@@ -12,6 +12,7 @@ import {
 import { ok } from "../src/domain/shared/result.js";
 import { parseUtcTimestamp } from "../src/domain/shared/time.js";
 import type { ExchangeCredentials } from "../src/ports/credential-provider.js";
+import { marketFixture } from "./fixtures/data-quality-fixtures.js";
 import { requireDailyFixture as value } from "./fixtures/daily-planning-evidence-fixtures.js";
 import {
   dailyPrepareLiquidationV2,
@@ -36,6 +37,8 @@ function setup(
     liquidationSchema?: "v2" | "v3";
     target?: "flat" | "long" | "order" | "absent";
     providerTime?: string;
+    staleTicker?: boolean;
+    planningTime?: string;
     preAuth?: boolean;
     slowPublic?: boolean;
     throwAt?: "market" | "liquidation" | "account" | "risk";
@@ -60,12 +63,34 @@ function setup(
     collectMarket: async (runId) => {
       events.push("market");
       explode("market");
-      return ok(dailyPrepareMarket(runId));
+      const market = dailyPrepareMarket(runId);
+      return ok(
+        options.staleTicker
+          ? marketFixture({
+              ...market,
+              symbols: market.symbols.map((row) =>
+                row.symbol === "BTCUSDT" && row.ticker
+                  ? {
+                      ...row,
+                      ticker: {
+                        ...row.ticker,
+                        observedAt: value(
+                          parseUtcTimestamp("2026-09-24T13:54:00.000Z"),
+                        ),
+                      },
+                    }
+                  : row,
+              ),
+            })
+          : market,
+      );
     },
     collectLiquidation: async (market, selectedAsset) => {
       events.push("liquidation");
       explode("liquidation");
-      wall = DAILY_PREPARE_TIME;
+      wall = value(
+        parseUtcTimestamp(options.planningTime ?? DAILY_PREPARE_TIME),
+      );
       return ok(
         options.liquidationSchema === "v2"
           ? dailyPrepareLiquidationV2(market)
@@ -175,6 +200,7 @@ test("clean native evidence traverses real planning/risk into replayable READY w
   if (result.kind !== "prepared") return;
   const p = result.prepared;
   assert.equal(p.state, "READY_FOR_APPROVAL");
+  assert.equal(p.schemaVersion, "prepared-daily-plan/v3");
   assert.equal(p.noteRequired, false);
   assert.equal(p.executionAuthority, "none");
   assert.equal(p.summary.decision.recommendation, "ADD_LONG");
@@ -204,6 +230,24 @@ test("clean native evidence traverses real planning/risk into replayable READY w
   );
   assert.ok(p.summary.informationalCodes.includes("PROVISIONAL_POLICY"));
   assert.equal(p.replayInputs.preflight.evaluationTime, DAILY_PREPARE_TIME);
+  assert.equal(p.replayInputs.shadowContext?.status, "recorded");
+  assert.ok(p.inputIdentity.shadowContextHash?.startsWith("sha256:"));
+  const savedShadowSummary = p.summary.shadowIntelligence;
+  assert.ok(savedShadowSummary && "sourceManifest" in savedShadowSummary);
+  if (!savedShadowSummary || !("sourceManifest" in savedShadowSummary)) return;
+  assert.ok(savedShadowSummary.sourceManifest.liquidation !== undefined);
+  assert.equal(savedShadowSummary.families.length, 4);
+  assert.ok(
+    savedShadowSummary.families.every(
+      (family) => family.assessmentStatus === "unavailable",
+    ),
+  );
+  assert.equal(result.diagnostics.shadowIntelligence, undefined);
+  assert.equal(
+    savedShadowSummary.evaluationTime,
+    result.prepared.inputIdentity.evaluationTime,
+  );
+  assert.equal(savedShadowSummary.qualityAssessment.status, "accepted");
   assert.equal(value(rehydratePreparedDailyPlan(p)).contentHash, p.contentHash);
   assert.equal(s.saved.length, 1);
   assert.equal(s.saved[0]?.contentHash, p.contentHash);
@@ -361,6 +405,10 @@ for (const target of ["long", "order"] as const)
     assert.equal(result.kind, "prepared", JSON.stringify(result));
     if (result.kind !== "prepared") return;
     assert.equal(result.prepared.state, "BLOCKED");
+    assert.equal(
+      result.prepared.summary.shadowIntelligence?.status,
+      "recorded",
+    );
     assert.ok(
       result.prepared.reasonCodes.includes("BLOCKED_BY_CREATE_ONLY_SCOPE"),
     );
@@ -378,6 +426,11 @@ test("fresh final provider time governs the exact 60-second account limit", asyn
     if (result.kind !== "prepared") continue;
     assert.equal(result.prepared.state, state);
     assert.equal(result.prepared.inputIdentity.evaluationTime, providerTime);
+    const shadowSummary = result.prepared.summary.shadowIntelligence;
+    assert.ok(shadowSummary && "evaluationTime" in shadowSummary);
+    if (!shadowSummary || !("evaluationTime" in shadowSummary)) continue;
+    assert.equal(shadowSummary.evaluationTime, providerTime);
+    assert.equal(result.diagnostics.shadowIntelligence, undefined);
     if (state === "BLOCKED")
       assert.ok(result.prepared.reasonCodes.includes("ACCOUNT_EVIDENCE_STALE"));
     assert.equal(s.loads, 1);
@@ -393,6 +446,63 @@ test("fresh final provider time governs the exact 60-second account limit", asyn
   }
 });
 
+test("stale quote shadow rejection stays separate from core planning and consent", async () => {
+  const result = await setup({ staleTicker: true }).boundary.prepare(input);
+  assert.equal(result.kind, "prepared", JSON.stringify(result));
+  if (result.kind !== "prepared") return;
+  assert.equal(result.prepared.state, "READY_FOR_APPROVAL");
+  assert.equal(result.prepared.noteRequired, false);
+  assert.equal(result.prepared.replayInputs.shadowContext?.status, "recorded");
+  const shadow = result.prepared.summary.shadowIntelligence;
+  assert.ok(
+    shadow &&
+      "qualityAssessment" in shadow &&
+      "observations" in shadow &&
+      "families" in shadow,
+  );
+  if (
+    !shadow ||
+    !("qualityAssessment" in shadow) ||
+    !("observations" in shadow) ||
+    !("families" in shadow)
+  )
+    return;
+  assert.equal(shadow?.qualityAssessment.status, "partial");
+  assert.ok(
+    shadow?.observations
+      .filter((observation) => observation.id.startsWith("quote-"))
+      .every((observation) => observation.qualityDisposition === "rejected"),
+  );
+  assert.ok(
+    shadow?.families.some(
+      (family) =>
+        family.family === "liquidity-stress" &&
+        family.qualityStatus === "rejected" &&
+        family.qualityReasonCodes.includes("STALE_EVIDENCE"),
+    ),
+  );
+  assert.equal(result.prepared.summary.quality.gate, "OK");
+  assert.ok(
+    result.prepared.summary.externalAvailability.every(
+      (family) => family.status === "not-configured",
+    ),
+  );
+});
+
+test("planning refusal includes shadow diagnostics without saving an artifact", async () => {
+  const s = setup({ planningTime: "2026-09-24T14:10:00.000Z" });
+  const result = await s.boundary.prepare(input);
+  assert.equal(result.kind, "blocked", JSON.stringify(result));
+  assert.equal(result.stage, "planning");
+  assert.equal(result.diagnostics.shadowIntelligence?.status, "recorded");
+  const shadowDiagnostic = result.diagnostics.shadowIntelligence;
+  assert.ok(shadowDiagnostic && "evaluationTime" in shadowDiagnostic);
+  if (!shadowDiagnostic || !("evaluationTime" in shadowDiagnostic)) return;
+  assert.equal(shadowDiagnostic.evaluationTime, "2026-09-24T14:10:00.000Z");
+  assert.equal(s.saved.length, 0);
+  assert.equal(s.loads, 0);
+});
+
 for (const throwAt of ["market", "liquidation", "account", "risk"] as const)
   test(`${throwAt} provider errors are sanitized without artifacts`, async () => {
     const s = setup({ throwAt });
@@ -404,6 +514,10 @@ for (const throwAt of ["market", "liquidation", "account", "risk"] as const)
       JSON.stringify(result),
       /synthetic-secret|rawUID|Authorization|private-payload/,
     );
+    if (throwAt === "market" || throwAt === "liquidation")
+      assert.equal(result.diagnostics.shadowIntelligence, undefined);
+    else
+      assert.equal(result.diagnostics.shadowIntelligence?.status, "recorded");
   });
 
 test("unsigned public mainnet evidence remains distinct from the private account environment", async () => {

@@ -4,6 +4,8 @@ import { summarizeLiquidationEvidenceBuckets } from "../domain/liquidation/liqui
 import { closedRecord } from "../domain/planning/planning-validation.js";
 import {
   createPreparedDailyPlan,
+  createPreparedShadowContext,
+  summarizePreparedShadowContext,
   type PreparedDailyPlan,
 } from "../domain/review/prepared-daily-plan.js";
 import {
@@ -69,6 +71,9 @@ export type DailyPrepareStage =
   | "risk"
   | "persistence";
 export interface DailyPrepareDiagnostics {
+  readonly shadowIntelligence?: ReturnType<
+    typeof summarizePreparedShadowContext
+  >;
   readonly marketStatus: string;
   readonly marketObservations: number;
   readonly liquidationStatus: string;
@@ -281,6 +286,19 @@ export function createDailyPrepareBoundary(deps: DailyPrepareDependencies) {
         });
         if (!analytics.ok)
           return failure("blocked", ["ANALYTICS_ADMISSION_FAILED"]);
+        const evaluationTime = deps.clock.now();
+        const shadowResult = createPreparedShadowContext({
+          market: market.value,
+          analytics: analytics.value,
+          liquidation: l,
+          symbol: composition.symbol,
+          evaluationTime,
+        });
+        if (shadowResult.ok) {
+          diagnostics.shadowIntelligence = summarizePreparedShadowContext(
+            shadowResult.value,
+          );
+        }
         const quality = createDataQualityBoundary({
           qualityProfile: composition.qualityProfile,
           issuer: "daily-prepare:provisional-m1-v1",
@@ -308,7 +326,7 @@ export function createDailyPrepareBoundary(deps: DailyPrepareDependencies) {
           symbol: composition.symbol,
           allocation: composition.allocation,
           bundleCutoff: market.value.bundleCutoff,
-          evaluationTime: deps.clock.now(),
+          evaluationTime,
         });
         if (plan.status === "blocked")
           return failure(
@@ -385,6 +403,7 @@ export function createDailyPrepareBoundary(deps: DailyPrepareDependencies) {
         } finally {
           store.value.close();
         }
+        delete diagnostics.shadowIntelligence;
         return Object.freeze({
           kind: "prepared",
           prepared: prepared.value,

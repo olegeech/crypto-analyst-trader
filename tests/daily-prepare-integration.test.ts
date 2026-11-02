@@ -70,6 +70,18 @@ test("released chain persists READY; fresh-process review and offline consent ca
     if (result.kind !== "prepared") return;
     const prepared = result.prepared;
     assert.equal(prepared.state, "READY_FOR_APPROVAL");
+    assert.equal(prepared.schemaVersion, "prepared-daily-plan/v3");
+    assert.equal(prepared.replayInputs.shadowContext?.status, "recorded");
+    assert.ok(prepared.inputIdentity.shadowContextHash?.startsWith("sha256:"));
+    const savedShadowSummary = prepared.summary.shadowIntelligence;
+    assert.ok(savedShadowSummary && "sourceManifest" in savedShadowSummary);
+    if (!savedShadowSummary || !("sourceManifest" in savedShadowSummary))
+      return;
+    assert.ok(savedShadowSummary.sourceManifest.liquidation !== undefined);
+    assert.equal(
+      savedShadowSummary.evaluationTime,
+      prepared.inputIdentity.evaluationTime,
+    );
     assert.equal(
       result.diagnostics.liquidationSchemaVersion,
       "liquidation-evidence/v3",
@@ -93,6 +105,18 @@ test("released chain persists READY; fresh-process review and offline consent ca
     assert.equal(review.status, 0, review.stderr);
     assert.match(review.stdout, /READY_FOR_APPROVAL/u);
     assert.match(review.stdout, /not-configured/u);
+    assert.match(review.stdout, /"shadowIntelligence": \{/u);
+    assert.match(review.stdout, /"sourceManifest": \{/u);
+    assert.match(review.stdout, /"liquidation": \{/u);
+    assert.match(review.stdout, /"return-24h"/u);
+    assert.match(review.stdout, /NO_CALIBRATED_MODEL/u);
+    assert.match(
+      review.stdout,
+      new RegExp(
+        `"evaluationTime": "${prepared.inputIdentity.evaluationTime}"`,
+        "u",
+      ),
+    );
     const redirected = spawnSync(
       process.execPath,
       ["--import", tsx, cli, "approve", ...args],

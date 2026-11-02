@@ -11,6 +11,7 @@ import { fail } from "../src/domain/shared/result.js";
 import { domainError } from "../src/domain/shared/errors.js";
 import { fixedClock } from "../src/domain/shared/time.js";
 import type { PreparedPlanApproval } from "../src/domain/review/prepared-plan-approval.js";
+import { createPreparedDailyPlanV2 } from "../src/domain/review/prepared-daily-plan.js";
 import { portfolioRiskPosition } from "./fixtures/portfolio-risk-fixtures.js";
 import { decimal } from "./account-evidence-fixture.js";
 
@@ -252,6 +253,7 @@ test("offline review/approval renders informational absence, binds derived actor
   );
   assert.equal(saved[0]?.actor, "local-operator:trusted");
   assert.equal(saved[0]?.executionAuthority, "none");
+  assert.equal(prompts, 1);
   assert.equal(privateCalls, 0);
   assert.equal(
     await runDailyCommand(["approve", ...args, "--note", "reviewed"], {
@@ -313,4 +315,83 @@ test("offline review/approval renders informational absence, binds derived actor
   assert.ok(rendered.includes("not-configured"));
   assert.ok(rendered.includes("Historical"));
   assert.ok(!rendered.includes("synthetic-secret"));
+});
+
+test("offline review keeps v3 shadow timing historical and preserves v2 review", async () => {
+  const prepared = preparedPlanFixture("ready");
+  const future = fixedClock("2027-11-02T00:00:00.000Z");
+  assert.ok(future.ok);
+  if (!future.ok) return;
+  let clockCalls = 0;
+  let prepareCalls = 0;
+  let actorCalls = 0;
+  let promptCalls = 0;
+  const output: string[] = [];
+  const code = await runDailyCommand(
+    [
+      "review",
+      "--environment",
+      prepared.inputIdentity.environment,
+      "--prepared-hash",
+      prepared.contentHash,
+    ],
+    {
+      prepare: async () => {
+        prepareCalls++;
+        throw new Error("offline review must not prepare");
+      },
+      openStore: () =>
+        ok({
+          savePrepared: () => ok(undefined),
+          loadPrepared: () => ok(prepared),
+          saveApproval: () => ok(undefined),
+          loadApproval: () => ok(undefined),
+          close: () => {},
+        }),
+      actor: () => {
+        actorCalls++;
+        return ok("unused");
+      },
+      clock: {
+        now: () => {
+          clockCalls++;
+          return future.value.now();
+        },
+      },
+      interactive: false,
+      prompt: async () => {
+        promptCalls++;
+        return "yes";
+      },
+      write: (text) => output.push(text),
+    },
+  );
+  assert.equal(code, 0);
+  assert.equal(prepareCalls, 0);
+  assert.equal(actorCalls, 0);
+  assert.equal(promptCalls, 0);
+  assert.equal(clockCalls, 0);
+  const rendered = output.join("\n");
+  assert.ok(
+    rendered.includes(
+      `Historical preflight evaluated at: ${prepared.inputIdentity.evaluationTime}`,
+    ),
+  );
+  assert.ok(rendered.includes('"shadowIntelligence": {'));
+  assert.ok(rendered.includes("SHADOW_SOURCE_INCOMPATIBLE"));
+  assert.ok(!rendered.includes("2027-11-02T00:00:00.000Z"));
+
+  const legacy = createPreparedDailyPlanV2({
+    preflight: prepared.replayInputs.preflight,
+    reviewPolicy: prepared.replayInputs.reviewPolicy,
+    approvalPolicy: prepared.replayInputs.approvalPolicy,
+    externalAvailability: prepared.replayInputs.externalAvailability,
+    protectionPolicy: prepared.replayInputs.protectionPolicy,
+  });
+  assert.equal(legacy.ok, true);
+  if (!legacy.ok) return;
+  const legacyReview = renderPreparedReview(legacy.value);
+  assert.ok(legacyReview.includes("Historical preflight evaluated at:"));
+  assert.ok(!legacyReview.includes('"shadowIntelligence"'));
+  assert.ok(legacyReview.includes('"externalAvailability"'));
 });
