@@ -116,6 +116,12 @@ test("released chain persists READY; fresh-process review and offline consent ca
     assert.equal(prepared.executionAuthority, "none");
     assert.equal(prepared.schemaVersion, "prepared-daily-plan/v3");
     assert.equal(prepared.replayInputs.shadowContext?.status, "recorded");
+    // Pin the complete persisted v3 replay identity, including the recorded
+    // shadow context, so changes require an explicit artifact version review.
+    assert.equal(
+      prepared.contentHash,
+      "sha256:ad470f398951a9245b202c636b7421999204bcd7f5c04e228d695d5c023c7b2f",
+    );
     assert.ok(prepared.inputIdentity.shadowContextHash?.startsWith("sha256:"));
     const savedShadowSummary = prepared.summary.shadowIntelligence;
     assert.ok(savedShadowSummary && "sourceManifest" in savedShadowSummary);

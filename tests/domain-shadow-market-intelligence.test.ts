@@ -87,6 +87,45 @@ function shadowFixture(
   };
 }
 
+test("shadow profiles reject incompatible and duplicate supported requests", () => {
+  const fixture = shadowFixture();
+  const request = fixture.analytics.profile.features.find(
+    (feature) => feature.id === "return-24h",
+  );
+  assert.ok(request?.kind === "close-return");
+  if (!request || request.kind !== "close-return") return;
+
+  const invalidProfiles = [
+    {
+      ...fixture.analytics.profile,
+      features: fixture.analytics.profile.features.map((feature) =>
+        feature.id === request.id ? { ...request, periods: 25 } : feature,
+      ),
+    },
+    {
+      ...fixture.analytics.profile,
+      features: [
+        ...fixture.analytics.profile.features,
+        { ...request, id: "return-24h-duplicate" },
+      ],
+    },
+  ];
+  for (const profile of invalidProfiles) {
+    const analytics = requireFixture(
+      createAnalyticsEvidenceBundle({
+        market: fixture.market,
+        liquidation: fixture.liquidation,
+        profile,
+        featuresVersion: fixture.analytics.featuresVersion,
+      }),
+    );
+    assert.equal(
+      createShadowMarketIntelligence({ ...fixture, analytics }).ok,
+      false,
+    );
+  }
+});
+
 test("shadow bundle records supported facts without claiming a model assessment", () => {
   const result = createShadowMarketIntelligence(shadowFixture());
 
