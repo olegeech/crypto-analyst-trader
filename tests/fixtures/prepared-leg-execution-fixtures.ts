@@ -1,6 +1,9 @@
 import { createProvisionalM1Composition } from "../../src/application/policies/provisional-m1.js";
 import { evaluatePortfolioRiskPreflight } from "../../src/domain/risk/portfolio-risk-preflight.js";
-import { createPreparedDailyPlanV2 } from "../../src/domain/review/prepared-daily-plan.js";
+import {
+  createPreparedDailyPlan,
+  createPreparedDailyPlanV2,
+} from "../../src/domain/review/prepared-daily-plan.js";
 import { createPreparedPlanApproval } from "../../src/domain/review/prepared-plan-approval.js";
 import {
   decimal as accountDecimal,
@@ -33,6 +36,7 @@ export const PREPARED_LEG_FOUR_LEVELS = [
 
 export function preparedLegExecutionFixture(
   options: {
+    readonly schemaVersion?: "v2" | "v3";
     readonly planningLevels?: readonly {
       readonly atrOffset: string;
       readonly allocationWeight: string;
@@ -105,8 +109,12 @@ export function preparedLegExecutionFixture(
       evaluationTime: EVALUATION_TIME,
     }),
   );
+  const createPrepared =
+    options.schemaVersion === "v3"
+      ? createPreparedDailyPlan
+      : createPreparedDailyPlanV2;
   const prepared = value(
-    createPreparedDailyPlanV2({
+    createPrepared({
       preflight,
       reviewPolicy: composition.reviewPolicy,
       approvalPolicy: composition.approvalPolicy,
