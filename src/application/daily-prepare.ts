@@ -4,10 +4,12 @@ import { summarizeLiquidationEvidenceBuckets } from "../domain/liquidation/liqui
 import { closedRecord } from "../domain/planning/planning-validation.js";
 import {
   createPreparedDailyPlan,
-  createPreparedShadowContext,
-  summarizePreparedShadowContext,
   type PreparedDailyPlan,
 } from "../domain/review/prepared-daily-plan.js";
+import {
+  createPreparedShadowContext,
+  summarizePreparedShadowContext,
+} from "../domain/review/prepared-shadow-context.js";
 import {
   MARKET_EVIDENCE_SYMBOLS,
   type MarketEvidenceBundle,
@@ -170,6 +172,8 @@ export function createDailyPrepareBoundary(deps: DailyPrepareDependencies) {
         executionAuthority: "none" as const,
       };
       let composition: ProvisionalM1Composition | undefined = undefined;
+      let buildShadowDiagnostic:
+        (() => DailyPrepareDiagnostics["shadowIntelligence"]) | undefined;
       let requiredLiquidationWindows: readonly RequiredLiquidationWindowDiagnostic[] =
         Object.freeze([]);
       const failure = (
@@ -186,10 +190,16 @@ export function createDailyPrepareBoundary(deps: DailyPrepareDependencies) {
           informationalCodes: composition?.reviewPolicy.informationalCodes ?? [
             "PROVISIONAL_POLICY",
           ],
-          diagnostics: Object.freeze({
-            ...diagnostics,
-            requiredLiquidationWindows,
-          }),
+          diagnostics: (() => {
+            const shadowIntelligence = buildShadowDiagnostic?.();
+            return Object.freeze({
+              ...diagnostics,
+              ...(shadowIntelligence === undefined
+                ? {}
+                : { shadowIntelligence }),
+              requiredLiquidationWindows,
+            });
+          })(),
         });
       if (
         !closedRecord(input, ["environment", "symbol", "allocation"]) ||
@@ -287,18 +297,22 @@ export function createDailyPrepareBoundary(deps: DailyPrepareDependencies) {
         if (!analytics.ok)
           return failure("blocked", ["ANALYTICS_ADMISSION_FAILED"]);
         const evaluationTime = deps.clock.now();
-        const shadowResult = createPreparedShadowContext({
-          market: market.value,
-          analytics: analytics.value,
-          liquidation: l,
-          symbol: composition.symbol,
-          evaluationTime,
-        });
-        if (shadowResult.ok) {
-          diagnostics.shadowIntelligence = summarizePreparedShadowContext(
-            shadowResult.value,
-          );
-        }
+        buildShadowDiagnostic = () => {
+          try {
+            const shadowResult = createPreparedShadowContext({
+              market: market.value,
+              analytics: analytics.value,
+              liquidation: l,
+              symbol: composition.symbol,
+              evaluationTime,
+            });
+            return shadowResult.ok
+              ? summarizePreparedShadowContext(shadowResult.value)
+              : undefined;
+          } catch {
+            return undefined;
+          }
+        };
         const quality = createDataQualityBoundary({
           qualityProfile: composition.qualityProfile,
           issuer: "daily-prepare:provisional-m1-v1",
@@ -403,7 +417,6 @@ export function createDailyPrepareBoundary(deps: DailyPrepareDependencies) {
         } finally {
           store.value.close();
         }
-        delete diagnostics.shadowIntelligence;
         return Object.freeze({
           kind: "prepared",
           prepared: prepared.value,

@@ -6,9 +6,11 @@ import {
 } from "../src/application/daily-prepare.js";
 import { createAccountEvidenceCollectionResult } from "../src/domain/account/account-evidence-bundle.js";
 import {
+  summarizePreparedShadowContext,
   rehydratePreparedDailyPlan,
   type PreparedDailyPlan,
 } from "../src/domain/review/prepared-daily-plan.js";
+import { hashCanonical } from "../src/domain/identity/canonical-serialization.js";
 import { ok } from "../src/domain/shared/result.js";
 import { parseUtcTimestamp } from "../src/domain/shared/time.js";
 import type { ExchangeCredentials } from "../src/ports/credential-provider.js";
@@ -29,6 +31,12 @@ import {
 import type { LiquidationTargetAsset } from "../src/domain/liquidation/liquidation-evidence-bundle.js";
 
 const input = { environment: "demo", symbol: "BTCUSDT", allocation: "10" };
+
+function rehash(raw: Record<string, unknown>) {
+  const { contentHash: _, ...payload } = raw;
+  void _;
+  return { ...payload, contentHash: value(hashCanonical(payload)) };
+}
 
 function setup(
   options: {
@@ -285,6 +293,59 @@ test("clean native evidence traverses real planning/risk into replayable READY w
   assert.ok(s.events.indexOf("account") < s.events.indexOf("risk-identity"));
   assert.ok(s.events.indexOf("risk-identity") < s.events.indexOf("risk-time"));
   assert.ok(s.events.indexOf("risk-time") < s.events.indexOf("store:demo"));
+});
+
+test("rehashing recorded v3 shadow-context edits cannot alter deterministic replay", async () => {
+  const result = await setup({ slowPublic: true }).boundary.prepare(input);
+  assert.equal(result.kind, "prepared", JSON.stringify(result));
+  if (result.kind !== "prepared") return;
+  const context = result.prepared.replayInputs.shadowContext;
+  assert.ok(context?.status === "recorded");
+  if (!context || context.status !== "recorded" || !context.assessment) return;
+
+  const { contentHash: _assessmentHash, ...assessmentPayload } =
+    context.assessment;
+  void _assessmentHash;
+  const changedAssessmentPayload = {
+    ...assessmentPayload,
+    findings: [
+      ...context.assessment.findings,
+      {
+        role: "market" as const,
+        reasonCode: "SOURCE_REFERENCE_MISMATCH" as const,
+      },
+    ],
+  };
+  const changedContext = {
+    ...context,
+    assessment: {
+      ...changedAssessmentPayload,
+      contentHash: value(hashCanonical(changedAssessmentPayload)),
+    },
+  };
+  const shadowContextHash = value(hashCanonical(changedContext));
+  const inputIdentity = { ...result.prepared.inputIdentity, shadowContextHash };
+  const preparedPlanId = value(
+    hashCanonical({
+      schemaVersion: "prepared-daily-plan-id/v1",
+      inputIdentity,
+    }),
+  );
+  const changed = rehash({
+    ...result.prepared,
+    preparedPlanId: "prepared-daily-plan:" + preparedPlanId,
+    inputIdentity,
+    replayInputs: {
+      ...result.prepared.replayInputs,
+      shadowContext: changedContext,
+    },
+    summary: {
+      ...result.prepared.summary,
+      shadowIntelligence: summarizePreparedShadowContext(changedContext),
+    },
+  } as unknown as Record<string, unknown>);
+
+  assert.equal(rehydratePreparedDailyPlan(changed).ok, false);
 });
 
 test("invalid input and caller authority overrides are rejected before any provider", async () => {

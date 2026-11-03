@@ -105,6 +105,11 @@ export function renderPreparedReview(p: PreparedDailyPlan): string {
     `PREPARED_HASH: ${p.contentHash}`,
     `Historical preflight evaluated at: ${p.inputIdentity.evaluationTime}`,
     `Approval TTL: ${p.summary.policies.approvalTtlMs} ms from explicit consent; historical approval does not refresh evidence`,
+    ...(p.summary.shadowIntelligence === undefined
+      ? []
+      : [
+          "Shadow intelligence is a saved historical snapshot; review does not refresh it or claim that it is current.",
+        ]),
     proposal,
     JSON.stringify(p.summary, null, 2),
     "Execution authority: none. No exchange writes. No default report file.",

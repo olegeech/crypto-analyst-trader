@@ -10,7 +10,7 @@ import { openSqlitePreparedArtifactStore } from "../src/adapters/sqlite/prepared
 import { runDailyCommand } from "../src/cli/daily-command.js";
 import { localOperatorIdentity } from "../src/application/local-operator.js";
 import { ok } from "../src/domain/shared/result.js";
-import { fixedClock } from "../src/domain/shared/time.js";
+import { fixedClock, parseUtcTimestamp } from "../src/domain/shared/time.js";
 import { validatePreparedPlanApproval } from "../src/domain/review/prepared-plan-approval.js";
 import {
   createPreparedDailyPlanV2,
@@ -194,6 +194,37 @@ test("released chain persists READY; fresh-process review and offline consent ca
     };
     assert.equal(await runDailyCommand(["review", ...args], deps), 0);
     assert.ok(offlineReviewOutput.includes(prepared.contentHash));
+    assert.equal(offlinePrepareCalls, 0);
+    const futureReviewOutput: string[] = [];
+    const futureClock = value(
+      fixedClock(value(parseUtcTimestamp("2027-01-01T00:00:00.000Z"))),
+    );
+    assert.equal(
+      await runDailyCommand(["review", ...args], {
+        ...deps,
+        clock: futureClock,
+        write: (text: string) => futureReviewOutput.push(text),
+      }),
+      0,
+    );
+    const expiredReview = futureReviewOutput.join("\n");
+    assert.ok(expiredReview.includes(prepared.contentHash));
+    assert.match(
+      expiredReview,
+      /saved historical snapshot; review does not refresh it or claim that it is current/u,
+    );
+    assert.match(
+      expiredReview,
+      new RegExp(
+        '"evaluationTime": "' + prepared.inputIdentity.evaluationTime + '"',
+        "u",
+      ),
+    );
+    assert.match(
+      expiredReview,
+      new RegExp('"asOf": "' + savedShadowSummary.asOf + '"', "u"),
+    );
+    assert.doesNotMatch(expiredReview, /2027-01-01T00:00:00\.000Z/u);
     assert.equal(offlinePrepareCalls, 0);
     const redirected = spawnSync(
       process.execPath,

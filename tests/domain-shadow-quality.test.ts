@@ -11,8 +11,13 @@ import { hashCanonical } from "../src/domain/identity/canonical-serialization.js
 import { createLiquidationEvidenceRef } from "../src/domain/liquidation/liquidation-evidence-bundle.js";
 import {
   createShadowQualityAssessment,
+  createShadowMarketIntelligenceWithQualityAssessment,
   type ShadowQualityAssessment,
 } from "../src/domain/quality/shadow-quality-assessment.js";
+import {
+  createPreparedShadowContext,
+  replayPreparedShadowContext,
+} from "../src/domain/review/prepared-shadow-context.js";
 import { assessDataQuality } from "../src/domain/quality/assess-data-quality.js";
 import {
   dailyPrepareLiquidationV3,
@@ -132,6 +137,71 @@ function assess(
     shadow,
   });
 }
+
+test("source-composed shadow quality matches the guarded supplied-bundle path", () => {
+  const fixture = shadowQualityFixture();
+  const composed = requireFixture(
+    createShadowMarketIntelligenceWithQualityAssessment({
+      market: fixture.market,
+      analytics: fixture.analytics,
+      liquidation: fixture.liquidation,
+      symbol: "BTCUSDT",
+      evaluationTime: fixture.evaluationTime,
+    }),
+  );
+  assert.deepEqual(composed.shadow, fixture.shadow);
+  assert.deepEqual(composed.assessment, requireFixture(assess(fixture)));
+
+  const preparedContext = requireFixture(
+    createPreparedShadowContext({
+      market: fixture.market,
+      analytics: fixture.analytics,
+      liquidation: fixture.liquidation,
+      symbol: "BTCUSDT",
+      evaluationTime: fixture.evaluationTime,
+    }),
+  );
+  assert.equal(preparedContext.status, "recorded");
+  assert.equal(
+    preparedContext.model.modelVersion,
+    "existing-evidence-shadow/v1",
+  );
+  assert.equal(
+    requireFixture(hashCanonical(preparedContext)),
+    "sha256:3c901777075b81bf9bf5f78886d1107bfebe8ddd4f44669fdbe6ce5f03e36f83",
+  );
+  assert.deepEqual(
+    requireFixture(
+      replayPreparedShadowContext(
+        {
+          market: fixture.market,
+          analytics: fixture.analytics,
+          liquidation: fixture.liquidation,
+          symbol: "BTCUSDT",
+          evaluationTime: fixture.evaluationTime,
+        },
+        preparedContext,
+      ),
+    ),
+    preparedContext,
+  );
+  assert.equal(
+    replayPreparedShadowContext(
+      {
+        market: fixture.market,
+        analytics: fixture.analytics,
+        liquidation: fixture.liquidation,
+        symbol: "BTCUSDT",
+        evaluationTime: fixture.evaluationTime,
+      },
+      {
+        ...preparedContext,
+        model: { ...preparedContext.model, modelVersion: "shadow/v2" },
+      },
+    ).ok,
+    false,
+  );
+});
 
 function rehashShadow(
   bundle: ShadowMarketIntelligenceBundle,

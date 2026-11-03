@@ -1,5 +1,5 @@
 import {
-  createShadowMarketIntelligence,
+  createShadowMarketIntelligenceV1,
   SHADOW_MARKET_INTELLIGENCE_MAX_SOURCE_AGE_MS,
   SHADOW_MARKET_INTELLIGENCE_MODEL_VERSION,
   SHADOW_MARKET_INTELLIGENCE_PROFILE_VERSION,
@@ -9,8 +9,10 @@ import {
   type ShadowMarketIntelligenceBundle,
   type ShadowMarketFamily,
 } from "../analytics/shadow-market-intelligence.js";
+import { compareAnalyticsText } from "../analytics/analytics-diagnostics.js";
 import { onlyKeys } from "../analytics/analytics-validation.js";
 import {
+  canonicalSerialize,
   hashCanonical,
   type PlanHash,
 } from "../identity/canonical-serialization.js";
@@ -108,8 +110,21 @@ export interface CreateShadowQualityAssessmentInput {
   readonly evaluationTime: unknown;
 }
 
+export interface ShadowMarketIntelligenceWithQualityAssessment {
+  readonly shadow: ShadowMarketIntelligenceBundle;
+  readonly assessment: ShadowQualityAssessment;
+}
+
 type AssessmentPayload = Omit<ShadowQualityAssessment, "contentHash">;
 type ShadowQualitySourceRole = "market" | "analytics" | "liquidation";
+
+const SHADOW_SOURCE_INPUT_KEYS = [
+  "market",
+  "analytics",
+  "liquidation",
+  "symbol",
+  "evaluationTime",
+] as const;
 
 const SHADOW_QUALITY_PROFILE_INPUT = {
   schemaVersion: "quality-profile/v1",
@@ -157,12 +172,8 @@ function invalid(message: string): Result<never> {
   return fail(domainError("INVALID_VALUE", message));
 }
 
-function compareText(left: string, right: string): number {
-  return left < right ? -1 : left > right ? 1 : 0;
-}
-
 function sortedUnique<T extends string>(values: readonly T[]): T[] {
-  return [...new Set(values)].sort(compareText);
+  return [...new Set(values)].sort(compareAnalyticsText);
 }
 
 function mapFindingRole(role: string): ShadowQualitySourceRole | undefined {
@@ -214,7 +225,6 @@ function makeSourceRecords(input: {
   readonly analytics: unknown;
   readonly liquidation?: unknown;
   readonly expected?: ShadowMarketIntelligenceBundle;
-  readonly profileAgeMs: number;
 }): Result<readonly QualityInputRecord[]> {
   const marketHash = input.expected?.sourceManifest.market.bundleHash;
   const analyticsHash = input.expected?.sourceManifest.analytics.bundleHash;
@@ -243,7 +253,7 @@ function makeSourceRecords(input: {
       const evidenceRef = createLiquidationEvidenceRef(
         liquidation.value,
         liquidationHash.value,
-        input.profileAgeMs,
+        SHADOW_MARKET_INTELLIGENCE_MAX_SOURCE_AGE_MS,
       );
       if (!evidenceRef.ok) return evidenceRef;
       const expectedHash =
@@ -367,14 +377,16 @@ function sourceDispositions(
         .map((finding) => finding.reasonCode),
     ]);
     const hardFailures = failures.get(role);
-    const disposition: ShadowQualitySourceDisposition["disposition"] =
-      record === undefined || record.value === undefined
-        ? "missing"
-        : hardFailures && hardFailures.size > 0
-          ? "rejected"
-          : reasonCodes.length > 0
-            ? "partial"
-            : "accepted";
+    let disposition: ShadowQualitySourceDisposition["disposition"];
+    if (record === undefined || record.value === undefined) {
+      disposition = "missing";
+    } else if (hardFailures !== undefined && hardFailures.size > 0) {
+      disposition = "rejected";
+    } else if (reasonCodes.length > 0) {
+      disposition = "partial";
+    } else {
+      disposition = "accepted";
+    }
     return {
       role,
       disposition,
@@ -389,8 +401,9 @@ function sourceDispositions(
   });
 }
 
-export function createShadowQualityAssessment(
+function createShadowQualityAssessmentInternal(
   rawInput: unknown,
+  generatedShadow?: ShadowMarketIntelligenceBundle,
 ): Result<ShadowQualityAssessment> {
   if (
     !isRecord(rawInput) ||
@@ -412,8 +425,6 @@ export function createShadowQualityAssessment(
   const evaluationTime = parseUtcTimestamp(rawInput.evaluationTime);
   if (!parsedRows.ok) return parsedRows;
   if (!evaluationTime.ok) return evaluationTime;
-  if (!isRecord(rawInput.shadow))
-    return invalid("shadow assessment bundle is invalid");
   const shadow = rawInput.shadow as unknown as ShadowMarketIntelligenceBundle;
   const parsedCutoff = parseUtcTimestamp(shadow.cutoff);
   if (!parsedCutoff.ok) return parsedCutoff;
@@ -437,29 +448,27 @@ export function createShadowQualityAssessment(
     shadow.modelVersion === SHADOW_MARKET_INTELLIGENCE_MODEL_VERSION &&
     shadow.profileVersion === SHADOW_MARKET_INTELLIGENCE_PROFILE_VERSION;
 
-  const replay = createShadowMarketIntelligence({
-    market: rawInput.market,
-    analytics: rawInput.analytics,
-    ...(rawInput.liquidation === undefined
-      ? {}
-      : { liquidation: rawInput.liquidation }),
-    symbol: shadow.symbol,
-    evaluationTime: evaluationTime.value,
-  });
+  const replay =
+    generatedShadow === undefined
+      ? createShadowMarketIntelligenceV1({
+          market: rawInput.market,
+          analytics: rawInput.analytics,
+          ...(rawInput.liquidation === undefined
+            ? {}
+            : { liquidation: rawInput.liquidation }),
+          symbol: shadow.symbol,
+          evaluationTime: evaluationTime.value,
+        })
+      : ok(generatedShadow);
   if (!replay.ok) return replay;
-  const suppliedHash = hashCanonical(shadow);
-  const replayHash = hashCanonical(replay.value);
-  if (!suppliedHash.ok) return suppliedHash;
-  if (!replayHash.ok) return replayHash;
-  const replayMatches =
-    shadow.contentHash === replay.value.contentHash &&
-    suppliedHash.value === replayHash.value &&
-    shadow.evaluationTime === evaluationTime.value &&
-    shadow.runId === replay.value.runId &&
-    shadow.universeVersion === replay.value.universeVersion &&
-    shadow.symbol === replay.value.symbol &&
-    shadow.cutoff === replay.value.cutoff &&
-    shadow.asOf === replay.value.asOf;
+  let replayMatches = shadow === replay.value;
+  if (!replayMatches) {
+    const supplied = canonicalSerialize(shadow);
+    const reproduced = canonicalSerialize(replay.value);
+    if (!supplied.ok) return supplied;
+    if (!reproduced.ok) return reproduced;
+    replayMatches = supplied.value === reproduced.value;
+  }
 
   const records = makeSourceRecords({
     market: rawInput.market,
@@ -468,7 +477,6 @@ export function createShadowQualityAssessment(
       ? {}
       : { liquidation: rawInput.liquidation }),
     expected: replay.value,
-    profileAgeMs: SHADOW_MARKET_INTELLIGENCE_MAX_SOURCE_AGE_MS,
   });
   if (!records.ok) return records;
   const findings = classifyQualityEvidence(
@@ -568,8 +576,8 @@ export function createShadowQualityAssessment(
   );
   const normalizedFindings = [...uniqueFindings.values()].sort(
     (left, right) =>
-      compareText(left.role, right.role) ||
-      compareText(left.reasonCode, right.reasonCode),
+      compareAnalyticsText(left.role, right.role) ||
+      compareAnalyticsText(left.reasonCode, right.reasonCode),
   );
   const sourceResults = sourceDispositions(records.value, findings, failures);
   const shadowContentHash = requireHash(
@@ -603,4 +611,57 @@ export function createShadowQualityAssessment(
   const contentHash = hashCanonical(payload);
   if (!contentHash.ok) return contentHash;
   return ok(deepFreeze({ ...payload, contentHash: contentHash.value }));
+}
+
+/** Version-pinned quality checks used to replay saved shadow/v1 artifacts. */
+export function createShadowQualityAssessmentV1(
+  rawInput: unknown,
+): Result<ShadowQualityAssessment> {
+  return createShadowQualityAssessmentInternal(rawInput);
+}
+
+/** Assess the current shadow model. New profiles must retain V1 replay. */
+export function createShadowQualityAssessment(
+  rawInput: unknown,
+): Result<ShadowQualityAssessment> {
+  return createShadowQualityAssessmentV1(rawInput);
+}
+
+/** Derive and assess one shadow bundle from trusted canonical source inputs. */
+export function createShadowMarketIntelligenceWithQualityAssessmentV1(
+  rawInput: unknown,
+): Result<ShadowMarketIntelligenceWithQualityAssessment> {
+  if (
+    !isRecord(rawInput) ||
+    !onlyKeys(rawInput, SHADOW_SOURCE_INPUT_KEYS) ||
+    !Object.hasOwn(rawInput, "market") ||
+    !Object.hasOwn(rawInput, "analytics") ||
+    !Object.hasOwn(rawInput, "symbol") ||
+    !Object.hasOwn(rawInput, "evaluationTime")
+  )
+    return invalid("shadow quality source input is invalid");
+  const shadow = createShadowMarketIntelligenceV1(rawInput);
+  if (!shadow.ok) return shadow;
+  const assessment = createShadowQualityAssessmentInternal(
+    {
+      shadow: shadow.value,
+      market: rawInput.market,
+      analytics: rawInput.analytics,
+      ...(rawInput.liquidation === undefined
+        ? {}
+        : { liquidation: rawInput.liquidation }),
+      evaluationTime: rawInput.evaluationTime,
+    },
+    shadow.value,
+  );
+  return assessment.ok
+    ? ok(deepFreeze({ shadow: shadow.value, assessment: assessment.value }))
+    : assessment;
+}
+
+/** Compose the current shadow model with its matching quality profile. */
+export function createShadowMarketIntelligenceWithQualityAssessment(
+  rawInput: unknown,
+): Result<ShadowMarketIntelligenceWithQualityAssessment> {
+  return createShadowMarketIntelligenceWithQualityAssessmentV1(rawInput);
 }

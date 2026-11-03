@@ -20,6 +20,12 @@
 
 **Apply when:** an integration combines multiple provider responses, fallbacks or state transitions. Exercise one successful path through real composition with representative changing evidence and critical failures. Prefer an actionable refusal code over adding blanket rechecks or speculative guards.
 
+## Shadow Market Intelligence (#116)
+
+- Provider-contract defects first found in manual operation: none observed. This slice changes no provider mapper, and no live source reads were performed.
+- Defect fixes after the first full green CI: none as of PR submission; exact-head CI is the remaining check.
+- Operator retries caused by program defects: none observed in the deterministic offline tests, including fresh-process review. Missing native liquidation evidence remains an expected source gap and does not relax the existing core requirement.
+
 ## Where these lessons belong
 
 The actionable reminders are incorporated in [Development Workflow](../workflow.md#integration-contract-check). Product decisions and acceptance criteria belong in the relevant GitHub issue; safety rules remain in [System Invariants](../architecture/invariants.md); code and tests define actual behavior. The detailed attempts, GET counts, live evidence and diagnostic chronology stay in [PR #148](https://github.com/olegeech/crypto-analyst-trader/pull/148).

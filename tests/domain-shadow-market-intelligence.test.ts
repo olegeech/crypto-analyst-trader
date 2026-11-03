@@ -4,6 +4,7 @@ import test from "node:test";
 import { createProvisionalM1Composition } from "../src/application/policies/provisional-m1.js";
 import { createAnalyticsEvidenceBundle } from "../src/domain/analytics/analytics-evidence-bundle.js";
 import { createShadowMarketIntelligence } from "../src/domain/analytics/shadow-market-intelligence.js";
+import { createShadowQualityAssessment } from "../src/domain/quality/shadow-quality-assessment.js";
 import { hashCanonical } from "../src/domain/identity/canonical-serialization.js";
 import { RoundingMode } from "../src/domain/shared/decimal.js";
 import {
@@ -94,6 +95,12 @@ test("shadow bundle records supported facts without claiming a model assessment"
 
   assert.equal(result.value.schemaVersion, "shadow-market-intelligence/v1");
   assert.equal(result.value.modelVersion, "existing-evidence-shadow/v1");
+  assert.equal(
+    result.value.contentHash,
+    "sha256:2092b4e3ea4b698ec2c26c84a661d20b088ff11d4d8bd086c8c7252f30c55a66",
+  );
+  // Changes to this calculation need a new model version and a retained v1
+  // replay path so saved prepared-daily-plan/v3 artifacts remain readable.
   assert.deepEqual(
     result.value.families.map((family) => [family.family, family.status]),
     [
@@ -212,6 +219,72 @@ test("missing ticker removes only ticker-derived facts and makes liquidity unava
     result.value.families.find((item) => item.family === "early-warning-risk")
       ?.missingSourceInputs,
     ["funding-current"],
+  );
+});
+
+test("missing optional liquidation source is explicit in provenance and family inputs", () => {
+  const market = dailyPrepareMarket();
+  const composition = requireFixture(
+    createProvisionalM1Composition({ symbol: "BTCUSDT", allocation: "100" }),
+  );
+  const profile = {
+    ...composition.analyticsProfile,
+    features: composition.analyticsProfile.features.filter(
+      (feature) => feature.kind !== "liquidation-window",
+    ),
+  };
+  const analytics = requireFixture(
+    createAnalyticsEvidenceBundle({
+      market,
+      profile,
+      featuresVersion: composition.analyticsFeaturesVersion,
+    }),
+  );
+  const result = createShadowMarketIntelligence({
+    market,
+    analytics,
+    symbol: "BTCUSDT",
+    evaluationTime: new Date(
+      Date.parse(market.bundleCutoff) + 3_000,
+    ).toISOString(),
+  });
+
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.equal(
+    Object.hasOwn(result.value.sourceManifest, "liquidation"),
+    false,
+  );
+  assert.equal(
+    result.value.observations.some((item) =>
+      item.id.startsWith("liquidation-12h-"),
+    ),
+    false,
+  );
+  for (const family of ["early-warning-risk", "trap"] as const)
+    assert.deepEqual(
+      result.value.families.find((item) => item.family === family)
+        ?.missingSourceInputs,
+      [
+        "liquidation-12h-long-usd",
+        "liquidation-12h-short-usd",
+        "liquidation-12h-total-usd",
+      ],
+    );
+
+  const assessment = createShadowQualityAssessment({
+    market,
+    analytics,
+    evaluationTime: result.value.evaluationTime,
+    shadow: result.value,
+  });
+  assert.equal(assessment.ok, true);
+  if (!assessment.ok) return;
+  assert.equal(
+    assessment.value.sourceDispositions.find(
+      (item) => item.role === "liquidation",
+    )?.disposition,
+    "missing",
   );
 });
 

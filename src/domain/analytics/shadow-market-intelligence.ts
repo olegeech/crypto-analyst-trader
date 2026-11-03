@@ -8,6 +8,7 @@ import {
   ANALYTICS_FEATURE_OUTPUT_SCALE,
   ANALYTICS_FEATURE_ROUNDING,
 } from "./analytics-numeric-policy.js";
+import { compareAnalyticsText } from "./analytics-diagnostics.js";
 import type { AnalyticsFeatureRequest } from "./analytics-profile.js";
 import type { DerivativeFeatureOutcome } from "./derivatives-features.js";
 import type { PriceFeatureOutcome } from "./price-features.js";
@@ -15,7 +16,6 @@ import {
   MARKET_EVIDENCE_PRODUCER,
   MARKET_EVIDENCE_SCHEMA_VERSION,
   createMarketEvidenceBundle,
-  marketEvidenceContentHash,
   type MarketEvidenceBundle,
   type MarketEvidenceSymbol,
   type MarketTickerEvidence,
@@ -209,29 +209,23 @@ const FAMILY_MODEL_GAPS: Readonly<
   ],
 };
 
+const RISK_FAMILY_SOURCE_INPUTS: readonly string[] = [
+  "return-24h",
+  "return-3d",
+  "funding-current",
+  "oi-relative-24h",
+  "liquidation-12h-long-usd",
+  "liquidation-12h-short-usd",
+  "liquidation-12h-total-usd",
+];
+
 const FAMILY_SOURCE_INPUTS: Readonly<
   Record<ShadowMarketFamily, readonly string[]>
 > = {
   "market-regime-score": ["return-24h", "return-3d", "atr-4h"],
-  "early-warning-risk": [
-    "return-24h",
-    "return-3d",
-    "funding-current",
-    "oi-relative-24h",
-    "liquidation-12h-long-usd",
-    "liquidation-12h-short-usd",
-    "liquidation-12h-total-usd",
-  ],
+  "early-warning-risk": RISK_FAMILY_SOURCE_INPUTS,
   "liquidity-stress": ["quote-spread", "quote-relative-spread"],
-  trap: [
-    "return-24h",
-    "return-3d",
-    "funding-current",
-    "oi-relative-24h",
-    "liquidation-12h-long-usd",
-    "liquidation-12h-short-usd",
-    "liquidation-12h-total-usd",
-  ],
+  trap: RISK_FAMILY_SOURCE_INPUTS,
 };
 
 function invalid(message: string, field?: string): Result<never> {
@@ -291,42 +285,46 @@ function observation(
     readonly sourceReasonCodes: readonly string[];
   },
 ): ShadowObservation {
-  const reasons = [...new Set(input.sourceReasonCodes)].sort();
+  const reasons = [...new Set(input.sourceReasonCodes)].sort(
+    compareAnalyticsText,
+  );
   return deepFreeze({ ...input, sourceReasonCodes: reasons });
 }
 
 function addPriceObservation(
   output: ShadowObservation[],
-  id: string,
-  kind: "close-return" | "atr",
-  request: AnalyticsFeatureRequest | undefined,
-  outcome: PriceFeatureOutcome | undefined,
-  valueType: "close-return" | "atr",
-  unit: "percent" | "price",
-  source: ShadowAnalyticsSourceManifest,
-  symbol: MarketEvidenceSymbol,
-  cutoff: UtcTimestamp,
-  instrument: MarketEvidenceBundle["symbols"][number]["instrument"],
+  input: {
+    readonly id: string;
+    readonly kind: "close-return" | "atr";
+    readonly request: AnalyticsFeatureRequest | undefined;
+    readonly outcome: PriceFeatureOutcome | undefined;
+    readonly source: ShadowAnalyticsSourceManifest;
+    readonly symbol: MarketEvidenceSymbol;
+    readonly cutoff: UtcTimestamp;
+    readonly instrument: MarketEvidenceBundle["symbols"][number]["instrument"];
+  },
 ): void {
+  const { id, kind, request, outcome, source, symbol, cutoff, instrument } =
+    input;
   if (
     request === undefined ||
     outcome === undefined ||
-    outcome.kind !== valueType ||
+    outcome.kind !== kind ||
     outcome.symbol !== symbol ||
-    outcome.value?.type !== valueType
+    outcome.value?.type !== kind
   )
     return;
   const status = sourceStatus(outcome);
   if (status === undefined || !hasValidWindow(outcome.window, cutoff)) return;
   const value =
-    valueType === "close-return" && outcome.value.type === "close-return"
+    kind === "close-return" && outcome.value?.type === "close-return"
       ? outcome.value.percent
-      : valueType === "atr" && outcome.value.type === "atr"
+      : kind === "atr" && outcome.value?.type === "atr"
         ? outcome.value.atr
         : undefined;
   if (value === undefined) return;
   const priceUnit =
-    valueType === "atr" && instrument !== undefined
+    kind === "atr" && instrument !== undefined
       ? `${instrument.quoteCoin} per ${instrument.baseCoin}`
       : undefined;
   output.push(
@@ -337,7 +335,7 @@ function addPriceObservation(
       sourceHash: source.bundleHash,
       symbol,
       value,
-      unit,
+      unit: kind === "atr" ? "price" : "percent",
       ...(instrument === undefined
         ? {}
         : {
@@ -432,7 +430,8 @@ function minimumAge(marketRefAge: number): number {
   return Math.min(marketRefAge, SHADOW_MARKET_INTELLIGENCE_MAX_SOURCE_AGE_MS);
 }
 
-export function createShadowMarketIntelligence(
+/** Version-pinned calculation used to replay saved shadow/v1 artifacts. */
+export function createShadowMarketIntelligenceV1(
   input: unknown,
 ): Result<ShadowMarketIntelligenceBundle> {
   if (
@@ -465,12 +464,7 @@ export function createShadowMarketIntelligence(
   const symbol = symbolValue.value as MarketEvidenceSymbol;
   if (!market.universe.includes(symbol))
     return invalid("shadow symbol is outside the market universe", "symbol");
-  const selected = market.symbols.filter((item) => item.symbol === symbol);
-  if (selected.length !== 1)
-    return invalid("shadow market symbol is missing or ambiguous", "symbol");
-  const symbolEvidence = selected[0];
-  if (symbolEvidence === undefined)
-    return invalid("shadow symbol evidence is missing");
+  const symbolEvidence = market.symbols.find((item) => item.symbol === symbol)!;
 
   const analyticsResult = rehydrateAnalyticsEvidenceBundle(input.analytics);
   if (!analyticsResult.ok) return analyticsResult;
@@ -499,11 +493,9 @@ export function createShadowMarketIntelligence(
   if (analytics.inputIdentity.runId !== market.runId)
     return invalid("shadow analytics run does not match the market source");
 
-  const marketContentHash = marketEvidenceContentHash(market);
-  const marketBundleHash = hashCanonical(market);
+  const marketContentHash = computedIdentity.value.marketContentHash;
+  const marketBundleHash = computedIdentity.value.marketBundleHash as PlanHash;
   const analyticsBundleHash = hashCanonical(analytics);
-  if (!marketContentHash.ok) return marketContentHash;
-  if (!marketBundleHash.ok) return marketBundleHash;
   if (!analyticsBundleHash.ok) return analyticsBundleHash;
 
   const marketRefs = market.evidence.filter(
@@ -522,7 +514,7 @@ export function createShadowMarketIntelligence(
     marketRef.schemaVersion !== market.schemaVersion ||
     marketRef.sourceId !== `bybit-public:${market.runId}` ||
     marketRef.asOf !== market.bundleCutoff ||
-    marketRef.contentHash !== marketContentHash.value
+    marketRef.contentHash !== marketContentHash
   )
     return invalid("shadow market source manifest is inconsistent");
 
@@ -535,8 +527,8 @@ export function createShadowMarketIntelligence(
     sourceId: marketRef.sourceId,
     producer: marketRef.producer,
     schemaVersion: marketRef.schemaVersion,
-    contentHash: marketContentHash.value,
-    bundleHash: marketBundleHash.value,
+    contentHash: marketContentHash,
+    bundleHash: marketBundleHash,
     asOf: marketRef.asOf,
     validForMs,
   };
@@ -552,15 +544,17 @@ export function createShadowMarketIntelligence(
   };
   let liquidationManifest: ShadowLiquidationSourceManifest | undefined;
   if (liquidation !== undefined) {
-    const hash = hashCanonical(liquidation);
-    if (!hash.ok) return hash;
+    const liquidationBundleHash = computedIdentity.value.liquidationBundleHash;
+    if (liquidationBundleHash === undefined)
+      return invalid("shadow liquidation source identity is inconsistent");
+    const hash = liquidationBundleHash as PlanHash;
     liquidationManifest = {
       role: "liquidation",
       sourceId: liquidation.runId,
       producer: liquidation.producer,
       schemaVersion: liquidation.schemaVersion,
-      contentHash: hash.value,
-      bundleHash: hash.value,
+      contentHash: hash,
+      bundleHash: hash,
       asOf: liquidation.bundleCutoff,
       validForMs,
     };
@@ -666,45 +660,36 @@ export function createShadowMarketIntelligence(
         );
 
   const observations: ShadowObservation[] = [];
-  addPriceObservation(
-    observations,
-    "return-24h",
-    "close-return",
-    return24Request.value,
-    priceOutcome(return24Request.value),
-    "close-return",
-    "percent",
-    analyticsManifest,
+  addPriceObservation(observations, {
+    id: "return-24h",
+    kind: "close-return",
+    request: return24Request.value,
+    outcome: priceOutcome(return24Request.value),
+    source: analyticsManifest,
     symbol,
     cutoff,
-    symbolEvidence.instrument,
-  );
-  addPriceObservation(
-    observations,
-    "return-3d",
-    "close-return",
-    return3dRequest.value,
-    priceOutcome(return3dRequest.value),
-    "close-return",
-    "percent",
-    analyticsManifest,
+    instrument: symbolEvidence.instrument,
+  });
+  addPriceObservation(observations, {
+    id: "return-3d",
+    kind: "close-return",
+    request: return3dRequest.value,
+    outcome: priceOutcome(return3dRequest.value),
+    source: analyticsManifest,
     symbol,
     cutoff,
-    symbolEvidence.instrument,
-  );
-  addPriceObservation(
-    observations,
-    "atr-4h",
-    "atr",
-    atrRequest.value,
-    priceOutcome(atrRequest.value),
-    "atr",
-    "price",
-    analyticsManifest,
+    instrument: symbolEvidence.instrument,
+  });
+  addPriceObservation(observations, {
+    id: "atr-4h",
+    kind: "atr",
+    request: atrRequest.value,
+    outcome: priceOutcome(atrRequest.value),
+    source: analyticsManifest,
     symbol,
     cutoff,
-    symbolEvidence.instrument,
-  );
+    instrument: symbolEvidence.instrument,
+  });
 
   const oiOutcome = derivativeOutcome(oiRequest.value);
   const oiValue =
@@ -787,17 +772,6 @@ export function createShadowMarketIntelligence(
 
   const ticker: MarketTickerEvidence | undefined = symbolEvidence.ticker;
   if (ticker !== undefined) {
-    if (
-      !ticker.bid.isPositive() ||
-      !ticker.ask.isPositive() ||
-      ticker.ask.compare(ticker.bid) < 0
-    )
-      return invalid("shadow quote is invalid", "market.ticker");
-    if (Date.parse(ticker.observedAt) > Date.parse(cutoff))
-      return invalid(
-        "shadow quote is after the authoritative cutoff",
-        "market.ticker.observedAt",
-      );
     const marketSource: ObservationSource = marketManifest;
     if (ticker.fundingRate !== undefined) {
       observations.push(
@@ -869,9 +843,7 @@ export function createShadowMarketIntelligence(
     );
   }
 
-  observations.sort((left, right) =>
-    left.id < right.id ? -1 : left.id > right.id ? 1 : 0,
-  );
+  observations.sort((left, right) => compareAnalyticsText(left.id, right.id));
   const payload: BundlePayload = {
     schemaVersion: SHADOW_MARKET_INTELLIGENCE_SCHEMA_VERSION,
     producer: SHADOW_MARKET_INTELLIGENCE_PRODUCER,
@@ -891,4 +863,11 @@ export function createShadowMarketIntelligence(
   const contentHash = hashCanonical(payload);
   if (!contentHash.ok) return contentHash;
   return ok(deepFreeze({ ...payload, contentHash: contentHash.value }));
+}
+
+/** Build the current shadow model. New model versions must retain V1 replay. */
+export function createShadowMarketIntelligence(
+  input: unknown,
+): Result<ShadowMarketIntelligenceBundle> {
+  return createShadowMarketIntelligenceV1(input);
 }
