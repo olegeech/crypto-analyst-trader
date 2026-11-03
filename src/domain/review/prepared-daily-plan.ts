@@ -829,6 +829,19 @@ export function rehydratePreparedDailyPlan(
   input: unknown,
 ): Result<PreparedDailyPlan> {
   if (!exactRecord(input, ARTIFACT_KEYS)) return invalid();
+  const { contentHash: embeddedHash, ...payload } = input;
+  const expectedHash = hashCanonical(payload);
+  if (
+    typeof embeddedHash !== "string" ||
+    !expectedHash.ok ||
+    expectedHash.value !== embeddedHash
+  )
+    return fail(
+      domainError(
+        "PLAN_HASH_MISMATCH",
+        "prepared daily plan content hash does not match its payload",
+      ),
+    );
   let replayed: Result<PreparedDailyPlan>;
   if (
     input.schemaVersion === LEGACY_PREPARED_DAILY_PLAN_SCHEMA_VERSION &&

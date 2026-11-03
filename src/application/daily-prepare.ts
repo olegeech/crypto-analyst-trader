@@ -1,5 +1,8 @@
 import type { AccountEvidenceEnvironment } from "../domain/account/account-evidence-bundle.js";
-import { createAnalyticsEvidenceBundle } from "../domain/analytics/analytics-evidence-bundle.js";
+import {
+  createAnalyticsEvidenceBundle,
+  type AnalyticsEvidenceBundle,
+} from "../domain/analytics/analytics-evidence-bundle.js";
 import { summarizeLiquidationEvidenceBuckets } from "../domain/liquidation/liquidation-evidence-summary.js";
 import { closedRecord } from "../domain/planning/planning-validation.js";
 import {
@@ -9,12 +12,14 @@ import {
 import {
   createPreparedShadowContext,
   summarizePreparedShadowContext,
+  type PreparedShadowContext,
 } from "../domain/review/prepared-shadow-context.js";
+import { createTrustedShadowMarketReportV1 } from "../domain/review/shadow-market-report.js";
 import {
   MARKET_EVIDENCE_SYMBOLS,
   type MarketEvidenceBundle,
 } from "../domain/market/market-evidence-bundle.js";
-import { type Clock } from "../domain/shared/time.js";
+import { type Clock, type UtcTimestamp } from "../domain/shared/time.js";
 import type { Result } from "../domain/shared/result.js";
 import { requireIdentifier } from "../domain/shared/validation.js";
 import type {
@@ -28,6 +33,7 @@ import {
 } from "../domain/liquidation/liquidation-evidence-bundle.js";
 import type { PortfolioRiskEvidenceReaderFactory } from "../ports/portfolio-risk-evidence.js";
 import type { PreparedArtifactStore } from "../ports/prepared-artifact-store.js";
+import type { ShadowReportStore } from "../ports/shadow-report-store.js";
 import type {
   collectAccountEvidence,
   AccountEvidenceCollectionOptions,
@@ -59,6 +65,9 @@ export interface DailyPrepareDependencies {
   readonly storeForEnvironment: (
     environment: AccountEvidenceEnvironment,
   ) => Result<PreparedArtifactStore>;
+  readonly shadowReportStoreForEnvironment: (
+    environment: AccountEvidenceEnvironment,
+  ) => Result<ShadowReportStore>;
   readonly clock: Clock;
   readonly newRunId: () => string;
   readonly createAccountReadPort?: AccountEvidenceCollectionOptions["createReadPort"];
@@ -73,6 +82,7 @@ export type DailyPrepareStage =
   | "risk"
   | "persistence";
 export interface DailyPrepareDiagnostics {
+  readonly shadowReportHash?: string;
   readonly shadowIntelligence?: ReturnType<
     typeof summarizePreparedShadowContext
   >;
@@ -172,10 +182,61 @@ export function createDailyPrepareBoundary(deps: DailyPrepareDependencies) {
         executionAuthority: "none" as const,
       };
       let composition: ProvisionalM1Composition | undefined = undefined;
+      let shadowContext: PreparedShadowContext | undefined;
+      let localShadowEvaluationTime: UtcTimestamp | undefined;
+      let shadowReportSources:
+        | {
+            environment: AccountEvidenceEnvironment;
+            market: MarketEvidenceBundle;
+            liquidation: LiquidationEvidenceCollectionResult["bundle"];
+            analytics: AnalyticsEvidenceBundle;
+            symbol: ProvisionalM1Composition["symbol"];
+          }
+        | undefined;
+      let shadowReportPersistenceAttempted = false;
       let buildShadowDiagnostic:
         (() => DailyPrepareDiagnostics["shadowIntelligence"]) | undefined;
       let requiredLiquidationWindows: readonly RequiredLiquidationWindowDiagnostic[] =
         Object.freeze([]);
+      const persistShadowReport = (
+        context: PreparedShadowContext,
+        evaluationTime: UtcTimestamp,
+      ): void => {
+        if (
+          shadowReportPersistenceAttempted ||
+          context.status !== "recorded" ||
+          shadowReportSources === undefined
+        )
+          return;
+        shadowReportPersistenceAttempted = true;
+        try {
+          const shadowReport = createTrustedShadowMarketReportV1({
+            environment: shadowReportSources.environment,
+            market: shadowReportSources.market,
+            liquidation: shadowReportSources.liquidation,
+            analytics: shadowReportSources.analytics,
+            symbol: shadowReportSources.symbol,
+            evaluationTime,
+            context,
+          });
+          if (!shadowReport.ok) return;
+          const reportStore = deps.shadowReportStoreForEnvironment(
+            shadowReportSources.environment,
+          );
+          if (!reportStore.ok) return;
+          try {
+            const saved = reportStore.value.saveShadowReport(
+              shadowReport.value,
+            );
+            if (saved.ok)
+              diagnostics.shadowReportHash = shadowReport.value.contentHash;
+          } finally {
+            reportStore.value.close();
+          }
+        } catch {
+          // Shadow report persistence is informative and cannot change readiness.
+        }
+      };
       const failure = (
         kind: "blocked" | "unavailable",
         reasonCodes: readonly string[],
@@ -191,6 +252,11 @@ export function createDailyPrepareBoundary(deps: DailyPrepareDependencies) {
             "PROVISIONAL_POLICY",
           ],
           diagnostics: (() => {
+            if (
+              shadowContext !== undefined &&
+              localShadowEvaluationTime !== undefined
+            )
+              persistShadowReport(shadowContext, localShadowEvaluationTime);
             const shadowIntelligence = buildShadowDiagnostic?.();
             return Object.freeze({
               ...diagnostics,
@@ -296,22 +362,31 @@ export function createDailyPrepareBoundary(deps: DailyPrepareDependencies) {
         });
         if (!analytics.ok)
           return failure("blocked", ["ANALYTICS_ADMISSION_FAILED"]);
+        shadowReportSources = {
+          environment,
+          market: market.value,
+          liquidation: l,
+          analytics: analytics.value,
+          symbol: composition.symbol,
+        };
         const evaluationTime = deps.clock.now();
+        localShadowEvaluationTime = evaluationTime;
+        try {
+          const shadowResult = createPreparedShadowContext({
+            market: market.value,
+            analytics: analytics.value,
+            liquidation: l,
+            symbol: composition.symbol,
+            evaluationTime,
+          });
+          if (shadowResult.ok) shadowContext = shadowResult.value;
+        } catch {
+          // Shadow intelligence is an optional review aid.
+        }
         buildShadowDiagnostic = () => {
-          try {
-            const shadowResult = createPreparedShadowContext({
-              market: market.value,
-              analytics: analytics.value,
-              liquidation: l,
-              symbol: composition.symbol,
-              evaluationTime,
-            });
-            return shadowResult.ok
-              ? summarizePreparedShadowContext(shadowResult.value)
-              : undefined;
-          } catch {
-            return undefined;
-          }
+          return shadowContext === undefined
+            ? undefined
+            : summarizePreparedShadowContext(shadowContext);
         };
         const quality = createDataQualityBoundary({
           qualityProfile: composition.qualityProfile,
@@ -406,6 +481,7 @@ export function createDailyPrepareBoundary(deps: DailyPrepareDependencies) {
         });
         if (!prepared.ok)
           return failure("blocked", ["PREPARED_ADMISSION_FAILED"]);
+        const preparedShadowContext = prepared.value.replayInputs.shadowContext;
         stage = "persistence";
         const store = deps.storeForEnvironment(environment);
         if (!store.ok)
@@ -417,6 +493,11 @@ export function createDailyPrepareBoundary(deps: DailyPrepareDependencies) {
         } finally {
           store.value.close();
         }
+        if (preparedShadowContext !== undefined)
+          persistShadowReport(
+            preparedShadowContext,
+            prepared.value.inputIdentity.evaluationTime,
+          );
         return Object.freeze({
           kind: "prepared",
           prepared: prepared.value,

@@ -211,6 +211,31 @@ test("v3 replay rejects rehashed unavailable context, profile and summary edits"
     );
 });
 
+test("stale prepared-plan hash is reported before unsupported shadow replay", () => {
+  const prepared = value(createPreparedDailyPlan(input()));
+  const context = prepared.replayInputs.shadowContext;
+  assert.ok(context);
+  if (!context) return;
+  const tampered = {
+    ...prepared,
+    state: "READY_FOR_APPROVAL",
+    replayInputs: {
+      ...prepared.replayInputs,
+      shadowContext: {
+        ...context,
+        model: {
+          ...context.model,
+          modelVersion: "existing-evidence-shadow/v2",
+        },
+      },
+    },
+  };
+
+  const replayed = rehydratePreparedDailyPlan(tampered);
+  assert.equal(replayed.ok, false);
+  if (!replayed.ok) assert.equal(replayed.error.code, "PLAN_HASH_MISMATCH");
+});
+
 test("changed shadow identity cannot reuse prior prepared consent", () => {
   const prepared = preparedPlanFixture("review");
   const approval = value(

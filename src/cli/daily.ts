@@ -1,4 +1,5 @@
 import { openSqlitePreparedArtifactStore } from "../adapters/sqlite/prepared-artifact-store.js";
+import { openSqliteShadowReportStore } from "../adapters/sqlite/shadow-report-store.js";
 import { createDailyPrepareComposition } from "../application/daily-prepare-composition.js";
 import { localOperatorIdentity } from "../application/local-operator.js";
 import { systemClock } from "../domain/shared/time.js";
@@ -10,6 +11,8 @@ import { runDailyCommand } from "./daily-command.js";
 process.exitCode = await runDailyCommand(process.argv.slice(2), {
   prepare: (input) => createDailyPrepareComposition().prepare(input),
   openStore: (environment) => openSqlitePreparedArtifactStore({ environment }),
+  openShadowStore: (environment) =>
+    openSqliteShadowReportStore({ environment }),
   actor: localOperatorIdentity,
   clock: systemClock,
   interactive: process.stdin.isTTY === true && process.stdout.isTTY === true,

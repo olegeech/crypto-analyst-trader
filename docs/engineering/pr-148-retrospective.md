@@ -22,9 +22,9 @@
 
 ## Shadow Market Intelligence (#116)
 
-- Provider-contract defects first found in manual operation: none observed. This slice changes no provider mapper, and no live source reads were performed.
-- Defect fixes after the first full green CI: none as of PR submission; exact-head CI is the remaining check.
-- Operator retries caused by program defects: none observed in the deterministic offline tests, including fresh-process review. Missing native liquidation evidence remains an expected source gap and does not relax the existing core requirement.
+- No provider-contract defect was found and no provider mapper changed. A read-only public-source Mainnet smoke ran on pre-implementation PR #152 head `c19b398c81e3fd13f2f4b5e1f4a59074a27d57d5`; it observed complete market data, incomplete liquidation history and zero exchange writes. Because it preceded shadow-report persistence, it did not validate this report/review path.
+- Follow-up review found and fixed inaccurate partial-status rendering, unsupported-contract versus integrity classification, and migration/test expectations. The exact-head `release-checks` result is the remaining release gate.
+- No operator retry caused by a program defect was observed in that live smoke. The blocked result was the expected missing native liquidation evidence; offline integration tests cover the persisted report and fresh-process review without weakening that gate.
 
 ## Where these lessons belong
 

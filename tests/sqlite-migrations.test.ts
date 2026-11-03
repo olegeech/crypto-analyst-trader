@@ -82,8 +82,8 @@ test("fresh and reopened journals configure verified SQLite durability state", (
   assert.equal(statSync(root).isDirectory(), true);
 });
 
-test("operator Mainnet journal uses v14 command schema with empty source tables", () => {
-  assert.equal(CURRENT_SCHEMA_VERSION, 14);
+test("operator Mainnet journal uses current schema with empty source tables", () => {
+  assert.equal(CURRENT_SCHEMA_VERSION, 15);
   const { path } = temporaryDatabase();
   const opened = openSqliteConnection({
     environment: "mainnet",
@@ -112,6 +112,7 @@ test("operator Mainnet journal uses v14 command schema with empty source tables"
     "history_window_conflicts",
     "history_window_checkpoints",
     "history_accounting_wallet_anchors",
+    "shadow_market_reports",
   ]) {
     assert.equal(
       db
@@ -120,6 +121,19 @@ test("operator Mainnet journal uses v14 command schema with empty source tables"
         )
         .get(table)?.name,
       table,
+    );
+  }
+  for (const trigger of [
+    "shadow_market_reports_no_update",
+    "shadow_market_reports_no_delete",
+  ]) {
+    assert.equal(
+      db
+        .prepare(
+          "SELECT name FROM sqlite_master WHERE type = 'trigger' AND name = ?",
+        )
+        .get(trigger)?.name,
+      trigger,
     );
   }
   assert.equal(
@@ -241,7 +255,7 @@ test("v13 migration preserves populated legacy source authorization bytes and re
     db
       .prepare("SELECT schema_version FROM schema_meta WHERE singleton = 1")
       .get()?.schema_version,
-    14,
+    15,
   );
   db.close();
 });

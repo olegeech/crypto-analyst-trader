@@ -99,25 +99,32 @@ export function createPreparedShadowContextV1(
   )
     return invalid("prepared shadow context inputs are invalid");
 
-  const build = createShadowMarketIntelligenceWithQualityAssessmentV1(rawInput);
-  if (!build.ok)
-    return ok(unavailableShadowContext(shadowFailureReason(build.error.code)));
-  const reasonCodes = [
-    ...new Set(
-      build.value.assessment.findings.map((finding) => finding.reasonCode),
-    ),
-  ].sort(compareAnalyticsText);
-  return ok(
-    deepFreeze({
-      schemaVersion: PREPARED_SHADOW_CONTEXT_SCHEMA_VERSION,
-      status: "recorded",
-      model: PREPARED_SHADOW_MODEL,
-      qualityProfileVersion: SHADOW_QUALITY_PROFILE_VERSION,
-      reasonCodes,
-      shadow: build.value.shadow,
-      assessment: build.value.assessment,
-    }),
-  );
+  try {
+    const build =
+      createShadowMarketIntelligenceWithQualityAssessmentV1(rawInput);
+    if (!build.ok)
+      return ok(
+        unavailableShadowContext(shadowFailureReason(build.error.code)),
+      );
+    const reasonCodes = [
+      ...new Set(
+        build.value.assessment.findings.map((finding) => finding.reasonCode),
+      ),
+    ].sort(compareAnalyticsText);
+    return ok(
+      deepFreeze({
+        schemaVersion: PREPARED_SHADOW_CONTEXT_SCHEMA_VERSION,
+        status: "recorded",
+        model: PREPARED_SHADOW_MODEL,
+        qualityProfileVersion: SHADOW_QUALITY_PROFILE_VERSION,
+        reasonCodes,
+        shadow: build.value.shadow,
+        assessment: build.value.assessment,
+      }),
+    );
+  } catch {
+    return ok(unavailableShadowContext("SHADOW_CONTEXT_UNAVAILABLE"));
+  }
 }
 
 /** Build the current shadow artifact. New versions must retain this v1 path. */

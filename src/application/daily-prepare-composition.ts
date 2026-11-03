@@ -7,6 +7,7 @@ import { CoinalyzeTransport } from "../adapters/coinalyze/coinalyze-transport.js
 import { createMacOSKeychainProvider } from "../adapters/macos-keychain.js";
 import { createMacOSKeychainSecretProvider } from "../adapters/macos-keychain-secret-provider.js";
 import { openSqlitePreparedArtifactStore } from "../adapters/sqlite/prepared-artifact-store.js";
+import { openSqliteShadowReportStore } from "../adapters/sqlite/shadow-report-store.js";
 import { systemClock } from "../domain/shared/time.js";
 import { collectAccountEvidence } from "./account-evidence-collection.js";
 import { collectMarketEvidence } from "./market-evidence-collection.js";
@@ -35,6 +36,8 @@ export function createDailyPrepareComposition() {
     createRiskReader: createBybitRiskEvidenceReader,
     storeForEnvironment: (environment) =>
       openSqlitePreparedArtifactStore({ environment }),
+    shadowReportStoreForEnvironment: (environment) =>
+      openSqliteShadowReportStore({ environment }),
     clock: systemClock,
     newRunId: () => `daily-${randomUUID()}`,
   });
