@@ -20,6 +20,12 @@
 
 **Apply when:** an integration combines multiple provider responses, fallbacks or state transitions. Exercise one successful path through real composition with representative changing evidence and critical failures. Prefer an actionable refusal code over adding blanket rechecks or speculative guards.
 
+## Shadow Market Intelligence (#116)
+
+- No provider-contract defect was found and no provider mapper changed. A read-only public-source Mainnet smoke ran on pre-implementation PR #152 head `c19b398c81e3fd13f2f4b5e1f4a59074a27d57d5`; it observed complete market data, incomplete liquidation history and zero exchange writes. Because it preceded shadow-report persistence, it did not validate this report/review path.
+- Follow-up review found and fixed inaccurate partial-status rendering, unsupported-contract versus integrity classification, and migration/test expectations. The exact-head `release-checks` result is the remaining release gate.
+- No operator retry caused by a program defect was observed in that live smoke. The blocked result was the expected missing native liquidation evidence; offline integration tests cover the persisted report and fresh-process review without weakening that gate.
+
 ## Where these lessons belong
 
 The actionable reminders are incorporated in [Development Workflow](../workflow.md#integration-contract-check). Product decisions and acceptance criteria belong in the relevant GitHub issue; safety rules remain in [System Invariants](../architecture/invariants.md); code and tests define actual behavior. The detailed attempts, GET counts, live evidence and diagnostic chronology stay in [PR #148](https://github.com/olegeech/crypto-analyst-trader/pull/148).

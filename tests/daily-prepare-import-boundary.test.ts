@@ -71,6 +71,24 @@ test("released composition cannot reach signed write transport, smoke or fixture
     visited.has(resolve("src/adapters/sqlite/prepared-artifact-store.ts")),
   );
 });
+
+test("shadow builder and assessor imports stay inside pure domain code", () => {
+  for (const root of [
+    "src/domain/analytics/shadow-market-intelligence.ts",
+    "src/domain/quality/shadow-quality-assessment.ts",
+  ]) {
+    const visited = graph(root);
+    assert.ok(visited.has(resolve(root)));
+    for (const path of visited) {
+      assert.match(path, /\/src\/domain\//u);
+      assert.doesNotMatch(
+        path,
+        /\/src\/(?:adapters|application|cli|ports|scripts|tests)\/|\/domain\/execution\//u,
+      );
+    }
+  }
+});
+
 test("import gate rejects direct, re-exported and dynamic authority", () => {
   for (const statement of [
     'import "../adapters/bybit-v5/execution-adapter.js";',

@@ -3,6 +3,8 @@ import test from "node:test";
 import { createProvisionalM1Composition } from "../src/application/policies/provisional-m1.js";
 import {
   createPreparedDailyPlan,
+  createPreparedDailyPlanV2,
+  summarizePreparedShadowContext,
   rehydratePreparedDailyPlan,
   createDailyReviewPolicy,
   createDailyApprovalPolicy,
@@ -23,6 +25,11 @@ import { requireDailyFixture as value } from "./fixtures/daily-planning-evidence
 import { DecimalValue } from "../src/domain/shared/decimal.js";
 import { decimal } from "./account-evidence-fixture.js";
 import { preparedLegExecutionFixture } from "./fixtures/prepared-leg-execution-fixtures.js";
+import { preparedPlanFixture } from "./fixtures/prepared-plan-fixtures.js";
+import {
+  createPreparedPlanApproval,
+  validatePreparedPlanApproval,
+} from "../src/domain/review/prepared-plan-approval.js";
 
 function input() {
   const planning = portfolioRiskPlanningFixture({ fundingRate: "0" });
@@ -91,8 +98,8 @@ function rehash(raw: Record<string, unknown>) {
 
 test("canonical replay is deterministic, immutable and serialized Decimal values round trip", () => {
   const source = input();
-  const first = value(createPreparedDailyPlan(source));
-  const second = value(createPreparedDailyPlan(source));
+  const first = value(createPreparedDailyPlanV2(source));
+  const second = value(createPreparedDailyPlanV2(source));
   assert.equal(first.contentHash, second.contentHash);
   assert.ok(Object.isFrozen(first));
   assert.ok(Object.isFrozen(first.summary));
@@ -115,8 +122,172 @@ test("canonical replay is deterministic, immutable and serialized Decimal values
   );
 });
 
-test("rehashed disposition, target, summary, warning and authority claims fail semantic replay", () => {
+test("v3 preserves explicit shadow unavailability and round-trips its safe summary", () => {
   const prepared = value(createPreparedDailyPlan(input()));
+  assert.equal(prepared.schemaVersion, "prepared-daily-plan/v3");
+  assert.ok(prepared.inputIdentity.shadowContextHash?.startsWith("sha256:"));
+  const context = prepared.replayInputs.shadowContext;
+  assert.ok(context);
+  assert.equal(context.status, "unavailable");
+  assert.deepEqual(context.reasonCodes, ["SHADOW_SOURCE_INCOMPATIBLE"]);
+  assert.equal(context.shadow, undefined);
+  assert.equal(context.assessment, undefined);
+  const shadowSummary = prepared.summary.shadowIntelligence as
+    | {
+        readonly status: string;
+        readonly reasonCodes: readonly string[];
+      }
+    | undefined;
+  assert.equal(shadowSummary?.status, "unavailable");
+  assert.deepEqual(shadowSummary?.reasonCodes, context.reasonCodes);
+  assert.equal(prepared.executionAuthority, "none");
+  assert.equal(
+    value(hashCanonical(context)),
+    prepared.inputIdentity.shadowContextHash,
+  );
+
+  const decoded = JSON.parse(
+    value(canonicalSerialize(prepared)),
+    (_key, raw: unknown) =>
+      raw !== null && typeof raw === "object" && "$decimal" in raw
+        ? value(DecimalValue.fromString(raw.$decimal))
+        : raw,
+  );
+  assert.equal(
+    value(rehydratePreparedDailyPlan(decoded)).contentHash,
+    prepared.contentHash,
+  );
+});
+
+test("v3 replay rejects rehashed unavailable context, profile and summary edits", () => {
+  const prepared = value(createPreparedDailyPlan(input()));
+  const context = prepared.replayInputs.shadowContext;
+  assert.ok(context?.status === "unavailable");
+  if (!context || context.status !== "unavailable") return;
+  const mutations = [
+    {
+      replayInputs: {
+        ...prepared.replayInputs,
+        shadowContext: { ...context, reasonCodes: ["INVENTED"] },
+      },
+    },
+    {
+      replayInputs: {
+        ...prepared.replayInputs,
+        shadowContext: {
+          ...context,
+          model: { ...context.model, producer: "untrusted" },
+        },
+      },
+    },
+    {
+      replayInputs: {
+        ...prepared.replayInputs,
+        shadowContext: {
+          ...context,
+          qualityProfileVersion: "foreign-shadow-quality/v1",
+        },
+      },
+    },
+    {
+      summary: {
+        ...prepared.summary,
+        shadowIntelligence: {
+          ...prepared.summary.shadowIntelligence,
+          status: "recorded",
+        },
+      },
+    },
+  ];
+  for (const mutation of mutations)
+    assert.equal(
+      rehydratePreparedDailyPlan(
+        rehash({ ...prepared, ...mutation } as unknown as Record<
+          string,
+          unknown
+        >),
+      ).ok,
+      false,
+    );
+});
+
+test("stale prepared-plan hash is reported before unsupported shadow replay", () => {
+  const prepared = value(createPreparedDailyPlan(input()));
+  const context = prepared.replayInputs.shadowContext;
+  assert.ok(context);
+  if (!context) return;
+  const tampered = {
+    ...prepared,
+    state: "READY_FOR_APPROVAL",
+    replayInputs: {
+      ...prepared.replayInputs,
+      shadowContext: {
+        ...context,
+        model: {
+          ...context.model,
+          modelVersion: "existing-evidence-shadow/v2",
+        },
+      },
+    },
+  };
+
+  const replayed = rehydratePreparedDailyPlan(tampered);
+  assert.equal(replayed.ok, false);
+  if (!replayed.ok) assert.equal(replayed.error.code, "PLAN_HASH_MISMATCH");
+});
+
+test("changed shadow identity cannot reuse prior prepared consent", () => {
+  const prepared = preparedPlanFixture("review");
+  const approval = value(
+    createPreparedPlanApproval({
+      prepared,
+      preparedHash: prepared.contentHash,
+      actor: "local-operator:fixture",
+      consent: true,
+      note: "Acknowledged quality degradation",
+      approvedAt: "2026-09-24T14:02:00.000Z",
+    }),
+  );
+  const context = prepared.replayInputs.shadowContext;
+  assert.ok(context?.status === "unavailable");
+  if (!context || context.status !== "unavailable") return;
+  const changedContext = {
+    ...context,
+    reasonCodes: [...context.reasonCodes, "SHADOW_CONTEXT_UNAVAILABLE"],
+  };
+  const shadowContextHash = value(hashCanonical(changedContext));
+  assert.notEqual(shadowContextHash, prepared.inputIdentity.shadowContextHash);
+  const inputIdentity = { ...prepared.inputIdentity, shadowContextHash };
+  const planId = value(
+    hashCanonical({
+      schemaVersion: "prepared-daily-plan-id/v1",
+      inputIdentity,
+    }),
+  );
+  const changed = rehash({
+    ...prepared,
+    preparedPlanId: `prepared-daily-plan:${planId}`,
+    inputIdentity,
+    replayInputs: {
+      ...prepared.replayInputs,
+      shadowContext: changedContext,
+    },
+    summary: {
+      ...prepared.summary,
+      shadowIntelligence: summarizePreparedShadowContext(changedContext),
+    },
+  } as unknown as Record<string, unknown>);
+  assert.notEqual(`prepared-daily-plan:${planId}`, prepared.preparedPlanId);
+  assert.notEqual(changed.contentHash, prepared.contentHash);
+  assert.equal(rehydratePreparedDailyPlan(changed).ok, false);
+  assert.equal(
+    validatePreparedPlanApproval(approval, changed, approval.approvedAt).ok,
+    false,
+  );
+});
+
+test("rehashed disposition, target, summary, warning and authority claims fail semantic replay", () => {
+  const prepared = value(createPreparedDailyPlanV2(input()));
   for (const edit of [
     { state: "BLOCKED" },
     { noteRequired: false },
@@ -171,7 +342,7 @@ test("nested preflight, original profile and foreign account substitution cannot
       },
     }),
   ])
-    assert.equal(createPreparedDailyPlan({ ...source, preflight }).ok, false);
+    assert.equal(createPreparedDailyPlanV2({ ...source, preflight }).ok, false);
 });
 
 test("policy bodies are explicit, closed and compatible with U1", () => {
@@ -191,7 +362,7 @@ test("policy bodies are explicit, closed and compatible with U1", () => {
     { ...source.reviewPolicy, extra: true },
   ])
     assert.equal(
-      createPreparedDailyPlan({ ...source, reviewPolicy }).ok,
+      createPreparedDailyPlanV2({ ...source, reviewPolicy }).ok,
       false,
     );
   for (const approvalPolicy of [
@@ -200,7 +371,7 @@ test("policy bodies are explicit, closed and compatible with U1", () => {
     { ...source.approvalPolicy, extra: true },
   ])
     assert.equal(
-      createPreparedDailyPlan({ ...source, approvalPolicy }).ok,
+      createPreparedDailyPlanV2({ ...source, approvalPolicy }).ok,
       false,
     );
   let invoked = false;
@@ -210,19 +381,19 @@ test("policy bodies are explicit, closed and compatible with U1", () => {
       return source.preflight;
     },
   });
-  assert.equal(createPreparedDailyPlan(accessor).ok, false);
+  assert.equal(createPreparedDailyPlanV2(accessor).ok, false);
   assert.equal(invoked, false);
   assert.equal(
-    createPreparedDailyPlan({ ...source, actor: "operator" }).ok,
+    createPreparedDailyPlanV2({ ...source, actor: "operator" }).ok,
     false,
   );
 });
 
 test("hash binds metadata and complete policies without inventing review warnings", () => {
   const source = input();
-  const prepared = value(createPreparedDailyPlan(source));
+  const prepared = value(createPreparedDailyPlanV2(source));
   const changed = value(
-    createPreparedDailyPlan({
+    createPreparedDailyPlanV2({
       ...source,
       reviewPolicy: {
         ...source.reviewPolicy,
@@ -235,11 +406,11 @@ test("hash binds metadata and complete policies without inventing review warning
   assert.equal(changed.state, prepared.state);
   assert.equal(changed.noteRequired, prepared.noteRequired);
   assert.equal(
-    createPreparedDailyPlan({ ...source, externalAvailability: [] }).ok,
+    createPreparedDailyPlanV2({ ...source, externalAvailability: [] }).ok,
     false,
   );
   assert.equal(
-    createPreparedDailyPlan({
+    createPreparedDailyPlanV2({
       ...source,
       externalAvailability: source.externalAvailability.map((row) => ({
         ...row,
@@ -290,7 +461,7 @@ test("Mainnet preparation binds one closed Partial Market LastPrice policy and r
 });
 
 test("prepared daily artifact compatibility retains its pre-operator golden hashes", () => {
-  const prepared = value(createPreparedDailyPlan(input()));
+  const prepared = value(createPreparedDailyPlanV2(input()));
   const envelope = value(
     encodeCanonicalArtifact("prepared-daily-plan", prepared),
   );

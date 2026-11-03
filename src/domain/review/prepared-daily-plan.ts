@@ -10,6 +10,7 @@ import {
 } from "../identity/canonical-serialization.js";
 import {
   prepareDailyPlanningInputs,
+  type DailyPlanningInput,
   type DailyPlanningInputs,
 } from "../planning/daily-planning-inputs.js";
 import type { AccountEvidenceEnvironment } from "../account/account-evidence-bundle.js";
@@ -22,12 +23,30 @@ import { deepFreeze } from "../shared/deep-freeze.js";
 import { domainError } from "../shared/errors.js";
 import { fail, ok, type Result } from "../shared/result.js";
 import { requireIdentifier } from "../shared/validation.js";
+import {
+  createPreparedShadowContext,
+  replayPreparedShadowContext,
+  summarizePreparedShadowContext,
+  type PreparedShadowContext,
+} from "./prepared-shadow-context.js";
+
+export {
+  createPreparedShadowContext,
+  PREPARED_SHADOW_CONTEXT_SCHEMA_VERSION,
+  summarizePreparedShadowContext,
+} from "./prepared-shadow-context.js";
+export type {
+  CreatePreparedShadowContextInput,
+  PreparedShadowContext,
+  PreparedShadowModelIdentity,
+} from "./prepared-shadow-context.js";
 
 export const PREPARED_DAILY_PLAN_SCHEMA_VERSION =
+  "prepared-daily-plan/v3" as const;
+export const PREPARED_DAILY_PLAN_V2_SCHEMA_VERSION =
   "prepared-daily-plan/v2" as const;
 const LEGACY_PREPARED_DAILY_PLAN_SCHEMA_VERSION =
   "prepared-daily-plan/v1" as const;
-
 export interface PreparedProtectionPolicy {
   readonly schemaVersion: "prepared-protection-policy/v1";
   readonly policyVersion:
@@ -78,6 +97,8 @@ export interface PreparedDailyPlanReplayInputs {
   readonly externalAvailability: readonly PreparedExternalAvailability[];
   /** Absent only on readable legacy v1 artifacts. */
   readonly protectionPolicy?: PreparedProtectionPolicy;
+  /** Present on v3 only; replayed from the original retained source graph. */
+  readonly shadowContext?: PreparedShadowContext;
 }
 
 export interface PreparedTargetGate {
@@ -94,6 +115,7 @@ export type PreparedDailyPlanSummary = ReturnType<typeof materialSummary>;
 export interface PreparedDailyPlan {
   readonly schemaVersion:
     | typeof PREPARED_DAILY_PLAN_SCHEMA_VERSION
+    | typeof PREPARED_DAILY_PLAN_V2_SCHEMA_VERSION
     | typeof LEGACY_PREPARED_DAILY_PLAN_SCHEMA_VERSION;
   readonly preparedPlanId: string;
   readonly contentHash: PlanHash;
@@ -104,6 +126,7 @@ export interface PreparedDailyPlan {
     readonly approvalPolicyHash: string;
     readonly externalAvailabilityHash: string;
     readonly protectionPolicyHash?: string;
+    readonly shadowContextHash?: string;
     readonly runId: string;
     readonly environment: PortfolioRiskPreflight["replayInputs"]["account"]["accountBinding"]["environment"];
     readonly accountIdentityHash: string;
@@ -530,6 +553,13 @@ function materialSummary(
       runId: planning.market.runId,
       bundleCutoff: planning.market.bundleCutoff,
     },
+    ...(inputs.shadowContext === undefined
+      ? {}
+      : {
+          shadowIntelligence: summarizePreparedShadowContext(
+            inputs.shadowContext,
+          ),
+        }),
     targetGate: gate,
     risk: {
       verdict: p.verdict,
@@ -574,6 +604,10 @@ const INPUT_KEYS = [
   "externalAvailability",
 ] as const;
 const V2_REPLAY_INPUT_KEYS = [...INPUT_KEYS, "protectionPolicy"] as const;
+const V3_REPLAY_INPUT_KEYS = [
+  ...V2_REPLAY_INPUT_KEYS,
+  "shadowContext",
+] as const;
 const ARTIFACT_KEYS = [
   "schemaVersion",
   "preparedPlanId",
@@ -589,11 +623,17 @@ const ARTIFACT_KEYS = [
 
 function createPreparedDailyPlanVersion(
   input: unknown,
-  schemaVersion:
-    | typeof PREPARED_DAILY_PLAN_SCHEMA_VERSION
-    | typeof LEGACY_PREPARED_DAILY_PLAN_SCHEMA_VERSION,
-  suppliedProtectionPolicy?: unknown,
+  options: {
+    readonly schemaVersion:
+      | typeof PREPARED_DAILY_PLAN_SCHEMA_VERSION
+      | typeof PREPARED_DAILY_PLAN_V2_SCHEMA_VERSION
+      | typeof LEGACY_PREPARED_DAILY_PLAN_SCHEMA_VERSION;
+    readonly suppliedProtectionPolicy?: unknown;
+    readonly suppliedShadowContext?: unknown;
+  },
 ): Result<PreparedDailyPlan> {
+  const { schemaVersion, suppliedProtectionPolicy, suppliedShadowContext } =
+    options;
   if (!exactRecord(input, INPUT_KEYS)) return invalid();
   const preflight = rehydratePortfolioRiskPreflight(input.preflight);
   const reviewPolicy = createDailyReviewPolicy(input.reviewPolicy);
@@ -609,15 +649,40 @@ function createPreparedDailyPlanVersion(
   if (account.runId !== planning.value.identity.runId)
     return invalid("account and planning runs differ");
   const protectionPolicy =
-    schemaVersion === PREPARED_DAILY_PLAN_SCHEMA_VERSION
-      ? parseProtectionPolicy(
+    schemaVersion === LEGACY_PREPARED_DAILY_PLAN_SCHEMA_VERSION
+      ? undefined
+      : parseProtectionPolicy(
           suppliedProtectionPolicy ??
             protectionPolicyFor(account.accountBinding.environment),
           account.accountBinding.environment,
-        )
-      : undefined;
+        );
   if (protectionPolicy !== undefined && !protectionPolicy.ok)
     return protectionPolicy;
+  let shadowContext: PreparedShadowContext | undefined;
+  if (schemaVersion === PREPARED_DAILY_PLAN_SCHEMA_VERSION) {
+    const originalInputs: DailyPlanningInput = p.replayInputs.dailyPlan.inputs;
+    const shadowInputs = {
+      market: originalInputs.market,
+      analytics: originalInputs.analytics,
+      ...(originalInputs.liquidation === undefined
+        ? {}
+        : { liquidation: originalInputs.liquidation }),
+      symbol: originalInputs.symbol,
+      evaluationTime: p.evaluationTime,
+    };
+    const generatedShadowContext =
+      suppliedShadowContext === undefined
+        ? createPreparedShadowContext(shadowInputs)
+        : replayPreparedShadowContext(shadowInputs, suppliedShadowContext);
+    if (!generatedShadowContext.ok) return generatedShadowContext;
+    shadowContext = generatedShadowContext.value;
+    if (suppliedShadowContext !== undefined) {
+      const supplied = canonicalSerialize(suppliedShadowContext);
+      const recomputed = canonicalSerialize(shadowContext);
+      if (!supplied.ok || !recomputed.ok || supplied.value !== recomputed.value)
+        return invalid("prepared shadow evidence differs from source replay");
+    }
+  }
   const availability = externalAvailability(
     input.externalAvailability,
     planning.value,
@@ -631,6 +696,7 @@ function createPreparedDailyPlanVersion(
     ...(protectionPolicy === undefined
       ? {}
       : { protectionPolicy: protectionPolicy.value }),
+    ...(shadowContext === undefined ? {} : { shadowContext }),
   };
   const gate = targetGate(p);
   const reasonCodes: string[] = [...p.reasonCodes];
@@ -658,12 +724,15 @@ function createPreparedDailyPlanVersion(
     protectionPolicy === undefined
       ? undefined
       : hashCanonical(protectionPolicy.value);
+  const shadowContextHash =
+    shadowContext === undefined ? undefined : hashCanonical(shadowContext);
   if (
     !preflightArtifactHash.ok ||
     !reviewPolicyHash.ok ||
     !approvalPolicyHash.ok ||
     !externalAvailabilityHash.ok ||
-    (protectionPolicyHash !== undefined && !protectionPolicyHash.ok)
+    (protectionPolicyHash !== undefined && !protectionPolicyHash.ok) ||
+    (shadowContextHash !== undefined && !shadowContextHash.ok)
   )
     return invalid("prepared source identity is invalid");
   const inputIdentity = {
@@ -675,6 +744,9 @@ function createPreparedDailyPlanVersion(
     ...(protectionPolicyHash === undefined
       ? {}
       : { protectionPolicyHash: protectionPolicyHash.value }),
+    ...(shadowContextHash === undefined
+      ? {}
+      : { shadowContextHash: shadowContextHash.value }),
     runId: account.runId,
     environment: account.accountBinding.environment,
     accountIdentityHash: account.accountBinding.accountIdentityHash,
@@ -702,22 +774,54 @@ function createPreparedDailyPlanVersion(
     : contentHash;
 }
 
-/** New preparation binds the current environment-specific protection policy. */
-export function createPreparedDailyPlan(
+function coreReplayInput(input: Record<string, unknown>) {
+  return Object.fromEntries(INPUT_KEYS.map((key) => [key, input[key]]));
+}
+
+/** Explicit constructor retained for v2 artifacts and compatibility fixtures. */
+export function createPreparedDailyPlanV2(
   input: unknown,
 ): Result<PreparedDailyPlan> {
   if (exactRecord(input, INPUT_KEYS))
-    return createPreparedDailyPlanVersion(
-      input,
-      PREPARED_DAILY_PLAN_SCHEMA_VERSION,
-    );
+    return createPreparedDailyPlanVersion(input, {
+      schemaVersion: PREPARED_DAILY_PLAN_V2_SCHEMA_VERSION,
+    });
   if (!exactRecord(input, V2_REPLAY_INPUT_KEYS)) return invalid();
-  const source = Object.fromEntries(INPUT_KEYS.map((key) => [key, input[key]]));
-  return createPreparedDailyPlanVersion(
-    source,
-    PREPARED_DAILY_PLAN_SCHEMA_VERSION,
-    input.protectionPolicy,
-  );
+  return createPreparedDailyPlanVersion(coreReplayInput(input), {
+    schemaVersion: PREPARED_DAILY_PLAN_V2_SCHEMA_VERSION,
+    suppliedProtectionPolicy: input.protectionPolicy,
+  });
+}
+
+/** Build v3 from the saved source graph and bind its replayed shadow context. */
+export function createPreparedDailyPlanV3(
+  input: unknown,
+): Result<PreparedDailyPlan> {
+  if (exactRecord(input, V3_REPLAY_INPUT_KEYS)) {
+    if (input.shadowContext === undefined) return invalid();
+    return createPreparedDailyPlanVersion(coreReplayInput(input), {
+      schemaVersion: PREPARED_DAILY_PLAN_SCHEMA_VERSION,
+      suppliedProtectionPolicy: input.protectionPolicy,
+      suppliedShadowContext: input.shadowContext,
+    });
+  }
+  if (exactRecord(input, V2_REPLAY_INPUT_KEYS))
+    return createPreparedDailyPlanVersion(coreReplayInput(input), {
+      schemaVersion: PREPARED_DAILY_PLAN_SCHEMA_VERSION,
+      suppliedProtectionPolicy: input.protectionPolicy,
+    });
+  if (exactRecord(input, INPUT_KEYS))
+    return createPreparedDailyPlanVersion(input, {
+      schemaVersion: PREPARED_DAILY_PLAN_SCHEMA_VERSION,
+    });
+  return invalid();
+}
+
+/** Current preparation uses v3; v1/v2 remain available only through replay. */
+export function createPreparedDailyPlan(
+  input: unknown,
+): Result<PreparedDailyPlan> {
+  return createPreparedDailyPlanV3(input);
 }
 
 /** Recompute all claims at the saved preflight time, even if an attacker rehashed them. */
@@ -725,20 +829,37 @@ export function rehydratePreparedDailyPlan(
   input: unknown,
 ): Result<PreparedDailyPlan> {
   if (!exactRecord(input, ARTIFACT_KEYS)) return invalid();
+  const { contentHash: embeddedHash, ...payload } = input;
+  const expectedHash = hashCanonical(payload);
+  if (
+    typeof embeddedHash !== "string" ||
+    !expectedHash.ok ||
+    expectedHash.value !== embeddedHash
+  )
+    return fail(
+      domainError(
+        "PLAN_HASH_MISMATCH",
+        "prepared daily plan content hash does not match its payload",
+      ),
+    );
   let replayed: Result<PreparedDailyPlan>;
   if (
     input.schemaVersion === LEGACY_PREPARED_DAILY_PLAN_SCHEMA_VERSION &&
     exactRecord(input.replayInputs, INPUT_KEYS)
   ) {
-    replayed = createPreparedDailyPlanVersion(
-      input.replayInputs,
-      LEGACY_PREPARED_DAILY_PLAN_SCHEMA_VERSION,
-    );
+    replayed = createPreparedDailyPlanVersion(input.replayInputs, {
+      schemaVersion: LEGACY_PREPARED_DAILY_PLAN_SCHEMA_VERSION,
+    });
   } else if (
-    input.schemaVersion === PREPARED_DAILY_PLAN_SCHEMA_VERSION &&
+    input.schemaVersion === PREPARED_DAILY_PLAN_V2_SCHEMA_VERSION &&
     exactRecord(input.replayInputs, V2_REPLAY_INPUT_KEYS)
   ) {
-    replayed = createPreparedDailyPlan(input.replayInputs);
+    replayed = createPreparedDailyPlanV2(input.replayInputs);
+  } else if (
+    input.schemaVersion === PREPARED_DAILY_PLAN_SCHEMA_VERSION &&
+    exactRecord(input.replayInputs, V3_REPLAY_INPUT_KEYS)
+  ) {
+    replayed = createPreparedDailyPlanV3(input.replayInputs);
   } else {
     return invalid();
   }

@@ -279,6 +279,33 @@ test("market evidence rejects a ticker or historical observation after the commo
   assert.equal(result.ok, false);
 });
 
+test("market evidence rejects non-positive or crossed ticker books", () => {
+  const invalidTickers = [
+    { bid: "0", ask: "101" },
+    { bid: "-1", ask: "101" },
+    { bid: "102", ask: "101" },
+  ];
+  for (const ticker of invalidTickers) {
+    const result = createMarketEvidenceBundle(
+      bundle({
+        symbols: MARKET_EVIDENCE_SYMBOLS.map((symbol) =>
+          symbol === "BTCUSDT"
+            ? {
+                ...symbolEvidence(symbol),
+                ticker: {
+                  ...symbolEvidence(symbol).ticker,
+                  bid: ticker.bid,
+                  ask: ticker.ask,
+                },
+              }
+            : symbolEvidence(symbol),
+        ),
+      }),
+    );
+    assert.equal(result.ok, false);
+  }
+});
+
 test("complete rehydration rejects underfilled, gapped or future metadata", () => {
   const underfilled = createMarketEvidenceBundle(
     bundle({

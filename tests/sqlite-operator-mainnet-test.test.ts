@@ -544,7 +544,7 @@ test("operator create intent, canonical artifacts and exact payload commit atomi
       .get()?.count,
     2,
   );
-  assert.equal(CURRENT_SCHEMA_VERSION, 14);
+  assert.equal(CURRENT_SCHEMA_VERSION, 15);
 });
 
 test("prepared plan is durable and readable before any CREATE intent", () => {
@@ -1667,7 +1667,7 @@ test("manual recovery rejects nonterminal source TP status even when account-wid
   fixture.connection.close();
 });
 
-test("v8 through v14 migrations preserve populated historical v1 intent bytes and recovery records", () => {
+test("v8 through v15 migrations preserve populated historical v1 intent bytes and recovery records", () => {
   const fixture = setup();
   const created = value(prepare(fixture));
   value(
@@ -1695,6 +1695,9 @@ test("v8 through v14 migrations preserve populated historical v1 intent bytes an
     DROP TABLE history_source_observations;
     DROP TABLE history_accounting_reports;
     DROP TABLE history_accounting_wallet_anchors;
+    DROP TRIGGER shadow_market_reports_no_update;
+    DROP TRIGGER shadow_market_reports_no_delete;
+    DROP TABLE shadow_market_reports;
     DROP TRIGGER operator_mainnet_test_sources_authorization_insert;
     DROP TRIGGER operator_mainnet_test_sources_authorization_update;
     DROP TRIGGER operator_mainnet_trade_command_receipts_no_update;

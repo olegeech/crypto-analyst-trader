@@ -4,14 +4,20 @@ import {
   createDailyPrepareBoundary,
   type DailyPrepareDependencies,
 } from "../src/application/daily-prepare.js";
+import { runDailyCommand } from "../src/cli/daily-command.js";
 import { createAccountEvidenceCollectionResult } from "../src/domain/account/account-evidence-bundle.js";
 import {
+  summarizePreparedShadowContext,
   rehydratePreparedDailyPlan,
   type PreparedDailyPlan,
 } from "../src/domain/review/prepared-daily-plan.js";
-import { ok } from "../src/domain/shared/result.js";
+import { hashCanonical } from "../src/domain/identity/canonical-serialization.js";
+import { fail, ok } from "../src/domain/shared/result.js";
+import { domainError } from "../src/domain/shared/errors.js";
 import { parseUtcTimestamp } from "../src/domain/shared/time.js";
 import type { ExchangeCredentials } from "../src/ports/credential-provider.js";
+import type { ShadowMarketReport } from "../src/domain/review/shadow-market-report.js";
+import { marketFixture } from "./fixtures/data-quality-fixtures.js";
 import { requireDailyFixture as value } from "./fixtures/daily-planning-evidence-fixtures.js";
 import {
   dailyPrepareLiquidationV2,
@@ -29,6 +35,12 @@ import type { LiquidationTargetAsset } from "../src/domain/liquidation/liquidati
 
 const input = { environment: "demo", symbol: "BTCUSDT", allocation: "10" };
 
+function rehash(raw: Record<string, unknown>) {
+  const { contentHash: _, ...payload } = raw;
+  void _;
+  return { ...payload, contentHash: value(hashCanonical(payload)) };
+}
+
 function setup(
   options: {
     liquidation?: "complete" | "missing" | "zero" | "invalid-response";
@@ -36,6 +48,8 @@ function setup(
     liquidationSchema?: "v2" | "v3";
     target?: "flat" | "long" | "order" | "absent";
     providerTime?: string;
+    staleTicker?: boolean;
+    planningTime?: string;
     preAuth?: boolean;
     slowPublic?: boolean;
     throwAt?: "market" | "liquidation" | "account" | "risk";
@@ -43,6 +57,7 @@ function setup(
 ) {
   const events: string[] = [];
   const saved: PreparedDailyPlan[] = [];
+  const savedShadowReports: ShadowMarketReport[] = [];
   let loads = 0;
   let capturedAccountCredentials: ExchangeCredentials | undefined;
   let wall = value(
@@ -60,12 +75,34 @@ function setup(
     collectMarket: async (runId) => {
       events.push("market");
       explode("market");
-      return ok(dailyPrepareMarket(runId));
+      const market = dailyPrepareMarket(runId);
+      return ok(
+        options.staleTicker
+          ? marketFixture({
+              ...market,
+              symbols: market.symbols.map((row) =>
+                row.symbol === "BTCUSDT" && row.ticker
+                  ? {
+                      ...row,
+                      ticker: {
+                        ...row.ticker,
+                        observedAt: value(
+                          parseUtcTimestamp("2026-09-24T13:54:00.000Z"),
+                        ),
+                      },
+                    }
+                  : row,
+              ),
+            })
+          : market,
+      );
     },
     collectLiquidation: async (market, selectedAsset) => {
       events.push("liquidation");
       explode("liquidation");
-      wall = DAILY_PREPARE_TIME;
+      wall = value(
+        parseUtcTimestamp(options.planningTime ?? DAILY_PREPARE_TIME),
+      );
       return ok(
         options.liquidationSchema === "v2"
           ? dailyPrepareLiquidationV2(market)
@@ -154,6 +191,16 @@ function setup(
         close: () => {},
       });
     },
+    shadowReportStoreForEnvironment: () =>
+      ok({
+        saveShadowReport: (report) => {
+          savedShadowReports.push(report);
+          return ok(undefined);
+        },
+        loadShadowReport: (hash) =>
+          ok(savedShadowReports.find((report) => report.contentHash === hash)),
+        close: () => {},
+      }),
     clock: { now: () => wall },
     newRunId: () => DAILY_PREPARE_RUN_ID,
   };
@@ -162,6 +209,7 @@ function setup(
     deps,
     events,
     saved,
+    savedShadowReports,
     get loads() {
       return loads;
     },
@@ -175,6 +223,7 @@ test("clean native evidence traverses real planning/risk into replayable READY w
   if (result.kind !== "prepared") return;
   const p = result.prepared;
   assert.equal(p.state, "READY_FOR_APPROVAL");
+  assert.equal(p.schemaVersion, "prepared-daily-plan/v3");
   assert.equal(p.noteRequired, false);
   assert.equal(p.executionAuthority, "none");
   assert.equal(p.summary.decision.recommendation, "ADD_LONG");
@@ -204,6 +253,33 @@ test("clean native evidence traverses real planning/risk into replayable READY w
   );
   assert.ok(p.summary.informationalCodes.includes("PROVISIONAL_POLICY"));
   assert.equal(p.replayInputs.preflight.evaluationTime, DAILY_PREPARE_TIME);
+  assert.equal(p.replayInputs.shadowContext?.status, "recorded");
+  assert.equal(s.savedShadowReports.length, 1);
+  assert.equal(
+    s.savedShadowReports[0]?.contentHash,
+    result.diagnostics.shadowReportHash,
+  );
+  assert.deepEqual(
+    s.savedShadowReports[0]?.context,
+    p.replayInputs.shadowContext,
+  );
+  assert.ok(p.inputIdentity.shadowContextHash?.startsWith("sha256:"));
+  const savedShadowSummary = p.summary.shadowIntelligence;
+  assert.ok(savedShadowSummary && "sourceManifest" in savedShadowSummary);
+  if (!savedShadowSummary || !("sourceManifest" in savedShadowSummary)) return;
+  assert.ok(savedShadowSummary.sourceManifest.liquidation !== undefined);
+  assert.equal(savedShadowSummary.families.length, 4);
+  assert.ok(
+    savedShadowSummary.families.every(
+      (family) => family.assessmentStatus === "unavailable",
+    ),
+  );
+  assert.equal(result.diagnostics.shadowIntelligence, undefined);
+  assert.equal(
+    savedShadowSummary.evaluationTime,
+    result.prepared.inputIdentity.evaluationTime,
+  );
+  assert.equal(savedShadowSummary.qualityAssessment.status, "accepted");
   assert.equal(value(rehydratePreparedDailyPlan(p)).contentHash, p.contentHash);
   assert.equal(s.saved.length, 1);
   assert.equal(s.saved[0]?.contentHash, p.contentHash);
@@ -241,6 +317,59 @@ test("clean native evidence traverses real planning/risk into replayable READY w
   assert.ok(s.events.indexOf("account") < s.events.indexOf("risk-identity"));
   assert.ok(s.events.indexOf("risk-identity") < s.events.indexOf("risk-time"));
   assert.ok(s.events.indexOf("risk-time") < s.events.indexOf("store:demo"));
+});
+
+test("rehashing recorded v3 shadow-context edits cannot alter deterministic replay", async () => {
+  const result = await setup({ slowPublic: true }).boundary.prepare(input);
+  assert.equal(result.kind, "prepared", JSON.stringify(result));
+  if (result.kind !== "prepared") return;
+  const context = result.prepared.replayInputs.shadowContext;
+  assert.ok(context?.status === "recorded");
+  if (!context || context.status !== "recorded" || !context.assessment) return;
+
+  const { contentHash: _assessmentHash, ...assessmentPayload } =
+    context.assessment;
+  void _assessmentHash;
+  const changedAssessmentPayload = {
+    ...assessmentPayload,
+    findings: [
+      ...context.assessment.findings,
+      {
+        role: "market" as const,
+        reasonCode: "SOURCE_REFERENCE_MISMATCH" as const,
+      },
+    ],
+  };
+  const changedContext = {
+    ...context,
+    assessment: {
+      ...changedAssessmentPayload,
+      contentHash: value(hashCanonical(changedAssessmentPayload)),
+    },
+  };
+  const shadowContextHash = value(hashCanonical(changedContext));
+  const inputIdentity = { ...result.prepared.inputIdentity, shadowContextHash };
+  const preparedPlanId = value(
+    hashCanonical({
+      schemaVersion: "prepared-daily-plan-id/v1",
+      inputIdentity,
+    }),
+  );
+  const changed = rehash({
+    ...result.prepared,
+    preparedPlanId: "prepared-daily-plan:" + preparedPlanId,
+    inputIdentity,
+    replayInputs: {
+      ...result.prepared.replayInputs,
+      shadowContext: changedContext,
+    },
+    summary: {
+      ...result.prepared.summary,
+      shadowIntelligence: summarizePreparedShadowContext(changedContext),
+    },
+  } as unknown as Record<string, unknown>);
+
+  assert.equal(rehydratePreparedDailyPlan(changed).ok, false);
 });
 
 test("invalid input and caller authority overrides are rejected before any provider", async () => {
@@ -352,6 +481,8 @@ test("early liquidation failure keeps required-window counts explicitly unknown"
     },
   ]);
   assert.ok(!s.events.includes("account"));
+  assert.equal(result.diagnostics.shadowReportHash, undefined);
+  assert.equal(s.savedShadowReports.length, 0);
 });
 
 for (const target of ["long", "order"] as const)
@@ -361,6 +492,10 @@ for (const target of ["long", "order"] as const)
     assert.equal(result.kind, "prepared", JSON.stringify(result));
     if (result.kind !== "prepared") return;
     assert.equal(result.prepared.state, "BLOCKED");
+    assert.equal(
+      result.prepared.summary.shadowIntelligence?.status,
+      "recorded",
+    );
     assert.ok(
       result.prepared.reasonCodes.includes("BLOCKED_BY_CREATE_ONLY_SCOPE"),
     );
@@ -378,6 +513,21 @@ test("fresh final provider time governs the exact 60-second account limit", asyn
     if (result.kind !== "prepared") continue;
     assert.equal(result.prepared.state, state);
     assert.equal(result.prepared.inputIdentity.evaluationTime, providerTime);
+    const shadowSummary = result.prepared.summary.shadowIntelligence;
+    assert.ok(shadowSummary && "evaluationTime" in shadowSummary);
+    if (!shadowSummary || !("evaluationTime" in shadowSummary)) continue;
+    assert.equal(shadowSummary.evaluationTime, providerTime);
+    assert.equal(s.savedShadowReports.length, 1);
+    assert.equal(s.savedShadowReports[0]?.evaluationTime, providerTime);
+    assert.notEqual(
+      s.savedShadowReports[0]?.evaluationTime,
+      DAILY_PREPARE_TIME,
+    );
+    assert.deepEqual(
+      s.savedShadowReports[0]?.context,
+      result.prepared.replayInputs.shadowContext,
+    );
+    assert.equal(result.diagnostics.shadowIntelligence, undefined);
     if (state === "BLOCKED")
       assert.ok(result.prepared.reasonCodes.includes("ACCOUNT_EVIDENCE_STALE"));
     assert.equal(s.loads, 1);
@@ -393,6 +543,163 @@ test("fresh final provider time governs the exact 60-second account limit", asyn
   }
 });
 
+test("stale quote shadow rejection stays separate from core planning and consent", async () => {
+  const result = await setup({ staleTicker: true }).boundary.prepare(input);
+  assert.equal(result.kind, "prepared", JSON.stringify(result));
+  if (result.kind !== "prepared") return;
+  assert.equal(result.prepared.state, "READY_FOR_APPROVAL");
+  assert.equal(result.prepared.noteRequired, false);
+  assert.equal(result.prepared.replayInputs.shadowContext?.status, "recorded");
+  const shadow = result.prepared.summary.shadowIntelligence;
+  assert.ok(
+    shadow &&
+      "qualityAssessment" in shadow &&
+      "observations" in shadow &&
+      "families" in shadow,
+  );
+  if (
+    !shadow ||
+    !("qualityAssessment" in shadow) ||
+    !("observations" in shadow) ||
+    !("families" in shadow)
+  )
+    return;
+  assert.equal(shadow?.qualityAssessment.status, "partial");
+  assert.ok(
+    shadow?.observations
+      .filter((observation) => observation.id.startsWith("quote-"))
+      .every((observation) => observation.qualityDisposition === "rejected"),
+  );
+  assert.ok(
+    shadow?.families.some(
+      (family) =>
+        family.family === "liquidity-stress" &&
+        family.qualityStatus === "rejected" &&
+        family.qualityReasonCodes.includes("STALE_EVIDENCE"),
+    ),
+  );
+  assert.equal(result.prepared.summary.quality.gate, "OK");
+  assert.ok(
+    result.prepared.summary.externalAvailability.every(
+      (family) => family.status === "not-configured",
+    ),
+  );
+});
+
+test("planning refusal keeps blocked readiness and saves a separate shadow report", async () => {
+  const s = setup({ planningTime: "2026-09-24T14:10:00.000Z" });
+  const result = await s.boundary.prepare(input);
+  assert.equal(result.kind, "blocked", JSON.stringify(result));
+  assert.equal(result.stage, "planning");
+  assert.equal(result.diagnostics.shadowIntelligence?.status, "recorded");
+  const shadowDiagnostic = result.diagnostics.shadowIntelligence;
+  assert.ok(shadowDiagnostic && "evaluationTime" in shadowDiagnostic);
+  if (!shadowDiagnostic || !("evaluationTime" in shadowDiagnostic)) return;
+  assert.equal(shadowDiagnostic.evaluationTime, "2026-09-24T14:10:00.000Z");
+  assert.equal(s.saved.length, 0);
+  assert.equal(s.savedShadowReports.length, 1);
+  assert.equal(
+    result.diagnostics.shadowReportHash,
+    s.savedShadowReports[0]?.contentHash,
+  );
+  assert.equal(s.loads, 0);
+});
+
+test("incomplete liquidation history stays blocked while a public shadow report is saved", async () => {
+  const s = setup({ liquidation: "missing" });
+  const result = await s.boundary.prepare(input);
+  assert.equal(result.kind, "blocked", JSON.stringify(result));
+  if (result.kind !== "blocked") return;
+  assert.equal(result.stage, "planning");
+  assert.equal(result.diagnostics.liquidationStatus, "incomplete");
+  assert.equal(result.diagnostics.historyProof, "incomplete");
+  assert.equal(result.diagnostics.exchangeWrites, 0);
+  assert.equal(result.diagnostics.executionAuthority, "none");
+  assert.equal(s.saved.length, 0);
+  assert.equal(s.savedShadowReports.length, 1);
+  assert.ok(!s.events.includes("account"));
+  assert.ok(!s.events.includes("credentials"));
+  assert.ok(!s.events.includes("risk-reader"));
+  assert.equal(
+    result.diagnostics.shadowReportHash,
+    s.savedShadowReports[0]?.contentHash,
+  );
+});
+
+test("shadow report open/save failure leaves native prepared decisions unchanged and prints separate readiness", async () => {
+  const baseline = await setup().boundary.prepare(input);
+  assert.equal(baseline.kind, "prepared");
+  if (baseline.kind !== "prepared") return;
+
+  for (const failureMode of ["open", "save"] as const) {
+    const s = setup();
+    let closes = 0;
+    const dependencies: DailyPrepareDependencies = {
+      ...s.deps,
+      shadowReportStoreForEnvironment: () =>
+        failureMode === "open"
+          ? fail(
+              domainError("PERSISTENCE_INTEGRITY", "report store unavailable"),
+            )
+          : ok({
+              saveShadowReport: () =>
+                fail(
+                  domainError("PERSISTENCE_INTEGRITY", "report save failed"),
+                ),
+              loadShadowReport: () => ok(undefined),
+              close: () => {
+                closes++;
+              },
+            }),
+    };
+    const result =
+      await createDailyPrepareBoundary(dependencies).prepare(input);
+    assert.equal(result.kind, "prepared", JSON.stringify(result));
+    if (result.kind !== "prepared") continue;
+    assert.equal(result.prepared.contentHash, baseline.prepared.contentHash);
+    assert.deepEqual(result.prepared.summary, baseline.prepared.summary);
+    assert.equal(result.diagnostics.shadowReportHash, undefined);
+    assert.equal(closes, failureMode === "save" ? 1 : 0);
+  }
+
+  const blocked = await setup({ liquidation: "missing" }).boundary.prepare(
+    input,
+  );
+  assert.equal(blocked.kind, "blocked");
+  if (blocked.kind !== "blocked") return;
+  const output: string[] = [];
+  const exitCode = await runDailyCommand(
+    [
+      "prepare",
+      "--environment",
+      "demo",
+      "--symbol",
+      "BTCUSDT",
+      "--allocation",
+      "10",
+    ],
+    {
+      prepare: async () => blocked,
+      openStore: () => {
+        assert.fail("blocked prepare must not open the prepared store");
+      },
+      actor: () => ok("operator"),
+      clock: { now: () => DAILY_PREPARE_TIME },
+      interactive: false,
+      prompt: async () => "",
+      write: (text) => output.push(text),
+    },
+  );
+  assert.equal(exitCode, 5);
+  assert.match(output[0] ?? "", /Market Intelligence: partial/u);
+  assert.match(output[0] ?? "", /GAPPED_WINDOW/u);
+  assert.match(output[0] ?? "", /INCOMPLETE_LIQUIDATION_HISTORY/u);
+  assert.match(output[1] ?? "", /SHADOW_REPORT_HASH: sha256:/u);
+  assert.match(output[0] ?? "", /Trading Readiness: BLOCKED/u);
+  assert.match(output.join("\n"), /native reason codes: .*QUALITY_BLOCKED/u);
+  assert.doesNotMatch(output.join("\n"), /PREPARED_HASH/u);
+});
+
 for (const throwAt of ["market", "liquidation", "account", "risk"] as const)
   test(`${throwAt} provider errors are sanitized without artifacts`, async () => {
     const s = setup({ throwAt });
@@ -404,6 +711,10 @@ for (const throwAt of ["market", "liquidation", "account", "risk"] as const)
       JSON.stringify(result),
       /synthetic-secret|rawUID|Authorization|private-payload/,
     );
+    if (throwAt === "market" || throwAt === "liquidation")
+      assert.equal(result.diagnostics.shadowIntelligence, undefined);
+    else
+      assert.equal(result.diagnostics.shadowIntelligence?.status, "recorded");
   });
 
 test("unsigned public mainnet evidence remains distinct from the private account environment", async () => {

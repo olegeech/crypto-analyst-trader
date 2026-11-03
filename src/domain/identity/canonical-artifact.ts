@@ -119,6 +119,10 @@ import {
   type PreparedPlanApproval,
 } from "../review/prepared-plan-approval.js";
 import {
+  rehydrateShadowMarketReport,
+  type ShadowMarketReport,
+} from "../review/shadow-market-report.js";
+import {
   rehydrateOperatorMainnetTestPlan,
   rehydrateOperatorMainnetTestApproval,
   type OperatorMainnetTestPlan,
@@ -135,6 +139,7 @@ export const ARTIFACT_SCHEMA_VERSION = "artifact/v1" as const;
 
 export type ArtifactKind =
   | "prepared-daily-plan"
+  | "shadow-market-report"
   | "prepared-plan-approval"
   | "operator-mainnet-execution-test"
   | "operator-mainnet-execution-approval"
@@ -176,6 +181,7 @@ export interface CanonicalArtifactEnvelope {
 
 export type RehydratedArtifact =
   | PreparedDailyPlan
+  | ShadowMarketReport
   | PreparedPlanApproval
   | OperatorMainnetTestPlan
   | OperatorMainnetTestApproval
@@ -1095,6 +1101,10 @@ const schemas: ReadonlyMap<ArtifactKind, Schema> = new Map([
     { kind: "validated", validate: rehydratePreparedDailyPlan },
   ],
   [
+    "shadow-market-report",
+    { kind: "validated", validate: rehydrateShadowMarketReport },
+  ],
+  [
     "prepared-plan-approval",
     { kind: "validated", validate: rehydratePreparedPlanApproval },
   ],
@@ -1345,6 +1355,16 @@ function decodeValue(value: unknown, path: string): Result<unknown> {
   return ok(decoded);
 }
 
+/** Canonicalize parsed artifact bytes without applying a particular schema. */
+export function canonicalizeArtifactPayload(
+  artifactKind: ArtifactKind,
+  value: unknown,
+): Result<string> {
+  const decoded = decodeValue(value, artifactKind);
+  if (!decoded.ok) return decoded;
+  return canonicalSerialize(decoded.value);
+}
+
 export function encodeCanonicalArtifact(
   artifactKind: ArtifactKind,
   value: unknown,
@@ -1562,6 +1582,10 @@ export function rehydrateArtifact(
   envelope: unknown,
 ): Result<PreparedDailyPlan>;
 export function rehydrateArtifact(
+  artifactKind: "shadow-market-report",
+  envelope: unknown,
+): Result<ShadowMarketReport>;
+export function rehydrateArtifact(
   artifactKind: "prepared-plan-approval",
   envelope: unknown,
 ): Result<PreparedPlanApproval>;
@@ -1638,6 +1662,8 @@ export function rehydrateArtifact(
   switch (artifactKind) {
     case "prepared-daily-plan":
       return rehydratePreparedDailyPlan(decoded.value);
+    case "shadow-market-report":
+      return rehydrateShadowMarketReport(decoded.value);
     case "prepared-plan-approval":
       return rehydratePreparedPlanApproval(decoded.value);
     case "operator-mainnet-execution-test":

@@ -390,6 +390,7 @@ class FakeMainnetExchange implements MainnetExchangeExecutionPort {
 
 function setup(
   options: {
+    readonly preparedSchemaVersion?: "v2" | "v3";
     readonly accountEvidenceAgeMs?: number;
     readonly readinessAccountHash?: string;
     readonly targetSide?: MainnetExchangeReadState["position"]["side"];
@@ -397,7 +398,11 @@ function setup(
     readonly denyAuthorization?: boolean;
   } = {},
 ) {
-  const fixture = preparedLegExecutionFixture();
+  const fixture = preparedLegExecutionFixture(
+    options.preparedSchemaVersion === undefined
+      ? {}
+      : { schemaVersion: options.preparedSchemaVersion },
+  );
   const prepared = fixture.prepared;
   const approval = fixture.approval;
   const rawAccount = prepared.replayInputs.preflight.replayInputs
@@ -802,6 +807,43 @@ test("persists exact intent before one authorized create and confirms known-open
       ),
       0,
     );
+  } finally {
+    state.cleanup();
+  }
+});
+
+test("v3 prepared identity keeps create authorization, TP protection and cancel checks", async () => {
+  const state = setup({ preparedSchemaVersion: "v3" });
+  try {
+    assert.equal(state.prepared.schemaVersion, "prepared-daily-plan/v3");
+    assert.equal(state.prepared.executionAuthority, "none");
+    assert.equal(
+      state.prepared.replayInputs.shadowContext?.status,
+      "unavailable",
+    );
+
+    const created = await createOpenPreparedLeg(state, "prepared-leg-v3-run");
+    assert.equal(state.exchange.createRequests.length, 1);
+    assert.equal(state.authorization.bindings[0]?.operation, "create");
+    assert.ok(state.exchange.createRequests[0]?.intent.protection?.takeProfit);
+
+    state.currentTime.value = plusMs(state.currentTime.value, 1000);
+    const cancelled = await cancelMainnetPreparedLeg(
+      {
+        sourceId: created.sourceId,
+        runId: "prepared-leg-v3-cancel-run",
+      },
+      state.dependencies,
+    );
+    assert.equal(
+      cancelled.ok,
+      true,
+      cancelled.ok ? "" : `${cancelled.error.code}: ${cancelled.error.message}`,
+    );
+    if (!cancelled.ok) return;
+    assert.equal(cancelled.value.status, "CANCELLED");
+    assert.equal(state.exchange.cancelRequests.length, 1);
+    assert.equal(state.authorization.bindings.at(-1)?.operation, "cancel");
   } finally {
     state.cleanup();
   }
