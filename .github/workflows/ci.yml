@@ -39,3 +39,35 @@ jobs:
         run: npm ci
       - if: steps.scope.outputs.docs_only != 'true'
         run: npm run test:release
+      - name: Offline CEWS archive replay (no network)
+        if: steps.scope.outputs.docs_only != 'true'
+        run: |
+          python3 scripts/research/cews_inj_external_replication.py \
+            --source-dir research/cews/injusdt-2026-08-01_2026-09-30 \
+            --start 2026-08-01T00:00:00Z \
+            --end 2026-10-01T00:00:00Z \
+            --pages-1h 8 --pages-4h 0 --replay
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          output = Path("research/cews/injusdt-2026-08-01_2026-09-30/offline-replay-result.json")
+          r = json.loads(output.read_text())
+          assert r["coverage"]["1h"]["admitted"] == 1464
+          assert r["coverage"]["4h"]["admitted"] == 366
+          assert (r["overlapping"]["count"], r["overlapping"]["positive"]) == (346, 50)
+          assert (r["daily04UTC"]["count"], r["daily04UTC"]["positive"]) == (57, 9)
+          assert r["overlapping"]["rules"]["range_shock"] == {
+              "TP": 21, "FP": 118, "FN": 29, "TN": 178,
+              "precisionPct": r["overlapping"]["rules"]["range_shock"]["precisionPct"],
+              "recallPct": r["overlapping"]["rules"]["range_shock"]["recallPct"],
+              "falseAlarmPct": r["overlapping"]["rules"]["range_shock"]["falseAlarmPct"],
+              "FPRPct": r["overlapping"]["rules"]["range_shock"]["FPRPct"],
+              "warningSharePct": r["overlapping"]["rules"]["range_shock"]["warningSharePct"],
+          }
+          daily = r["daily04UTC"]["rules"]["range_shock"]
+          assert tuple(daily[k] for k in ("TP", "FP", "FN", "TN")) == (6, 24, 3, 24)
+          assert len(r["sourceFileSha256"]) == 8
+          assert r["coverage"]["fourHourSource"].startswith("derived-4h-")
+          print("CEWS offline replay assertions passed")
+          PY

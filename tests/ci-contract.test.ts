@@ -95,9 +95,13 @@ test("release composition propagates each blocking stage failure", async () => {
   }
 });
 
-test("CI selects documentation checks or the full release command without secrets or optional checks", () => {
+test("CI selects documentation or release checks with credential-free offline CEWS replay", () => {
   assert.match(ciWorkflow, /run: npm ci/);
   assert.match(ciWorkflow, /run: npm run test:release/);
+  assert.match(
+    ciWorkflow,
+    /python3 scripts\/research\/cews_inj_external_replication\.py[\s\S]*--replay/u,
+  );
   assert.match(ciWorkflow, /fetch-depth: 0/u);
   assert.match(ciWorkflow, /CI_DIFF_BASE:.*pull_request\.base\.sha/u);
   assert.match(ciWorkflow, /CI_DIFF_HEAD:.*pull_request\.head\.sha/u);
@@ -109,7 +113,7 @@ test("CI selects documentation checks or the full release command without secret
   assert.equal(
     (ciWorkflow.match(/if: steps\.scope\.outputs\.docs_only != 'true'/gu) ?? [])
       .length,
-    2,
+    3,
   );
   assert.doesNotMatch(
     ciWorkflow,
