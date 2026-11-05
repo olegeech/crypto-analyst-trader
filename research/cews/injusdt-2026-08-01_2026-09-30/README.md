@@ -7,7 +7,7 @@ This directory contains **public Bybit-plugin-transformed historical OHLCV**, no
 - Instrument: **INJUSDT**, Bybit `linear` USDT perpetual. Frozen UTC research window **[2026-08-01T00:00:00Z, 2026-10-01T00:00:00Z)**.
 - Eight `1h-page-N.json` files preserve **eight public connector responses**, each with 200 candles, exact plugin query arguments, source metadata and retrieval timestamp. Pages were reacquired **2026-11-05 09:58–09:59 UTC** specifically for versioned repository retention. Some returned rows precede August; replay excludes them, rather than silently changing the fixed cohort.
 - 1,600 returned 1h rows; **1,464** closed UTC-hour candles admitted (61 days); **136** pre-window rows excluded; **zero interior gaps, duplicate timestamps or invalid OHLCV**. No account, credential, order or private API data is present.
-- **Native 4h source responses are NOT in this archive.** A separate native 4h fetch attempted during archival returned Bybit `retCode=10006` (rate-limited). Do **not** infer native 4h coverage from this PR. The offline checker explicitly constructs **366 complete 4h OHLCV bars from four consecutive archived 1h candles**, marked `derived-from-archived-1h`. An earlier in-session analysis found **366/366 matches** against native 4h, but that earlier source was not retained and is not independently replayed by this archive.
+- **Partial native 4h evidence is retained:** `4h-page-1.json` contains **200 genuine connector-transformed 4h candles** from **2026-08-28 16:00 to 2026-09-30 20:00 UTC**. The second requested 4h page was blocked by Bybit `retCode=10006` (rate limit), so **166 earlier native 4h rows are not archived**. Independent readback compared this retained native page against its constituent archived hourly candles: **200/200 OHLC matched, 0 mismatches**. The offline full-window checker deliberately constructs all **366 complete 4h OHLCV bars** from the 1h archive, marked `derived-from-archived-1h`; it must **not** claim all 366 are independently sourced native 4h. An earlier nonarchived analysis had 366/366 native/derived matches, but its complete native 4h data cannot be replayed from this PR.
 - These candles were obtained retrospectively: **point-in-time publication latency and contemporaneous historical availability are not proven**. The earlier interval predates #154 development. This is a **reverse-time historical replication**, not a newer chronological untouched holdout. No predictive edge or production CEWS usefulness is claimed.
 - The experiment used the **frozen k=2 event threshold** over the next 24h, Wilder ATR(14) on completed 4h candles, and unchanged six deterministic warning rules. 1× and 3× are sensitivity only.
 
@@ -32,6 +32,7 @@ The command never calls any API. It validates timestamps, OHLCV constraints, cro
 | Retained raw 1h pages | 8 × 200 rows |
 | Valid 1h rows in frozen interval | **1,464** |
 | Derived full 4h bars | **366** |
+| Retained native 4h spot-check | **200 OHLC matches / 200 retained** |
 | Excluded for ATR warm-up / absent full 24h forward horizon | **14 / 6** |
 | 4h-spaced eligible decision cutoffs | **346** |
 | Positive cutoffs at primary 2×ATR | **50 (14.45%)** |
