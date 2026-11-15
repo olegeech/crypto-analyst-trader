@@ -52,75 +52,67 @@ function snapshot(
   return { asOf: AS_OF, instruments, tickers, requestCount: 2 };
 }
 
-test("discovery applies the liquidity shortlist then relative-spread ranking with stable ties", () => {
-  const result = rankMarketDiscovery(
-    snapshot(
-      [
-        instrument("AUSDT"),
-        instrument("CUSDT"),
-        instrument("BUSDT"),
-        instrument("DUSDT"),
-      ],
-      [
-        ticker("AUSDT", {
-          turnover24h: decimal("300"),
-          bid: decimal("100"),
-          ask: decimal("102"),
-        }),
-        ticker("BUSDT", {
-          turnover24h: decimal("200"),
-          bid: decimal("100"),
-          ask: decimal("101"),
-        }),
-        ticker("CUSDT", {
-          turnover24h: decimal("200"),
-          bid: decimal("100"),
-          ask: decimal("101"),
-        }),
-        ticker("DUSDT", {
-          turnover24h: decimal("100"),
-          bid: decimal("100"),
-          ask: decimal("100.5"),
-        }),
-      ],
-    ),
-    { scanLimit: 3 },
-  );
+test("discovery ranks by turnover, breaks exact ties by spread and symbol, and returns five", () => {
+  const instruments = [
+    instrument("AUSDT"),
+    instrument("CUSDT"),
+    instrument("BUSDT"),
+    instrument("DUSDT"),
+    instrument("EUSDT"),
+    instrument("FUSDT"),
+  ];
+  const tickers = [
+    ticker("AUSDT", { turnover24h: decimal("300"), ask: decimal("102") }),
+    ticker("BUSDT", { turnover24h: decimal("200"), ask: decimal("101") }),
+    ticker("CUSDT", { turnover24h: decimal("200"), ask: decimal("101") }),
+    ticker("DUSDT", { turnover24h: decimal("100"), ask: decimal("100.1") }),
+    ticker("EUSDT", { turnover24h: decimal("200"), ask: decimal("100.5") }),
+    ticker("FUSDT", { turnover24h: decimal("50"), ask: decimal("100.01") }),
+  ];
+  const rank = (items: typeof instruments, quotes: typeof tickers) =>
+    rankMarketDiscovery(snapshot(items, quotes));
+  const result = rank(instruments, tickers);
+  const reverse = rank([...instruments].reverse(), [...tickers].reverse());
 
   assert.equal(result.status, "READY");
   assert.deepEqual(
     result.candidates.map((candidate) => candidate.symbol),
-    ["BUSDT", "CUSDT", "AUSDT"],
+    ["AUSDT", "EUSDT", "BUSDT", "CUSDT", "DUSDT"],
+  );
+  assert.deepEqual(
+    reverse.candidates.map((candidate) => candidate.symbol),
+    result.candidates.map((candidate) => candidate.symbol),
   );
   assert.equal(
-    result.candidates[0]?.relativeSpread.toString(),
+    result.candidates[2]?.relativeSpread.toString(),
     "0.009950248756218905",
   );
-  assert.match(result.candidates[0]?.reasons.join(" ") ?? "", /spread/u);
+  assert.match(result.candidates[0]?.reasons.join(" ") ?? "", /turnover/u);
 });
 
-test("scan-limit bounds the turnover-first shortlist and targeted symbols bypass it", () => {
+test("targeted symbol can be inspected outside the default top five", () => {
+  const symbols = [
+    "HIGH1USDT",
+    "HIGH2USDT",
+    "HIGH3USDT",
+    "HIGH4USDT",
+    "HIGH5USDT",
+    "HIGH6USDT",
+    "OUTSIDEUSDT",
+  ];
   const data = snapshot(
-    [instrument("HIGHUSDT"), instrument("OUTSIDEUSDT")],
-    [
-      ticker("HIGHUSDT", { turnover24h: decimal("10000") }),
-      ticker("OUTSIDEUSDT", {
-        turnover24h: decimal("1"),
-        bid: decimal("100"),
-        ask: decimal("100.1"),
-      }),
-    ],
+    symbols.map((symbol) => instrument(symbol)),
+    symbols.map((symbol, index) =>
+      ticker(symbol, { turnover24h: decimal(String(1000 - index)) }),
+    ),
   );
 
-  const shortlist = rankMarketDiscovery(data, { scanLimit: 1 });
-  const targeted = rankMarketDiscovery(data, {
-    scanLimit: 1,
-    symbol: "OUTSIDEUSDT",
-  });
+  const topFive = rankMarketDiscovery(data);
+  const targeted = rankMarketDiscovery(data, { symbol: "OUTSIDEUSDT" });
 
   assert.deepEqual(
-    shortlist.candidates.map((candidate) => candidate.symbol),
-    ["HIGHUSDT"],
+    topFive.candidates.map((candidate) => candidate.symbol),
+    symbols.slice(0, 5),
   );
   assert.deepEqual(
     targeted.candidates.map((candidate) => candidate.symbol),
