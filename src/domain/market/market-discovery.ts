@@ -257,8 +257,7 @@ export function rankMarketDiscovery(
   if (options.symbol !== undefined) {
     const found = instruments.length > 0;
     const row = eligible[0];
-    targetCandidate =
-      row === undefined ? undefined : candidateFor(row);
+    targetCandidate = row === undefined ? undefined : candidateFor(row);
     if (!found) {
       countReasons(exclusionCounts, ["INSTRUMENT_NOT_FOUND"]);
       targetExclusionReasons = ["INSTRUMENT_NOT_FOUND"];
