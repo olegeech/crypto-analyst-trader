@@ -26,6 +26,7 @@
     "smoke:bybit:account": "node --import tsx scripts/bybit-account-smoke.ts",
     "smoke:bybit:portfolio-risk": "node --import tsx scripts/smoke-bybit-portfolio-risk.ts",
     "test:bybit:public": "TRADER_ENV=public-mainnet node --import tsx scripts/public-market-smoke.ts",
+    "market:discover": "node --import tsx scripts/market-discover.ts",
     "coinalyze:liquidation:smoke": "node --import tsx scripts/coinalyze-liquidation-smoke.ts",
     "coinalyze:liquidation:full-smoke": "TRADER_ENV=public-mainnet node --import tsx scripts/coinalyze-liquidation-full-smoke.ts",
     "coinalyze:liquidation:decision-smoke": "TRADER_ENV=public-mainnet node --import tsx scripts/coinalyze-liquidation-decision-smoke.ts",
