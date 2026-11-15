@@ -70,7 +70,11 @@ export interface MarketDiscoveryAnalysis {
 
 export interface MarketDiscoveryOptions {
   readonly symbol?: string;
+  readonly resultLimit?: number;
 }
+
+export const DEFAULT_MARKET_DISCOVERY_RESULT_LIMIT = 5;
+export const MAX_MARKET_DISCOVERY_RESULT_LIMIT = 100;
 
 interface EligibleMarketRow {
   readonly symbol: string;
@@ -208,6 +212,14 @@ export function rankMarketDiscovery(
   snapshot: MarketDiscoverySnapshot,
   options: MarketDiscoveryOptions = {},
 ): MarketDiscoveryAnalysis {
+  if (
+    options.resultLimit !== undefined &&
+    (!Number.isInteger(options.resultLimit) ||
+      options.resultLimit < 1 ||
+      options.resultLimit > MAX_MARKET_DISCOVERY_RESULT_LIMIT)
+  ) {
+    throw new RangeError("resultLimit must be an integer from 1 to 100");
+  }
   if (options.symbol !== undefined && options.symbol.length === 0) {
     throw new TypeError("symbol must not be empty");
   }
@@ -279,7 +291,9 @@ export function rankMarketDiscovery(
   if (options.symbol !== undefined) {
     candidates = targetCandidate === undefined ? [] : [targetCandidate];
   } else {
-    const topRows = [...eligible].sort(compareTurnoverSpreadSymbol).slice(0, 5);
+    const topRows = [...eligible]
+      .sort(compareTurnoverSpreadSymbol)
+      .slice(0, options.resultLimit ?? DEFAULT_MARKET_DISCOVERY_RESULT_LIMIT);
     candidates = Object.freeze(topRows.map(candidateFor));
   }
 

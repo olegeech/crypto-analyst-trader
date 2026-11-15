@@ -79,6 +79,8 @@ test("discovery ranks by turnover, breaks exact ties by spread and symbol, and r
     result.candidates.map((candidate) => candidate.symbol),
     ["AUSDT", "EUSDT", "BUSDT", "CUSDT", "DUSDT"],
   );
+  assert.equal(result.eligibleCount, 6);
+  assert.equal(result.candidates.length, 5);
   assert.deepEqual(
     reverse.candidates.map((candidate) => candidate.symbol),
     result.candidates.map((candidate) => candidate.symbol),
@@ -119,6 +121,36 @@ test("targeted symbol can be inspected outside the default top five", () => {
     ["OUTSIDEUSDT"],
   );
   assert.equal(targeted.target?.candidate?.symbol, "OUTSIDEUSDT");
+});
+
+test("result limit returns the requested number when enough candidates are eligible", () => {
+  const symbols = Array.from({ length: 10 }, (_, index) => `M${index}USDT`);
+  const data = snapshot(
+    symbols.map((symbol) => instrument(symbol)),
+    symbols.map((symbol, index) =>
+      ticker(symbol, { turnover24h: decimal(String(1000 - index)) }),
+    ),
+  );
+
+  const result = rankMarketDiscovery(data, { resultLimit: 8 });
+
+  assert.equal(result.eligibleCount, 10);
+  assert.equal(result.candidates.length, 8);
+  assert.deepEqual(
+    result.candidates.map((candidate) => candidate.symbol),
+    symbols.slice(0, 8),
+  );
+});
+
+test("result limit must be an integer from 1 to 100", () => {
+  const data = snapshot([instrument("AUSDT")], [ticker("AUSDT")]);
+
+  for (const resultLimit of [0, 101, 1.5]) {
+    assert.throws(
+      () => rankMarketDiscovery(data, { resultLimit }),
+      /resultLimit must be an integer from 1 to 100/u,
+    );
+  }
 });
 
 test("ineligible instruments and unusable quotes are excluded with reason counts", () => {

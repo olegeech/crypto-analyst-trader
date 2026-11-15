@@ -4,6 +4,8 @@ import { pathToFileURL } from "node:url";
 import { readMarketDiscoverySnapshot } from "../src/adapters/bybit-v5/public-market-discovery.js";
 import { createBybitPublicTransport } from "../src/adapters/bybit-v5/public-transport.js";
 import {
+  DEFAULT_MARKET_DISCOVERY_RESULT_LIMIT,
+  MAX_MARKET_DISCOVERY_RESULT_LIMIT,
   rankMarketDiscovery,
   type MarketDiscoveryCandidate,
 } from "../src/domain/market/market-discovery.js";
@@ -11,6 +13,7 @@ import { DecimalValue, RoundingMode } from "../src/domain/shared/decimal.js";
 
 interface Options {
   readonly symbol?: string;
+  readonly resultLimit?: number;
 }
 
 const oneHundredResult = DecimalValue.fromString("100");
@@ -20,6 +23,7 @@ const ONE_HUNDRED = oneHundredResult.value;
 
 function parseOptions(args: readonly string[]): Options {
   let symbol: string | undefined;
+  let resultLimit: number | undefined;
   for (let index = 0; index < args.length; index += 1) {
     const argument = args[index];
     if (argument === "--symbol") {
@@ -29,13 +33,34 @@ function parseOptions(args: readonly string[]): Options {
       }
       symbol = value;
       index += 1;
+    } else if (argument === "--result-limit") {
+      const value = args[index + 1];
+      const parsed =
+        value !== undefined && /^\d+$/u.test(value)
+          ? Number(value)
+          : Number.NaN;
+      if (
+        !Number.isSafeInteger(parsed) ||
+        parsed < 1 ||
+        parsed > MAX_MARKET_DISCOVERY_RESULT_LIMIT
+      ) {
+        throw new Error("--result-limit must be an integer from 1 to 100");
+      }
+      resultLimit = parsed;
+      index += 1;
     } else {
       throw new Error(
-        `Unknown option ${argument ?? ""}. Usage: npm run market:discover -- [--symbol SYMBOL]`,
+        `Unknown option ${argument ?? ""}. Usage: npm run market:discover -- [--result-limit N] [--symbol SYMBOL]`,
       );
     }
   }
-  return symbol === undefined ? {} : { symbol };
+  if (symbol !== undefined && resultLimit !== undefined) {
+    throw new Error("--symbol cannot be combined with --result-limit");
+  }
+  return {
+    ...(symbol === undefined ? {} : { symbol }),
+    ...(resultLimit === undefined ? {} : { resultLimit }),
+  };
 }
 
 function percentage(value: MarketDiscoveryCandidate["priceChange24h"]): string {
@@ -110,7 +135,9 @@ async function run(): Promise<void> {
   } else if (analysis.candidates.length === 0) {
     console.log("NO_CANDIDATES");
   } else {
-    console.log(`Candidates (top ${analysis.candidates.length}):`);
+    console.log(
+      `Candidates (top ${analysis.candidates.length} of ${analysis.eligibleCount} eligible; limit ${options.resultLimit ?? DEFAULT_MARKET_DISCOVERY_RESULT_LIMIT}):`,
+    );
     analysis.candidates.forEach((candidate, index) =>
       printCandidate(candidate, index + 1),
     );
