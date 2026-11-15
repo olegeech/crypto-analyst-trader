@@ -69,11 +69,8 @@ export interface MarketDiscoveryAnalysis {
 }
 
 export interface MarketDiscoveryOptions {
-  readonly scanLimit?: number;
   readonly symbol?: string;
 }
-
-export const DEFAULT_MARKET_DISCOVERY_SCAN_LIMIT = 100;
 
 interface EligibleMarketRow {
   readonly symbol: string;
@@ -85,12 +82,6 @@ interface EligibleMarketRow {
   readonly lowPrice24h?: DecimalValue;
 }
 
-interface RankedCandidate {
-  readonly candidate: MarketDiscoveryCandidate;
-  readonly spreadNumerator: DecimalValue;
-  readonly spreadDenominator: DecimalValue;
-}
-
 function constant(value: string): DecimalValue {
   const parsed = DecimalValue.fromString(value);
   if (!parsed.ok)
@@ -100,12 +91,6 @@ function constant(value: string): DecimalValue {
 
 const TWO = constant("2");
 const ONE_HUNDRED = constant("100");
-
-function assertScanLimit(scanLimit: number): void {
-  if (!Number.isSafeInteger(scanLimit) || scanLimit < 1) {
-    throw new TypeError("scanLimit must be a positive safe integer");
-  }
-}
 
 function assessEligibility(
   instrument: MarketDiscoveryInstrument,
@@ -153,7 +138,7 @@ function assessEligibility(
   };
 }
 
-function candidateFor(row: EligibleMarketRow): RankedCandidate {
+function candidateFor(row: EligibleMarketRow): MarketDiscoveryCandidate {
   const spreadNumerator = row.ask.subtract(row.bid).multiply(TWO);
   const spreadDenominator = row.ask.add(row.bid);
   const spread = spreadNumerator.divide(
@@ -186,24 +171,28 @@ function candidateFor(row: EligibleMarketRow): RankedCandidate {
       `24h turnover ${row.turnover24h.toString()} USDT`,
     ]),
   });
-  return { candidate, spreadNumerator, spreadDenominator };
+  return candidate;
 }
 
 function compareRelativeSpread(
-  left: RankedCandidate,
-  right: RankedCandidate,
+  left: EligibleMarketRow,
+  right: EligibleMarketRow,
 ): number {
-  return left.spreadNumerator
-    .multiply(right.spreadDenominator)
-    .compare(right.spreadNumerator.multiply(left.spreadDenominator));
+  return left.ask
+    .subtract(left.bid)
+    .multiply(right.ask.add(right.bid))
+    .compare(
+      right.ask.subtract(right.bid).multiply(left.ask.add(left.bid)),
+    );
 }
 
-function compareTurnoverThenSymbol(
+function compareTurnoverSpreadSymbol(
   left: EligibleMarketRow,
   right: EligibleMarketRow,
 ): number {
   return (
     right.turnover24h.compare(left.turnover24h) ||
+    compareRelativeSpread(left, right) ||
     (left.symbol < right.symbol ? -1 : left.symbol > right.symbol ? 1 : 0)
   );
 }
@@ -220,8 +209,6 @@ export function rankMarketDiscovery(
   snapshot: MarketDiscoverySnapshot,
   options: MarketDiscoveryOptions = {},
 ): MarketDiscoveryAnalysis {
-  const scanLimit = options.scanLimit ?? DEFAULT_MARKET_DISCOVERY_SCAN_LIMIT;
-  assertScanLimit(scanLimit);
   if (options.symbol !== undefined && options.symbol.length === 0) {
     throw new TypeError("symbol must not be empty");
   }
@@ -272,7 +259,7 @@ export function rankMarketDiscovery(
     const found = instruments.length > 0;
     const row = eligible[0];
     targetCandidate =
-      row === undefined ? undefined : candidateFor(row).candidate;
+      row === undefined ? undefined : candidateFor(row);
     if (!found) {
       countReasons(exclusionCounts, ["INSTRUMENT_NOT_FOUND"]);
       targetExclusionReasons = ["INSTRUMENT_NOT_FOUND"];
@@ -294,19 +281,8 @@ export function rankMarketDiscovery(
   if (options.symbol !== undefined) {
     candidates = targetCandidate === undefined ? [] : [targetCandidate];
   } else {
-    const shortlist = [...eligible]
-      .sort(compareTurnoverThenSymbol)
-      .slice(0, scanLimit)
-      .map(candidateFor);
     candidates = Object.freeze(
-      shortlist
-        .sort(
-          (left, right) =>
-            compareRelativeSpread(left, right) ||
-            compareTurnoverThenSymbol(left.candidate, right.candidate),
-        )
-        .slice(0, 5)
-        .map((row) => row.candidate),
+      [...eligible].sort(compareTurnoverSpreadSymbol).slice(0, 5).map(candidateFor),
     );
   }
 
