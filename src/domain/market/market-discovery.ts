@@ -178,10 +178,11 @@ function compareRelativeSpread(
   left: EligibleMarketRow,
   right: EligibleMarketRow,
 ): number {
-  return left.ask
-    .subtract(left.bid)
+  const leftWidth = left.ask.subtract(left.bid);
+  const rightWidth = right.ask.subtract(right.bid);
+  return leftWidth
     .multiply(right.ask.add(right.bid))
-    .compare(right.ask.subtract(right.bid).multiply(left.ask.add(left.bid)));
+    .compare(rightWidth.multiply(left.ask.add(left.bid)));
 }
 
 function compareTurnoverSpreadSymbol(
@@ -279,12 +280,8 @@ export function rankMarketDiscovery(
   if (options.symbol !== undefined) {
     candidates = targetCandidate === undefined ? [] : [targetCandidate];
   } else {
-    candidates = Object.freeze(
-      [...eligible]
-        .sort(compareTurnoverSpreadSymbol)
-        .slice(0, 5)
-        .map(candidateFor),
-    );
+    const topRows = [...eligible].sort(compareTurnoverSpreadSymbol).slice(0, 5);
+    candidates = Object.freeze(topRows.map(candidateFor));
   }
 
   return Object.freeze({
