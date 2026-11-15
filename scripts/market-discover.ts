@@ -2,7 +2,10 @@ import process from "node:process";
 import { pathToFileURL } from "node:url";
 
 import { readMarketDiscoverySnapshot } from "../src/adapters/bybit-v5/public-market-discovery.js";
-import { createBybitPublicTransport } from "../src/adapters/bybit-v5/public-transport.js";
+import {
+  BybitPublicTransportError,
+  createBybitPublicTransport,
+} from "../src/adapters/bybit-v5/public-transport.js";
 import {
   DEFAULT_MARKET_DISCOVERY_RESULT_LIMIT,
   MAX_MARKET_DISCOVERY_RESULT_LIMIT,
@@ -31,7 +34,7 @@ function parseOptions(args: readonly string[]): Options {
       if (value === undefined || value.length === 0 || value.startsWith("--")) {
         throw new Error("--symbol requires a symbol such as INJUSDT");
       }
-      symbol = value;
+      symbol = value.toUpperCase();
       index += 1;
     } else if (argument === "--result-limit") {
       const value = args[index + 1];
@@ -107,6 +110,16 @@ async function run(): Promise<void> {
       ...(options.symbol === undefined ? {} : { symbol: options.symbol }),
     });
   } catch (error) {
+    if (
+      options.symbol !== undefined &&
+      error instanceof BybitPublicTransportError &&
+      error.retCode === 10001 &&
+      /symbol invalid/iu.test(error.retMsg ?? "")
+    ) {
+      console.log(`${options.symbol}: NO_CANDIDATES (INSTRUMENT_NOT_FOUND)`);
+      process.exitCode = 0;
+      return;
+    }
     console.error(
       `DATA_UNAVAILABLE: ${error instanceof Error ? error.message : "Bybit public data could not be read."}`,
     );

@@ -26,6 +26,7 @@ export type PublicTransportFailureKind =
 export class BybitPublicTransportError extends Error {
   readonly kind: PublicTransportFailureKind;
   readonly retCode: number | undefined;
+  readonly retMsg: string | undefined;
   readonly httpStatus: number | undefined;
   readonly reasonCode:
     | "PROVIDER_TIME_INVALID_OR_INCONSISTENT"
@@ -37,6 +38,7 @@ export class BybitPublicTransportError extends Error {
     message: string,
     options: {
       retCode?: number;
+      retMsg?: string;
       httpStatus?: number;
       reasonCode?:
         | "PROVIDER_TIME_INVALID_OR_INCONSISTENT"
@@ -47,6 +49,7 @@ export class BybitPublicTransportError extends Error {
     this.name = "BybitPublicTransportError";
     this.kind = kind;
     this.retCode = options.retCode;
+    this.retMsg = options.retMsg;
     this.httpStatus = options.httpStatus;
     this.reasonCode = options.reasonCode;
   }
@@ -101,7 +104,7 @@ function errorForResponse(
     response.retCode === 10006
       ? "Bybit public API rate-limited the request."
       : "Bybit public API returned an unsuccessful response.",
-    { retCode: response.retCode },
+    { retCode: response.retCode, retMsg: response.retMsg },
   );
 }
 

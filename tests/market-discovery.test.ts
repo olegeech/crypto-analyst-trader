@@ -123,6 +123,20 @@ test("targeted symbol can be inspected outside the default top five", () => {
   assert.equal(targeted.target?.candidate?.symbol, "OUTSIDEUSDT");
 });
 
+test("targeted ineligible symbol reports its exclusion reason", () => {
+  const result = rankMarketDiscovery(
+    snapshot(
+      [instrument("HALTEDUSDT", { status: "Settling" })],
+      [ticker("HALTEDUSDT")],
+    ),
+    { symbol: "HALTEDUSDT" },
+  );
+
+  assert.equal(result.status, "NO_CANDIDATES");
+  assert.equal(result.target?.candidate, undefined);
+  assert.deepEqual(result.target?.reasons, ["INSTRUMENT_NOT_TRADING"]);
+});
+
 test("result limit returns the requested number when enough candidates are eligible", () => {
   const symbols = Array.from({ length: 10 }, (_, index) => `M${index}USDT`);
   const data = snapshot(

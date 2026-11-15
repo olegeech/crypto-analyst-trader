@@ -5,7 +5,10 @@ import {
   PUBLIC_INSTRUMENTS_INFO_PATH,
   PUBLIC_TICKERS_PATH,
 } from "../src/adapters/bybit-v5/public-market-client.js";
-import { createBybitPublicTransport } from "../src/adapters/bybit-v5/public-transport.js";
+import {
+  BybitPublicTransportError,
+  createBybitPublicTransport,
+} from "../src/adapters/bybit-v5/public-transport.js";
 import { readMarketDiscoverySnapshot } from "../src/adapters/bybit-v5/public-market-discovery.js";
 
 type FixtureResponse = { readonly status?: number; readonly body: unknown };
@@ -178,6 +181,31 @@ test("empty bulk tickers are unavailable when instrument metadata is nonempty", 
   await assert.rejects(
     readMarketDiscoverySnapshot({ transport }),
     /ticker response was empty/u,
+  );
+});
+
+test("symbol-filtered invalid-symbol responses retain their provider code and message", async () => {
+  const transport = createBybitPublicTransport({
+    request: fixtureRequest((url) => {
+      assert.equal(url.pathname, PUBLIC_INSTRUMENTS_INFO_PATH);
+      assert.equal(url.searchParams.get("symbol"), "NOPEXYZUSDT");
+      return {
+        body: {
+          retCode: 10001,
+          retMsg: "params error: symbol invalid",
+          result: { category: "linear", list: [] },
+        },
+      };
+    }),
+  });
+
+  await assert.rejects(
+    readMarketDiscoverySnapshot({ transport, symbol: "NOPEXYZUSDT" }),
+    (error: unknown) =>
+      error instanceof BybitPublicTransportError &&
+      error.retCode === 10001 &&
+      error.retMsg === "params error: symbol invalid" &&
+      error.message === "Bybit public API returned an unsuccessful response.",
   );
 });
 

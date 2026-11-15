@@ -37,8 +37,7 @@ export type MarketDiscoveryExclusionReason =
   | "NON_POSITIVE_TURNOVER"
   | "MISSING_QUOTES"
   | "NON_POSITIVE_QUOTES"
-  | "CROSSED_QUOTES"
-  | "INSTRUMENT_NOT_FOUND";
+  | "CROSSED_QUOTES";
 
 export interface MarketDiscoveryCandidate {
   readonly symbol: string;
@@ -267,22 +266,13 @@ export function rankMarketDiscovery(
   let target: MarketDiscoveryAnalysis["target"] | undefined;
   let targetCandidate: MarketDiscoveryCandidate | undefined;
   if (options.symbol !== undefined) {
-    const found = instruments.length > 0;
     const row = eligible[0];
     targetCandidate = row === undefined ? undefined : candidateFor(row);
-    if (!found) {
-      countReasons(exclusionCounts, ["INSTRUMENT_NOT_FOUND"]);
-      targetExclusionReasons = ["INSTRUMENT_NOT_FOUND"];
-    }
     target = {
       symbol: options.symbol,
       ...(targetCandidate === undefined ? {} : { candidate: targetCandidate }),
-      ...(row === undefined
-        ? {
-            reasons: Object.freeze(
-              targetExclusionReasons ?? ["INSTRUMENT_NOT_FOUND"],
-            ),
-          }
+      ...(row === undefined && targetExclusionReasons !== undefined
+        ? { reasons: Object.freeze(targetExclusionReasons) }
         : {}),
     };
   }

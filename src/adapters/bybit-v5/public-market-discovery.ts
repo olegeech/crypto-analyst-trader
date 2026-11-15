@@ -16,14 +16,15 @@ import {
   responseServerTimeMs,
   type BybitPublicResponse,
 } from "./public-response.js";
+import {
+  BYBIT_LINEAR_CATEGORY,
+  PUBLIC_INSTRUMENTS_INFO_PATH,
+  PUBLIC_TICKERS_PATH,
+} from "./public-market-client.js";
 import type { BybitPublicTransport } from "./public-transport.js";
 
 type JsonObject = Record<string, unknown>;
 type MarketDiscoveryTransport = Pick<BybitPublicTransport, "get">;
-
-const BYBIT_LINEAR_CATEGORY = "linear";
-const PUBLIC_INSTRUMENTS_INFO_PATH = "/v5/market/instruments-info";
-const PUBLIC_TICKERS_PATH = "/v5/market/tickers";
 
 export interface MarketDiscoveryReaderOptions {
   readonly transport: MarketDiscoveryTransport;
