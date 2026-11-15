@@ -181,9 +181,7 @@ function compareRelativeSpread(
   return left.ask
     .subtract(left.bid)
     .multiply(right.ask.add(right.bid))
-    .compare(
-      right.ask.subtract(right.bid).multiply(left.ask.add(left.bid)),
-    );
+    .compare(right.ask.subtract(right.bid).multiply(left.ask.add(left.bid)));
 }
 
 function compareTurnoverSpreadSymbol(
@@ -282,7 +280,10 @@ export function rankMarketDiscovery(
     candidates = targetCandidate === undefined ? [] : [targetCandidate];
   } else {
     candidates = Object.freeze(
-      [...eligible].sort(compareTurnoverSpreadSymbol).slice(0, 5).map(candidateFor),
+      [...eligible]
+        .sort(compareTurnoverSpreadSymbol)
+        .slice(0, 5)
+        .map(candidateFor),
     );
   }
 
