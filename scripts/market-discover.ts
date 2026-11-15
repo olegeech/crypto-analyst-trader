@@ -4,14 +4,12 @@ import { pathToFileURL } from "node:url";
 import { readMarketDiscoverySnapshot } from "../src/adapters/bybit-v5/public-market-discovery.js";
 import { createBybitPublicTransport } from "../src/adapters/bybit-v5/public-transport.js";
 import {
-  DEFAULT_MARKET_DISCOVERY_SCAN_LIMIT,
   rankMarketDiscovery,
   type MarketDiscoveryCandidate,
 } from "../src/domain/market/market-discovery.js";
 import { DecimalValue, RoundingMode } from "../src/domain/shared/decimal.js";
 
 interface Options {
-  readonly scanLimit: number;
   readonly symbol?: string;
 }
 
@@ -21,22 +19,10 @@ if (!oneHundredResult.ok)
 const ONE_HUNDRED = oneHundredResult.value;
 
 function parseOptions(args: readonly string[]): Options {
-  let scanLimit = DEFAULT_MARKET_DISCOVERY_SCAN_LIMIT;
   let symbol: string | undefined;
   for (let index = 0; index < args.length; index += 1) {
     const argument = args[index];
-    if (argument === "--scan-limit") {
-      const value = args[index + 1];
-      const parsed =
-        value !== undefined && /^[1-9]\d*$/u.test(value)
-          ? Number(value)
-          : Number.NaN;
-      if (!Number.isSafeInteger(parsed) || parsed < 1) {
-        throw new Error("--scan-limit must be a positive integer");
-      }
-      scanLimit = parsed;
-      index += 1;
-    } else if (argument === "--symbol") {
+    if (argument === "--symbol") {
       const value = args[index + 1];
       if (value === undefined || value.length === 0 || value.startsWith("--")) {
         throw new Error("--symbol requires a symbol such as INJUSDT");
@@ -45,11 +31,11 @@ function parseOptions(args: readonly string[]): Options {
       index += 1;
     } else {
       throw new Error(
-        `Unknown option ${argument ?? ""}. Usage: npm run market:discover -- [--scan-limit N] [--symbol SYMBOL]`,
+        `Unknown option ${argument ?? ""}. Usage: npm run market:discover -- [--symbol SYMBOL]`,
       );
     }
   }
-  return { scanLimit, ...(symbol === undefined ? {} : { symbol }) };
+  return symbol === undefined ? {} : { symbol };
 }
 
 function percentage(value: MarketDiscoveryCandidate["priceChange24h"]): string {
@@ -102,10 +88,7 @@ async function run(): Promise<void> {
     process.exitCode = 1;
     return;
   }
-  const analysis = rankMarketDiscovery(snapshot, {
-    scanLimit: options.scanLimit,
-    ...(options.symbol === undefined ? {} : { symbol: options.symbol }),
-  });
+  const analysis = rankMarketDiscovery(snapshot, options);
   const durationMs = Math.round(performance.now() - startedAt);
 
   console.log("Bybit USDT linear perpetual discovery (consideration only)");
@@ -127,9 +110,7 @@ async function run(): Promise<void> {
   } else if (analysis.candidates.length === 0) {
     console.log("NO_CANDIDATES");
   } else {
-    console.log(
-      `Candidates (top ${analysis.candidates.length}; shortlist ${options.scanLimit}):`,
-    );
+    console.log(`Candidates (top ${analysis.candidates.length}):`);
     analysis.candidates.forEach((candidate, index) =>
       printCandidate(candidate, index + 1),
     );
