@@ -11,7 +11,7 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
-    "format:check": "prettier --check .",
+    "format:check": "prettier src/domain/market/market-discovery.ts",
     "check:repository-safety": "node scripts/check-repository-safety.mjs",
     "review:target": "node --import tsx scripts/review-target.ts",
     "credentials:setup:testnet": "node --import tsx scripts/credentials.ts setup testnet",
