@@ -1,0 +1,86 @@
+Bybit USDT linear perpetual discovery (consideration only)
+As of: 2026-11-16T11:42:28.850Z
+Coverage: instruments=929, tickers=937, matched=929, eligible=821
+Requests: 2; duration: 2563 ms
+Candidates (top 20 of 821 eligible; limit 20):
+1. BTCUSDT
+  Reasons: relative spread 0.0002%; 24h turnover 3859134958.3518 USDT
+  24h change: -1.5%
+  24h range: 64100–65777.6
+2. ETHUSDT
+  Reasons: relative spread 0.0006%; 24h turnover 1616674644.3531 USDT
+  24h change: -1.45%
+  24h range: 1790.28–1842.5
+3. SOXLUSDT
+  Reasons: relative spread 0.0191%; 24h turnover 495860732.9323 USDT
+  24h change: -4.94%
+  24h range: 51.78–59.15
+4. SOLUSDT
+  Reasons: relative spread 0.014%; 24h turnover 383901170.988 USDT
+  24h change: -1.53%
+  24h range: 70.41–73.23
+5. XRPUSDT
+  Reasons: relative spread 0.0105%; 24h turnover 251025929.5553 USDT
+  24h change: -1.2%
+  24h range: 0.9416–0.9779
+6. ZECUSDT
+  Reasons: relative spread 0.0011%; 24h turnover 231908259.3963 USDT
+  24h change: -3.58%
+  24h range: 871.2–925.35
+7. NVDAUSDT
+  Reasons: relative spread 0.0126%; 24h turnover 171049443.4996 USDT
+  24h change: -1.36%
+  24h range: 158.67–167.09
+8. HYPEUSDT
+  Reasons: relative spread 0.0015%; 24h turnover 148950853.8432 USDT
+  24h change: -2.01%
+  24h range: 65.673–68.647
+9. XAUUSDT
+  Reasons: relative spread 0.0003%; 24h turnover 96083594.2517 USDT
+  24h change: 0.94%
+  24h range: 3834.6–3904.94
+10. AKEUSDT
+  Reasons: relative spread 0.0435%; 24h turnover 93243155.9017 USDT
+  24h change: 6.87%
+  24h range: 0.008331–0.012711
+11. NEARUSDT
+  Reasons: relative spread 0.0313%; 24h turnover 93095023.6203 USDT
+  24h change: -0.09%
+  24h range: 3.097–3.24
+12. ASTERUSDT
+  Reasons: relative spread 0.0185%; 24h turnover 75227384.0755 USDT
+  24h change: 1.33%
+  24h range: 0.481–0.7117
+13. XAGUSDT
+  Reasons: relative spread 0.0209%; 24h turnover 64834300.2193 USDT
+  24h change: 0.19%
+  24h range: 47.22–49.11
+14. 1000PEPEUSDT
+  Reasons: relative spread 0.0264%; 24h turnover 63840490.9194 USDT
+  24h change: -5.83%
+  24h range: 0.003704–0.00405
+15. EVAAUSDT
+  Reasons: relative spread 0.1134%; 24h turnover 60111044.3934 USDT
+  24h change: 62.19%
+  24h range: 2.2255–3.81
+16. LITUSDT
+  Reasons: relative spread 0.0155%; 24h turnover 57823866.7303 USDT
+  24h change: -14.59%
+  24h range: 2.322–3.0187
+17. RAREUSDT
+  Reasons: relative spread 0.1167%; 24h turnover 55287550.1669 USDT
+  24h change: 77.21%
+  24h range: 0.008435–0.016649
+18. DOGEUSDT
+  Reasons: relative spread 0.017%; 24h turnover 54715326.6169 USDT
+  24h change: -0.93%
+  24h range: 0.05805–0.06008
+19. KORUUSDT
+  Reasons: relative spread 0.1423%; 24h turnover 45076621.7658 USDT
+  24h change: -2.23%
+  24h range: 6.96–7.88
+20. SOPHUSDT
+  Reasons: relative spread 0.2162%; 24h turnover 42092005.9144 USDT
+  24h change: -29.2%
+  24h range: 0.000837–0.001742
+Excluded: NON_USDT_QUOTE=68, NON_USDT_SETTLEMENT=68, NOT_LINEAR_PERPETUAL=40
