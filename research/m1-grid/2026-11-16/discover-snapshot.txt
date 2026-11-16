@@ -1,0 +1,26 @@
+Bybit USDT linear perpetual discovery
+Command: npm run market:discover -- --result-limit 20
+As of: 2026-11-16T11:42:28.850Z
+Coverage: instruments=929, tickers=937, matched=929, eligible=821
+Requests: 2; duration: 2563 ms
+Candidate ranking transcribed from the operator output.
+1. BTCUSDT
+2. ETHUSDT
+3. SOXLUSDT
+4. SOLUSDT
+5. XRPUSDT
+6. ZECUSDT
+7. NVDAUSDT
+8. HYPEUSDT
+9. XAUUSDT
+10. AKEUSDT
+11. NEARUSDT
+12. ASTERUSDT
+13. XAGUSDT
+14. 1000PEPEUSDT
+15. EVAAUSDT
+16. LITUSDT
+17. RAREUSDT
+18. DOGEUSDT
+19. KORUUSDT
+20. SOPHUSDT
