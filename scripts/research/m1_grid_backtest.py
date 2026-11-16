@@ -260,6 +260,9 @@ def simulate(name, bars, funding, signals, start, end, split):
                 stuck += 1
                 locked += basis
                 worst = max(worst, (basis-value)/basis)
+        if reduce and t == end - HOUR and positions:
+            cash += close * sum(p[1] for p in positions) * (1 - .00105)
+            positions.clear()
         equity = cash + close*sum(p[1] for p in positions)
         curve.append(equity)
         peak = max(peak,equity)
@@ -345,12 +348,22 @@ def replay(directory):
     (directory/"results.json").write_bytes(encode(results))
     lines = ["# M1 daily grid research", "", "Historical evidence is not a profit guarantee.",
              "", "Amounts are in units of each symbol's initial allocation.",
-             "", "| Group | Variant | Net | Development | Holdout | Return | TP closes |",
-             "|---|---|---:|---:|---:|---:|---:|"]
-    for group, variants in results["pooled"].items():
-        for name,r in variants.items():
-            lines.append(f"| {group} | {name} | {r['net']:.4f} | {r['development']:.4f} | "
-                         f"{r['holdout']:.4f} | {r['return']:.2%} | {r['closed']} |")
+             "", "The REDUCE_LONG variant closes remaining exposure at the final hourly close with exit fee and slippage.",
+             "", "| Group or symbol | Variant | Net | Development | Holdout | Return | Drawdown | Fill rate | TP closes | Episodes | Median below entry (h) | Max below entry (h) | Locked capital | Worst unrealised drawdown | Funding while stuck |",
+             "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|"]
+    tables = {**results["pooled"], **{s: r["variants"] for s, r in results["symbols"].items()}}
+    for group, variants in tables.items():
+        for name, r in variants.items():
+            if r is None:
+                lines.append(f"| {group} | {name} | Incomplete |" + " |" * 12)
+                continue
+            lines.append(
+                f"| {group} | {name} | {r['net']:.4f} | {r['development']:.4f} | "
+                f"{r['holdout']:.4f} | {r.get('return', r['net']):.2%} | {r['drawdown']:.2%} | "
+                f"{r['fill_rate']:.2%} | {r['closed']} | {r['episodes']} | "
+                f"{r['median_below_hours']} | {r['max_below_hours']} | {r['locked_share']:.2%} | "
+                f"{r['worst_unrealised']:.2%} | {r['stuck_funding']:.4f} |"
+            )
     lines += ["", "## Verdicts", ""] + [f"- {n} — {v}" for n,v in results["verdicts"].items()]
     lines += ["", "Incomplete and excluded: " + (", ".join(results["incomplete"]) or "none"),
               "", "Per-symbol results, signal counts, trade logs and stuck metrics are in results.json."]
