@@ -120,9 +120,13 @@ async function run(): Promise<void> {
       process.exitCode = 0;
       return;
     }
-    console.error(
-      `DATA_UNAVAILABLE: ${error instanceof Error ? error.message : "Bybit public data could not be read."}`,
-    );
+    const detail =
+      error instanceof BybitPublicTransportError && error.retCode !== undefined
+        ? `Bybit retCode=${error.retCode}: ${error.message}`
+        : error instanceof Error
+          ? error.message
+          : "Bybit public data could not be read.";
+    console.error(`DATA_UNAVAILABLE: ${detail}`);
     process.exitCode = 1;
     return;
   }

@@ -66,7 +66,11 @@ test("discovery ranks by turnover, breaks exact ties by spread and symbol, and r
     ticker("BUSDT", { turnover24h: decimal("200"), ask: decimal("101") }),
     ticker("CUSDT", { turnover24h: decimal("200"), ask: decimal("101") }),
     ticker("DUSDT", { turnover24h: decimal("100"), ask: decimal("100.1") }),
-    ticker("EUSDT", { turnover24h: decimal("200"), ask: decimal("100.5") }),
+    ticker("EUSDT", {
+      turnover24h: decimal("200"),
+      bid: decimal("1000"),
+      ask: decimal("1002"),
+    }),
     ticker("FUSDT", { turnover24h: decimal("50"), ask: decimal("100.01") }),
   ];
   const rank = (items: typeof instruments, quotes: typeof tickers) =>
