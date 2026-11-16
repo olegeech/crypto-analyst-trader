@@ -229,6 +229,9 @@ def simulate(name, bars, funding, signals, start, end, split):
                     for p in positions:
                         cash += p[1] * .25 * opening * (1-.00105)
                         p[1] *= .75
+                    for p in [p for p in positions if p[0] * p[1] < .0025]:
+                        cash += p[1] * opening * (1 - .00105)
+                        positions.remove(p)
                 elif not positions and (not quorum or votes[0] >= quorum) and not (price_filter and upper):
                     levels = [anchor-offset*atr for offset in (.5, 1, 1.5, 2)]
                     if all(e > 0 and atr >= e*(.0002+.001+.0005+max(0.,rate))+(e+atr)*.00055
@@ -260,9 +263,6 @@ def simulate(name, bars, funding, signals, start, end, split):
                 stuck += 1
                 locked += basis
                 worst = max(worst, (basis-value)/basis)
-        if reduce and t == end - HOUR and positions:
-            cash += close * sum(p[1] for p in positions) * (1 - .00105)
-            positions.clear()
         equity = cash + close*sum(p[1] for p in positions)
         curve.append(equity)
         peak = max(peak,equity)
@@ -348,7 +348,7 @@ def replay(directory):
     (directory/"results.json").write_bytes(encode(results))
     lines = ["# M1 daily grid research", "", "Historical evidence is not a profit guarantee.",
              "", "Amounts are in units of each symbol's initial allocation.",
-             "", "The REDUCE_LONG variant closes remaining exposure at the final hourly close with exit fee and slippage.",
+             "", "After a REDUCE_LONG sale, the model closes any leg below 1% of its original allocation at the same opening price, with exit fee and slippage. The 1% cutoff is an arbitrary research assumption.",
              "", "| Group or symbol | Variant | Net | Development | Holdout | Return | Drawdown | Fill rate | TP closes | Episodes | Median below entry (h) | Max below entry (h) | Locked capital | Worst unrealised drawdown | Funding while stuck |",
              "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|"]
     tables = {**results["pooled"], **{s: r["variants"] for s, r in results["symbols"].items()}}
