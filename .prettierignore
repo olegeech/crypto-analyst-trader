@@ -1,3 +1,7 @@
 research/m1-grid/*/manifest.json
 research/m1-grid/*/results.json
 research/m1-grid/*/results.md
+research/m1-selection/*/universe.json
+research/m1-selection/*/*/manifest.json
+research/m1-selection/*/results.json
+research/m1-selection/*/results.md
