@@ -4,6 +4,7 @@ import { deepFreeze } from "../shared/deep-freeze.js";
 import type { AccountEvidenceFailureCode } from "./account-evidence-diagnostics.js";
 import {
   ACCOUNT_EVIDENCE_COLLECTION_POLICY as policy,
+  accountEvidenceCollectionPolicy,
   accountEvidencePartitionKey,
   deriveExpectedAccountEvidencePartitions,
   type AccountEvidenceEndpoint,
@@ -480,6 +481,9 @@ export function evaluateAccountEvidenceConsistency(
   const reasons = new Set<AccountEvidenceFailureCode>();
   const add = (code: AccountEvidenceFailureCode) => reasons.add(code);
   const { A, B } = payload.criticalPasses;
+  const versionedPolicy = accountEvidenceCollectionPolicy(
+    payload.policyVersion,
+  );
   // Native enum values remain facts; only supported values can establish completeness.
   const supported = (value: unknown, values: readonly unknown[]) =>
     values.includes(value);
@@ -710,7 +714,8 @@ export function evaluateAccountEvidenceConsistency(
     entry.endedAt !== null;
   for (const entry of payload.coverage) {
     if (!terminalCoverage(entry)) add("COVERAGE_INCOMPLETE");
-    if (entry.pages > policy.maxPagesPerPartition) add("PAGE_BUDGET_EXCEEDED");
+    if (entry.pages > versionedPolicy.maxPagesPerPartition)
+      add("PAGE_BUDGET_EXCEEDED");
     const obs = observationByPartition.get(
       accountEvidencePartitionKey(entry.partition),
     );
@@ -830,7 +835,7 @@ export function evaluateAccountEvidenceConsistency(
       Date.parse(cutoff) > Date.parse(end) ||
       window.endedAt !== cutoff ||
       Date.parse(cutoff) - Date.parse(window.startedAt) !==
-        policy.historyWindowMs
+        versionedPolicy.historyWindowMs
     )
       add("INVALID_RESPONSE");
     if (
@@ -884,12 +889,13 @@ export function evaluateAccountEvidenceConsistency(
       add("CONTRADICTORY_OBSERVATION");
   }
   const budget = payload.budget;
-  if (budget.monotonicDurationMs > policy.maxCollectionDurationMs)
+  if (budget.monotonicDurationMs > versionedPolicy.maxCollectionDurationMs)
     add("COLLECTION_DEADLINE_EXCEEDED");
-  if (budget.httpAttempts > policy.maxHttpAttempts)
+  if (budget.httpAttempts > versionedPolicy.maxHttpAttempts)
     add("ATTEMPT_BUDGET_EXCEEDED");
-  if (budget.retainedRows > policy.maxRetainedRows) add("ROW_BUDGET_EXCEEDED");
-  if (budget.maxObservedResponseBytes > policy.maxResponseBytes)
+  if (budget.retainedRows > versionedPolicy.maxRetainedRows)
+    add("ROW_BUDGET_EXCEEDED");
+  if (budget.maxObservedResponseBytes > versionedPolicy.maxResponseBytes)
     add("RESPONSE_BYTE_LIMIT_EXCEEDED");
   if (
     budget.httpAttempts <
@@ -897,7 +903,7 @@ export function evaluateAccountEvidenceConsistency(
   )
     add("COVERAGE_INCOMPLETE");
   const rows = countAccountEvidenceRows(payload);
-  if (budget.retainedRows < rows || rows > policy.maxRetainedRows)
+  if (budget.retainedRows < rows || rows > versionedPolicy.maxRetainedRows)
     add("ROW_BUDGET_EXCEEDED");
   for (const diagnostic of payload.diagnostics)
     if (diagnostic.severity === "error") add(diagnostic.code);

@@ -107,11 +107,11 @@ test("deadline before vs after identity keeps the result discriminator truthful"
     let elapsed = 0;
     const read = port();
     read.readIdentity = async () => {
-      if (!after) elapsed = 30001;
+      if (!after) elapsed = 90001;
       return identity;
     };
     read.readExchangeTime = async () => {
-      elapsed = 30001;
+      elapsed = 90001;
       return start;
     };
     const result = await collectAccountEvidence({
@@ -343,22 +343,37 @@ test("missing tiers retains account facts and incomplete verdict", async () => {
   );
 });
 
-test("deadline mid critical pass preserves already mapped account and wallet facts", async () => {
-  let elapsed = 0;
-  const { options } = scriptedOptions((path) => {
-    if (path === "/v5/account/collateral-info") elapsed = 30001;
-  });
-  const result = await collectAccountEvidence({
-    ...options,
-    monotonicClock: () => elapsed,
-  });
-  assert.equal(result.kind, "account-evidence");
-  if (result.kind !== "account-evidence") return;
-  assert.equal(result.bundle.collectionStatus, "incomplete");
-  assert.equal(
-    result.bundle.criticalPasses.A?.account.utaStatus.state,
-    "known",
-  );
+test("collection can finish after the v2 deadline and fails closed after the v3 deadline", async () => {
+  for (const [duration, expected] of [
+    [40_001, "complete"],
+    [90_001, "incomplete"],
+  ] as const) {
+    let elapsed = 0;
+    const { options } = scriptedOptions((path) => {
+      if (path === "/v5/account/collateral-info") elapsed = duration;
+    });
+    const result = await collectAccountEvidence({
+      ...options,
+      monotonicClock: () => elapsed,
+    });
+    assert.equal(result.kind, "account-evidence");
+    if (result.kind !== "account-evidence") continue;
+    assert.equal(
+      result.bundle.policyVersion,
+      "account-evidence-collection-policy/v3",
+    );
+    assert.equal(result.bundle.collectionStatus, expected);
+    assert.equal(
+      result.bundle.criticalPasses.A?.account.utaStatus.state,
+      "known",
+    );
+    assert.equal(
+      result.bundle.consistency.reasonCodes.includes(
+        "COLLECTION_DEADLINE_EXCEEDED",
+      ),
+      expected === "incomplete",
+    );
+  }
 });
 
 test("account-wide scopes retain USDC, inverse manual orders and two same-time ETH option fills", async () => {
