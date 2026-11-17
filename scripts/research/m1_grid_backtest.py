@@ -68,14 +68,21 @@ def sha(data):
     return hashlib.sha256(data).hexdigest()
 
 
-def fetch(directory):
-    snapshot = (directory / "discover-snapshot.txt").read_bytes()
-    symbols = re.findall(rb"^\d+\. (\w+)$", snapshot, re.M)
-    end_date = datetime.fromisoformat(directory.name).replace(tzinfo=timezone.utc)
-    start_date = end_date.replace(year=end_date.year - 2)
+def fetch(directory, period=None, launches=None):
+    snapshot_dir = directory.parent if period else directory
+    snapshot = (snapshot_dir / "discover-snapshot.txt").read_bytes()
+    if period:
+        symbols = period["symbols"]
+        start_date, end_date = (datetime.fromisoformat(period[key]).replace(tzinfo=timezone.utc)
+                                for key in ("start", "end"))
+    else:
+        symbols = [s.decode() for s in re.findall(rb"^\d+\. (\w+)$", snapshot, re.M)]
+        end_date = datetime.fromisoformat(directory.name).replace(tzinfo=timezone.utc)
+        start_date = end_date.replace(year=end_date.year - 2)
     start, end = (int(d.timestamp() * 1000) for d in (start_date, end_date))
-    metadata = request("instruments-info", {"category": "linear", "limit": 1000})
-    launches = {row["symbol"]: int(row["launchTime"]) for row in metadata["list"]}
+    if launches is None:
+        metadata = request("instruments-info", {"category": "linear", "limit": 1000})
+        launches = {row["symbol"]: int(row["launchTime"]) for row in metadata["list"]}
     manifest = {"origin": ORIGIN, "start_ms": start, "end_exclusive_ms": end,
                 "snapshot_sha256": sha(snapshot), "symbols": {},
                 "queries": {"metadata": {"category": "linear", "limit": 1000},
@@ -86,8 +93,7 @@ def fetch(directory):
     with temporary.open("wb") as raw, gzip.GzipFile(fileobj=raw, mode="wb", mtime=0,
                                                   filename="") as compressed:
         with tarfile.open(fileobj=compressed, mode="w|") as archive:
-            for symbol_bytes in symbols:
-                symbol = symbol_bytes.decode()
+            for symbol in symbols:
                 launch = launches[symbol]
                 lower = max(start - 45 * DAY, launch // HOUR * HOUR)
                 entry = {"launch_ms": launch, "fetch_start_ms": lower,
@@ -370,6 +376,201 @@ def replay(directory):
     (directory/"results.md").write_text("\n".join(lines)+"\n")
 
 
+def freeze_universe(directory):
+    def ranks(path):
+        return re.findall(r"^\d+\. (\w+)$", path.read_text(), re.M)
+
+    ranked = ranks(directory / "discover-snapshot.txt")
+    reference_all = ranks(Path("research/m1-grid/2026-11-16/discover-snapshot.txt"))
+    metadata = request("instruments-info", {"category": "linear", "limit": 1000})
+    instruments = {item["symbol"]: item for item in metadata["list"]}
+    order = list(dict.fromkeys(ranked + reference_all))
+    excluded = {}
+    for symbol in order:
+        kind = instruments[symbol]["symbolType"]
+        if kind.lower() in {"stock", "etf", "commodity", "forex", "index"}:
+            excluded[symbol] = kind
+        elif symbol in {"PAXGUSDT", "XAUTUSDT"}:
+            excluded[symbol] = "tokenised gold"
+        elif symbol in {"USDCUSDT", "USDEUSDT", "USDDUSDT", "DAIUSDT", "USD1USDT",
+                        "RLUSDUSDT", "FDUSDUSDT", "TUSDUSDT", "USDSUSDT", "USDFUSDT"}:
+            excluded[symbol] = "stablecoin pair"
+    reference = [s for s in order if s in reference_all and s not in excluded]
+    other = [s for s in ranked if s not in reference_all and s not in excluded][:20]
+    launches = {s: int(instruments[s]["launchTime"]) for s in order}
+    a_end = int(datetime(2024, 11, 16, tzinfo=timezone.utc).timestamp()*1000)
+    earlier = [s for s in order if s in reference + other
+               and (launches[s] + 1000*HOUR + DAY - 1)//DAY*DAY < a_end]
+    return {"slot_order": order, "exclusions": excluded, "launches": launches,
+            "set-a": {"start": "2022-11-16", "end": "2024-11-16", "symbols": earlier},
+            "set-b": {"start": "2024-11-16", "end": "2026-11-16", "symbols": other},
+            "reference": {"start": "2024-11-16", "end": "2026-11-16", "symbols": reference}}
+
+
+def fetch_selection(directory):
+    path = directory / "universe.json"
+    if not path.exists():
+        path.write_bytes(encode(freeze_universe(directory)))
+    universe = json.loads(path.read_text())
+    for name in ("set-a", "set-b"):
+        target = directory / name
+        target.mkdir(exist_ok=True)
+        if not (target / "manifest.json").exists():
+            fetch(target, universe[name], universe["launches"])
+
+
+def selection_data(directory, symbols):
+    manifest = json.loads((directory / "manifest.json").read_text())
+    start, end = manifest["start_ms"], manifest["end_exclusive_ms"]
+    data = {}
+    with tarfile.open(directory / "archive.tar.gz", "r:gz") as archive:
+        for symbol in symbols:
+            entry = manifest["symbols"][symbol]
+
+            def read(kind):
+                return json.load(archive.extractfile(entry["series"][kind]["file"]))
+
+            bars = {int(r[0]): tuple(map(float, r[1:5])) for r in read("kline")}
+            oi = {int(r["timestamp"]): float(r["openInterest"]) for r in read("oi")}
+            rates = {int(r["fundingRateTimestamp"]): float(r["fundingRate"])
+                     for r in read("funding")}
+            data[symbol] = bars, rates, decisions(bars, oi, rates, start, end, entry["launch_ms"])
+    return start, end, data
+
+
+def portfolio(start, end, data, ranking, slots):
+    active = {}
+    contributions = dict.fromkeys(ranking, 0.0)
+    cash = peak = 1.0
+    drawdown = deployed = 0.0
+    missed = below = closed = missing = 0
+    final_values = {}
+    for t in range(start, end, HOUR):
+        if t % DAY == 0:
+            active = {s: cycle for s, cycle in active.items() if cycle[1]}
+            blocked = False
+            for symbol in ranking:
+                if symbol in active:
+                    continue
+                bars, _, signals = data[symbol]
+                if t not in signals:
+                    continue
+                signal = signals[t]
+                if signal is None or signal[3] is None or t not in bars:
+                    missing += 1
+                    continue
+                anchor, atr, rate, votes, _ = signal
+                if votes[0] != 3:
+                    continue
+                levels = [anchor - offset * atr for offset in (.5, 1, 1.5, 2)]
+                if not all(e > 0 and atr >= e*(.0002+.001+.0005+max(0.,rate))+(e+atr)*.00055
+                           for e in levels):
+                    continue
+                if len(active) == slots:
+                    blocked = True
+                    continue
+                active[symbol] = ([(e, .25 / slots / e, e + atr) for e in levels], [])
+            missed += blocked
+        values = {}
+        for symbol, (orders, positions) in active.items():
+            bars, rates, _ = data[symbol]
+            if not orders and not positions:
+                continue
+            if t not in bars:
+                return {"incomplete": {"symbol": symbol, "hour_ms": t}}
+            opening, high, low, close = bars[t]
+            delta = -sum(p[1] for p in positions) * opening * rates.get(t, 0)
+            for p in positions[:]:
+                entry, qty, target, opened = p
+                if t > opened and high >= target:
+                    delta += qty * target * (1 - .00105)
+                    positions.remove(p)
+                    closed += 1
+            for order in orders[:]:
+                entry, qty, target = order
+                if low < entry:
+                    delta -= entry * qty * 1.0002
+                    positions.append((entry, qty, target, t))
+                    orders.remove(order)
+            cash += delta
+            contributions[symbol] += delta
+            basis = sum(p[0] * p[1] for p in positions)
+            value = close * sum(p[1] for p in positions)
+            deployed += basis
+            below += value < basis
+            values[symbol] = value
+        final_values = values
+        equity = cash + sum(values.values())
+        peak = max(peak, equity)
+        drawdown = max(drawdown, (peak - equity) / peak)
+    for symbol, value in final_values.items():
+        contributions[symbol] += value
+    return {"return": equity - 1, "drawdown": drawdown, "closed": closed,
+            "capital_in_use": deployed / ((end - start) / HOUR),
+            "missed_signal_days": missed, "below_entry_slot_hours": below,
+            "missing_decisions": missing, "contributions": contributions}
+
+
+def replay_selection(directory):
+    universe = json.loads((directory / "universe.json").read_text())
+    reference = Path("research/m1-grid/2026-11-16")
+    fixed = ("BTCUSDT", "ETHUSDT", "SOLUSDT", "DOGEUSDT")
+    original = list(json.loads((reference / "manifest.json").read_text())["symbols"])
+    ref_data = selection_data(reference, original)
+    order = universe["slot_order"]
+    results = {}
+    for name in ("set-a", "set-b", "reference"):
+        symbols = universe[name]["symbols"]
+        start, end, data = (ref_data if name == "reference" else
+                            selection_data(directory / name, symbols))
+        ranking = [s for s in order if s in symbols]
+        baseline = data if name == "set-a" else ref_data[2]
+        rows = results[name] = {
+            "three": portfolio(start, end, data, ranking, 3),
+            "five": portfolio(start, end, data, ranking, 5),
+            "fixed": portfolio(start, end, baseline, fixed, 4),
+        }
+        if name == "reference":
+            rows["with_excluded"] = portfolio(start, end, data,
+                                               [s for s in order if s in original], 3)
+        elif "incomplete" not in rows["three"]:
+            contributions = rows["three"]["contributions"]
+            best = max(ranking, key=contributions.__getitem__)
+            rows["without_best"] = portfolio(start, end, data, [s for s in ranking if s != best], 3)
+            rows["without_best"]["excluded_symbol"] = best
+
+    rows = [results[name] for name in ("set-a", "set-b")]
+    if any("without_best" not in r or any("incomplete" in r[key]
+           for key in ("fixed", "three", "without_best")) for r in rows):
+        verdict = "retest — incomplete evidence"
+    elif any(r["three"]["closed"] < 30 for r in rows):
+        verdict = "retest — fewer than 30 take-profit closes"
+    elif all(min(r["three"]["return"], r["without_best"]["return"])
+             > max(0, r["fixed"]["return"]) for r in rows):
+        verdict = "adopt — both sets beat baseline before and after excluding their best contributor"
+    else:
+        verdict = "reject — no demonstrably better selector yet"
+    (directory / "results.json").write_bytes(encode({"sets": results, "verdict": verdict}))
+    lines = ["# M1 shared capital research", "", f"**{verdict}**", "",
+             "| Set | Variant | Return | Drawdown | TP closes | Capital in use | Missed-signal days | Slot-hours below entry |",
+             "|---|---|---:|---:|---:|---:|---:|---:|"]
+    for name, variants in results.items():
+        for label, row in variants.items():
+            if "excluded_symbol" in row:
+                label += " (" + row["excluded_symbol"] + ")"
+            if "incomplete" in row:
+                lines.append(f"| {name} | {label} | Incomplete ({row['incomplete']['symbol']}) | | | | | |")
+            else:
+                lines.append(f"| {name} | {label} | {row['return']:.2%} | {row['drawdown']:.2%} | "
+                             f"{row['closed']} | {row['capital_in_use']:.2%} | "
+                             f"{row['missed_signal_days']} | {row['below_entry_slot_hours']} |")
+    lines += ["", "The snapshot applies current turnover leaders and their rank to past markets. "
+              "This bias is stronger in set A, which also has fewer eligible instruments during the period. "
+              "Set B covers the reference period on different instruments. The strict quorum was selected after #163. "
+              "The #163 signal and hourly fill approximations still apply. Historical evidence is not a profit guarantee."]
+    (directory / "results.md").write_text("\n".join(lines) + "\n")
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     mode = parser.add_mutually_exclusive_group(required=True)
@@ -377,6 +578,12 @@ if __name__ == "__main__":
     mode.add_argument("--replay", type=Path, metavar="DIRECTORY")
     args = parser.parse_args()
     if args.fetch:
-        fetch(args.fetch)
+        if args.fetch.parent.name == "m1-selection":
+            fetch_selection(args.fetch)
+        else:
+            fetch(args.fetch)
     else:
-        replay(args.replay)
+        if args.replay.parent.name == "m1-selection":
+            replay_selection(args.replay)
+        else:
+            replay(args.replay)
