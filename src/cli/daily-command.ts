@@ -1,5 +1,5 @@
 import type { AccountEvidenceEnvironment } from "../domain/account/account-evidence-bundle.js";
-import { createProvisionalM1Composition } from "../application/policies/provisional-m1.js";
+import { createProvisionalM1V2Composition } from "../application/policies/provisional-m1.js";
 import type { DailyPrepareResult } from "../application/daily-prepare.js";
 import type { PreparedDailyPlan } from "../domain/review/prepared-daily-plan.js";
 import { summarizePreparedShadowContext } from "../domain/review/prepared-shadow-context.js";
@@ -70,7 +70,7 @@ export function parseDailyArguments(
     if (
       !symbol ||
       !allocation ||
-      !createProvisionalM1Composition({ symbol, allocation }).ok
+      !createProvisionalM1V2Composition({ symbol, allocation }).ok
     )
       return invalid();
     return ok({ kind, environment: env, symbol, allocation });

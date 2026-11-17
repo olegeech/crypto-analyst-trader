@@ -179,11 +179,19 @@ export function dailyPrepareLiquidationV2(market: MarketEvidenceBundle) {
   return { bundle, artifact, evidence };
 }
 
+export type DailyPrepareLiquidationMode =
+  | "complete"
+  | "zero"
+  | "missing"
+  | "missing-outside-window"
+  | "invalid-response"
+  | "invalid-catalogue";
+
 /** Trusted M1-scoped v3 evidence fixture used by the released daily path. */
 export function dailyPrepareLiquidationV3(
   market: MarketEvidenceBundle,
   selectedAsset: (typeof LIQUIDATION_EVIDENCE_ASSETS)[number],
-  mode: "complete" | "zero" | "missing" | "invalid-response" = "complete",
+  mode: DailyPrepareLiquidationMode = "complete",
 ) {
   const cutoffMs = Date.parse(market.bundleCutoff);
   const expireAt = 0;
@@ -204,43 +212,51 @@ export function dailyPrepareLiquidationV3(
     selectDecisionLiquidationMarkets({
       asset: selectedAsset,
       markets: catalogueMarkets,
-      catalogueComplete: true,
+      catalogueComplete: mode !== "invalid-catalogue",
       cutoffMs,
     }),
   );
   const expected = liquidationHistoryWindow(cutoffMs).epochs;
-  const missingIndex = 20;
+  const missingIndex = mode === "missing-outside-window" ? 0 : 20;
+  const hasMissingBucket =
+    mode === "missing" || mode === "missing-outside-window";
   const missingBucket = expected[missingIndex];
   const observations = expected
     .map((epoch, index) => ({ epoch, index }))
-    .filter(({ index }) => mode !== "missing" || index !== missingIndex)
+    .filter(({ index }) => !hasMissingBucket || index !== missingIndex)
     .map(({ epoch }) => ({
       timestamp: new Date(epoch).toISOString(),
       longUsd: mode === "zero" ? "0" : "10",
       shortUsd: mode === "zero" ? "0" : "20",
       provenance: "provider-explicit" as const,
     }));
-  const diagnostics =
-    mode === "missing"
+  const diagnostics = hasMissingBucket
+    ? [
+        {
+          code: "missing-bucket" as const,
+          operation: "fetch-liquidation-history" as const,
+          asset: selectedAsset,
+          providerSymbol: `${selectedAsset}USDT_PERP.BYBIT`,
+          bucketTimestamp:
+            missingBucket === undefined
+              ? undefined
+              : new Date(missingBucket).toISOString(),
+        },
+      ]
+    : mode === "invalid-response"
       ? [
           {
-            code: "missing-bucket" as const,
+            code: "rate-limited" as const,
             operation: "fetch-liquidation-history" as const,
             asset: selectedAsset,
             providerSymbol: `${selectedAsset}USDT_PERP.BYBIT`,
-            bucketTimestamp:
-              missingBucket === undefined
-                ? undefined
-                : new Date(missingBucket).toISOString(),
           },
         ]
-      : mode === "invalid-response"
+      : mode === "invalid-catalogue"
         ? [
             {
-              code: "rate-limited" as const,
-              operation: "fetch-liquidation-history" as const,
-              asset: selectedAsset,
-              providerSymbol: `${selectedAsset}USDT_PERP.BYBIT`,
+              code: "invalid-catalogue" as const,
+              operation: "discover-markets" as const,
             },
           ]
         : [];

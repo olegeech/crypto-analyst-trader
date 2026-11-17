@@ -197,6 +197,10 @@ export function prepareDailyPlanningInputs(
     if (selector.source === "ticker") {
       usable = selector.symbol === input.symbol;
       value = symbol!.ticker![selector.field];
+    } else if (selector.source === "funding-history") {
+      const settlement = symbol!.funding.at(-1);
+      usable = selector.symbol === input.symbol && settlement !== undefined;
+      value = settlement?.rate;
     } else if (selector.source === "native") {
       const row = outcomesByRequest.get(selector.requestId);
       const role = `analytics:${String(selector.requestId)}`;
@@ -226,7 +230,9 @@ export function prepareDailyPlanningInputs(
         accepted(role, analyticsValue.contentHash);
       if (row?.kind === "liquidation-window")
         usable =
-          usable && disposition("liquidation")?.disposition === "accepted";
+          usable &&
+          row.status === "complete" &&
+          disposition("liquidation")?.disposition === "accepted";
       value = selectedField(row?.value, String(selector.field));
     } else if (selector.source === "external") {
       const row = analyticsValue.externalEvidence.find(

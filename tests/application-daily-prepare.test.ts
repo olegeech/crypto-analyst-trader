@@ -17,7 +17,10 @@ import { domainError } from "../src/domain/shared/errors.js";
 import { parseUtcTimestamp } from "../src/domain/shared/time.js";
 import type { ExchangeCredentials } from "../src/ports/credential-provider.js";
 import type { ShadowMarketReport } from "../src/domain/review/shadow-market-report.js";
-import { marketFixture } from "./fixtures/data-quality-fixtures.js";
+import {
+  fixtureDecimal,
+  marketFixture,
+} from "./fixtures/data-quality-fixtures.js";
 import { requireDailyFixture as value } from "./fixtures/daily-planning-evidence-fixtures.js";
 import {
   dailyPrepareLiquidationV2,
@@ -30,6 +33,7 @@ import {
   dailyPrepareIdentity,
   dailyPrepareLiquidationV3,
   dailyPrepareMarket,
+  type DailyPrepareLiquidationMode,
 } from "./fixtures/daily-prepare-fixtures.js";
 import type { LiquidationTargetAsset } from "../src/domain/liquidation/liquidation-evidence-bundle.js";
 
@@ -43,12 +47,13 @@ function rehash(raw: Record<string, unknown>) {
 
 function setup(
   options: {
-    liquidation?: "complete" | "missing" | "zero" | "invalid-response";
+    liquidation?: DailyPrepareLiquidationMode;
     liquidationAsset?: LiquidationTargetAsset;
     liquidationSchema?: "v2" | "v3";
     target?: "flat" | "long" | "order" | "absent";
     providerTime?: string;
     staleTicker?: boolean;
+    positiveSettlement?: boolean;
     planningTime?: string;
     preAuth?: boolean;
     slowPublic?: boolean;
@@ -75,7 +80,24 @@ function setup(
     collectMarket: async (runId) => {
       events.push("market");
       explode("market");
-      const market = dailyPrepareMarket(runId);
+      const base = dailyPrepareMarket(runId);
+      const market = marketFixture({
+        ...base,
+        symbols: base.symbols.map((row) => ({
+          ...row,
+          ticker: { ...row.ticker!, fundingRate: fixtureDecimal("0.0001") },
+          funding: row.funding.map((observation, index) =>
+            index === row.funding.length - 1
+              ? {
+                  ...observation,
+                  rate: fixtureDecimal(
+                    options.positiveSettlement ? "0.0001" : "-0.0001",
+                  ),
+                }
+              : observation,
+          ),
+        })),
+      });
       return ok(
         options.staleTicker
           ? marketFixture({
@@ -405,13 +427,24 @@ test("invalid input and caller authority overrides are rejected before any provi
 });
 
 for (const liquidation of ["missing", "zero", "invalid-response"] as const)
-  test(`${liquidation} liquidation cannot fabricate required imbalance or reach account providers`, async () => {
+  test(`${liquidation} liquidation never supplies an imbalance vote`, async () => {
     const s = setup({ liquidation });
     const result = await s.boundary.prepare(input);
-    assert.equal(result.kind, "blocked", JSON.stringify(result));
-    assert.deepEqual(s.events, ["market", "liquidation"]);
-    assert.equal(s.saved.length, 0);
-    assert.ok(result.reasonCodes.length > 0);
+    assert.equal(result.kind, "prepared", result.kind);
+    if (result.kind !== "prepared") return;
+    assert.equal(
+      result.prepared.state,
+      liquidation === "zero" ? "READY_FOR_APPROVAL" : "REVIEW",
+    );
+    assert.deepEqual(
+      result.prepared.summary.selectorObservations.find(
+        (row) => row.selectorId === "liquidation-12h",
+      ),
+      {
+        selectorId: "liquidation-12h",
+        status: liquidation === "zero" ? "absent" : "unavailable",
+      },
+    );
     assert.equal(
       result.diagnostics.resolvedHourlyBuckets,
       liquidation === "missing" ? 23 : 24,
@@ -605,25 +638,137 @@ test("planning refusal keeps blocked readiness and saves a separate shadow repor
   assert.equal(s.loads, 0);
 });
 
-test("incomplete liquidation history stays blocked while a public shadow report is saved", async () => {
+test("incomplete history saves a replayable REVIEW using the last settled funding rate", async () => {
   const s = setup({ liquidation: "missing" });
   const result = await s.boundary.prepare(input);
-  assert.equal(result.kind, "blocked", JSON.stringify(result));
-  if (result.kind !== "blocked") return;
-  assert.equal(result.stage, "planning");
-  assert.equal(result.diagnostics.liquidationStatus, "incomplete");
-  assert.equal(result.diagnostics.historyProof, "incomplete");
-  assert.equal(result.diagnostics.exchangeWrites, 0);
-  assert.equal(result.diagnostics.executionAuthority, "none");
-  assert.equal(s.saved.length, 0);
-  assert.equal(s.savedShadowReports.length, 1);
-  assert.ok(!s.events.includes("account"));
-  assert.ok(!s.events.includes("credentials"));
-  assert.ok(!s.events.includes("risk-reader"));
+  assert.equal(result.kind, "prepared");
+  if (result.kind !== "prepared") return;
+  const { prepared, diagnostics } = result;
+  assert.equal(prepared.state, "REVIEW");
+  assert.equal(prepared.summary.policies.decisionVersion, "provisional-m1-v2");
+  assert.equal(prepared.summary.settledFunding?.rate.toString(), "-0.0001");
   assert.equal(
-    result.diagnostics.shadowReportHash,
+    prepared.summary.settledFunding?.timestamp,
+    "2026-09-24T14:00:00.000Z",
+  );
+  assert.equal(
+    prepared.summary.selectorObservations
+      .find((row) => row.selectorId === "funding")
+      ?.value?.toString(),
+    "-0.0001",
+  );
+  assert.deepEqual(
+    [
+      ...new Set(prepared.summary.quality.findings.map((row) => row.role)),
+    ].sort(),
+    ["analytics:liquidation-12h", "liquidation"],
+  );
+  assert.equal(prepared.summary.quality.evidenceConfidence?.toString(), "75");
+  assert.equal(prepared.summary.decision.recommendation, "ADD_LONG");
+  assert.equal(prepared.summary.decision.addWeightedSupport.toString(), "75");
+  assert.equal(diagnostics.liquidationStatus, "incomplete");
+  assert.equal(diagnostics.historyProof, "incomplete");
+  assert.equal(diagnostics.exchangeWrites, 0);
+  assert.equal(diagnostics.executionAuthority, "none");
+  assert.equal(s.saved.length, 1);
+  assert.equal(
+    value(rehydratePreparedDailyPlan(s.saved[0])).contentHash,
+    prepared.contentHash,
+  );
+  assert.equal(
+    diagnostics.shadowReportHash,
     s.savedShadowReports[0]?.contentHash,
   );
+});
+
+test("two trend votes need either derivatives agreement or a complete liquidation vote", async () => {
+  for (const liquidation of [
+    "missing",
+    "missing-outside-window",
+    "complete",
+  ] as const) {
+    const result = await setup({
+      liquidation,
+      positiveSettlement: true,
+    }).boundary.prepare(input);
+    assert.equal(result.kind, "prepared");
+    if (result.kind !== "prepared") continue;
+    assert.equal(
+      result.prepared.summary.decision.recommendation,
+      liquidation === "missing" ? "HOLD_LONG" : "ADD_LONG",
+    );
+    assert.equal(
+      result.prepared.summary.decision.addWeightedSupport.toString(),
+      liquidation === "missing" ? "50" : "75",
+    );
+    assert.equal(
+      result.prepared.state,
+      liquidation === "complete" ? "READY_FOR_APPROVAL" : "REVIEW",
+    );
+  }
+});
+
+test("an invalid liquidation catalogue remains blocking", async () => {
+  const { boundary, events, saved } = setup({
+    liquidation: "invalid-catalogue",
+  });
+  const result = await boundary.prepare(input);
+  assert.equal(result.kind, "blocked");
+  assert.ok(!events.includes("account"));
+  assert.equal(saved.length, 0);
+});
+
+test("an incomplete market bundle still blocks v2 when ATR or OI history is missing", async () => {
+  for (const missing of ["atr", "oi"] as const) {
+    const { deps, events, saved } = setup();
+    const result = await createDailyPrepareBoundary({
+      ...deps,
+      collectMarket: async (runId) => {
+        events.push("market");
+        const market = dailyPrepareMarket(runId);
+        return ok(
+          marketFixture({
+            ...market,
+            status: "incomplete",
+            symbols: market.symbols.map((row) =>
+              row.symbol !== "BTCUSDT"
+                ? row
+                : {
+                    ...row,
+                    ...(missing === "atr"
+                      ? {
+                          ohlcv: row.ohlcv.filter(
+                            (series) => series.interval !== "4h",
+                          ),
+                        }
+                      : {
+                          openInterest: row.openInterest.filter(
+                            (series) => series.interval !== "1h",
+                          ),
+                        }),
+                  },
+            ),
+          }),
+        );
+      },
+    }).prepare(input);
+    assert.equal(result.kind, "blocked");
+    assert.ok(!events.includes("account"));
+    assert.equal(saved.length, 0);
+  }
+});
+
+test("a failed liquidation collection stays unavailable before account reads", async () => {
+  const { deps, events, saved } = setup();
+  const result = await createDailyPrepareBoundary({
+    ...deps,
+    collectLiquidation: async () =>
+      fail(domainError("INVALID_VALUE", "provider unavailable")),
+  }).prepare(input);
+  assert.equal(result.kind, "unavailable");
+  assert.deepEqual(result.reasonCodes, ["LIQUIDATION_COLLECTION_UNAVAILABLE"]);
+  assert.deepEqual(events, ["market"]);
+  assert.equal(saved.length, 0);
 });
 
 test("shadow report open/save failure leaves native prepared decisions unchanged and prints separate readiness", async () => {
@@ -662,9 +807,9 @@ test("shadow report open/save failure leaves native prepared decisions unchanged
     assert.equal(closes, failureMode === "save" ? 1 : 0);
   }
 
-  const blocked = await setup({ liquidation: "missing" }).boundary.prepare(
-    input,
-  );
+  const blocked = await setup({
+    planningTime: "2026-09-24T14:10:00.000Z",
+  }).boundary.prepare(input);
   assert.equal(blocked.kind, "blocked");
   if (blocked.kind !== "blocked") return;
   const output: string[] = [];
@@ -691,9 +836,7 @@ test("shadow report open/save failure leaves native prepared decisions unchanged
     },
   );
   assert.equal(exitCode, 5);
-  assert.match(output[0] ?? "", /Market Intelligence: partial/u);
-  assert.match(output[0] ?? "", /GAPPED_WINDOW/u);
-  assert.match(output[0] ?? "", /INCOMPLETE_LIQUIDATION_HISTORY/u);
+  assert.match(output[0] ?? "", /Market Intelligence:/u);
   assert.match(output[1] ?? "", /SHADOW_REPORT_HASH: sha256:/u);
   assert.match(output[0] ?? "", /Trading Readiness: BLOCKED/u);
   assert.match(output.join("\n"), /native reason codes: .*QUALITY_BLOCKED/u);

@@ -29,6 +29,7 @@ const M1_ASSET_BY_SYMBOL = Object.freeze({
 } as const satisfies Record<string, LiquidationTargetAsset>);
 
 export const PROVISIONAL_M1_POLICY_VERSION = "provisional-m1-v1" as const;
+const PROVISIONAL_M1_V2_POLICY_VERSION = "provisional-m1-v2" as const;
 export const PROVISIONAL_M1_MAX_ACCOUNT_EVIDENCE_AGE_MS = 60_000 as const;
 export const PROVISIONAL_M1_EXTERNAL_AVAILABILITY = deepFreeze(
   (
@@ -43,6 +44,18 @@ export const PROVISIONAL_M1_EXTERNAL_AVAILABILITY = deepFreeze(
 
 /** Application authority: only symbol/allocation are caller inputs; no policy overrides. */
 export function createProvisionalM1Composition(input: unknown) {
+  return buildProvisionalM1Composition(input, PROVISIONAL_M1_POLICY_VERSION);
+}
+
+export function createProvisionalM1V2Composition(input: unknown) {
+  return buildProvisionalM1Composition(input, PROVISIONAL_M1_V2_POLICY_VERSION);
+}
+
+function buildProvisionalM1Composition<
+  Version extends
+    | typeof PROVISIONAL_M1_POLICY_VERSION
+    | typeof PROVISIONAL_M1_V2_POLICY_VERSION,
+>(input: unknown, version: Version) {
   if (
     !closedRecord(input, ["symbol", "allocation"]) ||
     !isPlanningSymbol(input.symbol) ||
@@ -67,7 +80,7 @@ export function createProvisionalM1Composition(input: unknown) {
   }
   const symbol = input.symbol;
   const asset = M1_ASSET_BY_SYMBOL[symbol];
-  const version = PROVISIONAL_M1_POLICY_VERSION;
+  const liquidationRequired = version === PROVISIONAL_M1_POLICY_VERSION;
   const analyticsProfile = createAnalyticsProfile({
     schemaVersion: "analytics-profile/v1",
     features: [
@@ -100,7 +113,7 @@ export function createProvisionalM1Composition(input: unknown) {
         kind: "liquidation-window",
         asset,
         windowHours: 12,
-        required: true,
+        required: liquidationRequired,
       },
       {
         id: "atr-4h",
@@ -116,8 +129,12 @@ export function createProvisionalM1Composition(input: unknown) {
   if (!analyticsProfile.ok) return analyticsProfile;
   const qualityProfile = createQualityProfile({
     schemaVersion: "quality-profile/v1",
-    profileVersion: "provisional-m1-quality/v2",
-    liquidationHistoryScope: "requested-feature-windows/v1",
+    profileVersion: liquidationRequired
+      ? "provisional-m1-quality/v2"
+      : "provisional-m1-quality/v3",
+    ...(liquidationRequired
+      ? { liquidationHistoryScope: "requested-feature-windows/v1" }
+      : {}),
     roles: [
       "market",
       "analytics",
@@ -125,10 +142,29 @@ export function createProvisionalM1Composition(input: unknown) {
       ...analyticsProfile.value.features.map((f) =>
         qualityRoleForOutcome(f.id),
       ),
-    ].map((id) => ({ id, required: true, maxAgeMs: 300000 })),
+    ].map((id) => ({
+      id,
+      required:
+        liquidationRequired ||
+        (id !== "liquidation" &&
+          id !== qualityRoleForOutcome("liquidation-12h")),
+      maxAgeMs: 300000,
+    })),
     metadataSkewMs: 1000,
     trust: [],
-    penalties: [],
+    penalties: liquidationRequired
+      ? []
+      : [
+          "INCOMPLETE_LIQUIDATION_COVERAGE",
+          "INCOMPLETE_LIQUIDATION_HISTORY",
+          "GAPPED_WINDOW",
+          "PARTIAL_ANALYTICS",
+          "UNAVAILABLE_ANALYTICS",
+        ].map((reasonCode) => ({
+          reasonCode,
+          confidenceImpactGroup: "liquidations",
+          penalty: "25",
+        })),
   });
   if (!qualityProfile.ok) return qualityProfile;
   const qualityProfileHash = hashQualityProfile(qualityProfile.value);
@@ -185,13 +221,14 @@ export function createProvisionalM1Composition(input: unknown) {
         kind: "liquidation-window",
         field: "imbalance",
         asset,
-        required: true,
+        required: liquidationRequired,
       },
       {
         id: "funding",
-        source: "ticker",
+        ...(liquidationRequired
+          ? { source: "ticker", field: "fundingRate" }
+          : { source: "funding-history", field: "lastSettledRate" }),
         symbol,
-        field: "fundingRate",
         required: true,
       },
     ],
@@ -291,5 +328,10 @@ export function createProvisionalM1Composition(input: unknown) {
 
 export type ProvisionalM1Composition = Extract<
   ReturnType<typeof createProvisionalM1Composition>,
+  { ok: true }
+>["value"];
+
+export type ProvisionalM1V2Composition = Extract<
+  ReturnType<typeof createProvisionalM1V2Composition>,
   { ok: true }
 >["value"];

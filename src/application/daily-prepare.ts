@@ -42,12 +42,12 @@ import { createDataQualityBoundary } from "./data-quality-assessment.js";
 import { createDailyPlanningBoundary } from "./daily-decision-planning.js";
 import { createPortfolioRiskPreflightBoundary } from "./portfolio-risk-preflight.js";
 import {
-  createProvisionalM1Composition,
+  createProvisionalM1V2Composition,
   PROVISIONAL_M1_EXTERNAL_AVAILABILITY,
-  type ProvisionalM1Composition,
+  type ProvisionalM1V2Composition,
 } from "./policies/provisional-m1.js";
 import {
-  summarizeRequiredLiquidationWindows,
+  summarizeLiquidationWindows,
   type RequiredLiquidationWindowDiagnostic,
 } from "./daily-prepare-diagnostics.js";
 
@@ -126,7 +126,7 @@ export type DailyPrepareResult =
       readonly kind: "blocked" | "unavailable";
       readonly stage: DailyPrepareStage;
       readonly reasonCodes: readonly string[];
-      readonly externalAvailability: ProvisionalM1Composition["externalAvailability"];
+      readonly externalAvailability: ProvisionalM1V2Composition["externalAvailability"];
       readonly informationalCodes: readonly string[];
       readonly diagnostics: DailyPrepareDiagnostics;
     };
@@ -181,7 +181,7 @@ export function createDailyPrepareBoundary(deps: DailyPrepareDependencies) {
         exchangeWrites: 0 as const,
         executionAuthority: "none" as const,
       };
-      let composition: ProvisionalM1Composition | undefined = undefined;
+      let composition: ProvisionalM1V2Composition | undefined = undefined;
       let shadowContext: PreparedShadowContext | undefined;
       let localShadowEvaluationTime: UtcTimestamp | undefined;
       let shadowReportSources:
@@ -190,7 +190,7 @@ export function createDailyPrepareBoundary(deps: DailyPrepareDependencies) {
             market: MarketEvidenceBundle;
             liquidation: LiquidationEvidenceCollectionResult["bundle"];
             analytics: AnalyticsEvidenceBundle;
-            symbol: ProvisionalM1Composition["symbol"];
+            symbol: ProvisionalM1V2Composition["symbol"];
           }
         | undefined;
       let shadowReportPersistenceAttempted = false;
@@ -272,13 +272,13 @@ export function createDailyPrepareBoundary(deps: DailyPrepareDependencies) {
         !["demo", "testnet", "mainnet"].includes(input.environment as string)
       )
         return failure("unavailable", ["INVALID_INPUT"]);
-      const configured = createProvisionalM1Composition({
+      const configured = createProvisionalM1V2Composition({
         symbol: input.symbol,
         allocation: input.allocation,
       });
       if (!configured.ok) return failure("unavailable", ["INVALID_INPUT"]);
       composition = configured.value;
-      requiredLiquidationWindows = summarizeRequiredLiquidationWindows(
+      requiredLiquidationWindows = summarizeLiquidationWindows(
         composition.analyticsProfile,
       );
       const environment = input.environment as AccountEvidenceEnvironment;
@@ -318,7 +318,7 @@ export function createDailyPrepareBoundary(deps: DailyPrepareDependencies) {
           return failure("blocked", ["LIQUIDATION_SCHEMA_MISMATCH"]);
         if (l.selection.selectedAsset !== composition.selectedAsset)
           return failure("blocked", ["LIQUIDATION_ASSET_MISMATCH"]);
-        requiredLiquidationWindows = summarizeRequiredLiquidationWindows(
+        requiredLiquidationWindows = summarizeLiquidationWindows(
           composition.analyticsProfile,
           market.value,
           l,
@@ -390,7 +390,7 @@ export function createDailyPrepareBoundary(deps: DailyPrepareDependencies) {
         };
         const quality = createDataQualityBoundary({
           qualityProfile: composition.qualityProfile,
-          issuer: "daily-prepare:provisional-m1-v1",
+          issuer: `daily-prepare:${composition.policyVersion}`,
         });
         if (!quality.ok)
           return failure("unavailable", ["QUALITY_COMPOSITION_INVALID"]);

@@ -42,19 +42,30 @@ and explicit `yes`. An ordinary note is optional; an actual REVIEW requires a
 nonblank note (prompt or `--note`). A BLOCKED artifact cannot be approved or
 overridden by consent.
 
-The fixed `provisional-m1-v1` policy requires native returns, funding, OI,
-liquidation imbalance and ATR. External Regime/CEWS/LSI/Trap absence and provisional
-policy are visible informational metadata, not REVIEW triggers. Real non-blocking
-quality degradation or exceptional warnings produce REVIEW. Missing required native
-data fails closed. Under #122, an omitted Coinalyze bucket is a provider-implied zero
+Daily preparation uses `provisional-m1-v2` and requires native returns, the last
+settled funding rate, open interest and ATR. A valid bundle with incomplete
+liquidation history produces REVIEW. A complete 12-hour liquidation result may
+vote. A partial result cannot vote, so all three other groups must agree when
+liquidations cannot vote. Review shows the settled rate and its settlement time.
+An upstream liquidation collection failure returns unavailable. Missing required
+data still blocks. External Regime/CEWS/LSI/Trap availability and provisional
+policy are informational.
+Under #122, an omitted Coinalyze bucket is a provider-implied zero
 only for a present symbol after a valid history response and complete catalogue proof;
 missing symbols, incomplete coverage, or invalid/partial responses remain unresolved.
 The `daily:prepare` summary keeps global `coverageProof`/`historyProof` separate and
-lists each required liquidation request's asset, window, observed/expected
+lists each liquidation request's asset, window, observed/expected
 constituent-bucket counts, completeness and missing counts by venue (up to 20
 sorted venues, plus omitted-group/missing totals). Counts are `null` when the
 source or catalogue coverage is not proven; these diagnostics do not change the
 quality verdict.
+
+For the four-week shadow period starting with the first run after merge, run
+`daily:prepare` for BTCUSDT, ETHUSDT, SOLUSDT and DOGEUSDT every day, then run
+`daily:review` with each printed `PREPARED_HASH`. Skip `daily:approve` during
+this period. Post one comment per day in the shadow log issue opened after
+merge, with each symbol's state and recommendation (or failure reason) and
+the day's total operator minutes.
 
 The saved v3 review may also show **shadow market intelligence**: source-derived
 observations and explicit source/model gaps for regime, early-warning, liquidity

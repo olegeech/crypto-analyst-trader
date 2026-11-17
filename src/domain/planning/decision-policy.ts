@@ -126,6 +126,11 @@ export type EvidenceSelector = SelectorBase &
         readonly symbol: PlanningSymbol;
         readonly field: TickerField;
       }
+    | {
+        readonly source: "funding-history";
+        readonly symbol: PlanningSymbol;
+        readonly field: "lastSettledRate";
+      }
   );
 export interface DecisionCondition {
   readonly selectorId: string;
@@ -308,6 +313,21 @@ export function parseEvidenceSelector(
       source: "ticker",
       symbol: input.symbol,
       field: input.field as TickerField,
+    });
+  }
+  if (input.source === "funding-history") {
+    if (
+      !closedRecord(input, ["id", "required", "source", "symbol", "field"]) ||
+      !isPlanningSymbol(input.symbol) ||
+      !symbols.includes(input.symbol) ||
+      input.field !== "lastSettledRate"
+    )
+      return invalidPlanning();
+    return ok({
+      ...base,
+      source: input.source,
+      symbol: input.symbol,
+      field: input.field,
     });
   }
   if (input.source === "external") {

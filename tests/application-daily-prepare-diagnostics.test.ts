@@ -9,7 +9,7 @@ import { liquidationHistoryWindow } from "../src/domain/liquidation/liquidation-
 import { createProvisionalM1Composition } from "../src/application/policies/provisional-m1.js";
 import {
   MAX_REQUIRED_LIQUIDATION_VENUE_GROUPS,
-  summarizeRequiredLiquidationWindows,
+  summarizeLiquidationWindows,
 } from "../src/application/daily-prepare-diagnostics.js";
 import {
   DAILY_PREPARE_RUN_ID,
@@ -73,11 +73,7 @@ test("diagnostics use selected asset/window and keep unavailable counts unknown"
     }),
   );
   assert.deepEqual(
-    summarizeRequiredLiquidationWindows(
-      ethFourHourProfile,
-      market,
-      liquidation,
-    ),
+    summarizeLiquidationWindows(ethFourHourProfile, market, liquidation),
     [
       {
         requestId: "eth-liquidation-4h",
@@ -92,7 +88,7 @@ test("diagnostics use selected asset/window and keep unavailable counts unknown"
       },
     ],
   );
-  const unknown = summarizeRequiredLiquidationWindows(
+  const unknown = summarizeLiquidationWindows(
     productionProfile(),
     market,
     undefined,
@@ -107,7 +103,7 @@ test("diagnostics do not infer counts from an incompatible source identity", () 
   const sourceMarket = dailyPrepareMarket(DAILY_PREPARE_RUN_ID);
   const otherRunMarket = dailyPrepareMarket("unrelated-market-run");
   const liquidation = dailyPrepareLiquidation(sourceMarket).bundle;
-  const diagnostic = summarizeRequiredLiquidationWindows(
+  const diagnostic = summarizeLiquidationWindows(
     productionProfile(),
     otherRunMarket,
     liquidation,
@@ -134,7 +130,7 @@ test("full observed counts remain incomplete when source history response was in
       ],
     }),
   );
-  const diagnostic = summarizeRequiredLiquidationWindows(
+  const diagnostic = summarizeLiquidationWindows(
     productionProfile(),
     market,
     invalidResponse,
@@ -189,7 +185,7 @@ test("venue diagnostics are sorted, capped at 20, and retain omitted totals", ()
     })),
   };
   const liquidation = requireValue(createLiquidationEvidenceBundle(input));
-  const diagnostic = summarizeRequiredLiquidationWindows(
+  const diagnostic = summarizeLiquidationWindows(
     productionProfile(),
     market,
     liquidation,
