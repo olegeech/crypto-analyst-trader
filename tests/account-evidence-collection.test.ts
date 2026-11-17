@@ -107,11 +107,11 @@ test("deadline before vs after identity keeps the result discriminator truthful"
     let elapsed = 0;
     const read = port();
     read.readIdentity = async () => {
-      if (!after) elapsed = 40001;
+      if (!after) elapsed = 90001;
       return identity;
     };
     read.readExchangeTime = async () => {
-      elapsed = 40001;
+      elapsed = 90001;
       return start;
     };
     const result = await collectAccountEvidence({
@@ -343,10 +343,10 @@ test("missing tiers retains account facts and incomplete verdict", async () => {
   );
 });
 
-test("collection can finish after the v1 deadline and fails closed after the v2 deadline", async () => {
+test("collection can finish after the v2 deadline and fails closed after the v3 deadline", async () => {
   for (const [duration, expected] of [
-    [30_001, "complete"],
-    [40_001, "incomplete"],
+    [40_001, "complete"],
+    [90_001, "incomplete"],
   ] as const) {
     let elapsed = 0;
     const { options } = scriptedOptions((path) => {
@@ -360,7 +360,7 @@ test("collection can finish after the v1 deadline and fails closed after the v2 
     if (result.kind !== "account-evidence") continue;
     assert.equal(
       result.bundle.policyVersion,
-      "account-evidence-collection-policy/v2",
+      "account-evidence-collection-policy/v3",
     );
     assert.equal(result.bundle.collectionStatus, expected);
     assert.equal(
