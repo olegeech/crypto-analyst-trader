@@ -1,0 +1,702 @@
+{
+  "origin": "https://api.bybit.com",
+  "start_ms": 1731715200000,
+  "end_exclusive_ms": 1794787200000,
+  "snapshot_sha256": "0fed63da36b67afcfd242ae4e5570b68cb5ce21a6f5cb3b0a2bb875a9df351ac",
+  "symbols": {
+    "BLESSUSDT": {
+      "launch_ms": 1758708305000,
+      "fetch_start_ms": 1758708000000,
+      "full_history": false,
+      "series": {
+        "kline": {
+          "file": "BLESSUSDT/kline.json",
+          "sha256": "840f2dc67e904726535109d804c79f5f857036799c45af2a650b782733a0492a",
+          "rows": 10022,
+          "first_ms": 1758708000000,
+          "last_ms": 1794783600000,
+          "gaps": []
+        },
+        "oi": {
+          "file": "BLESSUSDT/oi.json",
+          "sha256": "d700d8c4763b38f3b5a2a8edbaee79c5bb35d473b5810513855d1510ad7b08f3",
+          "rows": 10021,
+          "first_ms": 1758711600000,
+          "last_ms": 1794783600000,
+          "gaps": [
+            1758708000000
+          ]
+        },
+        "funding": {
+          "file": "BLESSUSDT/funding.json",
+          "sha256": "ae1bce7facf8fe9c5c496e8fa40a2332f0759672ea0690e06e6af35d53d87254",
+          "rows": 2505,
+          "first_ms": 1758715200000,
+          "last_ms": 1794772800000,
+          "gaps": []
+        }
+      }
+    },
+    "ENAUSDT": {
+      "launch_ms": 1712050966000,
+      "fetch_start_ms": 1727827200000,
+      "full_history": true,
+      "series": {
+        "kline": {
+          "file": "ENAUSDT/kline.json",
+          "sha256": "0c209d4e955402d56432b10f8538dbead53d89d4fb425941c23f5f12161aacaf",
+          "rows": 18600,
+          "first_ms": 1727827200000,
+          "last_ms": 1794783600000,
+          "gaps": []
+        },
+        "oi": {
+          "file": "ENAUSDT/oi.json",
+          "sha256": "0a311a4832669c8adb6d14bdb25b307c6f9e4277fb47c804adb2fd0627f62d8d",
+          "rows": 18600,
+          "first_ms": 1727827200000,
+          "last_ms": 1794783600000,
+          "gaps": []
+        },
+        "funding": {
+          "file": "ENAUSDT/funding.json",
+          "sha256": "3cb6ef639c2cfeea5088e5e6de727bd00dae7df047d931005d11c65605a8f271",
+          "rows": 4334,
+          "first_ms": 1727827200000,
+          "last_ms": 1794772800000,
+          "gaps": []
+        }
+      }
+    },
+    "AAVEUSDT": {
+      "launch_ms": 1620897660000,
+      "fetch_start_ms": 1727827200000,
+      "full_history": true,
+      "series": {
+        "kline": {
+          "file": "AAVEUSDT/kline.json",
+          "sha256": "eae2a23fc52d08a4bf9f0c8e2ca4f766812d87572406f3ab828a660ec10367b7",
+          "rows": 18600,
+          "first_ms": 1727827200000,
+          "last_ms": 1794783600000,
+          "gaps": []
+        },
+        "oi": {
+          "file": "AAVEUSDT/oi.json",
+          "sha256": "d9c756be6f656bf9f8cbbd92823ff86b5ec2807ccf7e33500eef1b26248012eb",
+          "rows": 18600,
+          "first_ms": 1727827200000,
+          "last_ms": 1794783600000,
+          "gaps": []
+        },
+        "funding": {
+          "file": "AAVEUSDT/funding.json",
+          "sha256": "eba48442906b24c67fa6b73f9217ee21652ed8d2c3494ded47388877e573de75",
+          "rows": 2325,
+          "first_ms": 1727827200000,
+          "last_ms": 1794758400000,
+          "gaps": []
+        }
+      }
+    },
+    "SUIUSDT": {
+      "launch_ms": 1683029724000,
+      "fetch_start_ms": 1727827200000,
+      "full_history": true,
+      "series": {
+        "kline": {
+          "file": "SUIUSDT/kline.json",
+          "sha256": "7b951c3a5d2d2c6901b97462c4ea1868d33c0a531a504659e6c19de07413bad1",
+          "rows": 18600,
+          "first_ms": 1727827200000,
+          "last_ms": 1794783600000,
+          "gaps": []
+        },
+        "oi": {
+          "file": "SUIUSDT/oi.json",
+          "sha256": "4762591e434ac71a82adc612a22274915c5f5ad6a76b183249530410fdd5afed",
+          "rows": 18600,
+          "first_ms": 1727827200000,
+          "last_ms": 1794783600000,
+          "gaps": []
+        },
+        "funding": {
+          "file": "SUIUSDT/funding.json",
+          "sha256": "a99ebf4f700eca5c06877447a9d2d14258b8a03e6bd6aa50bed0e8077b4b9296",
+          "rows": 2325,
+          "first_ms": 1727827200000,
+          "last_ms": 1794758400000,
+          "gaps": []
+        }
+      }
+    },
+    "SKRUSDT": {
+      "launch_ms": 1768904987000,
+      "fetch_start_ms": 1768903200000,
+      "full_history": false,
+      "series": {
+        "kline": {
+          "file": "SKRUSDT/kline.json",
+          "sha256": "31a725e1935531e3dcdaaf20e49818fe744e3d7c952f38f44aece526a89982fa",
+          "rows": 7189,
+          "first_ms": 1768906800000,
+          "last_ms": 1794783600000,
+          "gaps": [
+            1768903200000
+          ]
+        },
+        "oi": {
+          "file": "SKRUSDT/oi.json",
+          "sha256": "c805684d769b7276dea2e1daabe996404cc9409e5bfcbe165593a1a04fbaf2ad",
+          "rows": 7188,
+          "first_ms": 1768910400000,
+          "last_ms": 1794783600000,
+          "gaps": [
+            1768903200000,
+            1768906800000
+          ]
+        },
+        "funding": {
+          "file": "SKRUSDT/funding.json",
+          "sha256": "7be79d465a4b5287ee8370440104f57cbb4a211151bb5d2344a7fa96ab6e7fbf",
+          "rows": 1989,
+          "first_ms": 1768910400000,
+          "last_ms": 1794772800000,
+          "gaps": []
+        }
+      }
+    },
+    "XMRUSDT": {
+      "launch_ms": 1640143015000,
+      "fetch_start_ms": 1727827200000,
+      "full_history": true,
+      "series": {
+        "kline": {
+          "file": "XMRUSDT/kline.json",
+          "sha256": "6348dce703808df9171a948427088ae210716403fff6016f544390f847a1bceb",
+          "rows": 18600,
+          "first_ms": 1727827200000,
+          "last_ms": 1794783600000,
+          "gaps": []
+        },
+        "oi": {
+          "file": "XMRUSDT/oi.json",
+          "sha256": "040ee0e99f298cb4755b39ab29377d3d3df8b9b58b698a10b9329aea9b6983c9",
+          "rows": 18600,
+          "first_ms": 1727827200000,
+          "last_ms": 1794783600000,
+          "gaps": []
+        },
+        "funding": {
+          "file": "XMRUSDT/funding.json",
+          "sha256": "7409ca7b65722c118041bd8340b6f645531d36bf98340874b34635619c2797c1",
+          "rows": 2325,
+          "first_ms": 1727827200000,
+          "last_ms": 1794758400000,
+          "gaps": []
+        }
+      }
+    },
+    "ADAUSDT": {
+      "launch_ms": 1610668800000,
+      "fetch_start_ms": 1727827200000,
+      "full_history": true,
+      "series": {
+        "kline": {
+          "file": "ADAUSDT/kline.json",
+          "sha256": "b55407cd8a1c34d90edc1a145d267b9224eda83c03c074972dd00b146d6e4f79",
+          "rows": 18600,
+          "first_ms": 1727827200000,
+          "last_ms": 1794783600000,
+          "gaps": []
+        },
+        "oi": {
+          "file": "ADAUSDT/oi.json",
+          "sha256": "1d9545ce0a18d681b52b5f621557239d6a5a1e22d52af0186e049f4c0a2af8f3",
+          "rows": 18600,
+          "first_ms": 1727827200000,
+          "last_ms": 1794783600000,
+          "gaps": []
+        },
+        "funding": {
+          "file": "ADAUSDT/funding.json",
+          "sha256": "00e2a1cb402e633f67f9e96e932892e5abe44ab66e77d5c6487fe4314600ab50",
+          "rows": 2325,
+          "first_ms": 1727827200000,
+          "last_ms": 1794758400000,
+          "gaps": []
+        }
+      }
+    },
+    "UNIUSDT": {
+      "launch_ms": 1638230400000,
+      "fetch_start_ms": 1727827200000,
+      "full_history": true,
+      "series": {
+        "kline": {
+          "file": "UNIUSDT/kline.json",
+          "sha256": "0494792b9245940e52256df3f6ca7514d906baeb4ad9116c2c3803e834700a23",
+          "rows": 18600,
+          "first_ms": 1727827200000,
+          "last_ms": 1794783600000,
+          "gaps": []
+        },
+        "oi": {
+          "file": "UNIUSDT/oi.json",
+          "sha256": "9aa5a7b159d18bf7d20b674eaa6faa02de9ec3d0b305adf4d819bface0218b7d",
+          "rows": 18600,
+          "first_ms": 1727827200000,
+          "last_ms": 1794783600000,
+          "gaps": []
+        },
+        "funding": {
+          "file": "UNIUSDT/funding.json",
+          "sha256": "1c42f70ea1bf2b84d563666a8fa4d40d2ffe95cbce7cda7a884950cc209f5292",
+          "rows": 2325,
+          "first_ms": 1727827200000,
+          "last_ms": 1794758400000,
+          "gaps": []
+        }
+      }
+    },
+    "INITUSDT": {
+      "launch_ms": 1744616093000,
+      "fetch_start_ms": 1744614000000,
+      "full_history": false,
+      "series": {
+        "kline": {
+          "file": "INITUSDT/kline.json",
+          "sha256": "cfff8b96a674e7459979601272043b0d4e33bf1e1e54e3450b5259f1b303ff41",
+          "rows": 13933,
+          "first_ms": 1744628400000,
+          "last_ms": 1794783600000,
+          "gaps": [
+            1744614000000,
+            1744617600000,
+            1744621200000,
+            1744624800000
+          ]
+        },
+        "oi": {
+          "file": "INITUSDT/oi.json",
+          "sha256": "d34db7fa5a61da9377dc13984398b5843648ca9a672578bab44f7498e3d75e9c",
+          "rows": 13932,
+          "first_ms": 1744632000000,
+          "last_ms": 1794783600000,
+          "gaps": [
+            1744614000000,
+            1744617600000,
+            1744621200000,
+            1744624800000,
+            1744628400000
+          ]
+        },
+        "funding": {
+          "file": "INITUSDT/funding.json",
+          "sha256": "d54cfb12dfd2455c9068ea286daaf0836c48913718c2a3f5299b208ae840233b",
+          "rows": 3816,
+          "first_ms": 1744632000000,
+          "last_ms": 1794783600000,
+          "gaps": []
+        }
+      }
+    },
+    "JCTUSDT": {
+      "launch_ms": 1763374327000,
+      "fetch_start_ms": 1763373600000,
+      "full_history": false,
+      "series": {
+        "kline": {
+          "file": "JCTUSDT/kline.json",
+          "sha256": "85f216168bfc62e95ed8a157ce7bde4d132c1ac91a664ac4deb77bea920c710a",
+          "rows": 8726,
+          "first_ms": 1763373600000,
+          "last_ms": 1794783600000,
+          "gaps": []
+        },
+        "oi": {
+          "file": "JCTUSDT/oi.json",
+          "sha256": "238d3c7afb07ff92ec810c8797d770bd9e41313a5a8cb860565c39535d5c7618",
+          "rows": 8725,
+          "first_ms": 1763377200000,
+          "last_ms": 1794783600000,
+          "gaps": [
+            1763373600000
+          ]
+        },
+        "funding": {
+          "file": "JCTUSDT/funding.json",
+          "sha256": "d61d9b90bf0da98e5aa905f64023283ecd84911a4fd7f452b8d851d390cd2805",
+          "rows": 2181,
+          "first_ms": 1763380800000,
+          "last_ms": 1794772800000,
+          "gaps": []
+        }
+      }
+    },
+    "INJUSDT": {
+      "launch_ms": 1660694400000,
+      "fetch_start_ms": 1727827200000,
+      "full_history": true,
+      "series": {
+        "kline": {
+          "file": "INJUSDT/kline.json",
+          "sha256": "b0334ca88ab2800fff7d5870c77c89f3d0e654e16aae5fd3bf4e17925ffd743f",
+          "rows": 18600,
+          "first_ms": 1727827200000,
+          "last_ms": 1794783600000,
+          "gaps": []
+        },
+        "oi": {
+          "file": "INJUSDT/oi.json",
+          "sha256": "cffe2f6e088053f1b29983b99877c65a0327ae14ae4cdc9a33b66d04aafe932a",
+          "rows": 18600,
+          "first_ms": 1727827200000,
+          "last_ms": 1794783600000,
+          "gaps": []
+        },
+        "funding": {
+          "file": "INJUSDT/funding.json",
+          "sha256": "79ab6cffb4dbead1e1402d62284de55545bf70efa3c4b0bc8632bd8c315ee7e9",
+          "rows": 2474,
+          "first_ms": 1727827200000,
+          "last_ms": 1794758400000,
+          "gaps": []
+        }
+      }
+    },
+    "AVAXUSDT": {
+      "launch_ms": 1631664000000,
+      "fetch_start_ms": 1727827200000,
+      "full_history": true,
+      "series": {
+        "kline": {
+          "file": "AVAXUSDT/kline.json",
+          "sha256": "f3df2ac1ce48ac66fb5be5b0dc86e2b06ff2841c648eb586aa0ddbacfb399263",
+          "rows": 18600,
+          "first_ms": 1727827200000,
+          "last_ms": 1794783600000,
+          "gaps": []
+        },
+        "oi": {
+          "file": "AVAXUSDT/oi.json",
+          "sha256": "c5cbf80430fe8bce02c558eba89da8f0116568803f6464aec1f8c265f060501e",
+          "rows": 18600,
+          "first_ms": 1727827200000,
+          "last_ms": 1794783600000,
+          "gaps": []
+        },
+        "funding": {
+          "file": "AVAXUSDT/funding.json",
+          "sha256": "cbd25eeff39e311e5d522c966f1df90c74c2edd24f92f78df1c46b1a7b4b2eed",
+          "rows": 2325,
+          "first_ms": 1727827200000,
+          "last_ms": 1794758400000,
+          "gaps": []
+        }
+      }
+    },
+    "ARIAUSDT": {
+      "launch_ms": 1756903625000,
+      "fetch_start_ms": 1756900800000,
+      "full_history": false,
+      "series": {
+        "kline": {
+          "file": "ARIAUSDT/kline.json",
+          "sha256": "35fd7141f355fdf1d607d3e07f55789654ba89c1aad8528ce57ed47137b1c314",
+          "rows": 10523,
+          "first_ms": 1756904400000,
+          "last_ms": 1794783600000,
+          "gaps": [
+            1756900800000
+          ]
+        },
+        "oi": {
+          "file": "ARIAUSDT/oi.json",
+          "sha256": "f42f33344a729357d5fe7c02e4d4a0062bbd72d2d7d5c88496b28ee766f8b2d1",
+          "rows": 10522,
+          "first_ms": 1756908000000,
+          "last_ms": 1794783600000,
+          "gaps": [
+            1756900800000,
+            1756904400000
+          ]
+        },
+        "funding": {
+          "file": "ARIAUSDT/funding.json",
+          "sha256": "77001a1cfbd6f252d3a874ce518951e344f9490cdd88d55ea107c35fa9ae90e8",
+          "rows": 2793,
+          "first_ms": 1756900800000,
+          "last_ms": 1794772800000,
+          "gaps": []
+        }
+      }
+    },
+    "WLDUSDT": {
+      "launch_ms": 1690184920000,
+      "fetch_start_ms": 1727827200000,
+      "full_history": true,
+      "series": {
+        "kline": {
+          "file": "WLDUSDT/kline.json",
+          "sha256": "0adde5569cd3dff8f6d3ace30ac8a5d15a571cc0a1ce6d50eff13455573a8d7c",
+          "rows": 18600,
+          "first_ms": 1727827200000,
+          "last_ms": 1794783600000,
+          "gaps": []
+        },
+        "oi": {
+          "file": "WLDUSDT/oi.json",
+          "sha256": "bef5eef56f99830c576f25c0963d837e9fd8fb417bd8d1c36deb2ee2b9a9b393",
+          "rows": 18600,
+          "first_ms": 1727827200000,
+          "last_ms": 1794783600000,
+          "gaps": []
+        },
+        "funding": {
+          "file": "WLDUSDT/funding.json",
+          "sha256": "7a44aa1f28763388153b4e24c119de280e7a9409f664de5f7f45bdfc00a23a3e",
+          "rows": 2325,
+          "first_ms": 1727827200000,
+          "last_ms": 1794758400000,
+          "gaps": []
+        }
+      }
+    },
+    "LINKUSDT": {
+      "launch_ms": 1514764800000,
+      "fetch_start_ms": 1727827200000,
+      "full_history": true,
+      "series": {
+        "kline": {
+          "file": "LINKUSDT/kline.json",
+          "sha256": "a20249334a06e93645b54fee9f3c9230e0a9094ac04bf237826646f01087f2ef",
+          "rows": 18600,
+          "first_ms": 1727827200000,
+          "last_ms": 1794783600000,
+          "gaps": []
+        },
+        "oi": {
+          "file": "LINKUSDT/oi.json",
+          "sha256": "035e1d3137fa3cd1c1fe1b4b3e41c79e15289f1fd2d1124cef490edcbf0b587f",
+          "rows": 18600,
+          "first_ms": 1727827200000,
+          "last_ms": 1794783600000,
+          "gaps": []
+        },
+        "funding": {
+          "file": "LINKUSDT/funding.json",
+          "sha256": "8d22e3ef0708b5320c93697ab6830ac1667c0231808806be5828ab3b828f41f2",
+          "rows": 2325,
+          "first_ms": 1727827200000,
+          "last_ms": 1794758400000,
+          "gaps": []
+        }
+      }
+    },
+    "CASHCATUSDT": {
+      "launch_ms": 1785924043000,
+      "fetch_start_ms": 1785924000000,
+      "full_history": false,
+      "series": {
+        "kline": {
+          "file": "CASHCATUSDT/kline.json",
+          "sha256": "2372c754636e795f54166e528d256f7f7a47d80d48ae21111ae88b826533a30a",
+          "rows": 2462,
+          "first_ms": 1785924000000,
+          "last_ms": 1794783600000,
+          "gaps": []
+        },
+        "oi": {
+          "file": "CASHCATUSDT/oi.json",
+          "sha256": "de1d1a295844e274b53fa36cff7b96f174554fd271a429dca548869b1b313f43",
+          "rows": 2461,
+          "first_ms": 1785927600000,
+          "last_ms": 1794783600000,
+          "gaps": [
+            1785924000000
+          ]
+        },
+        "funding": {
+          "file": "CASHCATUSDT/funding.json",
+          "sha256": "c8417581e5f8383736eb4508d3347651943e49608f4c8118c9e1f87571c96505",
+          "rows": 615,
+          "first_ms": 1785931200000,
+          "last_ms": 1794772800000,
+          "gaps": []
+        }
+      }
+    },
+    "VVVUSDT": {
+      "launch_ms": 1738038705000,
+      "fetch_start_ms": 1738036800000,
+      "full_history": false,
+      "series": {
+        "kline": {
+          "file": "VVVUSDT/kline.json",
+          "sha256": "fccc0d752559f95320b746b6a6cdf1433362c6d96dbbea3c83649e0949a26511",
+          "rows": 15764,
+          "first_ms": 1738036800000,
+          "last_ms": 1794783600000,
+          "gaps": []
+        },
+        "oi": {
+          "file": "VVVUSDT/oi.json",
+          "sha256": "a107e3e0be4467045f130ba67c3388b412d6ddad767cfa6d4a1cf0a163a05207",
+          "rows": 15763,
+          "first_ms": 1738040400000,
+          "last_ms": 1794783600000,
+          "gaps": [
+            1738036800000
+          ]
+        },
+        "funding": {
+          "file": "VVVUSDT/funding.json",
+          "sha256": "71ef9550d14e528a700023f1188a398dcc938fe4b48cbc9690bc53b248084bb9",
+          "rows": 3941,
+          "first_ms": 1738036800000,
+          "last_ms": 1794772800000,
+          "gaps": []
+        }
+      }
+    },
+    "TAOUSDT": {
+      "launch_ms": 1706601081000,
+      "fetch_start_ms": 1727827200000,
+      "full_history": true,
+      "series": {
+        "kline": {
+          "file": "TAOUSDT/kline.json",
+          "sha256": "ae744bb57c9bad6bf7b385203c4f32c442da9a477c3d68184a53103a74b4f836",
+          "rows": 18600,
+          "first_ms": 1727827200000,
+          "last_ms": 1794783600000,
+          "gaps": []
+        },
+        "oi": {
+          "file": "TAOUSDT/oi.json",
+          "sha256": "855e40c1785699e4e8a33af2aaccb4dd990cf01c06918b4f604bbc42e9b40f47",
+          "rows": 18600,
+          "first_ms": 1727827200000,
+          "last_ms": 1794783600000,
+          "gaps": []
+        },
+        "funding": {
+          "file": "TAOUSDT/funding.json",
+          "sha256": "6282ed42b02ff87deee96cf747f6d39bb8f7b3fab83ed1711ba6005633e8fcc2",
+          "rows": 4334,
+          "first_ms": 1727827200000,
+          "last_ms": 1794772800000,
+          "gaps": []
+        }
+      }
+    },
+    "PUMPFUNUSDT": {
+      "launch_ms": 1752119132000,
+      "fetch_start_ms": 1752116400000,
+      "full_history": false,
+      "series": {
+        "kline": {
+          "file": "PUMPFUNUSDT/kline.json",
+          "sha256": "91c6c34c1592204e121df33e9d236e4b22745d200f5777e1fd4da02d4e06a056",
+          "rows": 11851,
+          "first_ms": 1752123600000,
+          "last_ms": 1794783600000,
+          "gaps": [
+            1752116400000,
+            1752120000000
+          ]
+        },
+        "oi": {
+          "file": "PUMPFUNUSDT/oi.json",
+          "sha256": "1e569196dabad1a30173558ae1cb9fc50ecae5ba4f6ddbd901823bec3f795bc2",
+          "rows": 11850,
+          "first_ms": 1752127200000,
+          "last_ms": 1794783600000,
+          "gaps": [
+            1752116400000,
+            1752120000000,
+            1752123600000
+          ]
+        },
+        "funding": {
+          "file": "PUMPFUNUSDT/funding.json",
+          "sha256": "0a92fb00007b5f3592fcb9d8446496988828c287554a42a77e85ddd4c47b3505",
+          "rows": 2963,
+          "first_ms": 1752120000000,
+          "last_ms": 1794772800000,
+          "gaps": []
+        }
+      }
+    },
+    "ZROUSDT": {
+      "launch_ms": 1718891646000,
+      "fetch_start_ms": 1727827200000,
+      "full_history": true,
+      "series": {
+        "kline": {
+          "file": "ZROUSDT/kline.json",
+          "sha256": "b4cbb7c30f31c5467cbf0dc00ded801c3d5749384d40222081931399fcd1037c",
+          "rows": 18600,
+          "first_ms": 1727827200000,
+          "last_ms": 1794783600000,
+          "gaps": []
+        },
+        "oi": {
+          "file": "ZROUSDT/oi.json",
+          "sha256": "db99cf444080ec329bd9866afa51b273e5907f179852352d27517a855b666c10",
+          "rows": 18600,
+          "first_ms": 1727827200000,
+          "last_ms": 1794783600000,
+          "gaps": []
+        },
+        "funding": {
+          "file": "ZROUSDT/funding.json",
+          "sha256": "182a3f33912095c246cc3992ea119573414f4a298ba3dc694a8f7718317fabae",
+          "rows": 4334,
+          "first_ms": 1727827200000,
+          "last_ms": 1794772800000,
+          "gaps": []
+        }
+      }
+    }
+  },
+  "queries": {
+    "metadata": {
+      "category": "linear",
+      "limit": 1000
+    },
+    "series": {
+      "kline": [
+        "kline",
+        {
+          "interval": "60"
+        },
+        "end",
+        1000,
+        0
+      ],
+      "oi": [
+        "open-interest",
+        {
+          "intervalTime": "1h"
+        },
+        "endTime",
+        200,
+        "timestamp"
+      ],
+      "funding": [
+        "funding/history",
+        {},
+        "endTime",
+        200,
+        "fundingRateTimestamp"
+      ]
+    },
+    "pagination": "category=linear; symbol; end=oldest timestamp minus 1 ms"
+  },
+  "archive": {
+    "bytes": 12181172,
+    "sha256": "a856dfb51c00fc4d7fa255006d087f000df5f53c41cd093850ce5ab7a6a8b6ca"
+  }
+}
