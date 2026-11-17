@@ -2,10 +2,20 @@ import { hashCanonical } from "../identity/canonical-serialization.js";
 import { deepFreeze } from "../shared/deep-freeze.js";
 import type { Result } from "../shared/result.js";
 
+const ACCOUNT_EVIDENCE_POLICY_V1 = "account-evidence-collection-policy/v1";
+const ACCOUNT_EVIDENCE_POLICY_V2 = "account-evidence-collection-policy/v2";
 export const ACCOUNT_EVIDENCE_POLICY_VERSION =
-  "account-evidence-collection-policy/v1" as const;
-export const ACCOUNT_EVIDENCE_COLLECTION_POLICY = deepFreeze({
-  schemaVersion: ACCOUNT_EVIDENCE_POLICY_VERSION,
+  "account-evidence-collection-policy/v3";
+export const ACCOUNT_EVIDENCE_POLICY_VERSIONS = [
+  ACCOUNT_EVIDENCE_POLICY_V1,
+  ACCOUNT_EVIDENCE_POLICY_V2,
+  ACCOUNT_EVIDENCE_POLICY_VERSION,
+] as const;
+export type AccountEvidencePolicyVersion =
+  (typeof ACCOUNT_EVIDENCE_POLICY_VERSIONS)[number];
+
+const legacyPolicy = deepFreeze({
+  schemaVersion: ACCOUNT_EVIDENCE_POLICY_V1,
   maxCollectionDurationMs: 30_000,
   historyWindowMs: 3_600_000,
   maxPagesPerPartition: 20,
@@ -145,10 +155,36 @@ export const ACCOUNT_EVIDENCE_COLLECTION_POLICY = deepFreeze({
     ],
   },
 } as const);
+const policyV2 = deepFreeze({
+  ...legacyPolicy,
+  schemaVersion: ACCOUNT_EVIDENCE_POLICY_V2,
+  maxCollectionDurationMs: 40_000,
+} as const);
+export const ACCOUNT_EVIDENCE_COLLECTION_POLICY = deepFreeze({
+  ...policyV2,
+  schemaVersion: ACCOUNT_EVIDENCE_POLICY_VERSION,
+  maxCollectionDurationMs: 90_000,
+} as const);
+
 export type AccountEvidenceCollectionPolicy =
   typeof ACCOUNT_EVIDENCE_COLLECTION_POLICY;
-export function accountEvidencePolicyHash(): Result<string> {
-  return hashCanonical(ACCOUNT_EVIDENCE_COLLECTION_POLICY);
+export function accountEvidenceCollectionPolicy(
+  version: AccountEvidencePolicyVersion,
+) {
+  switch (version) {
+    case ACCOUNT_EVIDENCE_POLICY_V1:
+      return legacyPolicy;
+    case ACCOUNT_EVIDENCE_POLICY_V2:
+      return policyV2;
+    case ACCOUNT_EVIDENCE_POLICY_VERSION:
+      return ACCOUNT_EVIDENCE_COLLECTION_POLICY;
+  }
+}
+
+export function accountEvidencePolicyHash(
+  version: AccountEvidencePolicyVersion,
+): Result<string> {
+  return hashCanonical(accountEvidenceCollectionPolicy(version));
 }
 
 export type AccountEvidenceCategory = "linear" | "inverse" | "spot" | "option";

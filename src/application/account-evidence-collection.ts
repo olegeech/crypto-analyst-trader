@@ -693,7 +693,7 @@ export async function collectAccountEvidence(
         reasonCodes: ["COVERAGE_INCOMPLETE"],
       });
   }
-  const policyHash = accountEvidencePolicyHash();
+  const policyHash = accountEvidencePolicyHash(ACCOUNT_EVIDENCE_POLICY_VERSION);
   if (!policyHash.ok) throw new BybitAccountReadError("INVALID_RESPONSE");
   const retainedRows = countAccountEvidenceRows({
     criticalPasses: critical,

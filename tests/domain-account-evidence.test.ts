@@ -9,12 +9,67 @@ import {
   createAccountPositionEvidence,
 } from "../src/domain/account/account-evidence-bundle.js";
 import {
+  ACCOUNT_EVIDENCE_POLICY_VERSION,
+  accountEvidencePolicyHash,
+} from "../src/domain/account/account-evidence-policy.js";
+import {
   execution,
   fixture,
   order,
   position,
   withCounts,
 } from "./account-evidence-fixture.js";
+
+test("stored evidence uses the deadline and hash of its own policy version", () => {
+  const input = fixture();
+  const historicalHashes = {
+    "account-evidence-collection-policy/v1":
+      "sha256:aa4b1724b856698320298ff29c32475f47d465700d7cf39e0b1909a64422eea0",
+    "account-evidence-collection-policy/v2":
+      "sha256:353c896193683924f2052fa6004ac5e71b8d3e890e58562e702f1353d6439889",
+  };
+  for (const [policyVersion, deadline] of [
+    ["account-evidence-collection-policy/v1", 30_000],
+    ["account-evidence-collection-policy/v2", 40_000],
+    [ACCOUNT_EVIDENCE_POLICY_VERSION, 90_000],
+  ] as const) {
+    const policyHash = accountEvidencePolicyHash(policyVersion);
+    assert.ok(policyHash.ok);
+    if (policyVersion !== ACCOUNT_EVIDENCE_POLICY_VERSION)
+      assert.equal(policyHash.value, historicalHashes[policyVersion]);
+    for (const [duration, collectionStatus] of [
+      [deadline, "complete"],
+      [deadline + 1, "incomplete"],
+    ] as const) {
+      const stored: Record<string, unknown> = {
+        ...input,
+        policyVersion,
+        policyHash: policyHash.value,
+        budget: { ...input.budget, monotonicDurationMs: duration },
+        collectionStatus,
+      };
+      const replay = createAccountEvidenceBundle(stored);
+      assert.ok(replay.ok);
+      assert.equal(
+        replay.value.consistency.reasonCodes.includes(
+          "COLLECTION_DEADLINE_EXCEEDED",
+        ),
+        collectionStatus === "incomplete",
+      );
+      assert.ok(
+        createAccountEvidenceBundle(JSON.parse(JSON.stringify(replay.value)))
+          .ok,
+      );
+      assert.equal(
+        createAccountEvidenceBundle({
+          ...stored,
+          policyHash: `sha256:${"0".repeat(64)}`,
+        }).ok,
+        false,
+      );
+    }
+  }
+});
 
 test("constructor derives incomplete versus failed from usable facts", () => {
   const input = fixture();
