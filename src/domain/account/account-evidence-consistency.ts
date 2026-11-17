@@ -4,6 +4,7 @@ import { deepFreeze } from "../shared/deep-freeze.js";
 import type { AccountEvidenceFailureCode } from "./account-evidence-diagnostics.js";
 import {
   ACCOUNT_EVIDENCE_COLLECTION_POLICY as policy,
+  accountEvidenceCollectionPolicy,
   accountEvidencePartitionKey,
   deriveExpectedAccountEvidencePartitions,
   type AccountEvidenceEndpoint,
@@ -884,7 +885,11 @@ export function evaluateAccountEvidenceConsistency(
       add("CONTRADICTORY_OBSERVATION");
   }
   const budget = payload.budget;
-  if (budget.monotonicDurationMs > policy.maxCollectionDurationMs)
+  if (
+    budget.monotonicDurationMs >
+    accountEvidenceCollectionPolicy(payload.policyVersion)
+      .maxCollectionDurationMs
+  )
     add("COLLECTION_DEADLINE_EXCEEDED");
   if (budget.httpAttempts > policy.maxHttpAttempts)
     add("ATTEMPT_BUDGET_EXCEEDED");

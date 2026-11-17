@@ -14,7 +14,8 @@ import {
   hashCanonical,
 } from "../identity/canonical-serialization.js";
 import {
-  ACCOUNT_EVIDENCE_POLICY_VERSION,
+  ACCOUNT_EVIDENCE_POLICY_VERSIONS,
+  type AccountEvidencePolicyVersion,
   accountEvidencePolicyHash,
   type AccountEvidencePartition,
 } from "./account-evidence-policy.js";
@@ -585,7 +586,7 @@ const payloadSchema = shape({
   producer: identifier,
   accountBinding: createAccountBinding,
   credentialPosture: createAccountCredentialPosture,
-  policyVersion: oneOf(ACCOUNT_EVIDENCE_POLICY_VERSION),
+  policyVersion: oneOf(...ACCOUNT_EVIDENCE_POLICY_VERSIONS),
   policyHash: hash,
   startedAt: timestamp,
   endedAt: timestamp,
@@ -660,7 +661,7 @@ export function createAccountEvidenceBundle(
   const parsed = payloadSchema(raw);
   if (!parsed.ok) return parsed;
   const payload = parsed.value,
-    policyHash = accountEvidencePolicyHash();
+    policyHash = accountEvidencePolicyHash(payload.policyVersion);
   if (
     !policyHash.ok ||
     payload.policyHash !== policyHash.value ||
@@ -715,7 +716,7 @@ export interface AccountEvidencePreAuthFailure {
   readonly kind: "pre-auth-failure";
   readonly environment: AccountEvidenceEnvironment;
   readonly runId: string;
-  readonly policyVersion: typeof ACCOUNT_EVIDENCE_POLICY_VERSION;
+  readonly policyVersion: AccountEvidencePolicyVersion;
   readonly reasonCodes: readonly AccountEvidenceFailureCode[];
   readonly startedAt: UtcTimestamp;
   readonly endedAt: UtcTimestamp;
@@ -750,7 +751,7 @@ export function createAccountEvidenceCollectionResult(
     kind: oneOf("pre-auth-failure"),
     environment,
     runId: identifier,
-    policyVersion: oneOf(ACCOUNT_EVIDENCE_POLICY_VERSION),
+    policyVersion: oneOf(...ACCOUNT_EVIDENCE_POLICY_VERSIONS),
     reasonCodes: parseAccountEvidenceFailureCodes,
     startedAt: timestamp,
     endedAt: timestamp,

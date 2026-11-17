@@ -9,12 +9,46 @@ import {
   createAccountPositionEvidence,
 } from "../src/domain/account/account-evidence-bundle.js";
 import {
+  ACCOUNT_EVIDENCE_POLICY_VERSION,
+  accountEvidencePolicyHash,
+} from "../src/domain/account/account-evidence-policy.js";
+import {
   execution,
   fixture,
   order,
   position,
   withCounts,
 } from "./account-evidence-fixture.js";
+
+test("stored evidence uses the deadline and hash of its own policy version", () => {
+  const input = fixture();
+  const legacy = {
+    ...input,
+    budget: { ...input.budget, monotonicDurationMs: 30_001 },
+    collectionStatus: "incomplete",
+  };
+  const replay = createAccountEvidenceBundle(legacy);
+  assert.ok(replay.ok);
+  assert.ok(
+    replay.value.consistency.reasonCodes.includes(
+      "COLLECTION_DEADLINE_EXCEEDED",
+    ),
+  );
+  assert.ok(
+    createAccountEvidenceBundle(JSON.parse(JSON.stringify(replay.value))).ok,
+  );
+  const v2Hash = accountEvidencePolicyHash(ACCOUNT_EVIDENCE_POLICY_VERSION);
+  assert.ok(v2Hash.ok);
+  const v2 = {
+    ...legacy,
+    policyVersion: ACCOUNT_EVIDENCE_POLICY_VERSION,
+    collectionStatus: "complete",
+  };
+  assert.equal(createAccountEvidenceBundle(v2).ok, false);
+  assert.ok(
+    createAccountEvidenceBundle({ ...v2, policyHash: v2Hash.value }).ok,
+  );
+});
 
 test("constructor derives incomplete versus failed from usable facts", () => {
   const input = fixture();

@@ -111,6 +111,7 @@ export function summarizeAccountEvidence(
       historyWindow: bundle.historyWindow,
     },
     durationMs: bundle.budget.monotonicDurationMs,
+    httpAttempts: bundle.budget.httpAttempts,
     partitionCounts: {
       expected: bundle.expectedPartitions.length,
       observed: bundle.coverage.length,

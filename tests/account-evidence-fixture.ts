@@ -179,7 +179,8 @@ export function fixture(configuredM1Symbols: readonly string[] = ["BTCUSDT"]) {
           endpoint === "option-base-discovery"
         ? 1
         : 0;
-  const hash = accountEvidencePolicyHash();
+  const policyVersion = "account-evidence-collection-policy/v1";
+  const hash = accountEvidencePolicyHash(policyVersion);
   if (!hash.ok) throw new Error("fixture policy hash failed");
   return {
     schemaVersion: "account-evidence-bundle/v1",
@@ -206,7 +207,7 @@ export function fixture(configuredM1Symbols: readonly string[] = ["BTCUSDT"]) {
       expiresAt: null,
       warnings: [],
     },
-    policyVersion: "account-evidence-collection-policy/v1",
+    policyVersion,
     policyHash: hash.value,
     startedAt: start,
     endedAt: end,
