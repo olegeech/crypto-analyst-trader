@@ -421,6 +421,7 @@ test("incomplete history persists REVIEW and its shadow report across processes"
     assert.equal(result.diagnostics.executionAuthority, "none");
     assert.ok(result.diagnostics.shadowReportHash?.startsWith("sha256:"));
     assert.deepEqual(reads, { account: 1, credentials: 1, risk: 2 });
+    const readsAfterPrepare = { ...reads };
 
     // The writer was closed by prepare. Reopen the same SQLite store to replay.
     const reopened = value(openShadowStore("demo"));
@@ -798,7 +799,7 @@ test("incomplete history persists REVIEW and its shadow report across processes"
     } finally {
       db.close();
     }
-    assert.deepEqual(reads, { account: 0, credentials: 0, risk: 0 });
+    assert.deepEqual(reads, readsAfterPrepare);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
