@@ -176,7 +176,15 @@ export function classifyQualityEvidence(
     for (const row of rows) {
       if (ignoreCanonicalMissingBuckets && row.code === "missing-bucket")
         continue;
-      if (mapping[row.code]) add(role, mapping[row.code]!);
+      if (
+        row.code === "invalid-catalogue" &&
+        role === "liquidation" &&
+        policy(role)?.required === false
+      ) {
+        add(role, "INVALID_EVIDENCE");
+      } else if (mapping[row.code]) {
+        add(role, mapping[row.code]!);
+      }
     }
   }
   function sourceTime(role: string, timestamp: UtcTimestamp | undefined) {

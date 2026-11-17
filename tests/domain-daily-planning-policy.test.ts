@@ -201,6 +201,13 @@ test("selector vocabulary is closed and external applicability/direction explici
     },
     {
       id: "return",
+      source: "funding-history",
+      symbol: "BTCUSDT",
+      field: "lastSettledRate",
+      required: true,
+    },
+    {
+      id: "return",
       source: "native",
       requestId: "liq",
       kind: "liquidation-window",
@@ -230,10 +237,12 @@ test("selector vocabulary is closed and external applicability/direction explici
     assert.ok(createDecisionPolicy({ ...base, selectors: [selector] }).ok);
   for (const selector of [
     { ...selectors[0], field: "arbitrary.path" },
-    { ...selectors[2], direction: "higher-is-healthier" },
-    { ...selectors[2], applicability: undefined },
-    { ...selectors[3], field: "score" },
-    { ...selectors[1], asset: "ETH" },
+    { ...selectors[1], field: "fundingRate" },
+    { ...selectors[1], symbol: "ETHUSDT" },
+    { ...selectors[3], direction: "higher-is-healthier" },
+    { ...selectors[3], applicability: undefined },
+    { ...selectors[4], field: "score" },
+    { ...selectors[2], asset: "ETH" },
   ])
     assert.equal(
       createDecisionPolicy({ ...base, selectors: [selector] }).ok,

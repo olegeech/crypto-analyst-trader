@@ -70,7 +70,7 @@ function admittedSources(
 }
 
 /** Bounded operator summary; unknown source/coverage never becomes a zero count. */
-export function summarizeRequiredLiquidationWindows(
+export function summarizeLiquidationWindows(
   profile: AnalyticsProfile,
   marketInput?: MarketEvidenceBundle,
   liquidationInput?: VersionedLiquidationEvidenceBundle,
@@ -81,7 +81,7 @@ export function summarizeRequiredLiquidationWindows(
     ): request is Extract<
       AnalyticsProfile["features"][number],
       { readonly kind: "liquidation-window" }
-    > => request.kind === "liquidation-window" && request.required,
+    > => request.kind === "liquidation-window",
   );
   if (requests.length === 0) return Object.freeze([]);
 

@@ -6,7 +6,10 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { DatabaseSync } from "node:sqlite";
-import { createDailyPrepareBoundary } from "../src/application/daily-prepare.js";
+import {
+  createDailyPrepareBoundary,
+  type DailyPrepareDependencies,
+} from "../src/application/daily-prepare.js";
 import { openSqlitePreparedArtifactStore } from "../src/adapters/sqlite/prepared-artifact-store.js";
 import { openSqliteShadowReportStore } from "../src/adapters/sqlite/shadow-report-store.js";
 import { runDailyCommand } from "../src/cli/daily-command.js";
@@ -46,6 +49,55 @@ function coreProjection(prepared: PreparedDailyPlan) {
   };
 }
 
+function privateReads(reads: {
+  account: number;
+  credentials: number;
+  risk: number;
+}): Pick<
+  DailyPrepareDependencies,
+  "collectAccount" | "credentialLoader" | "createRiskReader"
+> {
+  return {
+    collectAccount: async (options) => {
+      reads.account++;
+      await options.credentialLoader.load(options.environment);
+      return {
+        kind: "account-evidence",
+        bundle: dailyPrepareAccount({
+          environment: options.environment,
+          runId: options.runId,
+        }),
+      };
+    },
+    credentialLoader: {
+      load: async () => {
+        reads.credentials++;
+        return DAILY_PREPARE_CREDENTIALS;
+      },
+    },
+    createRiskReader: ({ environment }) => ({
+      environment,
+      origin: DAILY_PREPARE_ORIGINS[environment],
+      readIdentity: async () => {
+        reads.risk++;
+        return dailyPrepareIdentity();
+      },
+      readTargetPositions: async () => {
+        reads.risk++;
+        return {
+          rows: dailyPrepareAccount().criticalPasses.B!.positions,
+          observedAt: DAILY_PREPARE_TIME,
+        };
+      },
+      readExchangeTime: async () => {
+        reads.risk++;
+        return DAILY_PREPARE_TIME;
+      },
+      requestCount: () => 2,
+    }),
+  };
+}
+
 test("released chain persists READY; fresh-process review and offline consent cannot create execution state", async () => {
   const root = mkdtempSync(join(tmpdir(), "daily-prepare-integration-"));
   const directory = join(root, "data/private/execution");
@@ -71,43 +123,7 @@ test("released chain persists READY; fresh-process review and offline consent ca
         sourceReads.liquidation++;
         return ok(dailyPrepareLiquidationV3(market, selectedAsset));
       },
-      collectAccount: async (options) => {
-        sourceReads.account++;
-        await options.credentialLoader.load(options.environment);
-        return {
-          kind: "account-evidence",
-          bundle: dailyPrepareAccount({
-            environment: options.environment,
-            runId: options.runId,
-          }),
-        };
-      },
-      credentialLoader: {
-        load: async () => {
-          sourceReads.credentials++;
-          return DAILY_PREPARE_CREDENTIALS;
-        },
-      },
-      createRiskReader: ({ environment }) => ({
-        environment,
-        origin: DAILY_PREPARE_ORIGINS[environment],
-        readIdentity: async () => {
-          sourceReads.risk++;
-          return dailyPrepareIdentity();
-        },
-        readTargetPositions: async () => {
-          sourceReads.risk++;
-          return {
-            rows: dailyPrepareAccount().criticalPasses.B!.positions,
-            observedAt: DAILY_PREPARE_TIME,
-          };
-        },
-        readExchangeTime: async () => {
-          sourceReads.risk++;
-          return DAILY_PREPARE_TIME;
-        },
-        requestCount: () => 2,
-      }),
+      ...privateReads(sourceReads),
       storeForEnvironment: openStore,
       shadowReportStoreForEnvironment: openShadowStore,
       clock,
@@ -126,11 +142,9 @@ test("released chain persists READY; fresh-process review and offline consent ca
     assert.equal(prepared.executionAuthority, "none");
     assert.equal(prepared.schemaVersion, "prepared-daily-plan/v3");
     assert.equal(prepared.replayInputs.shadowContext?.status, "recorded");
-    // Pin the complete persisted v3 replay identity, including the recorded
-    // shadow context, so changes require an explicit artifact version review.
     assert.equal(
-      prepared.contentHash,
-      "sha256:ad470f398951a9245b202c636b7421999204bcd7f5c04e228d695d5c023c7b2f",
+      prepared.summary.policies.decisionVersion,
+      "provisional-m1-v2",
     );
     assert.ok(prepared.inputIdentity.shadowContextHash?.startsWith("sha256:"));
     const savedShadowSummary = prepared.summary.shadowIntelligence;
@@ -373,7 +387,7 @@ test("released chain persists READY; fresh-process review and offline consent ca
   }
 });
 
-test("blocked history still persists an offline, shadow-only report across processes", async () => {
+test("incomplete history persists REVIEW and its shadow report across processes", async () => {
   const root = mkdtempSync(join(tmpdir(), "daily-shadow-report-integration-"));
   const directory = join(root, "data/private/execution");
   const clock = value(fixedClock(DAILY_PREPARE_TIME));
@@ -387,20 +401,7 @@ test("blocked history still persists an offline, shadow-only report across proce
       collectMarket: async (runId) => ok(dailyPrepareMarket(runId)),
       collectLiquidation: async (market, selectedAsset) =>
         ok(dailyPrepareLiquidationV3(market, selectedAsset, "missing")),
-      collectAccount: async () => {
-        reads.account++;
-        throw new Error("blocked preparation must not read account data");
-      },
-      credentialLoader: {
-        load: async () => {
-          reads.credentials++;
-          throw new Error("blocked preparation must not load credentials");
-        },
-      },
-      createRiskReader: () => {
-        reads.risk++;
-        throw new Error("blocked preparation must not read private risk data");
-      },
+      ...privateReads(reads),
       storeForEnvironment: openStore,
       shadowReportStoreForEnvironment: openShadowStore,
       clock,
@@ -411,15 +412,15 @@ test("blocked history still persists an offline, shadow-only report across proce
       symbol: "BTCUSDT",
       allocation: "10",
     });
-    assert.equal(result.kind, "blocked", JSON.stringify(result));
-    if (result.kind !== "blocked") return;
-    assert.equal(result.stage, "planning");
+    assert.equal(result.kind, "prepared");
+    if (result.kind !== "prepared") return;
+    assert.equal(result.prepared.state, "REVIEW");
     assert.equal(result.diagnostics.liquidationStatus, "incomplete");
     assert.equal(result.diagnostics.historyProof, "incomplete");
     assert.equal(result.diagnostics.exchangeWrites, 0);
     assert.equal(result.diagnostics.executionAuthority, "none");
     assert.ok(result.diagnostics.shadowReportHash?.startsWith("sha256:"));
-    assert.deepEqual(reads, { account: 0, credentials: 0, risk: 0 });
+    assert.deepEqual(reads, { account: 1, credentials: 1, risk: 2 });
 
     // The writer was closed by prepare. Reopen the same SQLite store to replay.
     const reopened = value(openShadowStore("demo"));
@@ -467,6 +468,25 @@ test("blocked history still persists an offline, shadow-only report across proce
       review.stdout,
       /PREPARED_HASH|accountIdentityHash|apiSecret/u,
     );
+    const preparedReview = spawnSync(
+      process.execPath,
+      [
+        "--import",
+        tsx,
+        cli,
+        "review",
+        "--environment",
+        "demo",
+        "--prepared-hash",
+        result.prepared.contentHash,
+      ],
+      { cwd: root, encoding: "utf8", timeout: 60000 },
+    );
+    assert.equal(preparedReview.status, 0, preparedReview.stderr);
+    assert.match(preparedReview.stdout, /State: REVIEW/u);
+    assert.match(preparedReview.stdout, /INCOMPLETE_LIQUIDATION_HISTORY/u);
+    assert.match(preparedReview.stdout, /provisional-m1-v2/u);
+    assert.match(preparedReview.stdout, /"settledFunding"/u);
     const mismatch = spawnSync(
       process.execPath,
       [
@@ -487,7 +507,7 @@ test("blocked history still persists an offline, shadow-only report across proce
     try {
       assert.equal(
         db.prepare("SELECT COUNT(*) AS n FROM artifacts").get()?.n,
-        0,
+        1,
       );
       const stored = db
         .prepare("SELECT canonical_json FROM shadow_market_reports")

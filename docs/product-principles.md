@@ -55,12 +55,15 @@ review and is never fabricated.
 Required native decision evidence includes, at minimum:
 
 - OHLCV market history;
-- derivatives evidence including funding, open interest and liquidation data,
-  with liquidation ownership tracked by
-  [issue #45](https://github.com/olegeech/crypto-analyst-trader/issues/45);
+- derivatives evidence including funding and open interest;
 - current account, position and order state;
 - listing and instrument metadata, including delist or expiry restrictions; and
 - completeness, freshness, integrity and provenance checks for required inputs.
+
+Liquidation evidence is required by `provisional-m1-v1` and optional in
+`provisional-m1-v2`. Review always shows missing or incomplete liquidation
+evidence when a plan is prepared. Liquidation evidence is tracked in
+[issue #45](https://github.com/olegeech/crypto-analyst-trader/issues/45).
 
 Missing, stale or incompatible policy-required evidence blocks exposure
 according to invariants 1 and 18. Optional unavailable evidence remains explicit

@@ -489,6 +489,15 @@ function materialSummary(
   const p = inputs.preflight;
   const { dailyPlan, account } = p.replayInputs;
   const pass = account.criticalPasses.B;
+  const settledFunding = planning.decisionPolicy.selectors.some(
+    (selector) =>
+      selector.source === "funding-history" &&
+      selector.symbol === planning.symbol,
+  )
+    ? planning.market.symbols
+        .find((row) => row.symbol === planning.symbol)
+        ?.funding.at(-1)
+    : undefined;
   return {
     symbol: planning.symbol,
     allocationUsd: planning.allocation,
@@ -509,6 +518,7 @@ function materialSummary(
       status: outcome.status,
     })),
     selectorObservations: planning.selectors,
+    ...(settledFunding === undefined ? {} : { settledFunding }),
     atr: planning.atr,
     grid: (dailyPlan.candidateLegs ?? []).map((leg) => ({
       index: leg.index,
