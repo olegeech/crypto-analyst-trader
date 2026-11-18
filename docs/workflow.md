@@ -212,7 +212,11 @@ owner action needed to refresh the paused workflow.
 
 ## Context budget
 
-- Issue bodies should usually stay below 800 words.
+- Size issue bodies and plans to the work, not a word-count target.
+  Include the decisions, requirements and verification detail needed to implement
+  and review the change; cut duplication and speculation, not useful context.
+  Choose tests and checks by changed behavior and risk under
+  [risk-based validation](#risk-based-validation).
 - Link at most five directly relevant documents or source files.
 - A pull request describes only the delta, evidence and residual risk; it does
   not repeat the issue.
