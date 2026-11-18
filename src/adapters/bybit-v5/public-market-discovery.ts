@@ -1,4 +1,7 @@
 import {
+  estimateMarketDiscoveryBuyCost,
+  type MarketDiscoveryBookEstimate,
+  type MarketDiscoveryOrderbook,
   type MarketDiscoveryInstrument,
   type MarketDiscoverySnapshot,
   type MarketDiscoveryTicker,
@@ -72,12 +75,16 @@ function mapInstrument(record: JsonObject): MarketDiscoveryInstrument {
   const contractType = optionalText(record.contractType);
   const quoteCoin = optionalText(record.quoteCoin);
   const settleCoin = optionalText(record.settleCoin);
+  const baseCoin = optionalText(record.baseCoin);
+  const symbolType = optionalText(record.symbolType);
   return {
     ...(symbol === undefined ? {} : { symbol }),
     ...(status === undefined ? {} : { status }),
     ...(contractType === undefined ? {} : { contractType }),
     ...(quoteCoin === undefined ? {} : { quoteCoin }),
     ...(settleCoin === undefined ? {} : { settleCoin }),
+    ...(baseCoin === undefined ? {} : { baseCoin }),
+    ...(symbolType === undefined ? {} : { symbolType }),
   };
 }
 
@@ -157,4 +164,64 @@ export async function readMarketDiscoverySnapshot({
     tickers: Object.freeze(tickers),
     requestCount,
   });
+}
+
+function bookLevels(
+  value: unknown,
+): MarketDiscoveryOrderbook["asks"] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const levels: [DecimalValue, DecimalValue][] = [];
+  for (const level of value) {
+    if (!Array.isArray(level) || level.length !== 2) return undefined;
+    const price = optionalDecimal(level[0]);
+    const quantity = optionalDecimal(level[1]);
+    if (price === undefined || quantity === undefined) return undefined;
+    levels.push([price, quantity]);
+  }
+  return levels;
+}
+
+function estimateBook(
+  response: BybitPublicResponse,
+  symbol: string,
+): MarketDiscoveryBookEstimate {
+  const result = response.result;
+  if (result.s !== symbol || typeof result.ts !== "number" || result.ts <= 0)
+    return { status: "unavailable" };
+  const time = timestampFromEpochMs(result.ts);
+  const bids = bookLevels(result.b);
+  const asks = bookLevels(result.a);
+  if (!time.ok || bids === undefined || asks === undefined)
+    return { status: "unavailable" };
+  return estimateMarketDiscoveryBuyCost({ asOf: time.value, bids, asks });
+}
+
+/** Book failures are informational and leave the selected symbols intact. */
+export async function readMarketDiscoveryBooks({
+  transport,
+  symbols,
+}: {
+  readonly transport: MarketDiscoveryTransport;
+  readonly symbols: readonly string[];
+}): Promise<{
+  readonly estimates: ReadonlyMap<string, MarketDiscoveryBookEstimate>;
+  readonly requestCount: number;
+}> {
+  const entries = await Promise.all(
+    symbols.map(async (symbol) => {
+      let estimate: MarketDiscoveryBookEstimate;
+      try {
+        const response = await transport.get("/v5/market/orderbook", {
+          category: BYBIT_LINEAR_CATEGORY,
+          symbol,
+          limit: "50",
+        });
+        estimate = estimateBook(response, symbol);
+      } catch {
+        estimate = { status: "unavailable" };
+      }
+      return [symbol, estimate] as const;
+    }),
+  );
+  return { estimates: new Map(entries), requestCount: symbols.length };
 }

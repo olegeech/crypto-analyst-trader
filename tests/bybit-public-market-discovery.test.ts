@@ -9,7 +9,13 @@ import {
   BybitPublicTransportError,
   createBybitPublicTransport,
 } from "../src/adapters/bybit-v5/public-transport.js";
-import { readMarketDiscoverySnapshot } from "../src/adapters/bybit-v5/public-market-discovery.js";
+import {
+  readMarketDiscoveryBooks,
+  readMarketDiscoverySnapshot,
+} from "../src/adapters/bybit-v5/public-market-discovery.js";
+
+import { RoundingMode } from "../src/domain/shared/decimal.js";
+import { rankMarketDiscovery } from "../src/domain/market/market-discovery.js";
 
 type FixtureResponse = { readonly status?: number; readonly body: unknown };
 
@@ -35,6 +41,7 @@ function instrument(symbol: string): Record<string, unknown> {
     quoteCoin: "USDT",
     settleCoin: "USDT",
     baseCoin: symbol.replace("USDT", ""),
+    symbolType: "stock",
     additiveProviderField: "accepted",
   };
 }
@@ -101,6 +108,8 @@ test("discovery reads every instrument page and one timestamped bulk ticker snap
   const snapshot = await readMarketDiscoverySnapshot({ transport });
 
   assert.equal(snapshot.instruments.length, 2);
+  assert.equal(snapshot.instruments[0]?.baseCoin, "INJ");
+  assert.equal(snapshot.instruments[0]?.symbolType, "stock");
   assert.equal(snapshot.tickers.length, 2);
   assert.equal(snapshot.asOf, "2027-01-15T08:00:00.000Z");
   assert.equal(snapshot.requestCount, 3);
@@ -280,4 +289,126 @@ test("discovery rejects incomplete provider pages, missing ticker time, rate lim
       pagination: { maxPages: 1, maxRows: 10 },
     }),
   );
+});
+
+// Synthetic Bybit orderbook snapshot fields from
+// https://bybit-exchange.github.io/docs/v5/market/orderbook.
+function book(symbol: string) {
+  return {
+    s: symbol,
+    b: [["99", "10"]],
+    a: [
+      ["100", "0.5"],
+      ["102", "10"],
+    ],
+    ts: 1_800_000_000_000,
+  };
+}
+
+test("books are fetched once per final displayed candidate and never alter the shortlist", async () => {
+  const urls: URL[] = [];
+  const instruments = ["XAU", "PAXG", "NEAR", "INJ"].map((base) =>
+    instrument(base + "USDT"),
+  );
+  const tickers = ["XAU", "PAXG", "NEAR", "INJ"].map((base, index) => ({
+    ...ticker(base + "USDT"),
+    turnover24h: String(1000 - index),
+  }));
+  const transport = createBybitPublicTransport({
+    request: fixtureRequest((url) => {
+      urls.push(url);
+      if (url.pathname === "/v5/market/orderbook") {
+        const symbol = url.searchParams.get("symbol")!;
+        return symbol === "NEARUSDT"
+          ? { status: 429, body: {} }
+          : { body: { retCode: 0, retMsg: "OK", result: book(symbol) } };
+      }
+      return {
+        body: {
+          retCode: 0,
+          retMsg: "OK",
+          result: {
+            category: "linear",
+            list:
+              url.pathname === PUBLIC_INSTRUMENTS_INFO_PATH
+                ? instruments
+                : tickers,
+          },
+          ...(url.pathname === PUBLIC_TICKERS_PATH
+            ? { time: 1_800_000_000_000 }
+            : {}),
+        },
+      };
+    }),
+  });
+  const snapshot = await readMarketDiscoverySnapshot({ transport });
+  const analysis = rankMarketDiscovery(snapshot, { resultLimit: 2 });
+  const symbols = analysis.candidates.map((candidate) => candidate.symbol);
+  assert.deepEqual(symbols, ["XAUUSDT", "NEARUSDT"]);
+  const books = await readMarketDiscoveryBooks({ transport, symbols });
+  assert.equal(books.requestCount, 2);
+  assert.equal(snapshot.requestCount + books.requestCount, urls.length);
+  assert.deepEqual(
+    urls
+      .filter((url) => url.pathname === "/v5/market/orderbook")
+      .map((url) => url.searchParams.get("symbol")),
+    symbols,
+  );
+  for (const url of urls.filter(
+    (url) => url.pathname === "/v5/market/orderbook",
+  )) {
+    assert.equal(url.searchParams.get("category"), "linear");
+    assert.equal(url.searchParams.get("limit"), "50");
+  }
+  const estimate = books.estimates.get("XAUUSDT");
+  assert.equal(estimate?.status, "available");
+  if (estimate?.status !== "available") return;
+  assert.equal(estimate.asOf, "2027-01-15T08:00:00.000Z");
+  assert.equal(estimate.availableAskNotional.toString(), "1070");
+  assert.equal(
+    estimate.estimatedBuyCostBps
+      .roundToScale(4, RoundingMode.HALF_UP)
+      .toString(),
+    "149.7587",
+  );
+  assert.equal(books.estimates.get("NEARUSDT")?.status, "unavailable");
+  assert.deepEqual(
+    analysis.candidates.map((candidate) => candidate.symbol),
+    symbols,
+  );
+});
+
+test("targeted symbol gets one book; invalid books stay unavailable and short depth is explicit", async () => {
+  const responses = [
+    { ...book("INJUSDT"), a: [["100", "0.1"]] },
+    { ...book("INJUSDT"), a: [["100", "broken"]] },
+    { ...book("INJUSDT"), b: [["103", "1"]] },
+    { ...book("OTHERUSDT") },
+    { ...book("INJUSDT"), ts: undefined },
+  ];
+  for (const [index, result] of responses.entries()) {
+    const urls: URL[] = [];
+    const transport = createBybitPublicTransport({
+      request: fixtureRequest((url) => {
+        urls.push(url);
+        return { body: { retCode: 0, retMsg: "OK", result } };
+      }),
+    });
+    const books = await readMarketDiscoveryBooks({
+      transport,
+      symbols: ["INJUSDT"],
+    });
+    assert.equal(urls.length, 1);
+    assert.equal(urls[0]?.pathname, "/v5/market/orderbook");
+    assert.equal(urls[0]?.searchParams.get("symbol"), "INJUSDT");
+    assert.equal(urls[0]?.searchParams.get("category"), "linear");
+    assert.equal(urls[0]?.searchParams.get("limit"), "50");
+    const estimate = books.estimates.get("INJUSDT");
+    assert.equal(
+      estimate?.status,
+      index === 0 ? "insufficient" : "unavailable",
+    );
+    if (estimate?.status === "insufficient")
+      assert.equal(estimate.availableAskNotional.toString(), "10");
+  }
 });

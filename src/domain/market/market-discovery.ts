@@ -7,6 +7,8 @@ export interface MarketDiscoveryInstrument {
   readonly contractType?: string;
   readonly quoteCoin?: string;
   readonly settleCoin?: string;
+  readonly baseCoin?: string;
+  readonly symbolType?: string;
 }
 
 export interface MarketDiscoveryTicker {
@@ -41,6 +43,8 @@ export type MarketDiscoveryExclusionReason =
 
 export interface MarketDiscoveryCandidate {
   readonly symbol: string;
+  readonly exposureGroup: string;
+  readonly referenceSession: string;
   readonly turnover24h: DecimalValue;
   readonly bid: DecimalValue;
   readonly ask: DecimalValue;
@@ -57,6 +61,8 @@ export interface MarketDiscoveryAnalysis {
   readonly candidates: readonly MarketDiscoveryCandidate[];
   readonly matchedCount: number;
   readonly eligibleCount: number;
+  readonly duplicateCount: number;
+  readonly representativeRule: string;
   readonly exclusionCounts: Readonly<
     Partial<Record<MarketDiscoveryExclusionReason, number>>
   >;
@@ -77,6 +83,8 @@ export const MAX_MARKET_DISCOVERY_RESULT_LIMIT = 100;
 
 interface EligibleMarketRow {
   readonly symbol: string;
+  readonly baseCoin?: string;
+  readonly symbolType?: string;
   readonly turnover24h: DecimalValue;
   readonly bid: DecimalValue;
   readonly ask: DecimalValue;
@@ -125,6 +133,12 @@ function assessEligibility(
   return {
     eligible: {
       symbol,
+      ...(instrument.baseCoin === undefined
+        ? {}
+        : { baseCoin: instrument.baseCoin }),
+      ...(instrument.symbolType === undefined
+        ? {}
+        : { symbolType: instrument.symbolType }),
       turnover24h: ticker.turnover24h,
       bid: ticker.bid,
       ask: ticker.ask,
@@ -141,7 +155,17 @@ function assessEligibility(
   };
 }
 
-function candidateFor(row: EligibleMarketRow): MarketDiscoveryCandidate {
+function exposureGroupFor(row: EligibleMarketRow): string {
+  const base = row.baseCoin;
+  if (base === undefined || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/u.test(base))
+    return `symbol:${row.symbol}`;
+  return ["XAU", "PAXG", "XAUT"].includes(base) ? "GOLD" : `base:${base}`;
+}
+
+function candidateFor(
+  row: EligibleMarketRow,
+  asOf: UtcTimestamp,
+): MarketDiscoveryCandidate {
   const spreadNumerator = row.ask.subtract(row.bid).multiply(TWO);
   const spreadDenominator = row.ask.add(row.bid);
   const spread = spreadNumerator.divide(
@@ -156,8 +180,18 @@ function candidateFor(row: EligibleMarketRow): MarketDiscoveryCandidate {
     .roundToScale(4, RoundingMode.HALF_UP)
     .toString();
 
+  const exposureGroup = exposureGroupFor(row);
   const candidate: MarketDiscoveryCandidate = Object.freeze({
     symbol: row.symbol,
+    exposureGroup,
+    referenceSession:
+      [0, 6].includes(new Date(asOf).getUTCDay()) &&
+      (exposureGroup === "GOLD" ||
+        ["commodity", "stock", "forex", "ETF", "xstocks", "mstocks"].includes(
+          row.symbolType ?? "",
+        ))
+        ? "possible reference closure (usual weekend)"
+        : "session unknown",
     turnover24h: row.turnover24h,
     bid: row.bid,
     ask: row.ask,
@@ -267,7 +301,8 @@ export function rankMarketDiscovery(
   let targetCandidate: MarketDiscoveryCandidate | undefined;
   if (options.symbol !== undefined) {
     const row = eligible[0];
-    targetCandidate = row === undefined ? undefined : candidateFor(row);
+    targetCandidate =
+      row === undefined ? undefined : candidateFor(row, snapshot.asOf);
     target = {
       symbol: options.symbol,
       ...(targetCandidate === undefined ? {} : { candidate: targetCandidate }),
@@ -278,13 +313,23 @@ export function rankMarketDiscovery(
   }
 
   let candidates: readonly MarketDiscoveryCandidate[];
+  let duplicateCount = 0;
   if (options.symbol !== undefined) {
     candidates = targetCandidate === undefined ? [] : [targetCandidate];
   } else {
-    const topRows = [...eligible]
-      .sort(compareTurnoverSpreadSymbol)
-      .slice(0, options.resultLimit ?? DEFAULT_MARKET_DISCOVERY_RESULT_LIMIT);
-    candidates = Object.freeze(topRows.map(candidateFor));
+    const representatives = new Map<string, EligibleMarketRow>();
+    for (const row of [...eligible].sort(compareTurnoverSpreadSymbol)) {
+      const group = exposureGroupFor(row);
+      if (!representatives.has(group)) representatives.set(group, row);
+    }
+    duplicateCount = eligible.length - representatives.size;
+    const topRows = [...representatives.values()].slice(
+      0,
+      options.resultLimit ?? DEFAULT_MARKET_DISCOVERY_RESULT_LIMIT,
+    );
+    candidates = Object.freeze(
+      topRows.map((row) => candidateFor(row, snapshot.asOf)),
+    );
   }
 
   return Object.freeze({
@@ -292,7 +337,102 @@ export function rankMarketDiscovery(
     candidates,
     matchedCount,
     eligibleCount: eligible.length,
+    duplicateCount,
+    representativeRule:
+      "highest 24h turnover per known exposure; relative spread then symbol break ties",
     exclusionCounts: Object.freeze({ ...exclusionCounts }),
     ...(target === undefined ? {} : { target }),
   });
+}
+
+export interface MarketDiscoveryOrderbook {
+  readonly asOf: UtcTimestamp;
+  readonly bids: readonly (readonly [DecimalValue, DecimalValue])[];
+  readonly asks: readonly (readonly [DecimalValue, DecimalValue])[];
+}
+
+export type MarketDiscoveryBookEstimate =
+  | { readonly status: "unavailable" }
+  | {
+      readonly status: "insufficient";
+      readonly asOf: UtcTimestamp;
+      readonly availableAskNotional: DecimalValue;
+    }
+  | {
+      readonly status: "available";
+      readonly asOf: UtcTimestamp;
+      readonly availableAskNotional: DecimalValue;
+      readonly estimatedBuyCostBps: DecimalValue;
+    };
+
+function validBookSide(
+  levels: readonly (readonly [DecimalValue, DecimalValue])[],
+  direction: "ascending" | "descending",
+): boolean {
+  return (
+    levels.length > 0 &&
+    levels.every(([price, size], index) => {
+      if (!price.isPositive() || !size.isPositive()) return false;
+      const previous = levels[index - 1];
+      return (
+        previous === undefined ||
+        (direction === "ascending"
+          ? price.compare(previous[0]) > 0
+          : price.compare(previous[0]) < 0)
+      );
+    })
+  );
+}
+
+/** Point-in-time 100-USDT buy estimate, excluding fees and RPI liquidity. */
+export function estimateMarketDiscoveryBuyCost(
+  book: MarketDiscoveryOrderbook,
+): MarketDiscoveryBookEstimate {
+  if (
+    !validBookSide(book.asks, "ascending") ||
+    !validBookSide(book.bids, "descending") ||
+    book.bids[0]![0].compare(book.asks[0]![0]) > 0
+  )
+    return { status: "unavailable" };
+
+  const zero = constant("0");
+  const availableAskNotional = book.asks.reduce(
+    (sum, [price, size]) => sum.add(price.multiply(size)),
+    zero,
+  );
+  const context = { asOf: book.asOf, availableAskNotional };
+  if (availableAskNotional.compare(ONE_HUNDRED) < 0)
+    return { status: "insufficient", ...context };
+
+  let remaining = ONE_HUNDRED;
+  let acquired = zero;
+  for (const [price, size] of book.asks) {
+    const levelNotional = price.multiply(size);
+    if (levelNotional.compare(remaining) <= 0) {
+      acquired = acquired.add(size);
+      remaining = remaining.subtract(levelNotional);
+    } else {
+      const partialSize = remaining.divide(price, 36, RoundingMode.DOWN);
+      if (!partialSize.ok) return { status: "unavailable" };
+      acquired = acquired.add(partialSize.value);
+      remaining = zero;
+    }
+    if (remaining.isZero()) break;
+  }
+  const vwap = ONE_HUNDRED.divide(acquired, 36, RoundingMode.HALF_UP);
+  const midpoint = book.bids[0]![0].add(book.asks[0]![0]).divide(
+    TWO,
+    36,
+    RoundingMode.HALF_UP,
+  );
+  if (!vwap.ok || !midpoint.ok) return { status: "unavailable" };
+  const relativeCost = vwap.value
+    .subtract(midpoint.value)
+    .divide(midpoint.value, 36, RoundingMode.HALF_UP);
+  if (!relativeCost.ok) return { status: "unavailable" };
+  return {
+    status: "available",
+    ...context,
+    estimatedBuyCostBps: relativeCost.value.multiply(constant("10000")),
+  };
 }
