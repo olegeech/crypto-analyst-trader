@@ -1,9 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { rankMarketDiscovery } from "../src/domain/market/market-discovery.js";
+import {
+  estimateMarketDiscoveryBuyCost,
+  rankMarketDiscovery,
+} from "../src/domain/market/market-discovery.js";
 import type {
   MarketDiscoveryInstrument,
+  MarketDiscoveryOrderbook,
   MarketDiscoverySnapshot,
   MarketDiscoveryTicker,
 } from "../src/domain/market/market-discovery.js";
@@ -226,4 +230,148 @@ test("negative 24h context and missing optional history do not affect eligibilit
   );
   assert.equal(result.candidates[0]?.priceChange24h?.toString(), "-0.05");
   assert.equal(result.candidates[1]?.priceChange24h, undefined);
+});
+
+test("known exposures are grouped before the result limit with the turnover leader retained", () => {
+  const bases = ["XAU", "PAXG", "XAUT", "BTC", "BTC", "ETH"];
+  const symbols = [
+    "XAUUSDT",
+    "PAXGUSDT",
+    "XAUTUSDT",
+    "BTCUSDT",
+    "BTCALTUSDT",
+    "ETHUSDT",
+  ];
+  const data = snapshot(
+    symbols.map((symbol, i) => instrument(symbol, { baseCoin: bases[i]! })),
+    symbols.map((symbol, i) =>
+      ticker(symbol, { turnover24h: decimal(String(1000 - i)) }),
+    ),
+  );
+  for (const instruments of [
+    data.instruments,
+    [...data.instruments].reverse(),
+  ]) {
+    const result = rankMarketDiscovery(
+      { ...data, instruments },
+      { resultLimit: 3 },
+    );
+    assert.deepEqual(
+      result.candidates.map((row) => row.symbol),
+      ["XAUUSDT", "BTCUSDT", "ETHUSDT"],
+    );
+    assert.equal(result.duplicateCount, 3);
+    assert.equal(result.candidates[0]?.exposureGroup, "GOLD");
+    assert.match(result.representativeRule, /turnover/u);
+  }
+  const targeted = rankMarketDiscovery(data, { symbol: "XAUTUSDT" });
+  assert.equal(targeted.target?.candidate?.symbol, "XAUTUSDT");
+});
+
+test("unverified pairs and unknown base coins stay distinct", () => {
+  const bases = ["SKHYNIX", "SKHY", "MU", "MUU", "QQQ", "TQQQ", "SOXL", "SOXS"];
+  const symbols = bases.map((base) => `${base}USDT`);
+  const result = rankMarketDiscovery(
+    snapshot(
+      symbols.map((symbol, i) => instrument(symbol, { baseCoin: bases[i]! })),
+      symbols.map((symbol) => ticker(symbol)),
+    ),
+    { resultLimit: 100 },
+  );
+  assert.equal(result.candidates.length, 8);
+  assert.equal(result.duplicateCount, 0);
+  const unknown = rankMarketDiscovery(
+    snapshot(
+      [
+        instrument("AUSDT", { baseCoin: "bad base" }),
+        instrument("BUSDT", { baseCoin: "bad base" }),
+      ],
+      [ticker("AUSDT"), ticker("BUSDT")],
+    ),
+  );
+  assert.equal(unknown.candidates.length, 2);
+});
+
+test("recognized reference markets warn only on usual weekends", () => {
+  const data = snapshot(
+    [
+      instrument("XAUUSDT", { baseCoin: "XAU" }),
+      instrument("QQQUSDT", { baseCoin: "QQQ", symbolType: "ETF" }),
+      instrument("BTCUSDT", { baseCoin: "BTC" }),
+    ],
+    [ticker("XAUUSDT"), ticker("QQQUSDT"), ticker("BTCUSDT")],
+  );
+  const weekend = rankMarketDiscovery(data);
+  for (const row of weekend.candidates)
+    assert.equal(
+      row.referenceSession,
+      row.symbol === "BTCUSDT"
+        ? "session unknown"
+        : "possible reference closure (usual weekend)",
+    );
+  const weekday = rankMarketDiscovery({
+    ...data,
+    asOf: "2026-11-18T08:00:00.000Z" as UtcTimestamp,
+  });
+  assert.ok(
+    weekday.candidates.every(
+      (row) => row.referenceSession === "session unknown",
+    ),
+  );
+});
+
+function orderbook(
+  asks: readonly (readonly [string, string])[],
+  bids: readonly (readonly [string, string])[] = [["9", "10"]],
+): MarketDiscoveryOrderbook {
+  return {
+    asOf: AS_OF,
+    asks: asks.map(([price, size]) => [decimal(price), decimal(size)]),
+    bids: bids.map(([price, size]) => [decimal(price), decimal(size)]),
+  };
+}
+
+test("100-USDT buy cost sweeps asks and measures VWAP relative to the book midpoint", () => {
+  const estimate = estimateMarketDiscoveryBuyCost(
+    orderbook([
+      ["11", "5"],
+      ["15", "10"],
+    ]),
+  );
+  assert.equal(estimate.status, "available");
+  if (estimate.status !== "available") return;
+  assert.equal(estimate.availableAskNotional.toString(), "205");
+  // Spend 55 at 11 and 45 at 15, acquiring 8 units. VWAP 12.5 / mid 10.
+  assert.equal(estimate.estimatedBuyCostBps.toString(), "2500");
+  assert.equal(estimate.asOf, AS_OF);
+});
+
+test("book diagnostics distinguish insufficient depth from invalid quotes and levels", () => {
+  const insufficient = estimateMarketDiscoveryBuyCost(orderbook([["11", "9"]]));
+  assert.equal(insufficient.status, "insufficient");
+  if (insufficient.status !== "insufficient") return;
+  assert.equal(insufficient.availableAskNotional.toString(), "99");
+  assert.equal(insufficient.asOf, AS_OF);
+  for (const book of [
+    orderbook([], []),
+    orderbook([["11", "100"]], []),
+    orderbook([["11", "0"]]),
+    orderbook([["11", "-1"]]),
+    orderbook([["0", "100"]]),
+    orderbook([
+      ["11", "100"],
+      ["10", "100"],
+    ]),
+    orderbook([["11", "100"]], [["12", "1"]]),
+    orderbook(
+      [["11", "100"]],
+      [
+        ["9", "1"],
+        ["10", "1"],
+      ],
+    ),
+  ])
+    assert.deepEqual(estimateMarketDiscoveryBuyCost(book), {
+      status: "unavailable",
+    });
 });
