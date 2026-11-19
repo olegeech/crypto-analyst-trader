@@ -20,6 +20,11 @@ type DailyCommand =
       allocation: string;
     }
   | {
+      kind: "batch";
+      environment: AccountEvidenceEnvironment;
+      allocation: string;
+    }
+  | {
       kind: "review" | "approve";
       environment: AccountEvidenceEnvironment;
       preparedHash: string;
@@ -37,14 +42,21 @@ export function parseDailyArguments(
   const kind = args[0];
   const invalid = () =>
     fail(domainError("INVALID_VALUE", "Invalid daily command"));
-  if (kind !== "prepare" && kind !== "review" && kind !== "approve")
+  if (
+    kind !== "prepare" &&
+    kind !== "batch" &&
+    kind !== "review" &&
+    kind !== "approve"
+  )
     return invalid();
   const allowed =
     kind === "prepare"
       ? ["--environment", "--symbol", "--allocation"]
-      : kind === "review"
-        ? ["--environment", "--prepared-hash", "--shadow-hash"]
-        : ["--environment", "--prepared-hash", "--note"];
+      : kind === "batch"
+        ? ["--environment", "--allocation"]
+        : kind === "review"
+          ? ["--environment", "--prepared-hash", "--shadow-hash"]
+          : ["--environment", "--prepared-hash", "--note"];
   const values = new Map<string, string>();
   for (let i = 1; i < args.length; i += 2) {
     const flag = args[i];
@@ -64,8 +76,8 @@ export function parseDailyArguments(
   const env = values.get("--environment");
   if (env !== "demo" && env !== "testnet" && env !== "mainnet")
     return invalid();
-  if (kind === "prepare") {
-    const symbol = values.get("--symbol");
+  if (kind === "prepare" || kind === "batch") {
+    const symbol = kind === "batch" ? "BTCUSDT" : values.get("--symbol");
     const allocation = values.get("--allocation");
     if (
       !symbol ||
@@ -73,7 +85,9 @@ export function parseDailyArguments(
       !createProvisionalM1V2Composition({ symbol, allocation }).ok
     )
       return invalid();
-    return ok({ kind, environment: env, symbol, allocation });
+    return kind === "batch"
+      ? ok({ kind, environment: env, allocation })
+      : ok({ kind, environment: env, symbol, allocation });
   }
   const shadowHash = values.get("--shadow-hash");
   if (kind === "review" && shadowHash !== undefined) {
@@ -247,6 +261,57 @@ export async function runDailyCommand(
   if (!parsed.ok) return reason("INVALID_INPUT", 2);
   const input = parsed.value;
   try {
+    if (input.kind === "batch") {
+      deps.write(
+        [
+          `${new Date(deps.clock.now()).toISOString().slice(0, 10)} UTC | ${input.environment}`,
+          "Four independent preparations; not one atomic account or portfolio snapshot.",
+          "Decision-only. Execution authority: none. No exchange writes.",
+          "| Symbol | State | Recommendation | Reasons | Prepared hash | Exit |",
+          "| --- | --- | --- | --- | --- | --- |",
+        ].join("\n"),
+      );
+      let success = 0;
+      let overallExit = 0;
+      for (const symbol of ["BTCUSDT", "ETHUSDT", "SOLUSDT", "DOGEUSDT"]) {
+        let exit: number;
+        try {
+          const result = await deps.prepare({
+            environment: input.environment,
+            symbol,
+            allocation: input.allocation,
+          });
+          if (result.kind === "prepared") {
+            const prepared = result.prepared;
+            exit = prepared.state === "BLOCKED" ? 5 : 0;
+            const reasons = [
+              ...new Set([
+                ...prepared.reasonCodes,
+                ...prepared.summary.decision.reasons,
+                ...prepared.summary.quality.findings.map(
+                  (finding) => finding.reasonCode,
+                ),
+              ]),
+            ];
+            deps.write(
+              `| ${symbol} | ${prepared.state} | ${prepared.summary.decision.recommendation} | ${reasons.join(", ") || "none"} | ${prepared.contentHash} | ${exit} |`,
+            );
+          } else {
+            exit = result.kind === "blocked" ? 5 : 4;
+            deps.write(
+              `| ${symbol} | ${result.kind === "blocked" ? "BLOCKED" : "UNAVAILABLE"} | — | ${result.reasonCodes.join(", ") || "none"} | — | ${exit} |`,
+            );
+          }
+        } catch {
+          exit = 1;
+          deps.write(`| ${symbol} | — | — | INTERNAL_FAILURE | — | ${exit} |`);
+        }
+        if (exit === 0) success++;
+        else if (overallExit === 0) overallExit = exit;
+      }
+      deps.write(`Success: ${success} | Failure: ${4 - success}`);
+      return overallExit;
+    }
     if (input.kind === "prepare") {
       const result = await deps.prepare({
         environment: input.environment,
