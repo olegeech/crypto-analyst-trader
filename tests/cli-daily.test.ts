@@ -720,3 +720,111 @@ test("offline review keeps v3 shadow timing historical and preserves v2 review",
   assert.ok(!legacyReview.includes('"shadowIntelligence"'));
   assert.ok(legacyReview.includes('"externalAvailability"'));
 });
+
+test("batch sequentially prepares all four symbols and prints only saved result fields", async () => {
+  const symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "DOGEUSDT"];
+  const review = preparedPlanFixture("review");
+  const plans = [
+    review,
+    review,
+    preparedPlanFixture("review", { recommendation: "REDUCE_LONG" }),
+    preparedPlanFixture("ready"),
+  ];
+  const calls: string[] = [];
+  const output: string[] = [];
+  let active = false;
+  const code = await runDailyCommand(
+    ["batch", "--environment", "mainnet", "--allocation", "100.00"],
+    {
+      prepare: async (input) => {
+        assert.equal(active, false);
+        active = true;
+        assert.equal(input.environment, "mainnet");
+        assert.equal(input.allocation, "100.00");
+        const prepared = plans[calls.length]!;
+        calls.push(input.symbol);
+        await Promise.resolve();
+        active = false;
+        return {
+          kind: "prepared",
+          prepared,
+          diagnostics: {} as DailyPrepareResult["diagnostics"],
+        };
+      },
+      openStore: () => {
+        throw new Error("batch must not reload SQLite");
+      },
+      actor: () => {
+        throw new Error("batch must not approve");
+      },
+      clock: value(fixedClock("2026-11-19T23:59:59Z")),
+      interactive: false,
+      prompt: async () => {
+        throw new Error("batch must not prompt");
+      },
+      write: (text) => output.push(text),
+    },
+  );
+  assert.equal(code, 0);
+  assert.deepEqual(calls, symbols);
+  const text = output.join("\n");
+  assert.match(text, /2026-11-19 UTC/u);
+  assert.match(text, /Success: 4 \| Failure: 0/u);
+  for (const [index, plan] of plans.entries()) {
+    const row = text
+      .split("\n")
+      .find((line) => line.startsWith(`| ${symbols[index]} |`));
+    assert.ok(
+      row?.includes(
+        `| ${symbols[index]} | ${plan.state} | ${plan.summary.decision.recommendation} |`,
+      ),
+    );
+    assert.ok(row?.includes(plan.contentHash));
+    assert.equal(text.includes(plan.inputIdentity.accountIdentityHash), false);
+  }
+  assert.match(text, /independent/u);
+  assert.match(text, /No exchange writes/u);
+  assert.doesNotMatch(
+    text,
+    /account binding|equity|availableBalance|replayInputs|apiKey/u,
+  );
+});
+
+test("batch retains a saved BLOCKED hash, continues to later symbols and fails overall", async () => {
+  const blocked = preparedPlanFixture("blocked");
+  const review = preparedPlanFixture("review");
+  const calls: string[] = [];
+  const output: string[] = [];
+  const code = await runDailyCommand(
+    ["batch", "--environment", "mainnet", "--allocation", "100"],
+    {
+      prepare: async ({ symbol }) => {
+        calls.push(symbol);
+        return {
+          kind: "prepared",
+          prepared: symbol === "ETHUSDT" ? blocked : review,
+          diagnostics: {} as DailyPrepareResult["diagnostics"],
+        };
+      },
+      openStore: () => {
+        throw new Error("batch must not reload SQLite");
+      },
+      actor: () => ok("unused"),
+      clock: value(fixedClock("2026-11-19T15:00:00Z")),
+      interactive: false,
+      prompt: async () => "",
+      write: (text) => output.push(text),
+    },
+  );
+  assert.equal(code, 5);
+  assert.deepEqual(calls, ["BTCUSDT", "ETHUSDT", "SOLUSDT", "DOGEUSDT"]);
+  const text = output.join("\n");
+  assert.match(text, /Success: 3 \| Failure: 1/u);
+  const blockedRow = text
+    .split("\n")
+    .find((line) => line.startsWith("| ETHUSDT |"));
+  assert.ok(blockedRow?.includes("| BLOCKED |"));
+  assert.ok(blockedRow?.includes(blocked.contentHash));
+  for (const reason of blocked.reasonCodes)
+    assert.ok(blockedRow?.includes(reason));
+});

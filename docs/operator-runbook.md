@@ -60,12 +60,27 @@ sorted venues, plus omitted-group/missing totals). Counts are `null` when the
 source or catalogue coverage is not proven; these diagnostics do not change the
 quality verdict.
 
-For the four-week shadow period starting with the first run after merge, run
-`daily:prepare` for BTCUSDT, ETHUSDT, SOLUSDT and DOGEUSDT every day, then run
-`daily:review` with each printed `PREPARED_HASH`. Skip `daily:approve` during
-this period. Post one comment per day in the shadow log issue opened after
-merge, with each symbol's state and recommendation (or failure reason) and
-the day's total operator minutes.
+For the four-week shadow period tracked in [#175](https://github.com/olegeech/crypto-analyst-trader/issues/175),
+run the four independent preparations sequentially with one manual command:
+
+```bash
+npm run daily:batch -- --environment mainnet --allocation 100
+```
+
+The explicit positive allocation is passed unchanged to each plan; it is not a
+shared portfolio budget. The command prepares BTCUSDT, ETHUSDT, SOLUSDT and
+DOGEUSDT in that order and prints a copy-ready UTC-day summary with one row per
+symbol and exact hashes for saved plans. A failure does not stop later
+symbols; any failure gives a nonzero overall exit. Saved BLOCKED results retain
+their hashes. These are independent evaluations, not one atomic account snapshot.
+The batch does not reload SQLite or run review automatically. Use the existing
+`npm run daily:review -- --environment mainnet --prepared-hash <exact hash>` separately
+when an independent offline replay is wanted; standalone prepare remains available.
+Skip `daily:approve` during this period. Manually post the summary and measured
+elapsed/operator minutes to #175, noting the switch from manual commands to batch
+when first used. The manual baseline was 21 min 7 s including waits and replay;
+active human time was not measured, so it does not establish time saved by batch.
+The command does not post to GitHub or create a separate report file.
 
 The saved v3 review may also show **shadow market intelligence**: source-derived
 observations and explicit source/model gaps for regime, early-warning, liquidity
