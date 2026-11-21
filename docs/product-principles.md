@@ -2,9 +2,13 @@
 
 ## Outcome
 
-Improve measured net risk-adjusted return after trading fees, funding and
-slippage without exceeding explicit capital, exposure and drawdown limits.
-Profit is an objective, not a guarantee.
+Improve measured long-horizon net return on total capital after trading
+fees, funding and slippage within explicitly approved capital, exposure and
+portfolio-risk limits. Higher drawdown is acceptable to the product owner
+when a credible incremental long-run net benefit justifies it; its magnitude,
+duration, concentration and unrealized losses must remain visible, and a
+lower drawdown is not an end in itself. Profit and recovery are objectives,
+not guarantees.
 
 ## Product intent — reviewed 2026-10-05
 
@@ -85,6 +89,32 @@ exchange-valid order intents.
 Discovery provenance: the initial product-owner interview was recorded in
 [issue #35](https://github.com/olegeech/crypto-analyst-trader/issues/35).
 Review this section when the production-canary scope or autonomy level changes.
+
+## Product-owner trading preference — 2026-11-21
+
+The operator seeks **long-run net trading benefit and more free attention**, not
+a low-drawdown statistic as an end in itself. Deep drawdowns may be tolerated;
+an arbitrary multiple of baseline drawdown alone must not reject a strategy.
+However, capital can remain locked for a long period and never fully recover.
+Evaluate portfolio mark-to-market net results, fees, funding, slippage,
+underwater duration and capital efficiency together with the contribution
+of the strongest symbol. Require independent chronological evidence before
+promotion; do not reinterpret old holdouts as unseen evidence.
+
+The operator uses **both unborrowed spot and 1x perpetual futures** on Bybit;
+do not force a product-level either/or decision. The current released initial
+execution adapter remains USDT linear perpetuals. Future spot execution is a
+separate implementation scope, **not** permission to send spot orders now.
+One-times leverage reduces but does not eliminate liquidation risk for
+perpetuals. Unborrowed spot has no margin liquidation of its own, but in a
+Unified Trading Account spot balances can serve as collateral and be sold to
+cover derivatives margin.
+
+See [#181](https://github.com/olegeech/crypto-analyst-trader/issues/181)
+for the bounded post-shadow reassessment of dynamic M1 selection. #158's
+closed `reject` is preserved as the correct historical outcome under its
+then-declared concentration-sensitivity rule. The #175 shadow period and
+all execution authorization/capital/incident gates remain unchanged.
 
 ## Product-value priorities
 
@@ -185,8 +215,13 @@ For the first 1–2 months of usable operation, the primary product outcome metr
 is cumulative net PnL after fees, funding and slippage. The target is positive
 net PnL over that evaluation window, without treating profit as guaranteed.
 
-Required supporting measures are operator minutes per completed daily run,
-drawdown, capital efficiency, end-to-end automation rate and safety incidents.
+Required supporting measures are actually measured **active operator minutes**
+per completed daily run (distinct from elapsed program/API wait time), portfolio
+drawdown including unrealized PnL, capital tied up in underwater positions,
+concentration sensitivity, capital efficiency, end-to-end automation rate
+and safety incidents. Historical studies must include funding already accrued
+on held perpetual positions. Where active human time is unmeasured, label it
+unknown rather than treating elapsed runtime as human attention.
 Any experiment baseline, including buy-and-hold where useful, must define its
 period and cost assumptions under the [workflow experiment rules](workflow.md)
 rather than creating a second permanent baseline definition here.
