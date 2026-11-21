@@ -106,7 +106,9 @@ do not force a product-level either/or decision. The current released initial
 execution adapter remains USDT linear perpetuals. Future spot execution is a
 separate implementation scope, **not** permission to send spot orders now.
 One-times leverage reduces but does not eliminate liquidation risk for
-perpetuals; ordinary unborrowed spot does not have margin liquidation.
+perpetuals. Unborrowed spot has no margin liquidation of its own, but in a
+Unified Trading Account spot balances can serve as collateral and be sold to
+cover derivatives margin.
 
 See [#181](https://github.com/olegeech/crypto-analyst-trader/issues/181)
 for the bounded post-shadow reassessment of dynamic M1 selection. #158's
